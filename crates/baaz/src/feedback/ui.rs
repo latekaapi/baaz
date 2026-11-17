@@ -883,7 +883,7 @@ impl crate::app::Harness {
         if self.feedback.saving {
             return;
         }
-        match self.feedback.toggle(self.layout.feedback_mode) {
+        match self.feedback.toggle(crate::layout::Layout::get(cx).feedback_mode) {
             ToggleOutcome::NeedsSetting => {
                 let id = self.overlays.update(cx, |o, _| {
                     o.toast("Feedback mode is off", "Turn it on in Settings → General.")
@@ -1480,8 +1480,8 @@ impl crate::app::Harness {
     }
 
     /// The mode name the report prints verbatim: `Sessions` / `Browse`.
-    pub(crate) fn feedback_mode_name(&self) -> String {
-        match self.mode {
+    pub(crate) fn feedback_mode_name(&self, cx: &gpui::App) -> String {
+        match crate::layout::Layout::get(cx).mode {
             crate::layout::Mode::Sessions => "Sessions".to_owned(),
             crate::layout::Mode::Browse => "Browse".to_owned(),
         }
@@ -1493,10 +1493,10 @@ impl crate::app::Harness {
     }
 
     /// The human right-pane name (`Browser`, `Files`, …), only while open.
-    pub(crate) fn feedback_right_pane(&self) -> Option<String> {
-        self.layout
+    pub(crate) fn feedback_right_pane(&self, cx: &gpui::App) -> Option<String> {
+        crate::layout::Layout::get(cx)
             .right_open
-            .then(|| crate::layout::right_kind(&self.layout).label().to_owned())
+            .then(|| crate::layout::right_kind(crate::layout::Layout::get(cx)).label().to_owned())
     }
 
     /// The shown page's URL (only while a page shows): in Browse the centre
@@ -1506,18 +1506,18 @@ impl crate::app::Harness {
         // In Browse the tab model's URL is what the toolbar shows; the
         // page state's own URL was found empty live on a loaded Chromium
         // tab, so it is only the fallback.
-        let url = if self.mode == crate::layout::Mode::Browse {
+        let url = if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             let from_tab = self
-                .browse_centre_shown()
+                .browse_centre_shown(cx)
                 .and_then(|id| self.browser.tabs.get(id))
                 .map(|tab| tab.url.clone())
                 .filter(|url| !url.is_empty() && url != "about:blank");
-            from_tab.or_else(|| self.browse_centre_state().map(|state| state.read(cx).url().to_string()))
+            from_tab.or_else(|| self.browse_centre_state(cx).map(|state| state.read(cx).url().to_string()))
         } else {
             // The pane's page counts only while the pane is open on the
             // Browser: a background page must not move the screen identity.
-            let pane_on_browser = self.layout.right_open
-                && crate::layout::right_kind(&self.layout) == crate::layout::RightKind::Browser;
+            let pane_on_browser = crate::layout::Layout::get(cx).right_open
+                && crate::layout::right_kind(crate::layout::Layout::get(cx)) == crate::layout::RightKind::Browser;
             pane_on_browser
                 .then(|| self.existing_browser(cx))
                 .flatten()
@@ -1550,11 +1550,11 @@ impl crate::app::Harness {
         });
         let size = window.viewport_size();
         ScreenContext {
-            mode: self.feedback_mode_name(),
+            mode: self.feedback_mode_name(cx),
             project,
             session_id,
             session_title,
-            right_pane: self.feedback_right_pane(),
+            right_pane: self.feedback_right_pane(cx),
             page_url: self.feedback_page_url(cx),
             settings_section: self.feedback_settings_section(),
             window_w: f32::from(size.width),
@@ -1570,11 +1570,11 @@ impl crate::app::Harness {
     /// fields stay empty — pins compare screens, not sizes.
     pub(crate) fn current_pin_context(&self, cx: &gpui::App) -> ScreenContext {
         ScreenContext {
-            mode: self.feedback_mode_name(),
+            mode: self.feedback_mode_name(cx),
             project: None,
             session_id: self.feedback_session_id(cx),
             session_title: None,
-            right_pane: self.feedback_right_pane(),
+            right_pane: self.feedback_right_pane(cx),
             page_url: self.feedback_page_url(cx),
             settings_section: self.feedback_settings_section(),
             window_w: 0.0,
@@ -1806,7 +1806,7 @@ impl crate::app::Harness {
         match self.feedback.probe.hit(window, point) {
             Some(hit) => {
                 let win = window.viewport_size();
-                let in_browse = self.mode == crate::layout::Mode::Browse;
+                let in_browse = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
                 let target = FeedbackUi::note_target_for_hit(hit, point, win, in_browse);
                 self.begin_note_capture(target, window, cx);
             }
@@ -1855,7 +1855,7 @@ impl crate::app::Harness {
             if let Some(hit) = self.feedback.probe.hit(window, pending.point) {
                 self.feedback.pending_click = None;
                 let win = window.viewport_size();
-                let in_browse = self.mode == crate::layout::Mode::Browse;
+                let in_browse = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
                 let target = FeedbackUi::note_target_for_hit(hit, pending.point, win, in_browse);
                 self.begin_note_capture(target, window, cx);
                 return;
@@ -2037,11 +2037,11 @@ impl crate::app::Harness {
     /// else the capitalised mode (`Sessions` / `Browse`). Display only —
     /// [`ScreenContext`] keeps the stored lowercase values and the report
     /// is untouched.
-    pub(crate) fn feedback_pane_label(&self) -> String {
-        if self.layout.right_open {
-            format!("{} pane", crate::layout::right_kind(&self.layout).label())
+    pub(crate) fn feedback_pane_label(&self, cx: &gpui::App) -> String {
+        if crate::layout::Layout::get(cx).right_open {
+            format!("{} pane", crate::layout::right_kind(crate::layout::Layout::get(cx)).label())
         } else {
-            match self.mode {
+            match crate::layout::Layout::get(cx).mode {
                 crate::layout::Mode::Sessions => "Sessions".to_owned(),
                 crate::layout::Mode::Browse => "Browse".to_owned(),
             }
@@ -2051,8 +2051,8 @@ impl crate::app::Harness {
     /// The popover's muted subtitle: `<human role> · in <nearest
     /// ancestor> · <right pane or mode>` for an element, the region or the
     /// pane for an area.
-    pub(crate) fn feedback_note_subtitle(&self, target: &Target) -> String {
-        let pane = self.feedback_pane_label();
+    pub(crate) fn feedback_note_subtitle(&self, target: &Target, cx: &gpui::App) -> String {
+        let pane = self.feedback_pane_label(cx);
         match target {
             Target::Element(hit) => {
                 let role = human_role(&hit.role);
@@ -2308,7 +2308,7 @@ impl crate::app::Harness {
         // Browse: the slot draws in the corner window over the page
         // ([`crate::app::Harness::corner_in_overlay`]), never here — its
         // clicks land in that window, so there is nothing to record.
-        if self.corner_in_overlay() {
+        if self.corner_in_overlay(cx) {
             return self.feedback_slot_row(cx, false);
         }
         // While Active the floating copy (above the capture layer) is the
@@ -2357,7 +2357,7 @@ impl crate::app::Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.feedback.phase != FeedbackPhase::Active || self.corner_in_overlay() {
+        if self.feedback.phase != FeedbackPhase::Active || self.corner_in_overlay(cx) {
             return None;
         }
         let bounds = self.feedback.slot_bounds?;
@@ -2391,7 +2391,7 @@ impl crate::app::Harness {
     /// handlers and no bounds recorders — a screen reader hears each
     /// control once, from the floating copy.
     fn feedback_slot_row(&self, cx: &mut Context<Self>, decorative: bool) -> Option<AnyElement> {
-        if !self.feedback_slot_shown() {
+        if !self.feedback_slot_shown(cx) {
             return None;
         }
         let active = self.feedback.phase == FeedbackPhase::Active;
@@ -2403,7 +2403,7 @@ impl crate::app::Harness {
         // floating pill (D4, docs/41 §2.11). Padding 0 / 4, the toggle, then
         // the count, Done and Discard while active.
         let row_id = if decorative { "feedback-header-ghost" } else { "feedback-header" };
-        let row = if self.corner_in_overlay() {
+        let row = if self.corner_in_overlay(cx) {
             aui::feedback::floating_pill(row_id, cx)
         } else {
             h_flex().id(row_id).flex_none().items_center()
@@ -2438,9 +2438,9 @@ impl crate::app::Harness {
     /// feedback mode is on"). Off, the mode is reached from the centre
     /// header's `⋯` menu ([`Self::feedback_menu_row_shown`]), Help →
     /// Feedback Mode or ⌃⌥⌘F.
-    pub(crate) fn feedback_slot_shown(&self) -> bool {
+    pub(crate) fn feedback_slot_shown(&self, cx: &gpui::App) -> bool {
         !self.feedback.capturing
-            && (self.layout.feedback_mode || self.feedback.forced_on)
+            && (crate::layout::Layout::get(cx).feedback_mode || self.feedback.forced_on)
             && (self.feedback.phase != FeedbackPhase::Off || self.feedback_flashing())
     }
 
@@ -2453,8 +2453,8 @@ impl crate::app::Harness {
 
     /// Whether the centre header's `⋯` menu carries the "Feedback mode"
     /// row: the setting is on (or a scripted run forced it).
-    pub(crate) fn feedback_menu_row_shown(&self) -> bool {
-        self.layout.feedback_mode || self.feedback.forced_on
+    pub(crate) fn feedback_menu_row_shown(&self, cx: &gpui::App) -> bool {
+        crate::layout::Layout::get(cx).feedback_mode || self.feedback.forced_on
     }
 
     /// One small text control in the slot's pill — Done (the primary) or
@@ -2647,7 +2647,7 @@ impl crate::app::Harness {
         let pop_h = FeedbackUi::feedback_popover_height(rows);
         let (x, y) = FeedbackUi::feedback_popover_pos(rect, pop_h, win_w, win_h);
         let title = Self::feedback_note_title(&target);
-        let subtitle = self.feedback_note_subtitle(&target);
+        let subtitle = self.feedback_note_subtitle(&target, cx);
         // Empty text saves nothing (the save keeps focus as a no-op), so
         // the button reads disabled until there is something to file.
         let save_enabled = !note.field.read(cx).value().trim().is_empty();
@@ -3009,7 +3009,7 @@ mod tests {
         let baaz = hermetic_harness(vc, &state.2);
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                h.layout.feedback_mode = true;
+                crate::layout::Layout::stage(cx, |layout| layout.feedback_mode = true);
                 h.toggle_feedback(window, cx);
             })
         });
@@ -3096,7 +3096,7 @@ mod tests {
     ) {
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                h.layout.feedback_mode = true;
+                crate::layout::Layout::stage(cx, |layout| layout.feedback_mode = true);
                 h.toggle_feedback(window, cx);
             })
         });
@@ -3165,7 +3165,7 @@ mod tests {
         };
         assert!(!layer(vc), "Off renders no layer");
         assert!(!slot(vc), "setting off renders no header slot");
-        vc.update(|_, cx| baaz.update(cx, |h, _| h.layout.feedback_mode = true));
+        vc.update(|_, cx| baaz.update(cx, |_, cx| crate::layout::Layout::stage(cx, |layout| layout.feedback_mode = true)));
         assert!(!slot(vc), "setting on renders no header icon while Off (the `⋯` menu holds it)");
         enter_active(&baaz, vc);
         assert!(layer(vc), "Active renders the layer");
@@ -3187,7 +3187,7 @@ mod tests {
         let state = hermetic_state("header-toggle");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
-        vc.update(|_, cx| baaz.update(cx, |h, _| h.layout.feedback_mode = true));
+        vc.update(|_, cx| baaz.update(cx, |_, cx| crate::layout::Layout::stage(cx, |layout| layout.feedback_mode = true)));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         assert!(
             vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active),
@@ -3228,7 +3228,7 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
-                h.layout.feedback_mode = true;
+                crate::layout::Layout::stage(cx, |layout| layout.feedback_mode = true);
             })
         });
         (baaz, vc)
@@ -3267,7 +3267,7 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
-                h.layout.feedback_mode = true;
+                crate::layout::Layout::stage(cx, |layout| layout.feedback_mode = true);
             })
         });
         (baaz, vc)
@@ -3558,7 +3558,7 @@ mod tests {
         // the bounds while the slot stays unrendered.
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
-                h.layout.feedback_mode = false;
+                crate::layout::Layout::stage(cx, |layout| layout.feedback_mode = false);
                 h.feedback_setting_off(cx);
             })
         });
@@ -3869,7 +3869,7 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
-                h.layout.feedback_mode = true;
+                crate::layout::Layout::stage(cx, |layout| layout.feedback_mode = true);
             })
         });
         let draw = |vc: &mut gpui::VisualTestContext| {
@@ -4129,13 +4129,13 @@ mod tests {
         let state = hermetic_state("mode-steps");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
-        assert!(!vc.update(|_, cx| baaz.read(cx).layout.feedback_mode));
+        assert!(!vc.update(|_, cx| crate::layout::Layout::get(cx).feedback_mode));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("on", window, cx).expect("the step runs")));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
             assert!(harness.feedback.forced_on, "the run-only flag parks");
-            assert!(!harness.layout.feedback_mode, "the persisted setting never moves");
+            assert!(!crate::layout::Layout::get(cx).feedback_mode, "the persisted setting never moves");
         });
         let bogus = vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("bogus", window, cx)));
         assert!(
@@ -4147,7 +4147,7 @@ mod tests {
             let harness = baaz.read(cx);
             assert_eq!(harness.feedback.phase, FeedbackPhase::Off);
             assert!(!harness.feedback.forced_on, "off clears the run-only flag");
-            assert!(!harness.layout.feedback_mode, "off leaves the persisted setting alone");
+            assert!(!crate::layout::Layout::get(cx).feedback_mode, "off leaves the persisted setting alone");
         });
         restore_state(state);
     }
@@ -5017,15 +5017,17 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
         let target = Target::Element(f3_hit(10.0, 10.0, 100.0, 30.0, "Headers"));
-        let subtitle = vc.update(|_, cx| baaz.read(cx).feedback_note_subtitle(&target));
+        let subtitle = vc.update(|_, cx| baaz.read(cx).feedback_note_subtitle(&target, cx));
         assert_eq!(subtitle, "Button · in Header · Sessions");
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.layout.right_open = true;
-                h.layout.right_kind = Some(crate::layout::RightKind::Browser);
+            baaz.update(cx, |_, cx| {
+                crate::layout::Layout::stage(cx, |layout| {
+                    layout.right_open = true;
+                    layout.right_kind = Some(crate::layout::RightKind::Browser);
+                });
             })
         });
-        let subtitle = vc.update(|_, cx| baaz.read(cx).feedback_note_subtitle(&target));
+        let subtitle = vc.update(|_, cx| baaz.read(cx).feedback_note_subtitle(&target, cx));
         assert_eq!(subtitle, "Button · in Header · Page pane");
         restore_state(state);
     }
@@ -5110,8 +5112,8 @@ mod tests {
         );
         // The owner switches screens before the capture lands.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.mode = crate::layout::Mode::Browse;
+            baaz.update(cx, |_, cx| {
+                crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
             })
         });
         vc.update(|window, cx| {
@@ -5228,7 +5230,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
         // A web page only exists under the layer in Browse.
-        baaz.update(vc, |h, _| h.mode = crate::layout::Mode::Browse);
+        baaz.update(vc, |_, cx| crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse));
         enter_active(&baaz, vc);
         let mut page = f3_hit(0.0, 0.0, 2000.0, 2000.0, "Browse");
         page.role = "AXGroup".to_owned();
@@ -5303,8 +5305,8 @@ mod tests {
             "the toast shows while the setting is off"
         );
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.layout.feedback_mode = true;
+            baaz.update(cx, |_, cx| {
+                crate::layout::Layout::stage(cx, |layout| layout.feedback_mode = true);
             })
         });
         enter_active(&baaz, vc);

@@ -80,7 +80,7 @@ impl Harness {
         let entry = self.sessions.iter().find(|e| e.id == session_id);
         let turns = entry.map(|e| e.turns).unwrap_or(0);
         let eligible = titles::should_title(
-            self.layout.auto_title,
+            crate::layout::Layout::get(cx).auto_title,
             self.utility_available(self.session_lane_provider(session_id)),
             self.overrides.get(session_id),
             turns,
@@ -525,7 +525,7 @@ impl Harness {
         // byline work and independent of the byline switch below. Runs
         // first so an early return never skips it.
         self.reconcile_pack_turns(cx);
-        if !self.layout.auto_summary {
+        if !crate::layout::Layout::get(cx).auto_summary {
             return;
         }
         let session_id = view.read(cx).session_id.clone();

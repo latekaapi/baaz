@@ -241,7 +241,7 @@ impl SessionView {
         if self.gesture_active() {
             aui_motion::request_frame(window);
         }
-        self.sync_render_cache();
+        self.sync_render_cache(cx);
         if let Some(sent_at) = self.send_trace_turns {
             let replied = self.cached_turns.len() >= sent_at + 2
                 && matches!(self.cached_turns.last().map(|turn| &**turn), Some(aui_protocol::Turn::Assistant { .. }));
@@ -351,7 +351,7 @@ impl SessionView {
     ///
     /// Steady-state frames share one snapshot: re-snapshot only when the fold
     /// grew or shrank under us, or when `follow` says the content changed.
-    pub(super) fn sync_render_cache(&mut self) {
+    pub(super) fn sync_render_cache(&mut self, cx: &gpui::App) {
         let live_len = self.store.session().map(|s| s.turns.len()).unwrap_or(0);
         // The cache holds more than the fold: the view-side handoff prefix
         // and its one divider, minus the hidden pack bubble and the pack's
@@ -367,7 +367,7 @@ impl SessionView {
         let busy = self.working();
         if expected != self.cached_turns.len() || self.follow || busy != self.synced_busy {
             self.synced_busy = busy;
-            self.refresh_render_cache();
+            self.refresh_render_cache(cx);
         }
     }
 
@@ -553,10 +553,10 @@ impl SessionView {
                     open(&name, window, cx)
                 }))
             },
-            // B12: the fold switch's per-frame backing (default on), and
-            // the turn diff chip, out as a window-level event like the
+            // B12: the fold switch, read from the layout global (default
+            // on), and the turn diff chip, out as a window-level event like the
             // skill tap above.
-            fold_finished_turns: self.fold_finished_turns,
+            fold_finished_turns: crate::layout::Layout::get(cx).fold_finished_turns,
             open_turn_diff: {
                 let open = cx.listener(|_: &mut Self, id: &String, _, cx| {
                     cx.emit(crate::session::SessionEvent::OpenTurnChanges { turn_id: id.clone() });
@@ -1047,17 +1047,19 @@ impl SessionView {
     /// The fold owns the fetch handle (`outputRef`); this view owns the
     /// result. Called when the fold changes (length drift or `follow`), never
     /// per frame, so steady-state frames share one `Rc`.
-    pub(crate) fn refresh_render_cache(&mut self) {
+    pub(crate) fn refresh_render_cache(&mut self, cx: &gpui::App) {
+        // Settings › General › "Fold finished turns", from the layout global.
+        let fold = crate::layout::Layout::get(cx).fold_finished_turns;
         // The fold names the turns it wrote since the last refresh (perf
         // P1, docs/51 #6). Taken once: both paths below read the same set.
         let dirty =
             if self.store.session().is_some() { self.store.take_dirty() } else { None };
         if let Some(dirty) = dirty.as_ref() {
-            if self.refresh_render_suffix(dirty) {
+            if self.refresh_render_suffix(dirty, fold) {
                 return;
             }
         }
-        self.refresh_render_full(dirty);
+        self.refresh_render_full(dirty, fold);
     }
 
     /// How many turns the render cache holds (`--perf-turn`).
@@ -1085,7 +1087,7 @@ impl SessionView {
     /// The whole-transcript refresh: every turn reconsidered, every row
     /// counted. What a fresh session, a handoff view, a removed turn or a
     /// toggle takes; streaming takes [`Self::refresh_render_suffix`].
-    fn refresh_render_full(&mut self, dirty: Option<HashSet<String>>) {
+    fn refresh_render_full(&mut self, dirty: Option<HashSet<String>>, fold: bool) {
         if self.store.session().is_some() {
             // Only the turns that changed are copied. The rest hand back the
             // `Rc` the previous snapshot already held, so a streaming chunk
@@ -1172,8 +1174,8 @@ impl SessionView {
         // `transcript_list`.
         self.row_counts.clear();
         Rc::make_mut(&mut self.rows).clear();
-        self.rebuild_rows_from(0);
-        self.suffix_inputs = Some((self.toggled_gen, self.fold_finished_turns));
+        self.rebuild_rows_from(0, fold);
+        self.suffix_inputs = Some((self.toggled_gen, fold));
         self.refresh_card_state(0);
     }
 
@@ -1185,7 +1187,7 @@ impl SessionView {
     /// real, hinted list item that renders as one fixed-height row
     /// (`TAIL_SPACER_H`) in `transcript_list`. Each turn's count is
     /// memoised against its snapshot `Rc` (see `row_memo`).
-    fn rebuild_rows_from(&mut self, from: usize) {
+    fn rebuild_rows_from(&mut self, from: usize, fold: bool) {
         // Everything above `from` keeps its rows: the offset is what is left
         // once the tail's rows (and the spacer) come off — summed over the
         // tail, never the prefix, so a chunk at 3,000 turns adds 3 counts,
@@ -1205,11 +1207,11 @@ impl SessionView {
         rows.truncate(offset);
         for (turn_ix, turn) in self.cached_turns.iter().enumerate().skip(from) {
             let settled = turn_ix != last_turn || !live_tail;
-            let inputs = (settled, self.toggled_gen, self.fold_finished_turns);
+            let inputs = (settled, self.toggled_gen, fold);
             let n = match self.row_memo.get(turn.id()) {
                 Some(hit) if Rc::ptr_eq(&hit.turn, turn) && hit.inputs == inputs => hit.rows,
                 _ => {
-                    let n = transcript::turn_mapped_rows(turn, settled, &self.toggled, self.fold_finished_turns);
+                    let n = transcript::turn_mapped_rows(turn, settled, &self.toggled, fold);
                     self.row_memo.insert(turn.id().to_owned(), RowMemo { turn: Rc::clone(turn), inputs, rows: n });
                     n
                 }
@@ -1234,7 +1236,7 @@ impl SessionView {
     /// turn transcript per chunk (perf P1: 6.7 ms → see docs/51). `false`
     /// means "not this kind of change": the caller runs the full refresh
     /// with the same dirty set.
-    fn refresh_render_suffix(&mut self, dirty: &HashSet<String>) -> bool {
+    fn refresh_render_suffix(&mut self, dirty: &HashSet<String>, fold: bool) -> bool {
         /// More changed turns than this is a page or a replay, not a stream.
         const SUFFIX_LIMIT: usize = 64;
         // A handoff view interleaves view-side turns and hides two of the
@@ -1248,7 +1250,7 @@ impl SessionView {
             return false;
         }
         // A toggle or the fold switch can change any turn's rows.
-        if self.suffix_inputs != Some((self.toggled_gen, self.fold_finished_turns)) {
+        if self.suffix_inputs != Some((self.toggled_gen, fold)) {
             return false;
         }
         let Some(session) = self.store.session() else { return false };
@@ -1315,7 +1317,7 @@ impl SessionView {
         }
         let now_ms = self.frame_clock_ms(from);
         transcript::note_tool_starts(&self.cached_turns[from..], &mut self.tool_first_seen, now_ms);
-        self.rebuild_rows_from(from);
+        self.rebuild_rows_from(from, fold);
         self.refresh_card_state(from);
         true
     }
@@ -1432,7 +1434,7 @@ impl SessionView {
         if !toggled.remove(&key) {
             toggled.insert(key);
         }
-        self.refresh_render_cache();
+        self.refresh_render_cache(cx);
         cx.notify();
     }
 
@@ -3262,18 +3264,18 @@ mod tests {
             let view = cx.new(|cx| crate::session::SessionView::new("synthetic-stress-300".to_owned(), host, window, cx));
             view.update(cx, |view, cx| {
                 view.fold_provider_events(events, cx);
-                view.refresh_render_cache();
+                view.refresh_render_cache(cx);
                 // Something sent with an attachment pairs with a user turn.
                 let text = match view.cached_turns.iter().find(|turn| matches!(&***turn, Turn::User { .. })).map(|t| &**t) {
                     Some(Turn::User { text, .. }) => text.clone(),
                     _ => panic!("the capture has a user turn"),
                 };
                 view.sent_items.push(crate::sent::SentItem { text, annotations: Some(Default::default()), ..Default::default() });
-                view.refresh_render_full(None);
+                view.refresh_render_full(None, crate::layout::Layout::get(cx).fold_finished_turns);
                 for n in 0..5 {
                     for event in renamed_turn(&mut folder, &last_turn, 900 + n) {
                         view.fold_provider_events(vec![event], cx);
-                        view.refresh_render_cache();
+                        view.refresh_render_cache(cx);
                     }
                 }
                 let streamed = (
@@ -3286,7 +3288,7 @@ mod tests {
                     view.cached_turns.len(),
                 );
                 assert!(!streamed.3.is_empty(), "the sent item paired");
-                view.refresh_render_full(None);
+                view.refresh_render_full(None, crate::layout::Layout::get(cx).fold_finished_turns);
                 let full = (
                     view.rows.as_ref().clone(),
                     view.row_counts.clone(),
@@ -3344,7 +3346,7 @@ mod tests {
                         let turn = renamed_turn(&mut folder.borrow_mut(), &last_turn, *next);
                         view.fold_provider_events(turn, cx);
                     }
-                    view.refresh_render_cache();
+                    view.refresh_render_cache(cx);
                 });
                 view
             };
@@ -3368,7 +3370,7 @@ mod tests {
                             view.update(cx, |view, cx| {
                                 for event in turn {
                                     view.fold_provider_events(vec![event], cx);
-                                    view.refresh_render_cache();
+                                    view.refresh_render_cache(cx);
                                 }
                             });
                             total += at.elapsed();
@@ -3381,11 +3383,11 @@ mod tests {
             let view = new_view(window, cx);
             view.update(cx, |view, cx| {
                 view.fold_provider_events(events.clone(), cx);
-                view.refresh_render_cache();
+                view.refresh_render_cache(cx);
                 assert!(view.cached_turns.len() >= 300, "the capture folded: {} turns", view.cached_turns.len());
             });
             c.bench_function("render_cache/full_300", |b| {
-                b.iter(|| view.update(cx, |view, _| view.refresh_render_full(None)))
+                b.iter(|| view.update(cx, |view, cx| view.refresh_render_full(None, crate::layout::Layout::get(cx).fold_finished_turns)))
             });
             c.final_summary();
         });

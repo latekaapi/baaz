@@ -207,7 +207,7 @@ impl Harness {
     /// app activates too, so a click in another app lands on Baaz even
     /// when it was hidden behind it.
     fn open_external_tabs(&mut self, urls: &[String], window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode != crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             self.set_mode(crate::layout::Mode::Browse, window, cx);
         }
         for url in urls {
@@ -433,7 +433,7 @@ mod tests {
         });
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert_eq!(h.mode, crate::layout::Mode::Browse, "an outside link switches to Browse");
+            assert_eq!(crate::layout::Layout::get(cx).mode, crate::layout::Mode::Browse, "an outside link switches to Browse");
             let space = h.browse_space();
             let tabs = h.browser.tabs.ordered_tabs(&Owner::Person, space.as_deref());
             // Entering Browse arms its own blank tab first; the outside

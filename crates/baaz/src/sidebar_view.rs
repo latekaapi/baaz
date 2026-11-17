@@ -63,17 +63,25 @@ use crate::tier::Tier;
 /// (hover, its scroll container, the rename editor, and — since the reveal
 /// steers through `ListState` rather than prepaint intents — the reveal's
 /// own outside-the-draw pane-notify task in [`Harness::reveal_sidebar_row`])
-/// dirty it directly through the view tree.
+/// dirty it directly through the view tree. The window preferences it draws
+/// (grouping, sort, summary line, mode, collapse) re-arm it on their own:
+/// the pane observes the layout global ([`crate::layout::LayoutStore`]).
 /// How long the sidebar's new rows take to arrive after a mode switch.
 pub(crate) const MODE_FADE: std::time::Duration = std::time::Duration::from_millis(80);
 
 pub(crate) struct SidebarPane {
     baaz: WeakEntity<Harness>,
+    /// The column reads the window preferences (grouping, sort, summary
+    /// line, mode, collapse) from the layout global: a change re-renders
+    /// the cached pane in the same frame, with no key and no notify at the
+    /// write.
+    _layout: gpui::Subscription,
 }
 
 impl SidebarPane {
-    pub(crate) fn new(baaz: WeakEntity<Harness>) -> Self {
-        Self { baaz }
+    pub(crate) fn new(baaz: WeakEntity<Harness>, cx: &mut Context<Self>) -> Self {
+        let layout = cx.observe_global::<crate::layout::LayoutStore>(|_, cx| cx.notify());
+        Self { baaz, _layout: layout }
     }
 }
 
@@ -279,7 +287,9 @@ pub(crate) type BrowseGroupPrint = (String, Vec<(u64, bool)>);
 /// reveal, the footer's identity, and the current project. Compared
 /// in `on_frame`, before anything draws; a few small clones per frame, no
 /// rebuild. Nested entities inside the column (the rename editor, hover and
-/// scroll state) notify through the view tree on their own and need no key.
+/// scroll state) notify through the view tree on their own and need no key,
+/// and so do the window preferences (mode, collapse, summary line, grouping,
+/// sort, search scope): the pane observes the layout global itself.
 /// The tier is deliberately not an input: the footer shows the person,
 /// never the plan or the meter, so a usage tick must not dirty the column.
 #[derive(PartialEq)]
@@ -291,7 +301,6 @@ pub(crate) struct SidebarKey {
     reveal: Option<String>,
     auth: (u8, String, String, String, bool),
     current_project: Option<String>,
-    mode: crate::layout::Mode,
     browse_tabs: Vec<(u64, bool, bool, bool)>,
     tabs_generation: u64,
     browse_flags: Vec<(u64, bool, bool, bool, bool, bool)>,
@@ -312,16 +321,13 @@ pub(crate) struct SidebarKey {
     pinned_open: bool,
     view_menu_open: bool,
     account_menu_open: bool,
-    view_options: (bool, bool, bool, crate::layout::GroupBy, crate::layout::SortBy, bool, usize),
+    view_options: (bool, bool, bool, usize),
     browse_menu: Option<aui::screens::sidebar::BrowseMenu>,
     browse_naming: Option<aui::screens::sidebar::BrowseNaming>,
     current_space: String,
     loading: bool,
-    sidebar_open: bool,
     skills_on: usize,
     plan: Option<String>,
-    /// Settings › Sidebar › "Show a summary line": every row's height.
-    summary_line: bool,
     /// The session whose `⋯` menu stands open.
     row_menu: Option<String>,
     /// The usage cards tick while the account menu is open: the minute.
@@ -466,7 +472,7 @@ impl SidebarKey {
         // The Browse fingerprints cost model walks and label-free triples,
         // but only Browse shows them: outside Browse they stay empty, so
         // a Sessions frame never pays for the tab model at all.
-        let browse_mode = baaz.mode == crate::layout::Mode::Browse;
+        let browse_mode = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
         let (browse_tabs, tabs_generation, browse_flags, browse_groups) = if browse_mode {
             (
                 Self::browse_tabs_fingerprint(baaz),
@@ -488,7 +494,6 @@ impl SidebarKey {
             reveal: baaz.reveal.clone(),
             auth,
             current_project,
-            mode: baaz.mode,
             browse_tabs,
             tabs_generation,
             browse_flags,
@@ -509,19 +514,14 @@ impl SidebarKey {
                 baaz.show_empty,
                 baaz.show_hidden,
                 baaz.show_archived,
-                baaz.effective_group_by(),
-                baaz.layout.sort_by,
-                baaz.layout.search_all_projects,
                 baaz.hidden_count(),
             ),
             browse_menu: baaz.browse_menu.clone(),
             browse_naming: baaz.browse_naming.clone(),
             current_space: baaz.browser.tabs.current_space.clone(),
             loading: baaz.sidebar_loading(),
-            sidebar_open: baaz.sidebar_open,
             skills_on: baaz.skills.catalog.on_count(),
             plan: muse_plan_label(baaz.tier.as_ref()),
-            summary_line: baaz.layout.summary_line,
             row_menu: baaz.open_row_menu(cx),
             usage_minute: if account_menu_open { crate::account_usage::now_secs() / 60 } else { 0 },
         }
@@ -781,7 +781,7 @@ impl Harness {
         // screen draws skeleton rows the grouping does not have, and the
         // state follows the screen's count.
         if model.mode == Mode::Sessions {
-            self.sync_sidebar_list(&rows, &grouping);
+            self.sync_sidebar_list(&rows, &grouping, cx);
             let count = screen_item_count(&model);
             if self.sidebar_list.item_count() != count {
                 self.sidebar_list.reset(count);
@@ -904,16 +904,16 @@ impl Harness {
         if waiting > 0 || filter {
             nav.insert(0, NavItem { id: NAV_NEEDS_YOU.into(), label: "Needs you".into(), icon: IconName::Bell, count: Some(waiting as u32), active: filter });
         }
-        let group_by = match self.effective_group_by() {
+        let group_by = match self.effective_group_by(cx) {
             crate::layout::GroupBy::Project => GroupKey::Project,
             crate::layout::GroupBy::Date => GroupKey::Date,
         };
-        let sort_by = match self.layout.sort_by {
+        let sort_by = match crate::layout::Layout::get(cx).sort_by {
             crate::layout::SortBy::Recent => SortKey::Recent,
             crate::layout::SortBy::Created => SortKey::Created,
             crate::layout::SortBy::Name => SortKey::Name,
         };
-        let mode = match self.mode {
+        let mode = match crate::layout::Layout::get(cx).mode {
             crate::layout::Mode::Sessions => Mode::Sessions,
             crate::layout::Mode::Browse => Mode::Browse,
         };
@@ -929,9 +929,9 @@ impl Harness {
             // The row a right-click menu belongs to stays lit while it is open
             // (canvas Menus board).
             hovered: match self.browse_menu.as_ref().map(|menu| &menu.target) {
-                Some(aui::screens::sidebar::BrowseMenuTarget::Tab { id, .. }) if self.mode == crate::layout::Mode::Browse => Some(id.clone()),
-                Some(aui::screens::sidebar::BrowseMenuTarget::Folder(id)) if self.mode == crate::layout::Mode::Browse => Some(format!("folder-{id}").into()),
-                Some(aui::screens::sidebar::BrowseMenuTarget::TaskFolder { session, .. }) if self.mode == crate::layout::Mode::Browse => {
+                Some(aui::screens::sidebar::BrowseMenuTarget::Tab { id, .. }) if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse => Some(id.clone()),
+                Some(aui::screens::sidebar::BrowseMenuTarget::Folder(id)) if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse => Some(format!("folder-{id}").into()),
+                Some(aui::screens::sidebar::BrowseMenuTarget::TaskFolder { session, .. }) if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse => {
                     Some(format!("folder-{session}").into())
                 }
                 _ => self.sidebar_hovered.clone().map(SharedString::from),
@@ -954,10 +954,10 @@ impl Harness {
                 // (owner 2026-10-11).
                 show_pr_status: false,
                 pr_status_available: false,
-                search_all_projects: self.layout.search_all_projects,
+                search_all_projects: crate::layout::Layout::get(cx).search_all_projects,
             },
             // Settings › Sidebar › "Show a summary line" (docs/83 §4).
-            bylines: if self.layout.summary_line { Bylines::Summary } else { Bylines::Off },
+            bylines: if crate::layout::Layout::get(cx).summary_line { Bylines::Summary } else { Bylines::Off },
             account: self.sidebar_account(account_menu_open),
             browse,
         }
@@ -1029,7 +1029,7 @@ impl Harness {
         // also has an active tab of its own, and counting those lit every
         // agent tab's row and moved the selected pill onto the last of them
         // (owner screenshots 2026-10-11: the page's own row had none).
-        let shown = self.browse_centre_shown();
+        let shown = self.browse_centre_shown(cx);
         let tab = |id: crate::browser::TabId, title: String, initial: String, _owner_active: bool, loading: bool, favicon: Option<String>| BrowseTab {
             id: browse_tab_key(id).into(),
             title: title.into(),
@@ -1089,10 +1089,10 @@ impl Harness {
                 }
             })
             .collect();
-        let shown = self.browse_centre_shown();
+        let shown = self.browse_centre_shown(cx);
         // The live page's URL, falling back to the tab's — the same read
         // the toolbar makes, so the two never disagree.
-        let live_url = self.browse_centre_state().map(|state| state.read(cx).url().to_string()).unwrap_or_default();
+        let live_url = self.browse_centre_state(cx).map(|state| state.read(cx).url().to_string()).unwrap_or_default();
         let url = if live_url.is_empty() {
             shown.and_then(|id| self.browser.tabs.get(id)).map(|tab| tab.url.clone()).unwrap_or_default()
         } else {
@@ -1115,7 +1115,7 @@ impl Harness {
         let downloads = (!downloads.is_empty())
             .then(|| downloads.iter().any(|(_, _, d)| d.state == aui_webview::DownloadStatus::Downloading));
         BrowseModel {
-            bookmarked: self.browse_centre_shown()
+            bookmarked: self.browse_centre_shown(cx)
                 .and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone()))
                 .is_some_and(|url| self.browser.is_bookmarked(&url)),
             host: address.host,
@@ -1416,18 +1416,18 @@ impl Harness {
     fn browse_intent(&mut self, intent: BrowseIntent, window: &mut Window, cx: &mut Context<Self>) {
         match intent {
             BrowseIntent::Address => {
-                let url = self.browse_centre_state().map(|state| state.read(cx).url().to_string()).unwrap_or_default();
+                let url = self.browse_centre_state(cx).map(|state| state.read(cx).url().to_string()).unwrap_or_default();
                 self.focus_browse_address_with(&url, window, cx);
             }
             BrowseIntent::SiteInfo => {
-                self.site_info_open = self.browse_centre_state().is_some();
+                self.site_info_open = self.browse_centre_state(cx).is_some();
                 cx.notify();
             }
             BrowseIntent::Bookmark => self.edit_shown_bookmark(window, cx),
             BrowseIntent::Back => self.browse_go_back(window, cx),
             BrowseIntent::Forward => self.browse_go_forward(window, cx),
             BrowseIntent::Reload => {
-                if let Some(id) = self.browse_centre_shown() {
+                if let Some(id) = self.browse_centre_shown(cx) {
                     self.reload_browse_tab(id, window, cx);
                 }
             }
@@ -1623,14 +1623,14 @@ impl Harness {
     /// like any other local insert or remove, so the offset survives them.
     /// Compared in `render_sidebar` before anything draws; a change resets
     /// the list state to the flattened length.
-    pub(crate) fn regroup_key(&self) -> SidebarRegroupKey {
+    pub(crate) fn regroup_key(&self, cx: &gpui::App) -> SidebarRegroupKey {
         SidebarRegroupKey {
-            group_by: self.effective_group_by(),
-            sort_by: self.layout.sort_by,
+            group_by: self.effective_group_by(cx),
+            sort_by: crate::layout::Layout::get(cx).sort_by,
             show_hidden: self.show_hidden,
             show_empty: self.show_empty,
             show_archived: self.show_archived,
-            summary_line: self.layout.summary_line,
+            summary_line: crate::layout::Layout::get(cx).summary_line,
         }
     }
 
@@ -1643,7 +1643,7 @@ impl Harness {
     /// text-only height change (same rows, new grouping pointer). A
     /// mismatch never panics in the list — it paints blanks past the model
     /// — so the debug assertion below is the contract, not a guardrail.
-    pub(crate) fn sync_sidebar_list(&mut self, rows: &[SidebarRow], grouping: &Rc<Grouping>) {
+    pub(crate) fn sync_sidebar_list(&mut self, rows: &[SidebarRow], grouping: &Rc<Grouping>, cx: &gpui::App) {
         // The splice below tracks the top item by index, so rows inserted
         // above carry a steered or parked top away from its row; repaired
         // after the sync, once the new rows are in.
@@ -1654,7 +1654,7 @@ impl Harness {
         if self.sidebar_list.item_count() != self.prev_sidebar_rows.len() {
             self.sidebar_list.reset(self.prev_sidebar_rows.len());
         }
-        let key = self.regroup_key();
+        let key = self.regroup_key(cx);
         if self.prev_sidebar_regroup.as_ref() != Some(&key) {
             self.sidebar_list.reset(rows.len());
             self.prev_sidebar_regroup = Some(key);
@@ -2531,21 +2531,26 @@ mod tests {
     }
 
     /// B2a-H2: the cached pane re-arms on a mode switch, so the switch
-    /// row at the top of the column never goes stale.
+    /// row at the top of the column never goes stale. The mode is a window
+    /// preference: the pane observes the layout global (task 4.1), so the
+    /// write alone notifies it — nothing in the key, no notify at the write.
     #[gpui::test]
-    fn sidebar_key_changes_with_mode(cx: &mut TestAppContext) {
+    fn sidebar_pane_rearms_on_mode_switch(cx: &mut TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (dir, guard, old, args) = b3c_state("mode-key");
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
-        let sessions_key = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
-        assert_eq!(sessions_key.mode, crate::layout::Mode::Sessions);
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, _| h.mode = crate::layout::Mode::Browse);
+        vc.run_until_parked();
+        let pane = vc.update(|_, cx| baaz.read(cx).sidebar_pane.clone());
+        let notified = Rc::new(std::cell::Cell::new(0u32));
+        let _watch = vc.update(|_, cx| {
+            let notified = notified.clone();
+            cx.observe(&pane, move |_, _| notified.set(notified.get() + 1))
         });
-        let browse_key = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
-        assert!(sessions_key != browse_key, "the mode switch re-arms the cached pane");
-        assert_eq!(browse_key.mode, crate::layout::Mode::Browse);
+        vc.update(|_, cx| crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse));
+        vc.run_until_parked();
+        assert!(notified.get() > 0, "the mode switch re-arms the cached pane");
+        assert_eq!(vc.update(|_, cx| crate::layout::Layout::get(cx).mode), crate::layout::Mode::Browse);
         b3c_teardown(&dir, guard, old);
     }
 
@@ -2559,11 +2564,11 @@ mod tests {
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
+            baaz.update(cx, |h, cx| {
                 // The Browse fingerprints key only in Browse mode (a
                 // Sessions frame never walks the tab model), so the test
                 // enters Browse the way the switch does.
-                h.mode = crate::layout::Mode::Browse;
+                crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.tabs_loaded = true;
                 let space = h.browse_space();
                 h.browser.tabs.open(
@@ -2631,8 +2636,8 @@ mod tests {
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.mode = crate::layout::Mode::Browse;
+            baaz.update(cx, |h, cx| {
+                crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.tabs_loaded = true;
                 let space = h.browse_space();
                 h.browser.tabs.open(
@@ -2660,8 +2665,8 @@ mod tests {
         // Sessions: the same handler must not touch the tabs — the belt
         // holds, and ⌘W keeps closing the window there.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.mode = crate::layout::Mode::Sessions;
+            baaz.update(cx, |_, cx| {
+                crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Sessions);
             })
         });
         vc.update(|window, cx| {
@@ -2689,7 +2694,7 @@ mod tests {
         let baaz = b3c_window(vc, args);
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
-                h.mode = crate::layout::Mode::Browse;
+                crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.tabs_loaded = true;
                 let space = h.browse_space();
                 let mine = h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://a.example/", None);
@@ -2719,16 +2724,16 @@ mod tests {
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.mode = crate::layout::Mode::Browse;
+            baaz.update(cx, |h, cx| {
+                crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.tabs_loaded = true;
                 let space = h.browse_space();
                 let blank = h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, crate::browser::tabs::BLANK, None);
                 h.browser.tabs.activate(blank);
-                assert!(h.browse_centre_tab_blank(), "a fresh tab is blank");
+                assert!(h.browse_centre_tab_blank(cx), "a fresh tab is blank");
                 let going = h.browser.tabs.open(space, crate::browser::Owner::Person, "https://news.example/", Some(blank));
                 h.browser.tabs.activate(going);
-                assert!(!h.browse_centre_tab_blank(), "a tab opened on a URL is not blank");
+                assert!(!h.browse_centre_tab_blank(cx), "a tab opened on a URL is not blank");
             })
         });
         b3c_teardown(&dir, guard, old);
@@ -2743,8 +2748,8 @@ mod tests {
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
         let (first, folded) = vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.mode = crate::layout::Mode::Browse;
+            baaz.update(cx, |h, cx| {
+                crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.tabs_loaded = true;
                 let space = h.browse_space();
                 let first = h.browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://a.example/", None);
@@ -2784,8 +2789,8 @@ mod tests {
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.mode = crate::layout::Mode::Browse;
+            baaz.update(cx, |h, cx| {
+                crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.tabs_loaded = true;
                 let space = h.browse_space();
                 h.browser.tabs.open(
@@ -2964,9 +2969,9 @@ mod tests {
         assert_eq!(rows1.len(), 4, "header plus three sessions");
         let g1 = Rc::new(g1);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
+            baaz.update(cx, |h, cx| {
                 assert!(h.reveal.is_none(), "no session is active, so nothing arms a reveal");
-                h.sync_sidebar_list(&rows1, &g1);
+                h.sync_sidebar_list(&rows1, &g1, cx);
                 assert_eq!(h.sidebar_list.item_count(), rows1.len());
                 // Park the list the way a painted top leaves it: the splice
                 // below only carries a materialised scroll top.
@@ -2990,8 +2995,8 @@ mod tests {
         assert_eq!(rows2.len(), 6, "pinned header, pinned row, then the old rows");
         let g2 = Rc::new(g2);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.sync_sidebar_list(&rows2, &g2);
+            baaz.update(cx, |h, cx| {
+                h.sync_sidebar_list(&rows2, &g2, cx);
                 assert_eq!(h.sidebar_list.item_count(), rows2.len());
                 assert_eq!(
                     h.sidebar_list_top().item_ix,
@@ -3024,11 +3029,11 @@ mod tests {
         let g1 = Rc::new(g1);
         // Boot order: the activation arms the reveal before any rows land.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
+            baaz.update(cx, |h, cx| {
                 h.reveal = Some("s-draft".to_owned());
                 h.reveal_unknown = None;
                 h.sidebar_user_scrolled = false;
-                h.sync_sidebar_list(&rows1, &g1);
+                h.sync_sidebar_list(&rows1, &g1, cx);
                 // Park the list the way a painted top leaves it (a parked
                 // scroll, not a reveal steer — the draft has no row).
                 h.sidebar_list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
@@ -3048,7 +3053,7 @@ mod tests {
         let g2 = Rc::new(g2);
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
-                h.sync_sidebar_list(&rows2, &g2);
+                h.sync_sidebar_list(&rows2, &g2, cx);
                 // The wait itself never steers, even called every frame: the
                 // draft has no row anywhere yet.
                 h.reveal_sidebar_row(&rows2, &g2, "s-draft", cx);
@@ -3090,9 +3095,9 @@ mod tests {
         assert_eq!(rows1.len(), 4, "header plus three sessions");
         let g1 = Rc::new(g1);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
+            baaz.update(cx, |h, cx| {
                 assert!(!h.sessions_loaded, "the wire list has not landed yet");
-                h.sync_sidebar_list(&rows1, &g1);
+                h.sync_sidebar_list(&rows1, &g1, cx);
                 assert_eq!(h.sidebar_list.item_count(), rows1.len());
             })
         });
@@ -3124,8 +3129,8 @@ mod tests {
         assert_eq!(rows2.len(), 24, "header plus twenty-three sessions");
         let g2 = Rc::new(g2);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.sync_sidebar_list(&rows2, &g2);
+            baaz.update(cx, |h, cx| {
+                h.sync_sidebar_list(&rows2, &g2, cx);
                 assert_eq!(h.sidebar_list.item_count(), rows2.len());
             })
         });
@@ -3204,9 +3209,9 @@ mod tests {
         let flat = flatten_sidebar(&g, false);
         let g = Rc::new(g);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
+            baaz.update(cx, |h, cx| {
                 h.sessions_loaded = true;
-                h.sync_sidebar_list(&flat, &g);
+                h.sync_sidebar_list(&flat, &g, cx);
             })
         });
         let state = vc.update(|_, cx| baaz.read(cx).sidebar_list.clone());
@@ -3523,8 +3528,8 @@ mod tests {
 
     /// Fill the harness with `n` date-grouped sessions (the last pinned) and
     /// mark the lists loaded.
-    fn load_sessions(h: &mut Harness, n: usize) {
-        h.layout.group_by = Some(crate::layout::GroupBy::Date);
+    fn load_sessions(h: &mut Harness, n: usize, cx: &mut gpui::App) {
+        crate::layout::Layout::stage(cx, |layout| layout.group_by = Some(crate::layout::GroupBy::Date));
         h.sessions = (0..n).map(|i| list_entry(&format!("s{i}"), i == n - 1)).collect();
         h.sessions_loaded = true;
         h.index_loaded = true;
@@ -3545,7 +3550,7 @@ mod tests {
         let (dir, guard, old, args) = b3c_state("browse-keeps-list");
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
-        vc.update(|_, cx| baaz.update(cx, |h, _| load_sessions(h, 40)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| load_sessions(h, 40, cx)));
         render_once(vc, &baaz);
         let (count, top) = vc.update(|_, cx| {
             baaz.update(cx, |h, _| {
@@ -3555,14 +3560,14 @@ mod tests {
         });
         assert!(count > 20, "the sessions area has rows: {count}");
         assert_eq!(top.item_ix, 9);
-        vc.update(|_, cx| baaz.update(cx, |h, _| h.mode = crate::layout::Mode::Browse));
+        vc.update(|_, cx| baaz.update(cx, |_, cx| crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse)));
         render_once(vc, &baaz);
         let (browse_count, browse_top) =
             vc.update(|_, cx| baaz.update(cx, |h, _| (h.sidebar_list.item_count(), h.sidebar_list.logical_scroll_top())));
         assert_eq!(browse_count, count, "Browse must not resize the Sessions list state");
         assert_eq!(browse_top.item_ix, top.item_ix);
         assert_eq!(browse_top.offset_in_item, top.offset_in_item);
-        vc.update(|_, cx| baaz.update(cx, |h, _| h.mode = crate::layout::Mode::Sessions));
+        vc.update(|_, cx| baaz.update(cx, |_, cx| crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Sessions)));
         render_once(vc, &baaz);
         let back = vc.update(|_, cx| baaz.update(cx, |h, _| h.sidebar_list.logical_scroll_top()));
         assert_eq!(back.item_ix, top.item_ix, "switching back lands where the person was");
@@ -3595,7 +3600,7 @@ mod tests {
         let (dir, guard, old, args) = b3c_state("pinned-reveal");
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
-        vc.update(|_, cx| baaz.update(cx, |h, _| load_sessions(h, 40)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| load_sessions(h, 40, cx)));
         render_once(vc, &baaz);
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
@@ -3622,8 +3627,8 @@ mod tests {
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
         let (filed, pinned, session) = vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.mode = crate::layout::Mode::Browse;
+            baaz.update(cx, |h, cx| {
+                crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.tabs_loaded = true;
                 h.browser.tabs.ensure_spaces(|_| None);
                 let space = h.browse_space();

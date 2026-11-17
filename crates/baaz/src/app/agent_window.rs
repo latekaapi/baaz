@@ -257,7 +257,7 @@ fn step_state(status: &aui_protocol::ToolStatus) -> aui::browse::agent_window::S
 impl Harness {
     /// ⌘J: open the line on the page on screen, or close it.
     pub(crate) fn toggle_agent_line(&mut self, cx: &mut Context<Self>) {
-        if self.mode != crate::layout::Mode::Browse || self.browse_centre_shown().is_none() {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.browse_centre_shown(cx).is_none() {
             return;
         }
         self.line_ui = if self.line_ui == LineUi::Closed { LineUi::Ask } else { LineUi::Closed };
@@ -294,7 +294,7 @@ impl Harness {
 
     /// ⌘E: open the card on the current chat, or close it.
     pub(crate) fn toggle_agent_card(&mut self, cx: &mut Context<Self>) {
-        if self.mode != crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return;
         }
         self.card_ui = if self.card_ui == CardUi::Closed { CardUi::Card } else { CardUi::Closed };
@@ -307,7 +307,7 @@ impl Harness {
 
     /// ⌘⇧E: dock the card as a column, or undock it.
     pub(crate) fn toggle_agent_column(&mut self, cx: &mut Context<Self>) {
-        if self.mode != crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return;
         }
         self.card_ui = if self.card_ui == CardUi::Column { CardUi::Card } else { CardUi::Column };
@@ -319,8 +319,8 @@ impl Harness {
 
     /// The tab on screen in Browse, as the chat's prompt names it.
     fn page_on_screen(&self, cx: &gpui::App) -> Option<(u64, String, String)> {
-        let id = self.browse_centre_shown()?;
-        let state = self.browse_centre_state()?;
+        let id = self.browse_centre_shown(cx)?;
+        let state = self.browse_centre_state(cx)?;
         let page = state.read(cx);
         Some((id.0, page.title().to_string(), page.url().to_string()))
     }
@@ -340,7 +340,7 @@ impl Harness {
         // Assistant's provider; after a change in Settings the next ask
         // starts a fresh chat there (seen live: a Muse chat kept taking
         // asks after Claude Haiku was picked).
-        let provider = self.assistant_choice().map(|choice| choice.provider);
+        let provider = self.assistant_choice(cx).map(|choice| choice.provider);
         let reuse = self
             .registry
             .browser_chat()
@@ -365,8 +365,8 @@ impl Harness {
                 pages.push((title.clone(), url.clone()));
             }
         }
-        if let (Some((tab, _, _)), Some(state)) = (page.as_ref(), self.browse_centre_state()) {
-            let read_only = self.layout.agents.your_tabs == crate::browser::agents::YourTabs::ReadOnly;
+        if let (Some((tab, _, _)), Some(state)) = (page.as_ref(), self.browse_centre_state(cx)) {
+            let read_only = crate::layout::Layout::get(cx).agents.your_tabs == crate::browser::agents::YourTabs::ReadOnly;
             self.terminal_service.grant_tab(&session, *tab, state, read_only);
         }
         if let Some(input) = self.agent_line_input.clone() {
@@ -607,7 +607,7 @@ impl Harness {
             return Err(format!("unknown fixture `{kind}`; known fixtures are answer, steps, draft"));
         }
         let id = format!("browser-fixture-{}", if kind.is_empty() { "answer" } else { kind });
-        crate::baaz_log!("browser-chat-fixture: {id} (page {:?})", self.browse_centre_shown());
+        crate::baaz_log!("browser-chat-fixture: {id} (page {:?})", self.browse_centre_shown(cx));
         let page = self.page_on_screen(cx);
         let ask = match kind {
             "steps" => "Compare the refund windows on these three shops and save the policy pages as PDFs to ~/Documents/refunds",

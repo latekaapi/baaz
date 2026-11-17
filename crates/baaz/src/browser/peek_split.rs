@@ -158,7 +158,7 @@ impl Harness {
         }
         for (opener, url, gesture) in gestures {
             let person = matches!(self.browser.tabs.get(opener).map(|tab| &tab.owner), Some(Owner::Person));
-            let in_browse = self.mode == crate::layout::Mode::Browse;
+            let in_browse = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
             crate::baaz_log!("browse: {gesture:?} {url} from tab {}", opener.0);
             match gesture {
                 LinkGesture::Peek if person && in_browse => self.open_peek(opener, &url, window, cx),
@@ -235,7 +235,7 @@ impl Harness {
             }
         }
         window.focus(&self.focus_root, cx);
-        if self.browse_centre_shown() == Some(half) {
+        if self.browse_centre_shown(cx) == Some(half) {
             if let Some(other) = pair.partner(half) {
                 self.select_browse_sidebar_tab(other, window, cx);
             }
@@ -245,9 +245,9 @@ impl Harness {
 
     /// The Split partner shown beside the centre tab, when the centre tab is
     /// a half of the open Split and both tabs still exist.
-    pub(crate) fn split_partner(&self) -> Option<TabId> {
+    pub(crate) fn split_partner(&self, cx: &gpui::App) -> Option<TabId> {
         let pair = self.browser.split?;
-        let shown = self.browse_centre_shown()?;
+        let shown = self.browse_centre_shown(cx)?;
         let other = pair.partner(shown)?;
         self.browser.tabs.get(other).is_some().then_some(other)
     }
@@ -262,7 +262,7 @@ impl Harness {
         if !super::history::recordable(url) {
             return Err(format!("`{url}` is not a web page to open"));
         }
-        let opener = self.browse_centre_shown().ok_or("no tab is shown in Browse")?;
+        let opener = self.browse_centre_shown(cx).ok_or("no tab is shown in Browse")?;
         match gesture {
             LinkGesture::Peek => self.open_peek(opener, url, window, cx),
             LinkGesture::Split => {

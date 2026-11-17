@@ -99,7 +99,7 @@ impl SessionView {
     pub(crate) fn note_handoff_pack(&mut self, pack: String, display: String, cx: &mut Context<Self>) {
         self.handoff_pack_full = Some(pack);
         self.handoff_pack_display = Some(display);
-        self.refresh_render_cache();
+        self.refresh_render_cache(cx);
         cx.notify();
     }
 
@@ -211,7 +211,7 @@ impl SessionView {
             self.handoff_pack_display = pack_display;
         }
         self.follow = true;
-        self.refresh_render_cache();
+        self.refresh_render_cache(cx);
         cx.notify();
     }
 
@@ -222,8 +222,8 @@ impl SessionView {
     /// handoff). What activation snapshots, so a chain's next hop already
     /// carries this hop's divider. The live source view keeps its card; only
     /// these returned turns leave it out.
-    pub(crate) fn handoff_snapshot_turns(&mut self) -> Vec<Turn> {
-        self.refresh_render_cache();
+    pub(crate) fn handoff_snapshot_turns(&mut self, cx: &gpui::App) -> Vec<Turn> {
+        self.refresh_render_cache(cx);
         let turns: Vec<Turn> = self.cached_turns.iter().map(|turn| (**turn).clone()).collect();
         crate::handoff_snapshot::without_handoff_cards(turns)
     }

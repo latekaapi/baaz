@@ -750,7 +750,7 @@ impl Harness {
             return None;
         }
         let (rows, actions) = overflow_rows(
-            self.feedback_menu_row_shown(),
+            self.feedback_menu_row_shown(cx),
             self.feedback.phase != crate::app::feedback_ui::FeedbackPhase::Off,
         );
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
@@ -759,7 +759,7 @@ impl Harness {
             match action {
                 Some(OverflowAction::Rename) => {
                     if let Some(session_id) = this.active_id(cx) {
-                        this.sidebar_open = true;
+                        crate::layout::Layout::stage(cx, |layout| layout.sidebar_open = true);
                         this.start_rename(session_id, window, cx);
                     } else {
                         this.overlays.update(cx, |overlays, _| {
@@ -825,12 +825,12 @@ impl Harness {
         if !self.overlays.read(cx).is_open(MenuKind::RightViews) {
             return None;
         }
-        let shown = layout::right_kind(&self.layout);
+        let shown = layout::right_kind(crate::layout::Layout::get(cx));
         let mut rows: Vec<MenuRow> =
             RightKind::ALL.into_iter().map(|kind| MenuRow::Toggle { label: kind.label().into(), checked: kind == shown }).collect();
-        let terminal = self.mode != layout::Mode::Browse;
+        let terminal = crate::layout::Layout::get(cx).mode != layout::Mode::Browse;
         if terminal {
-            rows.push(MenuRow::Toggle { label: "Terminal".into(), checked: self.layout.terminal_open });
+            rows.push(MenuRow::Toggle { label: "Terminal".into(), checked: crate::layout::Layout::get(cx).terminal_open });
         }
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
@@ -882,7 +882,7 @@ impl Harness {
         if !self.overlays.read(cx).is_open(MenuKind::BackHistory) {
             return None;
         }
-        let id = self.browse_centre_shown()?;
+        let id = self.browse_centre_shown(cx)?;
         let mut past: Vec<String> = self
             .browser
             .histories
@@ -899,7 +899,7 @@ impl Harness {
             this.overlays.update(cx, |overlays, _| overlays.menu = None);
             this.ensure_tabs_loaded(cx);
             // Rows read newest-first, so row `i` steps back `i + 1`.
-            if let Some(id) = this.browse_centre_shown() {
+            if let Some(id) = this.browse_centre_shown(cx) {
                 let steps = index.saturating_add(1);
                 if let Some(url) = this.browser.histories.entry(id).or_default().go_back_steps(steps) {
                     this.navigate_browse_tab(id, &url, window, cx);
@@ -1465,7 +1465,7 @@ impl Harness {
         // The feedback slot left the transcript for the centre header
         // (docs/83 §5); only Browse, whose header has no actions, keeps it
         // in the corner window over the page.
-        let slot = if self.corner_in_overlay() { self.render_feedback_header_slot(cx) } else { None };
+        let slot = if self.corner_in_overlay(cx) { self.render_feedback_header_slot(cx) } else { None };
         if toast.is_none() && slot.is_none() {
             return None;
         }
@@ -1492,8 +1492,8 @@ impl Harness {
     /// `feedback-native-page-above-gpui`) — always in Browse, page or not,
     /// so a page loading under a toast never moves it. Settings hides the
     /// page, so the stack draws in the window there.
-    pub(crate) fn corner_in_overlay(&self) -> bool {
-        self.mode == layout::Mode::Browse && !self.settings_page.open
+    pub(crate) fn corner_in_overlay(&self, cx: &gpui::App) -> bool {
+        crate::layout::Layout::get(cx).mode == layout::Mode::Browse && !self.settings_page.open
     }
 
     /// The newest toast as the stack's chip, with `+n` while more wait. The
@@ -1672,9 +1672,9 @@ mod tests {
                 baaz.update(cx, |harness, cx| harness.run_window_command(command, window, cx))
             });
             assert!(handled, "{command:?} is a window command");
-            assert!(vc.update(|_, cx| baaz.read(cx).layout.right_open), "{command:?} opens the right pane");
+            assert!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_open), "{command:?} opens the right pane");
             assert_eq!(
-                vc.update(|_, cx| baaz.read(cx).layout.right_kind),
+                vc.update(|_, cx| crate::layout::Layout::get(cx).right_kind),
                 Some(kind),
                 "{command:?} opens on {kind:?}"
             );
@@ -1689,7 +1689,7 @@ mod tests {
             });
             assert!(handled, "{command:?} is a window command");
             assert!(
-                vc.update(|_, cx| baaz.read(cx).layout.terminal_open),
+                vc.update(|_, cx| crate::layout::Layout::get(cx).terminal_open),
                 "{command:?} opens the dock from closed"
             );
         }
@@ -1764,7 +1764,7 @@ mod tests {
                 })
             });
             let (open, shown) =
-                vc.update(|_, cx| (baaz.read(cx).layout.right_open, baaz.read(cx).layout.right_kind));
+                vc.update(|_, cx| (crate::layout::Layout::get(cx).right_open, crate::layout::Layout::get(cx).right_kind));
             assert!(open, "{command:?} left the right pane shut");
             assert_eq!(shown, Some(kind), "{command:?} opened the wrong kind");
         }
@@ -1788,7 +1788,7 @@ mod tests {
             vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.is_some())
         };
 
-        let sidebar = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| baaz.read(cx).sidebar_open);
+        let sidebar = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| crate::layout::Layout::get(cx).sidebar_open);
 
         // ⌘K must open the palette every time, not only the first.
         vc.simulate_keystrokes("cmd-k");
@@ -2164,7 +2164,7 @@ mod tests {
         assert_eq!(selected(vc), Some(0));
         vc.simulate_keystrokes("enter");
         let (open, kind) =
-            vc.update(|_, cx| (baaz.read(cx).layout.right_open, baaz.read(cx).layout.right_kind));
+            vc.update(|_, cx| (crate::layout::Layout::get(cx).right_open, crate::layout::Layout::get(cx).right_kind));
         assert!(open, "enter did not run the selected row");
         assert_eq!(kind, Some(RightKind::Browser), "enter ran the wrong row");
 
@@ -2478,11 +2478,11 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = header_harness(vc, &state.2);
-        assert!(vc.update(|_, cx| !baaz.read(cx).corner_in_overlay()), "Sessions draws it in the window");
-        vc.update(|_, cx| baaz.update(cx, |h, _| h.mode = Mode::Browse));
-        assert!(vc.update(|_, cx| baaz.read(cx).corner_in_overlay()), "Browse draws it over the page");
+        assert!(vc.update(|_, cx| !baaz.read(cx).corner_in_overlay(cx)), "Sessions draws it in the window");
+        vc.update(|_, cx| baaz.update(cx, |_, cx| crate::layout::Layout::stage(cx, |layout| layout.mode = Mode::Browse)));
+        assert!(vc.update(|_, cx| baaz.read(cx).corner_in_overlay(cx)), "Browse draws it over the page");
         vc.update(|_, cx| baaz.update(cx, |h, _| h.settings_page.open = true));
-        assert!(vc.update(|_, cx| !baaz.read(cx).corner_in_overlay()), "Settings hides the page");
+        assert!(vc.update(|_, cx| !baaz.read(cx).corner_in_overlay(cx)), "Settings hides the page");
         restore_state(state);
     }
 
@@ -2495,11 +2495,11 @@ mod tests {
         let baaz = header_harness(vc, &state.2);
         let wanted = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| baaz.read(cx).modal_overlay_wanted(cx));
         vc.update(|_, cx| baaz.update(cx, |h, cx| {
-            h.mode = Mode::Sessions;
+            crate::layout::Layout::stage(cx, |layout| layout.mode = Mode::Sessions);
             h.open_palette(PaletteKind::Search, cx);
         }));
         assert!(!wanted(vc), "Sessions draws its palette in the main window");
-        vc.update(|_, cx| baaz.update(cx, |h, _| h.mode = Mode::Browse));
+        vc.update(|_, cx| baaz.update(cx, |_, cx| crate::layout::Layout::stage(cx, |layout| layout.mode = Mode::Browse)));
         assert!(wanted(vc), "Browse hosts the palette in the overlay window");
         vc.update(|_, cx| baaz.update(cx, |h, cx| {
             h.overlays.update(cx, |o, _| o.palette = None);
@@ -2519,7 +2519,7 @@ mod tests {
         let vc = cx.add_empty_window();
         let baaz = header_harness(vc, &state.2);
         vc.update(|_, cx| baaz.update(cx, |h, cx| {
-            h.mode = Mode::Browse;
+            crate::layout::Layout::stage(cx, |layout| layout.mode = Mode::Browse);
             h.open_palette(PaletteKind::Search, cx);
         }));
         let (focus, query, dialog_focus) = vc.update(|_, cx| {

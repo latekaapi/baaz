@@ -28,7 +28,7 @@ impl Harness {
         if command.trim().is_empty() {
             return;
         }
-        self.layout.terminal_open = true;
+        crate::layout::Layout::stage(cx, |layout| layout.terminal_open = true);
         let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
         let session = self.terminal_host.update(cx, |host, cx| {
             let id = match pick {
@@ -49,7 +49,7 @@ impl Harness {
             });
         }
         window.focus(&self.terminal_focus, cx);
-        crate::layout::write(&self.layout);
+        crate::layout::Layout::save(cx);
         cx.notify();
     }
 }

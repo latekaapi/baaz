@@ -689,8 +689,8 @@ impl Harness {
     /// The Browse centre's shown tab, when Browse shows one (B2a-H2): the
     /// session tab it holds, else the current space's person-tab page. `None`
     /// in Sessions mode, before the tabs load, or with no tab yet.
-    pub(crate) fn browse_centre_shown(&self) -> Option<TabId> {
-        if self.mode != crate::layout::Mode::Browse || !self.browser.tabs_loaded {
+    pub(crate) fn browse_centre_shown(&self, cx: &gpui::App) -> Option<TabId> {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || !self.browser.tabs_loaded {
             return None;
         }
         // A session-owned tab the centre holds: ownership never moves, and
@@ -707,8 +707,8 @@ impl Harness {
     /// Whether the centre's tab itself is blank (its stored URL): a tab
     /// mid-way through its first navigation is not, even while its live
     /// page still reports `about:blank`.
-    pub(crate) fn browse_centre_tab_blank(&self) -> bool {
-        self.browse_centre_shown()
+    pub(crate) fn browse_centre_tab_blank(&self, cx: &gpui::App) -> bool {
+        self.browse_centre_shown(cx)
             .and_then(|id| self.browser.tabs.get(id))
             .is_none_or(|tab| tab.url.is_empty() || tab.url == BLANK)
     }
@@ -716,8 +716,8 @@ impl Harness {
     /// The Browse centre's live page, when one already exists — the
     /// shown tab's state — never creating. The mouse-down hand-back
     /// reads this instead of the pane's page while in Browse.
-    pub(crate) fn browse_centre_state(&self) -> Option<Entity<WebviewState>> {
-        let id = self.browse_centre_shown()?;
+    pub(crate) fn browse_centre_state(&self, cx: &gpui::App) -> Option<Entity<WebviewState>> {
+        let id = self.browse_centre_shown(cx)?;
         self.browser.states.get(&id).cloned()
     }
 
@@ -725,15 +725,15 @@ impl Harness {
     /// (B2a-H2b): the one height behind the centre rect, the sync's
     /// dock bounds and the mouse-down hand-back — computed once here,
     /// reused everywhere, so the three can never disagree.
-    fn open_dock_height_px(&self, window: &Window) -> Pixels {
-        if !self.layout.terminal_open {
+    fn open_dock_height_px(&self, window: &Window, cx: &gpui::App) -> Pixels {
+        if !crate::layout::Layout::get(cx).terminal_open {
             return gpui::px(0.0);
         }
         // The centre column runs the window's height (the flat shell has
         // no inset, docs/83 §3).
         let centre_height = f32::from(window.bounds().size.height).max(0.0);
         let want =
-            self.layout.terminal_height.unwrap_or(crate::terminal::DOCK_DEFAULT_HEIGHT);
+            crate::layout::Layout::get(cx).terminal_height.unwrap_or(crate::terminal::DOCK_DEFAULT_HEIGHT);
         gpui::px(crate::terminal::clamp_dock_height(want, centre_height))
     }
 
@@ -743,18 +743,18 @@ impl Harness {
     /// same `v_flex` — beside it, never over it — so its height
     /// subtracts here, and the column the `webview_pane` fills is
     /// exactly this rect.
-    fn browse_centre_content_rect(&self, content: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
-        let sidebar = if self.sidebar_open {
+    fn browse_centre_content_rect(&self, content: Bounds<Pixels>, window: &Window, cx: &gpui::App) -> Bounds<Pixels> {
+        let sidebar = if crate::layout::Layout::get(cx).sidebar_open {
             gpui::px(self.resize.width)
         } else {
             gpui::px(0.0)
         };
-        let right = if self.layout.right_open {
+        let right = if crate::layout::Layout::get(cx).right_open {
             gpui::px(self.right_resize.width)
         } else {
             gpui::px(0.0)
         };
-        browser_centre_bounds(content, sidebar, right, self.open_dock_height_px(window))
+        browser_centre_bounds(content, sidebar, right, self.open_dock_height_px(window, cx))
     }
 
     /// Start a fetch for every tab favicon not yet asked for this launch
@@ -798,22 +798,22 @@ impl Harness {
     /// hand-back reads the stored rect, so the slide — a translate
     /// inside the clipped sidebar, which moves no column — changes
     /// nothing either side computes.
-    fn browse_centre_page_rect(&self, content: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
+    fn browse_centre_page_rect(&self, content: Bounds<Pixels>, window: &Window, cx: &gpui::App) -> Bounds<Pixels> {
         // Flat (docs/83 §3): the page is the centre column edge to edge —
         // between the sidebar column and the right column, the dock below
         // it inside the column.
         if !self.settings_open() {
-            let sidebar = if self.sidebar_open { gpui::px(self.resize.width) } else { gpui::px(0.0) };
-            let mut right = if self.layout.right_open { gpui::px(self.right_resize.width) } else { gpui::px(0.0) };
+            let sidebar = if crate::layout::Layout::get(cx).sidebar_open { gpui::px(self.resize.width) } else { gpui::px(0.0) };
+            let mut right = if crate::layout::Layout::get(cx).right_open { gpui::px(self.right_resize.width) } else { gpui::px(0.0) };
             // The docked agent column takes its strip beside the page (R3):
             // the page gives it up rather than sitting under it (the card
             // window puts the column 6 past the page's right edge).
-            if self.mode == crate::layout::Mode::Browse && self.card_ui == crate::app::agent_window::CardUi::Column {
+            if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse && self.card_ui == crate::app::agent_window::CardUi::Column {
                 right += gpui::px(crate::app::agent_window::COLUMN_W + 6.0);
             }
-            return column_page_rect(content, sidebar, right, self.open_dock_height_px(window));
+            return column_page_rect(content, sidebar, right, self.open_dock_height_px(window, cx));
         }
-        self.browse_centre_content_rect(content, window)
+        self.browse_centre_content_rect(content, window, cx)
     }
 
     /// The Browse centre's page (B2a-H2b): the current project's person
@@ -829,7 +829,7 @@ impl Harness {
         cx: &mut Context<Self>,
     ) -> Option<Entity<WebviewState>> {
         self.ensure_tabs_loaded(cx);
-        let id = self.browse_centre_shown()?;
+        let id = self.browse_centre_shown(cx)?;
         Some(self.ensure_tab_page(HOME_KEY, id, window, cx))
     }
 
@@ -890,7 +890,7 @@ impl Harness {
         // The tab being left drops its find highlight (its strip keeps the
         // query), and the shared input points at the arriving tab — both
         // on the event, never during render.
-        if let Some(leaving) = self.browse_centre_shown() {
+        if let Some(leaving) = self.browse_centre_shown(cx) {
             if leaving != id {
                 self.stop_find_on_tab(leaving, cx);
             }
@@ -912,7 +912,7 @@ impl Harness {
     /// Whether the Browse tab shortcuts may fire: only in Browse mode.
     /// The `BaazBrowse` key context scopes them; this is the belt.
     fn browse_command_ready(&mut self, cx: &mut Context<Self>) -> Option<Option<String>> {
-        if self.mode != crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return None;
         }
         self.ensure_tabs_loaded(cx);
@@ -1087,7 +1087,7 @@ impl Harness {
         if self.browser.tabs.get(id).is_none_or(|tab| !matches!(tab.owner, Owner::Session(_))) {
             return;
         }
-        if let Some(leaving) = self.browse_centre_shown() {
+        if let Some(leaving) = self.browse_centre_shown(cx) {
             if leaving != id {
                 self.stop_find_on_tab(leaving, cx);
             }
@@ -1134,10 +1134,10 @@ impl Harness {
     pub(crate) fn prewarm_browser_if_needed(&mut self, cx: &mut Context<Self>) {
         // B2a-H2b: in Browse the pane never shows a page, so nothing
         // prewarms one for it — the centre builds its own on show.
-        if self.mode == crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             return;
         }
-        if !self.layout.right_open || crate::layout::right_kind(&self.layout) != RightKind::Browser
+        if !crate::layout::Layout::get(cx).right_open || crate::layout::right_kind(crate::layout::Layout::get(cx)) != RightKind::Browser
         {
             return;
         }
@@ -1181,10 +1181,10 @@ impl Harness {
     pub(crate) fn prewarm_browser_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // B2a-H2b: like `prewarm_browser_if_needed` — no pane page in
         // Browse, so no prewarm for one.
-        if self.mode == crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             return;
         }
-        if !self.layout.right_open || crate::layout::right_kind(&self.layout) != RightKind::Browser
+        if !crate::layout::Layout::get(cx).right_open || crate::layout::right_kind(crate::layout::Layout::get(cx)) != RightKind::Browser
         {
             return;
         }
@@ -1325,7 +1325,7 @@ impl Harness {
         // B2a-H2b: in Browse a new tab is always the person's, even with
         // a session open behind the mode — the session's tabs belong to
         // Sessions.
-        let owner = if self.mode == crate::layout::Mode::Browse {
+        let owner = if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             Owner::Person
         } else {
             self.shown_tab_owner(cx)
@@ -1350,7 +1350,7 @@ impl Harness {
         self.schedule_tabs_write(cx);
         // In Browse the person's new tab is what the centre shows next, over
         // any session tab it held.
-        if self.mode == crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             self.browse_session_tab = None;
         }
         let key = match &owner {
@@ -1618,7 +1618,7 @@ impl Harness {
         // close are the two events that create tabs, never render. Other
         // spaces and Sessions mode keep the closed state: emptiness
         // there is honest, and the centre is not showing.
-        if self.mode == crate::layout::Mode::Browse
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse
             && tab.owner == Owner::Person
             && tab.space == self.browse_space()
             && self.browser.tabs.person_tabs(tab.space.as_deref()).is_empty()
@@ -1680,7 +1680,7 @@ impl Harness {
         let owner = self.shown_tab_owner(cx);
         let space = self.owner_space(&owner);
         let shown = self.browser.tabs.active_of(&owner, space.as_deref());
-        let centre = self.browse_centre_shown();
+        let centre = self.browse_centre_shown(cx);
         self.discard_hidden_tabs(true, shown, centre, cx);
         cx.notify();
         Ok(())
@@ -1877,8 +1877,8 @@ impl Harness {
         // R4: the Split partner shows with the centre; under a Peek both
         // freeze into their stand-ins (one decision per page per frame —
         // flipping a page live and back each frame never lets it settle).
-        let in_browse = self.mode == crate::layout::Mode::Browse;
-        let partner = if in_browse { self.split_partner() } else { None };
+        let in_browse = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
+        let partner = if in_browse { self.split_partner(cx) } else { None };
         let peeking = in_browse && self.browser.peek.is_some();
         let pages: Vec<(TabId, Entity<WebviewState>)> = self
             .browser
@@ -1907,7 +1907,7 @@ impl Harness {
     /// the Skills page and a pending provider switch hide it exactly
     /// like the palette, menus, dialogs and settings hide the pane's.
     pub(crate) fn browse_centre_live(&self, cx: &gpui::App) -> bool {
-        self.browse_centre_shown().is_some()
+        self.browse_centre_shown(cx).is_some()
             && self.pending_switch_dest(cx).is_none()
             && !self.skills.open
     }
@@ -2183,7 +2183,7 @@ impl Harness {
         // session's draft only while that tab still shows, so a switch
         // can never misattribute them.
         let active_key = self.browser_key(cx);
-        let shown_now = self.browse_centre_shown();
+        let shown_now = self.browse_centre_shown(cx);
         let pending: Vec<String> = self.browser.shot_pending.iter().cloned().collect();
         for key in pending {
             if let Some(id) = screenshot_tab_id(&key) {
@@ -2239,7 +2239,7 @@ impl Harness {
             .active
             .as_ref()
             .is_some_and(|view| view.read(cx).plus_open());
-        let kind = crate::layout::right_kind(&self.layout);
+        let kind = crate::layout::right_kind(crate::layout::Layout::get(cx));
         let content = window_content_bounds(window);
         // Q4c: while a provider switch is pending no session's page shows —
         // `browser_key` still names the previous session, and its webview
@@ -2275,13 +2275,13 @@ impl Harness {
             .collect();
         // The Baaz-drawn crashed page covers the centre page's rect. The
         // chrome popovers are resolved below, once the centre tab is known.
-        let in_browse = self.mode == crate::layout::Mode::Browse;
+        let in_browse = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
         let page_error_open = self
-            .browse_centre_shown()
+            .browse_centre_shown(cx)
             .and_then(|id| self.browser.states.get(&id))
             .is_some_and(|state| state.read(cx).crashed().is_some());
         let base = BrowserVisibility {
-            pane_open: self.layout.right_open,
+            pane_open: crate::layout::Layout::get(cx).right_open,
             kind_browser: kind == RightKind::Browser,
             centre_browse: false,
             session_active: false,
@@ -2327,7 +2327,7 @@ impl Harness {
         // page and a pending provider switch hide it too. The centre rect is
         // stored for the mouse-down hand-back: the single source behind
         // placement and release.
-        let centre_shown = self.browse_centre_shown();
+        let centre_shown = self.browse_centre_shown(cx);
         // B2a-H5: a switch dismisses the chrome popovers (they point at
         // the old tab's state), and leaving Browse closes them all; the
         // find strip is per tab and stays. The last-seen tab stores every
@@ -2399,7 +2399,7 @@ impl Harness {
             .and_then(|id| self.browser.states.get(&id))
             .is_some_and(|state| !state.read(cx).permissions().is_empty());
         let stack = chrome::strip_stack_px(find_open, permission_open);
-        let mut centre_page = self.browse_centre_page_rect(content, window);
+        let mut centre_page = self.browse_centre_page_rect(content, window, cx);
         if in_browse && stack > 0.0 {
             centre_page.origin.y += gpui::px(stack);
             centre_page.size.height = (centre_page.size.height - gpui::px(stack)).max(gpui::px(0.0));
@@ -2440,7 +2440,7 @@ impl Harness {
         self.apply_page_visibility(shown, frame_live, centre_shown, centre_live, cx);
         // R4: a Split partner shows beside the centre; a Peek shows over it,
         // the centre (and its partner) frozen into their stand-ins beneath.
-        let partner = if in_browse { self.split_partner() } else { None };
+        let partner = if in_browse { self.split_partner(cx) } else { None };
         let peeking = in_browse && self.browser.peek.is_some();
         // A click into the other half (it just took the keyboard) makes it
         // the shown tab: the rising edge, since the left page may still
@@ -2516,15 +2516,15 @@ impl Harness {
         // is the stored centre rect — the very rect the sync placed —
         // never the pane's and never a second computation. Before the
         // first sync the live computation stands in.
-        if self.mode == crate::layout::Mode::Browse {
-            let Some(state) = self.browse_centre_state() else {
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
+            let Some(state) = self.browse_centre_state(cx) else {
                 return;
             };
             let page = match self.browser.centre_page_rect {
                 Some(page) => page,
                 None => {
                     let content = window_content_bounds(window);
-                    self.browse_centre_page_rect(content, window)
+                    self.browse_centre_page_rect(content, window, cx)
                 }
             };
             if should_release_keyboard_on_mouse_down(
@@ -2537,8 +2537,8 @@ impl Harness {
             return;
         }
         if !browser_pane_showing(
-            self.layout.right_open,
-            crate::layout::right_kind(&self.layout) == RightKind::Browser,
+            crate::layout::Layout::get(cx).right_open,
+            crate::layout::right_kind(crate::layout::Layout::get(cx)) == RightKind::Browser,
         ) {
             return;
         }
@@ -2569,10 +2569,10 @@ impl Harness {
         // In Browse ⌘L reaches the centre toolbar's own field, which needs
         // no open pane: the Harness-owned input, prefilled with the shown
         // URL (empty on a blank tab, where the new-tab field takes it).
-        if self.mode == crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             self.ensure_browse_tab(window, cx);
             let url = self
-                .browse_centre_shown()
+                .browse_centre_shown(cx)
                 .and_then(|id| {
                     self.browser
                         .states
@@ -2586,8 +2586,8 @@ impl Harness {
             return;
         }
         if !browser_pane_showing(
-            self.layout.right_open,
-            crate::layout::right_kind(&self.layout) == RightKind::Browser,
+            crate::layout::Layout::get(cx).right_open,
+            crate::layout::right_kind(crate::layout::Layout::get(cx)) == RightKind::Browser,
         ) {
             return;
         }
@@ -2610,7 +2610,7 @@ impl Harness {
     /// merely editing with no rows obscures nothing. The covering input
     /// in `sync_browser`: the list drops down over the page.
     pub(crate) fn browse_omnibox_open(&self, cx: &gpui::App) -> bool {
-        self.mode == crate::layout::Mode::Browse && !self.browse_suggestions(cx).is_empty()
+        crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse && !self.browse_suggestions(cx).is_empty()
     }
 
     /// The address field's current text, or empty at rest.
@@ -2638,11 +2638,11 @@ impl Harness {
         self.browse_completed = None;
         self.browse_completed_text = None;
         self.browse_address_page_focus =
-            self.browse_centre_state().is_some_and(|state| state.read(cx).holds_keyboard());
+            self.browse_centre_state(cx).is_some_and(|state| state.read(cx).holds_keyboard());
         // The page lets go of the keyboard as the field opens, as find does: a
         // page left key would take the keystrokes back the moment the Field's
         // panel closes.
-        if let Some(state) = self.browse_centre_state() {
+        if let Some(state) = self.browse_centre_state(cx) {
             state.update(cx, |state, _| state.release_keyboard());
         }
         if std::env::var("BAAZ_OVERLAY_TRACE").as_deref() == Ok("1") {
@@ -2745,11 +2745,11 @@ impl Harness {
             return;
         }
         self.drop_browse_address(cx);
-        if self.mode != crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return;
         }
         if self.browse_address_page_focus {
-            if let Some(state) = self.browse_centre_state() {
+            if let Some(state) = self.browse_centre_state(cx) {
                 let focus = state.read(cx).focus_handle().clone();
                 window.focus(&focus, cx);
                 return;
@@ -2765,11 +2765,11 @@ impl Harness {
     /// find field instead of the page. A crashed page or a blank tab
     /// opens nothing.
     pub(crate) fn open_browse_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode != crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return;
         }
         self.ensure_tabs_loaded(cx);
-        let Some(id) = self.browse_centre_shown() else { return };
+        let Some(id) = self.browse_centre_shown(cx) else { return };
         let Some(state) = self.browse_centre_page(window, cx) else { return };
         if state.read(cx).crashed().is_some() {
             return;
@@ -2795,14 +2795,14 @@ impl Harness {
     /// shared input lives while any tab's strip stands open, so closing
     /// one tab's strip never strands the others'.
     pub(crate) fn close_browse_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.browse_centre_shown() else { return };
+        let Some(id) = self.browse_centre_shown(cx) else { return };
         let stop = self.browser.find_strips.for_tab(id).close();
         if !self.browser.find_strips.any_open() {
             self.browse_find = None;
             self.browse_find_sub = None;
         }
         if stop {
-            if let Some(state) = self.browse_centre_state() {
+            if let Some(state) = self.browse_centre_state(cx) {
                 state.update(cx, |state, _| state.stop_find());
             }
         }
@@ -2857,7 +2857,7 @@ impl Harness {
     /// Step the find to the next (`forward`) or previous match: Enter, the
     /// ↑/↓ buttons. A no-op with no open strip or no query.
     pub(crate) fn step_browse_find(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let Some(id) = self.browse_centre_shown() else { return };
+        let Some(id) = self.browse_centre_shown(cx) else { return };
         let (query, match_case) = {
             let strip = self.browser.find_strips.for_tab(id);
             if !strip.open || strip.query.is_empty() {
@@ -2865,14 +2865,14 @@ impl Harness {
             }
             (strip.query.clone(), strip.match_case)
         };
-        if let Some(state) = self.browse_centre_state() {
+        if let Some(state) = self.browse_centre_state(cx) {
             state.update(cx, |state, _| state.find(&query, forward, match_case));
         }
     }
 
     /// Flip "Match case" and re-search the kept query.
     pub(crate) fn toggle_browse_find_case(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.browse_centre_shown() else { return };
+        let Some(id) = self.browse_centre_shown(cx) else { return };
         let research = self.browser.find_strips.for_tab(id).toggle_case();
         if research {
             self.step_browse_find(true, cx);
@@ -2920,7 +2920,7 @@ impl Harness {
     /// The debounce is per tab: the timer fires only for the tab that
     /// armed it, so a switch never searches a stale query on the new tab.
     fn find_input_changed(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.browse_centre_shown() else { return };
+        let Some(id) = self.browse_centre_shown(cx) else { return };
         let typed = self.browse_find.as_ref().map(|input| input.read(cx).value().to_string());
         let Some(typed) = typed else { return };
         if !self.browser.find_strips.for_tab(id).set_query(&typed) {
@@ -2931,7 +2931,7 @@ impl Harness {
             cx.background_executor().timer(std::time::Duration::from_millis(chrome::FIND_DEBOUNCE_MS)).await;
             let _ = this.update(cx, |this, cx| {
                 if this.browser.find_strips.armed_current(id, generation)
-                    && this.browse_centre_shown() == Some(id)
+                    && this.browse_centre_shown(cx) == Some(id)
                 {
                     this.step_browse_find(true, cx);
                 }
@@ -2946,8 +2946,8 @@ impl Harness {
     /// those kinds. The grant keys on the full origin (scheme + host +
     /// port): a host-only report borrows them from the tab's URL.
     pub(crate) fn answer_shown_permission(&mut self, id: u64, allow: bool, remember_visit: bool, cx: &mut Context<Self>) {
-        let tab_url = self.browse_centre_shown().and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone()));
-        let ask = self.browse_centre_state().and_then(|state| {
+        let tab_url = self.browse_centre_shown(cx).and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone()));
+        let ask = self.browse_centre_state(cx).and_then(|state| {
             state
                 .read(cx)
                 .permissions()
@@ -2960,7 +2960,7 @@ impl Harness {
                 self.browser.visit_allows.remember(&chrome::normalize_origin(origin, tab_url), kinds);
             }
         }
-        if let Some(state) = self.browse_centre_state() {
+        if let Some(state) = self.browse_centre_state(cx) {
             let decision = if allow { PermissionDecision::Allow } else { PermissionDecision::Deny };
             state.update(cx, |state, cx| state.answer_permission(id, decision, cx));
         }
@@ -3068,7 +3068,7 @@ impl Harness {
             return false;
         }
         let mut placed_any = false;
-        let shown = self.browse_centre_shown();
+        let shown = self.browse_centre_shown(cx);
         let openers: Vec<TabId> = self.browser.states.keys().copied().collect();
         for opener in openers {
             let Some(state) = self.browser.states.get(&opener).cloned() else { continue };
@@ -3140,7 +3140,7 @@ impl Harness {
     /// whether a page was rebuilt.
     fn rebuild_shown_browse_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.ensure_tabs_loaded(cx);
-        let Some(id) = self.browse_centre_shown() else { return false };
+        let Some(id) = self.browse_centre_shown(cx) else { return false };
         self.browser.states.remove(&id);
         self.terminal_service.unregister_tab_page(id.0);
         self.ensure_tab_page(HOME_KEY, id, window, cx);
@@ -3163,8 +3163,8 @@ impl Harness {
     /// Whether a footer popover (downloads or extensions, R4) wants its
     /// overlay window: opened from its button. An empty downloads list
     /// still opens (it says so).
-    pub(crate) fn downloads_overlay_wanted(&self, _cx: &gpui::App) -> bool {
-        self.mode == crate::layout::Mode::Browse
+    pub(crate) fn downloads_overlay_wanted(&self, cx: &gpui::App) -> bool {
+        crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse
             && (self.browser.downloads_open || self.browser.extensions_open)
             && self.browser.downloads_anchor.is_some()
     }
@@ -3195,11 +3195,11 @@ impl Harness {
     /// or no URL.
     pub(crate) fn copy_shown_browse_link(&mut self, cx: &mut Context<Self>) {
         let url = self
-            .browse_centre_state()
+            .browse_centre_state(cx)
             .map(|state| state.read(cx).url().to_string())
             .filter(|url| !url.is_empty())
             .or_else(|| {
-                self.browse_centre_shown().and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone()))
+                self.browse_centre_shown(cx).and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone()))
             })
             .unwrap_or_default();
         if !url.is_empty() {
@@ -3211,7 +3211,7 @@ impl Harness {
     /// Open the shown tab's developer tools (⌥⌘I in Browse, the ⋯ menu).
     /// A no-op with no shown page, or where the backend cannot host them.
     pub(crate) fn open_browse_devtools(&mut self, cx: &mut Context<Self>) {
-        if let Some(state) = self.browse_centre_state() {
+        if let Some(state) = self.browse_centre_state(cx) {
             if state.read(cx).supports(aui_webview::BackendFeature::DevTools) {
                 state.update(cx, |state, _| state.show_devtools());
             }
@@ -3226,7 +3226,7 @@ impl Harness {
         if delta == 0 {
             return;
         }
-        if let Some(state) = self.browse_centre_state() {
+        if let Some(state) = self.browse_centre_state(cx) {
             let next = toolbar::zoom_step(state.read(cx).zoom(), delta > 0);
             state.update(cx, |state, _| state.set_zoom(next));
         }
@@ -3236,7 +3236,7 @@ impl Harness {
     /// the library's nav row, so this row is how the intent stays
     /// reachable. A no-op with no shown page.
     pub(crate) fn toggle_browse_annotate(&mut self, cx: &mut Context<Self>) {
-        if let Some(state) = self.browse_centre_state() {
+        if let Some(state) = self.browse_centre_state(cx) {
             let on = !state.read(cx).annotating();
             state.update(cx, |state, _| state.set_annotate(on));
         }
@@ -3251,8 +3251,8 @@ impl Harness {
     /// switch can never misattribute it.
     pub(crate) fn capture_browse_screenshot(&mut self, cx: &mut Context<Self>) {
         self.dismiss_browse_popovers(cx);
-        let shown = self.browse_centre_shown();
-        if let Some(state) = self.browse_centre_state() {
+        let shown = self.browse_centre_shown(cx);
+        if let Some(state) = self.browse_centre_state(cx) {
             state.update(cx, |state, _cx| state.capture());
             match state.read(cx).screenshot().map(<[u8]>::to_vec) {
                 Some(bytes) => self.attach_browser_screenshot(bytes, cx),
@@ -3268,7 +3268,7 @@ impl Harness {
     /// Whether the ⋯ menu offers "Open in Safari": only for `http(s)` pages.
     pub(crate) fn browse_safari_url(&self, cx: &gpui::App) -> Option<String> {
         let url = self
-            .browse_centre_state()
+            .browse_centre_state(cx)
             .map(|state| state.read(cx).url().to_string())
             .unwrap_or_default();
         (url.starts_with("http://") || url.starts_with("https://")).then_some(url)
@@ -3294,7 +3294,7 @@ impl Harness {
     /// the navigation clears the crash, whatever the tab's owner.
     pub(crate) fn reload_browse_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_tabs_loaded(cx);
-        let Some(id) = self.browse_centre_shown() else { return };
+        let Some(id) = self.browse_centre_shown(cx) else { return };
         let url = self.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
         if url.is_empty() {
             return;
@@ -3402,10 +3402,10 @@ impl Harness {
         let typed = self.browse_address_text(cx);
         self.leave_browse_address(window, cx);
         self.ensure_tabs_loaded(cx);
-        let Some(id) = self.browse_centre_shown() else {
+        let Some(id) = self.browse_centre_shown(cx) else {
             return;
         };
-        match toolbar::classify_address_input_with(&typed, self.layout.search_engine) {
+        match toolbar::classify_address_input_with(&typed, crate::layout::Layout::get(cx).search_engine) {
             toolbar::NavTarget::Url(url) => self.navigate_browse_tab(id, &url, window, cx),
             toolbar::NavTarget::Search(url) => {
                 if !url.is_empty() {
@@ -3420,7 +3420,7 @@ impl Harness {
     /// Step the shown tab back within its Baaz-tracked history.
     pub(crate) fn browse_go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_tabs_loaded(cx);
-        let Some(id) = self.browse_centre_shown() else {
+        let Some(id) = self.browse_centre_shown(cx) else {
             return;
         };
         let url = self.browser.histories.entry(id).or_default().go_back();
@@ -3432,7 +3432,7 @@ impl Harness {
     /// Step the shown tab forward within its Baaz-tracked history.
     pub(crate) fn browse_go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_tabs_loaded(cx);
-        let Some(id) = self.browse_centre_shown() else {
+        let Some(id) = self.browse_centre_shown(cx) else {
             return;
         };
         let url = self.browser.histories.entry(id).or_default().go_forward();
@@ -3569,7 +3569,7 @@ impl Harness {
             FIELD_COMMANDS.iter().map(|(id, title, _)| ((*id).to_owned(), (*title).to_owned())).collect();
         let history = self.history_hits(&query);
         let marks = self.bookmark_hits(&query);
-        toolbar::rank_omnibox(&query, &tabs, &sessions, &commands, &history, &marks, self.layout.search_engine)
+        toolbar::rank_omnibox(&query, &tabs, &sessions, &commands, &history, &marks, crate::layout::Layout::get(cx).search_engine)
     }
 
     /// Bookmarks for the Field's query, cached per query.
@@ -3699,7 +3699,7 @@ impl Harness {
     /// Browser › Your data lists it, with a way back.
     pub(crate) fn forget_shown_site(&mut self, cx: &mut Context<Self>) {
         let url = self
-            .browse_centre_shown()
+            .browse_centre_shown(cx)
             .and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone()))
             .unwrap_or_default();
         let site = history::host_of(&url);
@@ -3719,15 +3719,14 @@ impl Harness {
     /// "Allow ads on this site": flips the shown site's exception; a toast
     /// says which way, and the page reloads so it takes effect.
     pub(crate) fn toggle_ads_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let url = self.browse_centre_shown().and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone())).unwrap_or_default();
+        let url = self.browse_centre_shown(cx).and_then(|id| self.browser.tabs.get(id).map(|tab| tab.url.clone())).unwrap_or_default();
         let site = history::host_of(&url);
         if !history::recordable(&url) || site.is_empty() {
             return;
         }
-        let allowed = self.layout.adblock.toggle(&site);
-        adblock::apply(&self.layout.adblock);
-        crate::layout::write(&self.layout);
-        if let Some(id) = self.browse_centre_shown() {
+        let allowed = crate::layout::Layout::update(cx, |layout| layout.adblock.toggle(&site));
+        adblock::apply(&crate::layout::Layout::get(cx).adblock);
+        if let Some(id) = self.browse_centre_shown(cx) {
             self.reload_browse_tab(id, window, cx);
         }
         let (title, body) = if allowed {
@@ -3895,7 +3894,7 @@ impl Harness {
             OmniTarget::History(url) | OmniTarget::Search(url) => {
                 self.leave_browse_address(window, cx);
                 self.ensure_tabs_loaded(cx);
-                if let Some(id) = self.browse_centre_shown() {
+                if let Some(id) = self.browse_centre_shown(cx) {
                     self.navigate_browse_tab(id, &url, window, cx);
                 }
             }
@@ -4229,7 +4228,7 @@ impl Harness {
     /// Free: no turn, no wire.
     pub(crate) fn step_page_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         // In Browse the active page is the centre's, not the pane's.
-        if self.mode == crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             self.ensure_browse_tab(window, cx);
             let state = self.browse_centre_page(window, cx).ok_or("no page is open in Browse")?;
             let focus = state.read(cx).focus_handle().clone();
@@ -4277,7 +4276,7 @@ impl Harness {
             state.update(cx, |state, _| state.release_keyboard());
         }
         // In Browse the keyboard may sit with the centre page instead.
-        if let Some(state) = self.browse_centre_state() {
+        if let Some(state) = self.browse_centre_state(cx) {
             state.update(cx, |state, _| state.release_keyboard());
         }
         #[cfg(feature = "cef")]
@@ -4354,7 +4353,7 @@ impl Harness {
             return;
         }
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
-        adblock::start(&self.layout.adblock);
+        adblock::start(&crate::layout::Layout::get(cx).adblock);
         aui_cef::set_key_router(|k| crate::keymap::claims_keystroke(k) || peek_split::peek_claims(k), move |keystroke| {
             let _ = tx.unbounded_send(keystroke);
         });
@@ -5509,7 +5508,7 @@ mod tests {
         vc.run_until_parked();
         assert_eq!(count(vc), before - 1, "⌘W closed exactly one tab");
         assert!(
-            vc.update(|_, cx| baaz.read(cx).mode == crate::layout::Mode::Browse),
+            vc.update(|_, cx| crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse),
             "still in Browse, window alive"
         );
     }
@@ -5589,8 +5588,10 @@ mod tests {
         // and gpui would fall back above every handler.
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.layout.right_open = true;
-                harness.layout.right_kind = Some(crate::layout::RightKind::Browser);
+                crate::layout::Layout::stage(cx, |layout| {
+                    layout.right_open = true;
+                    layout.right_kind = Some(crate::layout::RightKind::Browser);
+                });
                 harness.prewarm_browser_in(window, cx);
             });
         });

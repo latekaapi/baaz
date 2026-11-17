@@ -43,8 +43,10 @@ pub enum SiteRule {
 }
 
 /// The live Agents settings the page tools read (they run off the window's
-/// state, in the automation jobs): set from the layout at boot and on every
-/// change ([`set_current`]).
+/// state, in the automation jobs, with no `cx` to read the layout global):
+/// the one copy of `layout.agents`, written only by the global itself — at
+/// boot ([`crate::layout::Layout::init`]) and on every write
+/// ([`crate::layout::Layout::save`]).
 static CURRENT: std::sync::Mutex<Option<AgentsPrefs>> = std::sync::Mutex::new(None);
 
 /// The Agents settings in force.

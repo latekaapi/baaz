@@ -2973,7 +2973,7 @@ mod tests {
         assert_eq!(out.get("status"), Some(&json!("running")));
         vc.update(|_, cx| {
             assert!(
-                harness.read(cx).layout.terminal_open,
+                crate::layout::Layout::get(cx).terminal_open,
                 "the run opens the dock for the person to watch"
             );
         });

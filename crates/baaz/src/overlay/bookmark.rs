@@ -34,7 +34,7 @@ impl Harness {
             self.close_bookmark_popover(cx);
             return;
         }
-        let Some(id) = self.browse_centre_shown() else { return };
+        let Some(id) = self.browse_centre_shown(cx) else { return };
         let Some(tab) = self.browser.tabs.get(id).cloned() else { return };
         if !crate::browser::history::recordable(&tab.url) {
             return;
@@ -48,7 +48,7 @@ impl Harness {
 
     /// The ★ in the address line: the popover on the page's bookmark.
     pub(crate) fn edit_shown_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.browse_centre_shown() else { return };
+        let Some(id) = self.browse_centre_shown(cx) else { return };
         let Some(url) = self.browser.tabs.get(id).map(|tab| tab.url.clone()) else { return };
         if let Some(mark) = bookmarks::find(self.browser.db().conn(), &url) {
             self.open_bookmark_popover(mark, window, cx);

@@ -765,12 +765,6 @@ pub struct SessionView {
     /// The first turn a render-cache refresh rebuilt since the last
     /// `sync_virtual_list`: the rows above it are unchanged there.
     rows_changed_from: Option<usize>,
-    /// B12: "Fold finished turns" (Settings → General; default on): a
-    /// settled assistant turn folds its work behind one header row, while
-    /// the final answer stays out. The persisted switch belongs to the
-    /// settings store; this view flag is its per-frame backing, so the
-    /// transcript reads folded from the first frame.
-    pub fold_finished_turns: bool,
     /// Virtualized transcript list (gpui `list()`, top-aligned, one item
     /// per turn) and the item count it was last synced to. Only visible rows
     /// are built and laid out per frame; `splice` keeps indices stable across
@@ -1302,6 +1296,16 @@ impl SessionView {
                 cx,
             )
         });
+        // B12 "Fold finished turns" (Settings → General) is read from the
+        // layout global, never copied in: a flip re-folds this view, shown
+        // or parked, when its rows were built under the other value.
+        let layout_watch = cx.observe_global::<crate::layout::LayoutStore>(|this: &mut Self, cx| {
+            let fold = crate::layout::Layout::get(cx).fold_finished_turns;
+            if this.suffix_inputs.is_some_and(|(_, built)| built != fold) {
+                this.refresh_render_cache(cx);
+                cx.notify();
+            }
+        });
         let workspace_key = workspace.clone();
         let sent_items = crate::sent::load(&session_id);
         Self {
@@ -1325,7 +1329,6 @@ impl SessionView {
             row_memo: HashMap::new(),
             suffix_inputs: None,
             rows_changed_from: None,
-            fold_finished_turns: true,
             list_state: ListState::new(
                 0,
                 // Top, not Bottom: a short transcript starts at the top
@@ -1475,7 +1478,7 @@ impl SessionView {
             handoff_pack_hidden: None,
             handoff_pack_reply_hidden: None,
             display_overrides: None,
-            _subscriptions: vec![subscription],
+            _subscriptions: vec![subscription, layout_watch],
         }
     }
 

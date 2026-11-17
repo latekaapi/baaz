@@ -186,8 +186,8 @@ pub struct Folds {
     /// B12: whether settled assistant turns fold their work behind one
     /// turn-fold row (default on). Off leaves every run expanded after
     /// settle, for people auditing agents live. The persisted Settings
-    /// switch lives outside this module's scope; this is the per-frame
-    /// backing the view fills in.
+    /// switch lives outside this module's scope: the view fills this from
+    /// the layout global ([`crate::layout::Layout::get`]) every frame.
     pub fold_finished_turns: bool,
     /// B12: the turn fold's `+N −M` chip: the turn id, out to the Changes
     /// view scoped to that turn (or the session without a per-turn

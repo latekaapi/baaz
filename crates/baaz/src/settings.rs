@@ -10,10 +10,12 @@
 //! their state is untouched and restored on exit.
 //!
 //! The switches and the Appearance theme stay in `layout.json` — there is
-//! no second store.
+//! no second store, and no copy of it: the layout is one gpui global
+//! ([`crate::layout::LayoutStore`]).
 //! [`crate::app::Harness::settings_sections`] builds the sections' rows
-//! from that state every frame, and a switch intent flips the matching
-//! layout field back through [`crate::layout::write`].
+//! from it every frame, and a switch intent flips the matching layout field
+//! through [`crate::layout::Layout::update`], which writes the file and
+//! re-renders every view that observes the global.
 //!
 //! B11b decisions, kept here so every caller agrees:
 //!
@@ -60,8 +62,8 @@ use crate::providers::ProviderId;
 
 /// Flip one Sidebar switch in `layout` by row id. `false` is an unknown id,
 /// ignored by every caller. Pure, so tests drive it without a window;
-/// [`Harness::flip_setting`] and the `auto-*` step verbs persist the layout
-/// and redraw around it.
+/// [`Harness::flip_setting`] and the `auto-*` step verbs run it inside
+/// [`crate::layout::Layout::update`], which persists and redraws.
 pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
     match id {
         "summary_line" => layout.summary_line = on,
@@ -360,7 +362,7 @@ pub(crate) fn sidebar_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
 /// so it opens dark unless its entry passes `--theme`.
 pub(crate) fn boot_theme(flag: Option<aui_tokens::ThemeKind>, cx: &gpui::App) -> aui_tokens::ThemeKind {
     flag.unwrap_or_else(|| {
-        crate::layout::read().theme.resolve(crate::layout::appearance_is_dark(cx.window_appearance()))
+        crate::layout::Layout::get(cx).theme.resolve(crate::layout::appearance_is_dark(cx.window_appearance()))
     })
 }
 
@@ -369,12 +371,15 @@ pub(crate) fn boot_theme(flag: Option<aui_tokens::ThemeKind>, cx: &gpui::App) ->
 /// reads no store, so it stays on the design's values unless a step sets
 /// them (`settings-set:density=compact`).
 pub(crate) fn boot_type(cx: &mut gpui::App) {
-    let layout = crate::layout::read();
-    if layout.density != crate::layout::DensityPref::default() {
-        aui_tokens::AuiTheme::set_density(layout.density.density(), None, cx);
+    let (density, text_size) = {
+        let layout = crate::layout::Layout::get(cx);
+        (layout.density, layout.text_size)
+    };
+    if density != crate::layout::DensityPref::default() {
+        aui_tokens::AuiTheme::set_density(density.density(), None, cx);
     }
-    if layout.text_size != crate::layout::TextSizePref::default() {
-        aui_tokens::AuiTheme::set_text_size(layout.text_size.text_size(), None, cx);
+    if text_size != crate::layout::TextSizePref::default() {
+        aui_tokens::AuiTheme::set_text_size(text_size.text_size(), None, cx);
     }
 }
 
@@ -489,22 +494,22 @@ impl Harness {
     ///
     /// A later section is one more arm here (and one more `on_switch` id in
     /// [`Self::flip_setting`]).
-    pub(crate) fn settings_sections(&self) -> Vec<SettingsSection> {
+    pub(crate) fn settings_sections(&self, cx: &gpui::App) -> Vec<SettingsSection> {
         vec![
             SettingsSection {
                 id: SharedString::from("general"),
                 label: SharedString::from("General"),
-                rows: general_settings_rows(&self.layout),
+                rows: general_settings_rows(crate::layout::Layout::get(cx)),
             },
             SettingsSection {
                 id: SharedString::from("appearance"),
                 label: SharedString::from("Appearance"),
-                rows: appearance_settings_rows(&self.layout),
+                rows: appearance_settings_rows(crate::layout::Layout::get(cx)),
             },
             SettingsSection {
                 id: SharedString::from("sidebar"),
                 label: SharedString::from("Sidebar"),
-                rows: sidebar_settings_rows(&self.layout),
+                rows: sidebar_settings_rows(crate::layout::Layout::get(cx)),
             },
             crate::settings_providers::providers_section(),
             shortcuts_section(
@@ -719,15 +724,13 @@ impl Harness {
             self.flip_provider_enabled(provider, on, cx);
             return;
         }
-        if !apply_setting(&mut self.layout, id, on) {
+        // Every reader observes the layout global, so the change reaches
+        // them all from here — the fold switch re-folds every open view,
+        // parked ones included (B12fix), with no push into them.
+        if !crate::layout::Layout::stage(cx, |layout| apply_setting(layout, id, on)) {
             return;
         }
-        crate::layout::write(&self.layout);
-        // B12fix: the fold switch applies live to every open view, not
-        // just the next frame's settings rows — parked views fold too.
-        if id == "fold_finished_turns" {
-            self.apply_fold_to_views(on, cx);
-        }
+        crate::layout::Layout::save(cx);
         // Turning feedback mode off mid-session parks the shell Off but
         // keeps the draft, so the next toggle resumes it.
         if id == "feedback_mode" && !on {
@@ -739,7 +742,6 @@ impl Harness {
         if id.starts_with("notify_") {
             self.check_attention(cx);
         }
-        cx.notify();
     }
 
     /// Settings › Appearance › Theme: store `pref` and paint with it now.
@@ -752,8 +754,7 @@ impl Harness {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        self.layout.theme = pref;
-        self.persist_layout();
+        crate::layout::Layout::update(cx, |layout| layout.theme = pref);
         self.apply_theme_pref(window, cx);
     }
 
@@ -762,7 +763,7 @@ impl Harness {
     /// The window's appearance observer calls this while the choice is
     /// System, so a macOS switch repaints Baaz too.
     pub(crate) fn apply_theme_pref(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
-        let kind = self.layout.theme.resolve(crate::layout::appearance_is_dark(cx.window_appearance()));
+        let kind = crate::layout::Layout::get(cx).theme.resolve(crate::layout::appearance_is_dark(cx.window_appearance()));
         if cx.aui().kind != kind {
             aui_tokens::AuiTheme::set_kind(kind, window, cx);
             // Rows cached with the old palette rebuild on the next frame.
@@ -779,15 +780,13 @@ impl Harness {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        self.layout.density = pref;
-        self.persist_layout();
+        crate::layout::Layout::update(cx, |layout| layout.density = pref);
         if cx.aui().density != pref.density() {
             aui_tokens::AuiTheme::set_density(pref.density(), window, cx);
             // Rows cached at the old sizes rebuild on the next frame.
             self.invalidate_list();
             self.retype_sessions(cx);
         }
-        cx.notify();
     }
 
     /// Settings › Appearance › Text size: store `pref` and set every text
@@ -798,14 +797,12 @@ impl Harness {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        self.layout.text_size = pref;
-        self.persist_layout();
+        crate::layout::Layout::update(cx, |layout| layout.text_size = pref);
         if cx.aui().text_size != pref.text_size() {
             aui_tokens::AuiTheme::set_text_size(pref.text_size(), window, cx);
             self.invalidate_list();
             self.retype_sessions(cx);
         }
-        cx.notify();
     }
 
     /// Every live transcript (open, parked, the browser chat) measures its
@@ -819,9 +816,7 @@ impl Harness {
     /// Set the engine an address commit searches with. The Settings →
     /// Browser page's rows own it; the toolbar reads it on every commit.
     pub(crate) fn set_search_engine(&mut self, engine: SearchEngine, cx: &mut Context<Self>) {
-        self.layout.search_engine = engine;
-        self.persist_layout();
-        cx.notify();
+        crate::layout::Layout::update(cx, |layout| layout.search_engine = engine);
     }
 
     /// Point downloads at `dir`: persisted, and passed to the CEF backend
@@ -830,9 +825,7 @@ impl Harness {
     pub(crate) fn set_download_dir_path(&mut self, dir: std::path::PathBuf, cx: &mut Context<Self>) {
         #[cfg(feature = "cef")]
         aui_cef::CefBackend::set_download_dir(dir.clone());
-        self.layout.download_dir = Some(dir);
-        self.persist_layout();
-        cx.notify();
+        crate::layout::Layout::update(cx, |layout| layout.download_dir = Some(dir));
     }
 
     /// The Settings → Browser page's Change row: the native folder
@@ -951,13 +944,11 @@ impl Harness {
     /// verb is what captures flip. Off means no title model call ever.
     /// Always flips: `Ok`.
     pub(crate) fn step_auto_title(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let on = !self.layout.auto_title;
-        if !apply_setting(&mut self.layout, "auto_title", on) {
+        let on = !crate::layout::Layout::get(cx).auto_title;
+        if !crate::layout::Layout::update(cx, |layout| apply_setting(layout, "auto_title", on)) {
             return Err("no auto_title switch to flip".to_owned());
         }
-        crate::layout::write(&self.layout);
         self.invalidate_list();
-        cx.notify();
         Ok(())
     }
 
@@ -965,13 +956,11 @@ impl Harness {
     /// See [`Self::step_auto_title`]. Off means no rewrite model call ever;
     /// the ladder's preview rung still fills every second line. Always flips: `Ok`.
     pub(crate) fn step_auto_summary(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let on = !self.layout.auto_summary;
-        if !apply_setting(&mut self.layout, "auto_summary", on) {
+        let on = !crate::layout::Layout::get(cx).auto_summary;
+        if !crate::layout::Layout::update(cx, |layout| apply_setting(layout, "auto_summary", on)) {
             return Err("no auto_summary switch to flip".to_owned());
         }
-        crate::layout::write(&self.layout);
         self.invalidate_list();
-        cx.notify();
         Ok(())
     }
 
@@ -1262,21 +1251,21 @@ impl Harness {
                 "auto_title",
                 "Name sessions automatically",
                 "Each of these spends one short call on the cheapest model. Naming runs after a session's first message.",
-                self.layout.auto_title,
+                crate::layout::Layout::get(cx).auto_title,
                 cx,
             ),
             self.settings_switch_row(
                 "auto_summary",
                 "Summarise sessions in the sidebar",
                 "Show the last request beside the last reply; rewrite poor ones.",
-                self.layout.auto_summary,
+                crate::layout::Layout::get(cx).auto_summary,
                 cx,
             ),
             self.settings_switch_row(
                 "handoff_model_summary",
                 "Summarise handoffs with a model",
                 "A cheap model writes the summary the next provider reads (one short turn).",
-                self.layout.handoff_model_summary,
+                crate::layout::Layout::get(cx).handoff_model_summary,
                 cx,
             ),
         ];
@@ -1284,14 +1273,14 @@ impl Harness {
             "fold_finished_turns",
             "Fold finished turns",
             "When a turn ends, its tool calls and in-between notes fold into one \"Worked for …\" row above the answer.",
-            self.layout.fold_finished_turns,
+            crate::layout::Layout::get(cx).fold_finished_turns,
             cx,
         )];
         let advanced = vec![self.settings_switch_row(
             "feedback_mode",
             "Feedback mode",
             FEEDBACK_MODE_DETAIL,
-            self.layout.feedback_mode,
+            crate::layout::Layout::get(cx).feedback_mode,
             cx,
         )];
         settings_sections_stack()
@@ -1307,7 +1296,7 @@ impl Harness {
     /// it holds).
     fn settings_appearance_page(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::layout::{DensityPref, TextSizePref, ThemePref};
-        let active = ThemePref::ALL.iter().position(|pref| *pref == self.layout.theme).unwrap_or(0);
+        let active = ThemePref::ALL.iter().position(|pref| *pref == crate::layout::Layout::get(cx).theme).unwrap_or(0);
         let set = cx.listener(|this: &mut Self, index: &usize, window, cx| {
             if let Some(pref) = ThemePref::ALL.get(*index) {
                 this.set_theme_pref(*pref, Some(window), cx);
@@ -1323,7 +1312,7 @@ impl Harness {
                 ),
             )
             .into_any_element();
-        let size_active = TextSizePref::ALL.iter().position(|pref| *pref == self.layout.text_size).unwrap_or(0);
+        let size_active = TextSizePref::ALL.iter().position(|pref| *pref == crate::layout::Layout::get(cx).text_size).unwrap_or(0);
         let set_size = cx.listener(|this: &mut Self, index: &usize, window, cx| {
             if let Some(pref) = TextSizePref::ALL.get(*index) {
                 this.set_text_size_pref(*pref, Some(window), cx);
@@ -1339,7 +1328,7 @@ impl Harness {
                 ),
             )
             .into_any_element();
-        let density_active = DensityPref::ALL.iter().position(|pref| *pref == self.layout.density).unwrap_or(0);
+        let density_active = DensityPref::ALL.iter().position(|pref| *pref == crate::layout::Layout::get(cx).density).unwrap_or(0);
         let set_density = cx.listener(|this: &mut Self, index: &usize, window, cx| {
             if let Some(pref) = DensityPref::ALL.get(*index) {
                 this.set_density_pref(*pref, Some(window), cx);
@@ -1359,7 +1348,7 @@ impl Harness {
             "summary_line",
             SUMMARY_LINE_LABEL,
             SUMMARY_LINE_DETAIL,
-            self.layout.summary_line,
+            crate::layout::Layout::get(cx).summary_line,
             cx,
         );
         settings_sections_stack()
@@ -1373,7 +1362,7 @@ impl Harness {
     /// The Search group: the four engines as one segmented choice. The
     /// address field commits to the chosen one from the next Enter on.
     fn settings_browser_search_group(&self, cx: &mut Context<Self>) -> AnyElement {
-        let active = SearchEngine::ALL.iter().position(|e| *e == self.layout.search_engine).unwrap_or(0);
+        let active = SearchEngine::ALL.iter().position(|e| *e == crate::layout::Layout::get(cx).search_engine).unwrap_or(0);
         let set = cx.listener(|this: &mut Self, index: &usize, _, cx| {
             if let Some(engine) = SearchEngine::ALL.get(*index) {
                 this.set_search_engine(*engine, cx);
@@ -1402,7 +1391,7 @@ impl Harness {
         use aui::composer::{model_menu, PickerRow};
         let p = cx.aui().colors;
         let statuses = crate::provider_status::live_statuses();
-        let current = self.assistant_choice();
+        let current = self.assistant_choice(cx);
         let mut anchor = div().relative().flex_none();
         let chip_label = current.as_ref().map(|c| c.label).unwrap_or("No provider connected");
         let mut chip = button("settings-assistant-model", chip_label)
@@ -1446,9 +1435,9 @@ impl Harness {
                         let (provider, model) = row.split_once('/').unwrap_or((row.as_ref(), ""));
                         let (provider, model) = (provider.to_owned(), model.to_owned());
                         let _ = pick.update(cx, |this, cx| {
-                            this.layout.assistant = crate::browser::assistant::AssistantPrefs { provider: Some(provider), model: Some(model) };
+                            crate::layout::Layout::stage(cx, |layout| layout.assistant = crate::browser::assistant::AssistantPrefs { provider: Some(provider), model: Some(model) });
                             this.assistant_menu_open = false;
-                            this.persist_layout();
+                            crate::layout::Layout::save(cx);
                             cx.notify();
                         });
                     })
@@ -1475,7 +1464,7 @@ impl Harness {
         let row = |_id: &'static str, label: &'static str, detail: &'static str, control: AnyElement| -> AnyElement {
             settings_row(label).description(detail).control(control).into_any_element()
         };
-        let agents = self.layout.agents.clone();
+        let agents = crate::layout::Layout::get(cx).agents.clone();
         let act_index = match agents.act {
             ActMode::Ask => 0,
             ActMode::Auto => 1,
@@ -1483,10 +1472,8 @@ impl Harness {
         let act = segmented("settings-agents-act", vec!["Ask".into(), "Auto".into()], act_index)
             .accessibility_label("Before acting on a page")
             .on_select({
-                let set = cx.listener(|this: &mut Self, index: &usize, _, cx| {
-                    this.layout.agents.act = if *index == 0 { ActMode::Ask } else { ActMode::Auto };
-                    this.persist_layout();
-                    cx.notify();
+                let set = cx.listener(|_: &mut Self, index: &usize, _, cx| {
+                    crate::layout::Layout::update(cx, |layout| layout.agents.act = if *index == 0 { ActMode::Ask } else { ActMode::Auto });
                 });
                 move |index, w, cx| set(&index, w, cx)
             });
@@ -1498,14 +1485,13 @@ impl Harness {
         let tabs = segmented("settings-agents-tabs", vec!["Yes".into(), "Ask first".into(), "Read only".into()], tabs_index)
             .accessibility_label("Your own tabs")
             .on_select({
-                let set = cx.listener(|this: &mut Self, index: &usize, _, cx| {
-                    this.layout.agents.your_tabs = match *index {
+                let set = cx.listener(|_: &mut Self, index: &usize, _, cx| {
+                    let tabs = match *index {
                         0 => YourTabs::Yes,
                         1 => YourTabs::AskFirst,
                         _ => YourTabs::ReadOnly,
                     };
-                    this.persist_layout();
-                    cx.notify();
+                    crate::layout::Layout::update(cx, |layout| layout.agents.your_tabs = tabs);
                 });
                 move |index, w, cx| set(&index, w, cx)
             });
@@ -1537,10 +1523,8 @@ impl Harness {
                 SiteRule::Never => "Never here",
             };
             let host_owned = host.clone();
-            let remove = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.layout.agents.set_site(&host_owned, None);
-                this.persist_layout();
-                cx.notify();
+            let remove = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                crate::layout::Layout::update(cx, |layout| layout.agents.set_site(&host_owned, None));
             });
             rows.push(
                 site_row(
@@ -1617,7 +1601,7 @@ impl Harness {
 
     /// R4 Ad blocking: the switch and the sites ads are allowed on.
     fn settings_browser_adblock_group(&self, cx: &mut Context<Self>) -> AnyElement {
-        let prefs = self.layout.adblock.clone();
+        let prefs = crate::layout::Layout::get(cx).adblock.clone();
         let mut rows = vec![self.settings_switch_row(
             "adblock_enabled",
             "Block ads and trackers",
@@ -1636,11 +1620,11 @@ impl Harness {
         );
         for (index, site) in prefs.allowed.iter().enumerate() {
             let owned = site.clone();
-            let remove = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.layout.adblock.toggle(&owned);
-                crate::browser::adblock::apply(&this.layout.adblock);
-                crate::layout::write(&this.layout);
-                cx.notify();
+            let remove = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                crate::layout::Layout::update(cx, |layout| {
+                    layout.adblock.toggle(&owned);
+                });
+                crate::browser::adblock::apply(&crate::layout::Layout::get(cx).adblock);
             });
             rows.push(site_row(
                 site,
@@ -1655,7 +1639,7 @@ impl Harness {
     }
 
     fn settings_browser_downloads_group(&self, cx: &mut Context<Self>) -> AnyElement {
-        let dir = browser_download_dir(&self.layout);
+        let dir = browser_download_dir(crate::layout::Layout::get(cx));
         let row = div().debug_selector(|| "settings-browser-downloads".into()).child(
             settings_row("Downloads folder").description(tilde_path(&dir)).control(
                 div().debug_selector(|| "settings-downloads-change".into()).child(
@@ -1759,7 +1743,7 @@ impl Harness {
                 "group_branch",
                 "Branch name",
                 "Show each project's git branch on its row.",
-                self.layout.group_branch,
+                crate::layout::Layout::get(cx).group_branch,
                 cx,
             ),
         ];
@@ -1776,7 +1760,7 @@ impl Harness {
     /// the sound, and the Dock badge. macOS asks permission the first time
     /// one fires; the note says so, since the switches cannot.
     fn settings_notifications_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let prefs = self.layout.notify_prefs();
+        let prefs = crate::layout::Layout::get(cx).notify_prefs();
         let events = vec![
             self.settings_switch_row("notify_needs_you", "Needs you", "A session waits for your approval or answer.", prefs.needs_you, cx),
             self.settings_switch_row("notify_done", "Finished", "A turn finished while you were in another session or app.", prefs.done, cx),

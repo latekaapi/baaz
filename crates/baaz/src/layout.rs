@@ -472,8 +472,8 @@ pub struct Layout {
     /// Whether a settled assistant turn folds its work behind one header
     /// row while the final answer stays out (B12). ON by default; off
     /// leaves every run expanded after settle. The Settings page's
-    /// General section owns the switch, and every open view applies it
-    /// live through [`crate::settings::apply_setting`].
+    /// General section owns the switch, and every open view (parked ones
+    /// too) observes [`LayoutStore`] and re-folds when it flips.
     #[serde(rename = "foldFinishedTurns", default = "default_true")]
     pub fold_finished_turns: bool,
     /// Whether ⌃⌥⌘F points at parts of Baaz to leave notes for Claude
@@ -714,9 +714,73 @@ pub fn read() -> Layout {
 ///
 /// A failed write is reported ([`crate::store::write_authored`]). A deterministic
 /// capture writes nothing at all: like [`read`], the owner's file must
-/// never gain a capture's widths or modes.
-pub fn write(layout: &Layout) {
+/// never gain a capture's widths or modes. Private: [`Layout::save`] (and
+/// [`Layout::update`] through it) is the one way a preference reaches disk.
+fn write(layout: &Layout) {
     let _ = STORE.write_now(layout);
+}
+
+/// The window's preferences as one gpui [`gpui::Global`] (task 4.1, audit D
+/// Q1 row 7): the single live copy of `layout.json`. Every reader asks
+/// [`Layout::get`]; every change goes through [`Layout::update`] (or
+/// [`Layout::stage`]), which marks the global changed so each view that
+/// called `cx.observe_global::<LayoutStore>` re-renders — no hand copy into
+/// a view, no manual notify after a settings flip.
+pub struct LayoutStore(Layout);
+
+impl gpui::Global for LayoutStore {}
+
+/// What [`Layout::get`] reads before the global is set: a standalone view in
+/// a unit test that never booted a window.
+static DEFAULT_LAYOUT: std::sync::LazyLock<Layout> = std::sync::LazyLock::new(Layout::default);
+
+impl Layout {
+    /// Read `layout.json` into the global, once: a second call keeps the live
+    /// value. Boot calls it before anything reads a preference (`main`), and
+    /// [`crate::app::Harness::new`] calls it for test windows.
+    pub fn init(cx: &mut gpui::App) {
+        if !cx.has_global::<LayoutStore>() {
+            let layout = read();
+            crate::browser::agents::set_current(&layout.agents);
+            cx.set_global(LayoutStore(layout));
+        }
+    }
+
+    /// The live preferences.
+    pub fn get(cx: &gpui::App) -> &Layout {
+        cx.try_global::<LayoutStore>().map_or(&DEFAULT_LAYOUT, |store| &store.0)
+    }
+
+    /// Change the preferences and write `layout.json`: the one write path.
+    /// Observers of [`LayoutStore`] re-render on the change. The edit gets
+    /// the layout only, never `cx`, so it cannot re-enter the global.
+    pub fn update<R>(cx: &mut gpui::App, edit: impl FnOnce(&mut Layout) -> R) -> R {
+        let result = Self::stage(cx, edit);
+        Self::save(cx);
+        result
+    }
+
+    /// Change the preferences without writing yet: the next
+    /// [`Layout::update`] (or the quit's [`Layout::save`]) carries it. For a
+    /// session switch restoring that session's pane, which must not pay for
+    /// a file write, and for scripted steps and tests.
+    pub fn stage<R>(cx: &mut gpui::App, edit: impl FnOnce(&mut Layout) -> R) -> R {
+        Self::init(cx);
+        // `global_mut` queues the observers' notification; unlike
+        // `update_global` it leases nothing, so an observer that reads the
+        // global (or updates it again) never finds it missing.
+        let store = cx.global_mut::<LayoutStore>();
+        edit(&mut store.0)
+    }
+
+    /// Write the live preferences, and put the Agents block in force for the
+    /// page tools (whose jobs have no `cx`: [`crate::browser::agents::current`]
+    /// is the one copy, and this is its only writer after boot).
+    pub fn save(cx: &gpui::App) {
+        let layout = Self::get(cx);
+        crate::browser::agents::set_current(&layout.agents);
+        write(layout);
+    }
 }
 
 /// The width the shell should open at: the stored one, clamped into the

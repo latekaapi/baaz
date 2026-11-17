@@ -5216,7 +5216,7 @@ mod tests {
             .expect("the lane channel is open");
         });
         vc.run_until_parked();
-        vc.update(|_, cx| view.update(cx, |view, _| view.refresh_render_cache()));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.refresh_render_cache(cx)));
         vc.update(|_, cx| {
             let view = view.read(cx);
             assert!(view.busy(), "the turn is still open");
@@ -5309,7 +5309,7 @@ mod tests {
                 .expect("the lane channel is open");
         });
         vc.run_until_parked();
-        vc.update(|_, cx| view.update(cx, |view, _| view.refresh_render_cache()));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.refresh_render_cache(cx)));
         vc.update(|_, cx| {
             let view = view.read(cx);
             assert!(view.busy(), "the turn itself is still open");
@@ -5366,7 +5366,7 @@ mod tests {
         // Muse completes the turn: the queued submit starts.
         handle.complete_open_turn();
         drain_recording(&view, &tx, vc);
-        vc.update(|_, cx| view.update(cx, |view, _| view.refresh_render_cache()));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.refresh_render_cache(cx)));
         assert_eq!(submitted_texts(&handle), ["work", "next"], "submitted exactly once");
         assert_eq!(user_bubbles(vc), 1, "the echo replaced the bubble in place");
         vc.update(|_, cx| {
@@ -5377,5 +5377,102 @@ mod tests {
             assert!(!view.saving_memories());
             assert!(view.pending_optimistic.is_empty(), "no bubble left waiting");
         });
+    }
+
+    // ------------------------------------- task 4.1: the layout global
+
+    /// Counts `entity`'s notifies from now on (keep the subscription alive).
+    fn count_notifies<T: 'static>(
+        vc: &mut gpui::VisualTestContext,
+        entity: &Entity<T>,
+    ) -> (std::rc::Rc<std::cell::Cell<u32>>, gpui::Subscription) {
+        let count = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let watch = vc.update(|_, cx| {
+            let count = count.clone();
+            cx.observe(entity, move |_, _| count.set(count.get() + 1))
+        });
+        (count, watch)
+    }
+
+    /// Task 4.1's "done when": a setting change re-renders its readers with
+    /// no manual notify. "Fold finished turns" flipped through the one write
+    /// path (`flip_setting` → `Layout::update`, which notifies nothing
+    /// itself) refolds the shown view, which re-renders — its virtual list
+    /// re-syncs to the new rows, and only render does that — and a parked
+    /// view, whose rows are refolded though it never draws. "Show a summary
+    /// line" re-arms the cached sidebar pane the same way, without touching
+    /// the transcripts. Both choices land in `layout.json`.
+    #[gpui::test]
+    fn a_setting_flip_reaches_every_reader_through_the_layout_global(cx: &mut gpui::TestAppContext) {
+        let sandbox = crate::providers::TestEnvSandbox::enter("layout-global-readers");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let args = harness_args(sandbox.state_dir());
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            crate::app::Harness::new(args, crate::shot::CaptureToken::default(), window, cx)
+        });
+        vc.run_until_parked();
+        let replay = |vc: &mut gpui::VisualTestContext| {
+            let (_folder, events) = super::super::events::bench_support::capture_events("synthetic-full.jsonl");
+            vc.update(|window, cx| {
+                let host = crate::session::SessionHost {
+                    provider_id: "meta".to_owned(),
+                    workspace: "/tmp/layout-global-readers".to_owned(),
+                    overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                    capture: crate::shot::CaptureToken::default(),
+                    terminal_host: None,
+                };
+                let view = cx.new(|cx| SessionView::new("synthetic-full".to_owned(), host, window, cx));
+                view.update(cx, |view, cx| {
+                    view.fold_provider_events(events, cx);
+                    view.refresh_render_cache(cx);
+                });
+                view
+            })
+        };
+        let shown = replay(vc);
+        let parked = replay(vc);
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.args.login = crate::LoginSample::SignedIn;
+                harness.apply_login_sample(window, cx);
+                harness.active = Some(shown.clone());
+                cx.notify();
+            })
+        });
+        vc.run_until_parked();
+        let rows = |vc: &mut gpui::VisualTestContext, view: &Entity<SessionView>| {
+            vc.update(|_, cx| {
+                let view = view.read(cx);
+                (view.rows.len(), view.list_len, view.suffix_inputs.map(|(_, fold)| fold))
+            })
+        };
+        let (folded, drawn, fold) = rows(vc, &shown);
+        assert_eq!(fold, Some(true), "the rows start folded (the default)");
+        assert_eq!(drawn, folded, "the shown view drew its rows");
+        assert_eq!(rows(vc, &parked), (folded, 0, Some(true)), "the parked view holds the same rows, never drawn");
+
+        let (shown_notified, _shown_watch) = count_notifies(vc, &shown);
+        let (parked_notified, _parked_watch) = count_notifies(vc, &parked);
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.flip_setting("fold_finished_turns", false, cx)));
+        vc.run_until_parked();
+        let (unfolded, drawn, fold) = rows(vc, &shown);
+        assert!(unfolded > folded, "the shown view unfolds its settled turns: {folded} -> {unfolded} rows");
+        assert_eq!(fold, Some(false));
+        assert_eq!(drawn, unfolded, "the shown view re-rendered: its list synced to the unfolded rows");
+        assert!(shown_notified.get() > 0, "the shown view was told");
+        assert_eq!(rows(vc, &parked), (unfolded, 0, Some(false)), "the parked view refolded without drawing");
+        assert!(parked_notified.get() > 0, "the parked view was told");
+        assert!(!crate::layout::read().fold_finished_turns, "the switch is written to layout.json");
+
+        let pane = vc.update(|_, cx| baaz.read(cx).sidebar_pane.clone());
+        let (pane_notified, _pane_watch) = count_notifies(vc, &pane);
+        let parked_before = parked_notified.get();
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.flip_setting("summary_line", true, cx)));
+        vc.run_until_parked();
+        assert!(pane_notified.get() > 0, "the summary line re-arms the cached sidebar pane");
+        assert_eq!(parked_notified.get(), parked_before, "a sidebar switch leaves the transcripts alone");
+        assert!(vc.update(|_, cx| crate::layout::Layout::get(cx).summary_line));
+        assert!(crate::layout::read().summary_line, "the summary line is written to layout.json");
+        drop(sandbox);
     }
 }

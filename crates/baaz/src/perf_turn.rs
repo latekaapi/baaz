@@ -235,7 +235,7 @@ fn time_render_turns(
                 view.fold_provider_events(folder.fold_line(&body), cx);
             }
         }
-        view.refresh_render_cache();
+        view.refresh_render_cache(cx);
     });
     let base = view.read(cx).cached_turn_count();
     assert!(base >= 300 + extra, "the capture and {extra} more turns folded: {base}");
@@ -251,7 +251,7 @@ fn time_render_turns(
         view.update(cx, |view, cx| {
             for events in turn {
                 view.fold_provider_events(events, cx);
-                view.refresh_render_cache();
+                view.refresh_render_cache(cx);
             }
         });
         per_turn.push(at.elapsed().as_secs_f64() * 1e6);
@@ -307,7 +307,7 @@ fn time_long_answer(window: &mut gpui::Window, cx: &mut gpui::App) -> (f64, f64)
         for body in &opening {
             view.fold_provider_events(folder.fold_line(body), cx);
         }
-        view.refresh_render_cache();
+        view.refresh_render_cache(cx);
     });
     let palette = aui_tokens::dark();
     let style = aui::transcript::ProseStyle {
@@ -327,7 +327,7 @@ fn time_long_answer(window: &mut gpui::Window, cx: &mut gpui::App) -> (f64, f64)
         let at = Instant::now();
         let drawn = view.update(cx, |view, cx| {
             view.fold_provider_events(events, cx);
-            view.refresh_render_cache();
+            view.refresh_render_cache(cx);
             view.last_answer_text()
         });
         let blocks = aui::transcript::parsed_markdown(&drawn, &style);

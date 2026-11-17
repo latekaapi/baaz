@@ -499,12 +499,10 @@ impl Harness {
     /// Baaz's scoping; live sessions keep the argv they spawned with.
     pub(crate) fn flip_use_own_mcp(&mut self, id: ProviderId, on: bool, cx: &mut Context<Self>) {
         match id {
-            ProviderId::Codex => self.layout.use_own_mcp.codex = on,
-            ProviderId::ClaudeCode => self.layout.use_own_mcp.claude_code = on,
-            ProviderId::Muse => return,
+            ProviderId::Codex => crate::layout::Layout::update(cx, |layout| layout.use_own_mcp.codex = on),
+            ProviderId::ClaudeCode => crate::layout::Layout::update(cx, |layout| layout.use_own_mcp.claude_code = on),
+            ProviderId::Muse => {}
         }
-        crate::layout::write(&self.layout);
-        cx.notify();
     }
 
     /// The "Use my own MCP servers" row under the Claude Code / Codex
@@ -512,7 +510,7 @@ impl Harness {
     /// [`Self::flip_use_own_mcp`]. Shared with the Settings provider
     /// sub-pages (B11).
     pub(crate) fn use_own_mcp_row(&self, id: ProviderId, cx: &mut Context<Self>) -> AnyElement {
-        let on = use_own_mcp_state(&self.layout, id);
+        let on = use_own_mcp_state(crate::layout::Layout::get(cx), id);
         let flip = cx.listener(move |this: &mut Self, _: &SwitchIntent, _, cx| {
             this.flip_use_own_mcp(id, !on, cx);
         });

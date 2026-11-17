@@ -88,7 +88,7 @@ impl SessionView {
             return;
         }
         self.full_outputs.insert(block_id.clone(), full_output::Fetch::Fetching);
-        self.refresh_render_cache();
+        self.refresh_render_cache(cx);
         cx.notify();
         let command = ProviderCommand::ReadStoredOutput {
             session_id: self.session_id.clone(),
@@ -111,7 +111,7 @@ impl SessionView {
                     this.report_provider_error(&error, cx);
                 }
             }
-            this.refresh_render_cache();
+            this.refresh_render_cache(cx);
             cx.notify();
         });
     }

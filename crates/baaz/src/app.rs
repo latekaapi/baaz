@@ -501,10 +501,10 @@ pub fn set_menus(cx: &mut App) {
                                 .clone()
                                 .downcast::<Harness>()
                                 .map(|harness| {
-                                    harness.update(cx, |this, _| {
+                                    harness.update(cx, |this, cx| {
                                         this.flush_stores();
                                         this.flush_tabs_save();
-                                        this.persist_layout();
+                                        crate::layout::Layout::save(cx);
                                     })
                                 })
                                 .unwrap_or(())
@@ -885,7 +885,6 @@ pub struct Harness {
     pub(crate) overlays: Entity<Overlays>,
     /// F2 feedback mode shell: phase, draft, probe, discard arm.
     pub(crate) feedback: feedback_ui::FeedbackUi,
-    pub(crate) sidebar_open: bool,
     /// The sidebar divider's width and whatever drag is in flight over it
     /// (see [`crate::resize`]).
     pub(crate) resize: ResizeDrag,
@@ -1232,11 +1231,6 @@ pub struct Harness {
     /// from disk by the first index read (or by the first listing, whichever
     /// runs first); `None` until then, and the listing reads the file itself.
     pub(crate) saved_list: Option<std::sync::Arc<crate::list_cache::ListCache<crate::list_cache::ListedRow>>>,
-    /// Window preferences: the sidebar grouping, closed groups, search scope.
-    pub(crate) layout: layout::Layout,
-    /// Which half of the window the person is in (B2a-H2): sessions or
-    /// browse. Persists in `layout.json` ([`layout::Layout::mode`]).
-    pub(crate) mode: layout::Mode,
     /// Whether the sidebar owes its cached pane animation frames after a
     /// mode switch, so the slide runs to rest instead of freezing on its
     /// first frame. Armed only while the sidebar stands expanded (the
@@ -1582,14 +1576,17 @@ impl Harness {
         // is this Baaz entity under construction, which `cx.entity()` already
         // names inside the builder.
         let baaz_weak = cx.entity().downgrade();
-        let sidebar_pane = cx.new(move |_| SidebarPane::new(baaz_weak));
+        let sidebar_pane = cx.new(move |cx| SidebarPane::new(baaz_weak, cx));
         // The API-key field: masked, with the capture-safe placeholder. Enter
         // inside it submits (single-line inputs always emit `PressEnter`).
         let api_key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste your key"));
         // The divider's last settled x, or the default for a fresh store.
-        let restored = layout::sidebar_width(&layout::read());
+        // Window preferences live in one gpui global (`layout.json`), read
+        // once here when `main` has not already: a test window boots it.
+        layout::Layout::init(cx);
+        let restored = layout::sidebar_width(layout::Layout::get(cx));
         // The right divider's last settled width, or the default.
-        let right_restored = layout::right_width(&layout::read());
+        let right_restored = layout::right_width(layout::Layout::get(cx));
         // The backend new sessions start on: an explicit `--provider` or
         // `BAAZ_PROVIDER` names this run; otherwise the last pick the
         // person made, kept in the store across relaunches; otherwise the
@@ -1700,7 +1697,6 @@ impl Harness {
             starting_root: None,
             overlays: cx.new(|_| Overlays::default()),
             feedback: feedback_ui::FeedbackUi::new(feedback_ui::FeedbackUi::probe_for(), cx),
-            sidebar_open: true,
             resize: ResizeDrag::restored(restored),
             right_resize: RightResizeDrag::restored(right_restored),
             right_cache: crate::right::RightCache::default(),
@@ -1789,11 +1785,6 @@ impl Harness {
             sessions_list_in_flight: false,
             sessions_list_stale: false,
             saved_list: None,
-            layout: {
-                let layout = layout::read();
-                crate::browser::agents::set_current(&layout.agents);
-                layout
-            },
             shortcuts_cache: crate::keymap::effective_bindings(),
             recording_shortcut: None,
             shortcut_errors: HashMap::new(),
@@ -1863,7 +1854,6 @@ impl Harness {
             hover_trace_last_shown: None,
             tasks: Vec::new(),
             field_subscriptions: Vec::new(),
-            mode: layout::read().mode,
             mode_fade_since: None,
             browse_drop_target: None,
             browse_drop_at_end: false,
@@ -1883,23 +1873,27 @@ impl Harness {
             tab_menu_bounds: None,
             browse_session_tab: None,
         };
+        // Every window preference lives in the layout global (task 4.1): a
+        // change from anywhere — a Settings switch, a menu, a step, the
+        // terminal hook — redraws the window, with no notify at the write.
+        cx.observe_global::<layout::LayoutStore>(|_, cx| cx.notify()).detach();
         // Settings › Appearance › System follows macOS: an appearance
         // change repaints while the stored choice is System (a Light or
         // Dark choice ignores it). Detached: it lives as long as the window.
         cx.observe_window_appearance(window, |this, window, cx| {
-            if this.layout.theme == layout::ThemePref::System {
+            if crate::layout::Layout::get(cx).theme == layout::ThemePref::System {
                 this.apply_theme_pref(Some(window), cx);
             }
         })
         .detach();
         // Booting into Browse stands its right pane closed, like a switch.
-        if this.mode == layout::Mode::Browse {
-            this.layout.enter_browse();
+        let browse = layout::Layout::get(cx).mode == layout::Mode::Browse;
+        if browse {
+            layout::Layout::stage(cx, layout::Layout::enter_browse);
         }
-        this.sidebar_open = this.layout.sidebar_open;
         // The CEF claim check's live-mode flag starts where the window
         // starts; every switch after this rides `set_mode`.
-        crate::keymap::set_claim_live_browse(this.mode == layout::Mode::Browse);
+        crate::keymap::set_claim_live_browse(browse);
         // When the agent opens a URL the Browser pane opens on it — never
         // focused, so the person's keyboard stays where it was while they
         // watch. Deferred for the same re-entrancy reason as the dock hook
@@ -1928,21 +1922,12 @@ impl Harness {
         });
         // When the agent runs something the dock opens — never focused, so
         // the person's keyboard stays where it was while they watch.
-        let harness = cx.entity();
         this.terminal_service.set_activity_hook(move |cx: &mut App| {
-            // Deferred: the hook runs inside `drain`, which the pump task
-            // calls inside a Harness update — touching the Harness here
-            // re-enters it and aborts (`cannot update Harness while it is
-            // already being updated`). The defer runs at the end of the
-            // effect cycle, with the Harness off the stack.
-            let harness = harness.clone();
-            cx.defer(move |cx| {
-                harness.update(cx, |harness, cx| {
-                    harness.layout.terminal_open = true;
-                    harness.persist_layout();
-                    cx.notify();
-                });
-            });
+            // The open is a layout write, which needs no Harness: the window
+            // observes the layout global and redraws. Still deferred to the
+            // end of the effect cycle, so it lands after the `drain` (run
+            // inside a Harness update) that reported the activity.
+            cx.defer(|cx| crate::layout::Layout::update(cx, |layout| layout.terminal_open = true));
         });
         // The service's requests queue on socket threads; this pump runs
         // them on the UI thread until the window is gone. A pass is one
@@ -2640,13 +2625,11 @@ impl Harness {
     /// The sidebar's collapse toggle (⌘B): the rail is the column at zero
     /// width. One state for both modes.
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_open = !self.sidebar_open;
+        layout::Layout::update(cx, |layout| layout.sidebar_open = !layout.sidebar_open);
         // A Browse menu hangs off a sidebar row or the page controls: with
         // the sidebar gone it pointed at nothing (seen live 2026-10-12, the
         // page menu stayed where the sidebar had been).
         self.close_browse_menu(cx);
-        self.persist_layout();
-        cx.notify();
     }
 
     /// The dock toggle (⌃`): flips the open state, persists it, and focuses
@@ -2658,12 +2641,12 @@ impl Harness {
         if self.settings_page.open {
             return;
         }
-        self.layout.terminal_open = !self.layout.terminal_open;
-        if self.layout.terminal_open {
+        crate::layout::Layout::stage(cx, |layout| layout.terminal_open = !layout.terminal_open);
+        if crate::layout::Layout::get(cx).terminal_open {
             self.ensure_terminal_tab(cx);
             window.focus(&self.terminal_focus, cx);
         }
-        self.persist_layout();
+        crate::layout::Layout::save(cx);
         cx.notify();
     }
 
@@ -2699,10 +2682,10 @@ impl Harness {
         // snap and no frame has consumed it yet.
         self.right_snap = false;
         self.right_cache.page_menu = false;
-        self.layout.right_open = !self.layout.right_open;
-        crate::baaz_log!("toggle right pane: open={}", self.layout.right_open);
-        self.arm_browser_url_focus();
-        self.persist_layout();
+        crate::layout::Layout::stage(cx, |layout| layout.right_open = !layout.right_open);
+        crate::baaz_log!("toggle right pane: open={}", crate::layout::Layout::get(cx).right_open);
+        self.arm_browser_url_focus(cx);
+        crate::layout::Layout::save(cx);
         // B7: the webview is prepared here, on the toggle — never as a
         // render side effect — so the opening animation's first frame
         // does not pay the construction cost.
@@ -2720,7 +2703,7 @@ impl Harness {
     /// rail toggle, the View menu): whatever the window shows now, show
     /// the other half.
     pub(crate) fn toggle_browse_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_mode(self.mode.other(), window, cx);
+        self.set_mode(crate::layout::Layout::get(cx).mode.other(), window, cx);
     }
 
     /// ⌘T, at window level so it fires with a page focused (B2a-H3): a
@@ -2728,7 +2711,7 @@ impl Harness {
     /// switches to Browse first, then opens there. Sessions keep ⌘N;
     /// ⌘T never leaves the browser.
     pub(crate) fn new_browser_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode != layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode != layout::Mode::Browse {
             self.set_mode(layout::Mode::Browse, window, cx);
         }
         self.new_browse_sidebar_tab(window, cx);
@@ -2742,13 +2725,13 @@ impl Harness {
     /// stands closed: the Sessions pane waits aside and comes back
     /// ([`layout::Layout::enter_browse`]).
     pub(crate) fn set_mode(&mut self, mode: layout::Mode, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode == mode {
+        if layout::Layout::get(cx).mode == mode {
             if mode == layout::Mode::Browse {
                 self.ensure_browse_tab(window, cx);
             }
             return;
         }
-        self.mode = mode;
+        layout::Layout::stage(cx, |layout| layout.mode = mode);
         // One sidebar for both modes (owner, 2026-10-12): the switch lives
         // in the chrome row, so a mode change never opens or closes the
         // column on its own.
@@ -2762,12 +2745,10 @@ impl Harness {
         // The CEF claim check filters `BaazBrowse` rows by this flag, set
         // here (never read from gpui state inside the router callback).
         crate::keymap::set_claim_live_browse(mode == layout::Mode::Browse);
-        self.layout.mode = mode;
-        match mode {
-            layout::Mode::Browse => self.layout.enter_browse(),
-            layout::Mode::Sessions => self.layout.leave_browse(),
-        }
-        self.persist_layout();
+        layout::Layout::update(cx, |layout| match mode {
+            layout::Mode::Browse => layout.enter_browse(),
+            layout::Mode::Sessions => layout.leave_browse(),
+        });
         // The sidebar's new rows fade in (the cached pane is re-armed from
         // `on_frame` while the fade runs).
         self.mode_fade_since = Some(cx.background_executor().now());
@@ -2777,14 +2758,6 @@ impl Harness {
         self.prewarm_browser_if_needed(cx);
         self.refresh_right_now(cx);
         cx.notify();
-    }
-
-    /// Persist `layout.json` with the live sidebar state. The write itself
-    /// stays a no-op under `BAAZ_DETERMINISTIC=1`.
-    pub(crate) fn persist_layout(&mut self) {
-        self.layout.sidebar_open = self.sidebar_open;
-        crate::browser::agents::set_current(&self.layout.agents);
-        layout::write(&self.layout);
     }
 
     /// Open the right pane on `kind`: records the kind, forces the pane
@@ -2804,15 +2777,17 @@ impl Harness {
         }
         // A user pick always animates (see `toggle_right`).
         self.right_snap = false;
-        if self.layout.right_open && self.layout.right_kind == Some(kind) {
-            self.layout.right_open = false;
+        if crate::layout::Layout::get(cx).right_open && crate::layout::Layout::get(cx).right_kind == Some(kind) {
+            crate::layout::Layout::stage(cx, |layout| layout.right_open = false);
         } else {
-            self.layout.right_kind = Some(kind);
-            self.layout.right_open = true;
+            crate::layout::Layout::stage(cx, |layout| {
+                layout.right_kind = Some(kind);
+                layout.right_open = true;
+            });
         }
-        crate::baaz_log!("show right pane: {kind:?} open={}", self.layout.right_open);
-        self.arm_browser_url_focus();
-        self.persist_layout();
+        crate::baaz_log!("show right pane: {kind:?} open={}", crate::layout::Layout::get(cx).right_open);
+        self.arm_browser_url_focus(cx);
+        crate::layout::Layout::save(cx);
         // B7: prepare the webview on the pick, before the pane animates.
         self.prewarm_browser_if_needed(cx);
         // B7fix2: the real webview rides a deferred task with the window.
@@ -2835,7 +2810,7 @@ impl Harness {
         self.right_snap = false;
         self.right_cache.page_menu = false;
         self.open_right_on(kind, cx);
-        self.arm_browser_url_focus();
+        self.arm_browser_url_focus(cx);
     }
 
     /// The non-toggling open behind [`Self::select_right`], [`Self::show_right`]
@@ -2844,10 +2819,12 @@ impl Harness {
     /// callers that owe it (a person's own open) arm it themselves, so an
     /// agent navigation never steals the keyboard.
     pub(crate) fn open_right_on(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
-        self.layout.right_kind = Some(kind);
-        self.layout.right_open = true;
-        crate::baaz_log!("open right pane: {kind:?} open={}", self.layout.right_open);
-        self.persist_layout();
+        crate::layout::Layout::stage(cx, |layout| {
+            layout.right_kind = Some(kind);
+            layout.right_open = true;
+        });
+        crate::baaz_log!("open right pane: {kind:?} open={}", crate::layout::Layout::get(cx).right_open);
+        crate::layout::Layout::save(cx);
         // B7: prepare the webview on the pick, before the pane animates.
         self.prewarm_browser_if_needed(cx);
         // B7fix2: the real webview rides a deferred task with the window.
@@ -2861,8 +2838,9 @@ impl Harness {
     /// person's own open — a click, the palette, a shortcut — earns it, and
     /// only landing open on Browser. Restores never arm it, so a restored
     /// Browser pane leaves the keyboard where activation put it.
-    fn arm_browser_url_focus(&mut self) {
-        if self.layout.right_open && layout::right_kind(&self.layout) == layout::RightKind::Browser {
+    fn arm_browser_url_focus(&mut self, cx: &App) {
+        let layout = layout::Layout::get(cx);
+        if layout.right_open && layout::right_kind(layout) == layout::RightKind::Browser {
             self.browser_url_focus_armed = true;
         }
     }
@@ -2945,10 +2923,10 @@ impl Harness {
     pub(crate) fn defer_browser_prewarm(&mut self, cx: &mut Context<Self>) {
         // B2a-H2b: no pane page in Browse, so no deferred prewarm for
         // one either.
-        if self.mode == layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
             return;
         }
-        if !self.layout.right_open || layout::right_kind(&self.layout) != layout::RightKind::Browser {
+        if !crate::layout::Layout::get(cx).right_open || layout::right_kind(crate::layout::Layout::get(cx)) != layout::RightKind::Browser {
             return;
         }
         if self.browser.fake || cfg!(test) {
@@ -3026,8 +3004,8 @@ impl Harness {
             .and_then(|meta| meta.right.clone())
             .and_then(|right| right.browser_url);
         let state = crate::sessions::RightState {
-            open: self.layout.right_open,
-            kind: self.layout.right_kind.unwrap_or(layout::RightKind::Files),
+            open: crate::layout::Layout::get(cx).right_open,
+            kind: crate::layout::Layout::get(cx).right_kind.unwrap_or(layout::RightKind::Files),
             files_preview,
             files_selected,
             files_expanded,
@@ -3052,12 +3030,12 @@ impl Harness {
         self.flush_stores();
         let stored = self.overrides.get(session_id).and_then(|meta| meta.right.clone());
         let open = stored.as_ref().is_some_and(|state| state.open);
-        if self.layout.right_open != open {
-            self.layout.right_open = open;
+        if crate::layout::Layout::get(cx).right_open != open {
+            crate::layout::Layout::stage(cx, |layout| layout.right_open = open);
             self.right_snap = true;
         }
         if let Some(state) = &stored {
-            self.layout.right_kind = Some(state.kind);
+            crate::layout::Layout::stage(cx, |layout| layout.right_kind = Some(state.kind));
         }
         if let Some((root, _)) = self.right_project() {
             match &stored {
@@ -3161,8 +3139,8 @@ impl Harness {
     /// the background executor and lands with an update + notify. Nothing here
     /// blocks the UI thread.
     pub(crate) fn refresh_right_now(&mut self, cx: &mut Context<Self>) {
-        let kind = layout::right_kind(&self.layout);
-        if !self.layout.right_open || !Self::right_needs_data(kind) {
+        let kind = layout::right_kind(crate::layout::Layout::get(cx));
+        if !crate::layout::Layout::get(cx).right_open || !Self::right_needs_data(kind) {
             return;
         }
         let Some((root, _)) = self.right_project() else { return };
@@ -3252,8 +3230,8 @@ impl Harness {
     /// Browser. The `right:` step verb writes the layout directly, so it is
     /// covered here rather than at a call site.
     fn sync_right_cache(&mut self, cx: &mut Context<Self>) {
-        let kind = layout::right_kind(&self.layout);
-        let open = self.layout.right_open;
+        let kind = layout::right_kind(crate::layout::Layout::get(cx));
+        let open = crate::layout::Layout::get(cx).right_open;
         let root = self.right_project().map(|(root, _)| root);
         if !open || !Self::right_needs_data(kind) {
             self.right_last_key = Some((open, kind, root));
@@ -3292,7 +3270,7 @@ impl Harness {
         if self.settings_page.open {
             return;
         }
-        self.layout.terminal_open = true;
+        crate::layout::Layout::stage(cx, |layout| layout.terminal_open = true);
         if let Some(root) = self.current_project().map(|project| project.root.clone()) {
             let decision = self.terminal_host.read(cx).pick(cx, &root, false);
             match decision {
@@ -3309,7 +3287,7 @@ impl Harness {
             }
         }
         window.focus(&self.terminal_focus, cx);
-        self.persist_layout();
+        crate::layout::Layout::save(cx);
         cx.notify();
     }
 
@@ -3330,14 +3308,14 @@ impl Harness {
         if self.settings_page.open {
             return;
         }
-        self.layout.terminal_open = true;
+        crate::layout::Layout::stage(cx, |layout| layout.terminal_open = true);
         if let Some(tab) = tab {
             if self.terminal_host.read(cx).get(&tab).is_some() {
                 self.terminal_host.update(cx, |host, _| host.activate(&tab));
             }
         }
         window.focus(&self.terminal_focus, cx);
-        self.persist_layout();
+        crate::layout::Layout::save(cx);
         cx.notify();
     }
 
@@ -3501,7 +3479,7 @@ impl Harness {
         if self.settings_page.open {
             return Err("the Settings page is open".into());
         }
-        self.layout.terminal_open = true;
+        crate::layout::Layout::stage(cx, |layout| layout.terminal_open = true);
         let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
         let nonce = aui_terminal::generate_nonce();
         let script = terminal::deterministic_script(&nonce);
@@ -3509,7 +3487,7 @@ impl Harness {
             let id = host.open_fake(&root, title, TabOwner::User, origin, script, &nonce, cx);
             host.drain(&id, cx);
         });
-        self.persist_layout();
+        crate::layout::Layout::save(cx);
         window.focus(&self.terminal_focus, cx);
         cx.notify();
         Ok(())
@@ -3523,8 +3501,8 @@ impl Harness {
 
     /// The dock's height now: the stored one, clamped into `[120px, 70% of
     /// the centre column]`.
-    fn dock_height(&self, window: &Window) -> f32 {
-        let want = self.layout.terminal_height.unwrap_or(terminal::DOCK_DEFAULT_HEIGHT);
+    fn dock_height(&self, window: &Window, cx: &App) -> f32 {
+        let want = crate::layout::Layout::get(cx).terminal_height.unwrap_or(terminal::DOCK_DEFAULT_HEIGHT);
         terminal::clamp_dock_height(want, self.centre_height(window))
     }
 
@@ -3569,8 +3547,8 @@ impl Harness {
     }
 
     fn render_terminal_dock(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let open = self.layout.terminal_open;
-        let resting = self.dock_height(window);
+        let open = crate::layout::Layout::get(cx).terminal_open;
+        let resting = self.dock_height(window, cx);
         let target = if open { px(resting) } else { Pixels::ZERO };
         // Mid-drag the height feeds straight through: `spring_px` would chase
         // a moving target and the divider would lag the pointer. On release
@@ -3634,15 +3612,11 @@ impl Harness {
             cx.processor(move |this: &mut Self, action: TerminalDockAction, window, cx| match action {
                 TerminalDockAction::Maximize => {
                     let max = terminal::clamp_dock_height(f32::MAX, this.centre_height(window));
-                    this.layout.terminal_height =
-                        if maximised { Some(terminal::DOCK_DEFAULT_HEIGHT) } else { Some(max) };
-                    this.persist_layout();
-                    cx.notify();
+                    let height = if maximised { Some(terminal::DOCK_DEFAULT_HEIGHT) } else { Some(max) };
+                    crate::layout::Layout::update(cx, |layout| layout.terminal_height = height);
                 }
                 TerminalDockAction::Close => {
-                    this.layout.terminal_open = false;
-                    this.persist_layout();
-                    cx.notify();
+                    crate::layout::Layout::update(cx, |layout| layout.terminal_open = false);
                 }
                 TerminalDockAction::NewTerminal => this.new_terminal(window, cx),
             });
@@ -3650,14 +3624,14 @@ impl Harness {
             .hint(self.terminal_hint_name(hint_provider))
             .maximized(maximised)
             .on_action(dock_action);
-        let resize_start = cx.processor(|this: &mut Self, grab: f32, _, _| {
-            this.terminal_drag = Some((grab, this.layout.terminal_height.unwrap_or(terminal::DOCK_DEFAULT_HEIGHT)));
+        let resize_start = cx.processor(|this: &mut Self, grab: f32, _, cx| {
+            this.terminal_drag = Some((grab, crate::layout::Layout::get(cx).terminal_height.unwrap_or(terminal::DOCK_DEFAULT_HEIGHT)));
         });
         let resize_move = cx.processor(|this: &mut Self, at: f32, window, cx| {
             if let Some((grab, start)) = this.terminal_drag {
-                this.layout.terminal_height =
-                    Some(terminal::clamp_dock_height(start + (grab - at), this.centre_height(window)));
-                cx.notify();
+                // Live while the drag runs; the release writes it.
+                let height = terminal::clamp_dock_height(start + (grab - at), this.centre_height(window));
+                crate::layout::Layout::stage(cx, |layout| layout.terminal_height = Some(height));
             }
         });
         let end_weak = cx.entity().downgrade();
@@ -3665,7 +3639,7 @@ impl Harness {
             end_weak
                 .update(cx, |this: &mut Harness, cx| {
                     this.terminal_drag = None;
-                    this.persist_layout();
+                    crate::layout::Layout::save(cx);
                     cx.notify();
                 })
                 .ok();
@@ -3699,8 +3673,8 @@ impl Harness {
     /// click opens the pane on that screen (sliding the strip when it was
     /// open on another), and the lit toggle closes it.
     fn pane_toggles(&self, cx: &mut Context<Self>) -> AnyElement {
-        let open = self.layout.right_open && !self.settings_page.open;
-        let shown = layout::right_kind(&self.layout);
+        let open = crate::layout::Layout::get(cx).right_open && !self.settings_page.open;
+        let shown = layout::right_kind(crate::layout::Layout::get(cx));
         let mut row = h_flex().flex_none().items_center().gap(px(ROW_GAP));
         for (kind, id) in [
             (layout::RightKind::Changes, "hd-centre-pane-changes"),
@@ -3711,7 +3685,7 @@ impl Harness {
             let lit = open && shown == kind;
             let click = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
                 this.pane_toggle_click(kind, cx);
-                if kind == layout::RightKind::Browser && this.layout.right_open {
+                if kind == layout::RightKind::Browser && crate::layout::Layout::get(cx).right_open {
                     // B7fix2: the click builds the real webview itself, with
                     // the window, ahead of the strip's first frame.
                     this.prewarm_browser_in(window, cx);
@@ -3725,7 +3699,7 @@ impl Harness {
     /// A two-finger sideways swipe in the pane: one screen along the strip
     /// (Changes · Files · Page), stopping at either end.
     pub(crate) fn swipe_right_screen(&mut self, dir: i32, cx: &mut Context<Self>) {
-        let at = right::screen_index(layout::right_kind(&self.layout)) as i32 + dir;
+        let at = right::screen_index(layout::right_kind(crate::layout::Layout::get(cx))) as i32 + dir;
         if let Some(kind) = usize::try_from(at).ok().and_then(|i| layout::RightKind::ALL.get(i).copied()) {
             self.select_right(kind, cx);
         }
@@ -3734,7 +3708,7 @@ impl Harness {
     /// A pane toggle's click: the lit one closes the pane; any other opens
     /// the pane on its screen (the strip slides there when it was open).
     pub(crate) fn pane_toggle_click(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
-        let lit = self.layout.right_open && layout::right_kind(&self.layout) == kind;
+        let lit = crate::layout::Layout::get(cx).right_open && layout::right_kind(crate::layout::Layout::get(cx)) == kind;
         if lit {
             self.toggle_right(cx);
         } else {
@@ -3846,18 +3820,18 @@ impl Harness {
     /// Shift+Enter steps back.
     fn render_browse_find(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::browser::chrome::find_count_text;
-        let shown = self.browse_centre_shown();
+        let shown = self.browse_centre_shown(cx);
         let (query, match_case) = match self.browser.find_strips.visible(shown) {
             Some((_, strip)) => (strip.query.clone(), strip.match_case),
             None => return None,
         };
-        if self.browse_centre_state().is_some_and(|state| state.read(cx).crashed().is_some()) {
+        if self.browse_centre_state(cx).is_some_and(|state| state.read(cx).crashed().is_some()) {
             return None;
         }
         let input = self.browse_find.clone()?;
         let p = cx.aui().colors;
         let count = self
-            .browse_centre_state()
+            .browse_centre_state(cx)
             .and_then(|state| state.read(cx).find_state())
             .filter(|found| found.query == query)
             .map(|found| (find_count_text(found.active, found.total), found.active, found.total));
@@ -3964,7 +3938,7 @@ impl Harness {
     fn render_browse_permission(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::browser::chrome::{permission_sentence, permission_want};
         let p = cx.aui().colors;
-        let state = self.browse_centre_state()?;
+        let state = self.browse_centre_state(cx)?;
         let request = state.read(cx).permissions().first()?.clone();
         let sentence = permission_sentence(&request.origin, &request.kinds);
         let want = permission_want(&request.kinds);
@@ -4084,7 +4058,7 @@ impl Harness {
                 None,
                 cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                     this.dismiss_browse_popovers(cx);
-                    let _ = crate::system_open::open_detached([crate::layout::browser_download_dir(&this.layout)]);
+                    let _ = crate::system_open::open_detached([crate::layout::browser_download_dir(crate::layout::Layout::get(cx))]);
                 }),
                 cx,
             );
@@ -4245,7 +4219,7 @@ impl Harness {
         if !self.browser.more_open {
             return None;
         }
-        let state = self.browse_centre_state()?;
+        let state = self.browse_centre_state(cx)?;
         let zoom = state.read(cx).zoom();
         let devtools = state.read(cx).supports(aui_webview::BackendFeature::DevTools);
         let zoomable = state.read(cx).supports(aui_webview::BackendFeature::Zoom);
@@ -4287,7 +4261,7 @@ impl Harness {
             &format!("{zoom}%"),
             "Reset zoom",
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                if let Some(state) = this.browse_centre_state() {
+                if let Some(state) = this.browse_centre_state(cx) {
                     state.update(cx, |state, _| state.set_zoom(100));
                 }
             }),
@@ -4399,7 +4373,7 @@ impl Harness {
     fn render_bar_chrome(&self, window: &mut Window, cx: &mut Context<Self>) -> BarChrome {
         let lead = self.render_sidebar_toggle(cx);
         let switch_to = cx.entity().downgrade();
-        let shown = match self.mode {
+        let shown = match crate::layout::Layout::get(cx).mode {
             layout::Mode::Browse => aui::screens::sidebar::Mode::Browse,
             _ => aui::screens::sidebar::Mode::Sessions,
         };
@@ -4412,7 +4386,7 @@ impl Harness {
                 let _ = switch_to.update(cx, |this, cx| this.set_mode(target, window, cx));
             })
             .into_any_element();
-        if self.mode == layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
             // Browse: the page controls and the address live in the sidebar's
             // own header; the centre is the page, so the row shows nothing.
             BarChrome { lead, switch: Some(switch), title: None, right: None }
@@ -4430,12 +4404,12 @@ impl Harness {
     /// so a pointer resting there over the native page still reaches the
     /// shell; none outside Browse.
     pub(crate) fn set_browse_hover_zones(&mut self, zones: Vec<gpui::Bounds<Pixels>>, cx: &mut Context<Self>) {
-        let zones: Vec<[f32; 4]> = if self.mode == layout::Mode::Browse {
+        let zones: Vec<[f32; 4]> = if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
             zones.iter().map(|b| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)]).collect()
         } else {
             Vec::new()
         };
-        if let Some(state) = self.browse_centre_state() {
+        if let Some(state) = self.browse_centre_state(cx) {
             state.update(cx, |state, _| state.set_hover_zones(zones));
         }
     }
@@ -4446,12 +4420,12 @@ impl Harness {
     pub(crate) fn set_browse_holes(&mut self, rects: Vec<(gpui::Bounds<Pixels>, Pixels)>, cx: &mut Context<Self>) {
         // R4: the Split's × on the shown half rides with the centre's holes.
         let mut rects = rects;
-        if self.mode == layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
             if let Some(hole) = self.peek_split_holes(cx) {
                 rects.push(hole);
             }
         }
-        let holes: Vec<[f32; 5]> = if self.mode == layout::Mode::Browse {
+        let holes: Vec<[f32; 5]> = if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
             rects
                 .iter()
                 .chain(self.browser.progress_hole.get().map(|b| (b, Pixels::ZERO)).iter())
@@ -4462,7 +4436,7 @@ impl Harness {
         };
         // Holes belong to the page shown now: a page that stopped being the
         // centre (another tab, Sessions, Settings) gets its own back whole.
-        let current = self.browse_centre_state();
+        let current = self.browse_centre_state(cx);
         if let Some(previous) = self.browser.holes_on.take() {
             if current.as_ref().map(|c| c.entity_id()) != Some(previous.entity_id()) {
                 if let Some(previous) = previous.upgrade() {
@@ -4569,7 +4543,7 @@ impl Harness {
         let mut term_button = icon_button("hd-centre-terminal", IconName::Terminal)
             .ghost()
             .accessibility_label("Toggle terminal");
-        if self.layout.terminal_open {
+        if crate::layout::Layout::get(cx).terminal_open {
             term_button = term_button.on_click(term_toggle);
         } else {
             term_button = term_button.muted().on_click(term_toggle);
@@ -4852,7 +4826,7 @@ impl Harness {
                 // the new-tab page over a tab already navigating (seen live
                 // 2026-10-11).
                 let blank = matches!(state.read(cx).url().as_ref(), "" | crate::browser::tabs::BLANK)
-                    && self.browse_centre_tab_blank();
+                    && self.browse_centre_tab_blank(cx);
                 // `about:blank` tabs render the Baaz new-tab page instead of
                 // a white page — gpui, since about:blank is hidden by the
                 // library.
@@ -4989,7 +4963,7 @@ impl Harness {
     /// anything gpui draws under it.
     fn render_page_progress(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.browser.progress_hole.set(None);
-        let state = self.browse_centre_state()?;
+        let state = self.browse_centre_state(cx)?;
         let (loading, progress) = {
             let page = state.read(cx);
             (page.loading(), page.progress())
@@ -5448,7 +5422,7 @@ impl Harness {
             self.render_skills_page(window, cx)
         } else if pending_dest.is_some() {
             self.render_pending_switch(cx)
-        } else if self.mode == layout::Mode::Browse {
+        } else if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
             self.render_browse_centre(window, cx)
         } else {
             match self.active.clone() {
@@ -5542,8 +5516,8 @@ impl Harness {
         // A centre with no composer (no session, Skills, a pending switch)
         // holds the corner stack 12 above the column's bottom; Browse's is
         // in the corner window.
-        let in_band = !self.skills.open && pending_dest.is_none() && self.mode != layout::Mode::Browse && self.active.is_some();
-        let body = match (in_band || self.corner_in_overlay()).then_some(()).map_or_else(|| self.render_corner_stack(cx), |_| None) {
+        let in_band = !self.skills.open && pending_dest.is_none() && crate::layout::Layout::get(cx).mode != layout::Mode::Browse && self.active.is_some();
+        let body = match (in_band || self.corner_in_overlay(cx)).then_some(()).map_or_else(|| self.render_corner_stack(cx), |_| None) {
             // A flex column, never a block: the Skills page's root is
             // `flex_1`, and in a block parent it took no height — feedback
             // mode's slot put every page in this wrapper and Skills drew a
@@ -6052,7 +6026,7 @@ impl Harness {
     /// and not on every frame the palette is open (finding `performance-9`).
     pub(crate) fn search_status(&self, cx: &gpui::App) -> SharedString {
         let blank = self.search_query.read(cx).value().trim().is_empty();
-        let scoped = !self.layout.search_all_projects;
+        let scoped = !crate::layout::Layout::get(cx).search_all_projects;
         let project = self.current_project().map(|p| p.name.clone()).unwrap_or_default();
         let key = (blank, self.search_sessions.len(), self.search_files.len(), scoped, project.clone());
         let mut cache = self.search_status.borrow_mut();
@@ -6117,9 +6091,9 @@ impl Harness {
         #[cfg(feature = "cef")]
         crate::browser::PANE_PAGE_LIVE.with(|live| {
             live.set(
-                self.mode == crate::layout::Mode::Sessions
-                    && self.layout.right_open
-                    && crate::layout::right_kind(&self.layout) == crate::layout::RightKind::Browser,
+                crate::layout::Layout::get(cx).mode == crate::layout::Mode::Sessions
+                    && crate::layout::Layout::get(cx).right_open
+                    && crate::layout::right_kind(crate::layout::Layout::get(cx)) == crate::layout::RightKind::Browser,
             )
         });
         // B7fix2: one idle-time Browser warmup, outside render — the first
@@ -6186,14 +6160,14 @@ impl Harness {
         // window could never hold one across frames.
         if self.resize.active && !self.resize.scripted && !window.is_window_active() {
             self.resize.active = false;
-            self.resize.persist();
+            self.resize.persist(cx);
         }
         // The right drag's twin: a release outside the window never reaches
         // the overlay either, so an armed right drag settles where it stands
         // when the window goes inactive.
         if self.right_resize.active && !self.right_resize.scripted && !window.is_window_active() {
             self.right_resize.active = false;
-            self.right_resize.persist();
+            self.right_resize.persist(cx);
         }
         // A frame-paced width sweep marches the divider one step per
         // rendered frame (scripting only): each tick logs
@@ -6413,7 +6387,7 @@ impl Render for Harness {
             // and terminal hidden, not closed — their state is untouched
             // and restored on exit).
             let settings_open = self.settings_page.open;
-            let right_open = self.layout.right_open && !settings_open;
+            let right_open = crate::layout::Layout::get(cx).right_open && !settings_open;
             let sidebar: AnyElement = if settings_open {
                 self.render_settings_nav(cx)
             } else if window.is_a11y_active() {
@@ -6432,7 +6406,7 @@ impl Render for Harness {
             };
             // Painted lights off: the window owns real, glossy ones, and
             // the painted set only ever stacked underneath them.
-            let kind = layout::right_kind(&self.layout);
+            let kind = layout::right_kind(crate::layout::Layout::get(cx));
             // Drawn from the cache the refresh path maintains: building this
             // element performs no subprocess or filesystem I/O of its own.
             // Deliberately not `.cached(...)` like the sidebar and transcript
@@ -6446,14 +6420,14 @@ impl Render for Harness {
             // shown for the still-active session, so its page can neither
             // draw nor hit-test under the loading centre.
             let pending_neutral = self.pending_right_neutral(cx);
-            let browse_mode = self.mode == layout::Mode::Browse;
+            let browse_mode = crate::layout::Layout::get(cx).mode == layout::Mode::Browse;
             // B2a-H2b: in Browse the pane never drives a native page —
             // one tab, one page. The Browser kind falls back to Changes
             // until B3 puts the agent there: a session page behind
             // Browse would share the centre's tab (flicker) or show a
             // session the mode hides. The header keeps the stored kind;
             // only the body falls back.
-            let body_kind = if self.mode == layout::Mode::Browse && kind == layout::RightKind::Browser
+            let body_kind = if crate::layout::Layout::get(cx).mode == layout::Mode::Browse && kind == layout::RightKind::Browser
             {
                 layout::RightKind::Changes
             } else {
@@ -6619,7 +6593,7 @@ impl Render for Harness {
             // once at the resting width); Browse is instant — the native page
             // cannot follow a per-frame resize without jank — and cuts a hole
             // for the peek so it shows over the page.
-            let browse = self.mode == layout::Mode::Browse && !settings_open;
+            let browse = crate::layout::Layout::get(cx).mode == layout::Mode::Browse && !settings_open;
             let chrome = if settings_open {
                 self.set_browse_holes(Vec::new(), cx);
                 self.render_settings_chrome(cx)
@@ -6634,7 +6608,7 @@ impl Render for Harness {
                 .sidebar_width(px(self.resize.width))
                 .right_width(px(self.right_resize.width))
                 .resizing(self.resize.active || self.right_resize.active || std::mem::take(&mut self.right_snap))
-                .sidebar_open(self.sidebar_open)
+                .sidebar_open(crate::layout::Layout::get(cx).sidebar_open)
                 .right_open(right_open)
                 .sidebar(sidebar)
                 .chrome_lead(chrome.lead)
@@ -6649,7 +6623,7 @@ impl Render for Harness {
                     let _ = holes.update(cx, |this, cx| {
                         // The lights belong to the sidebar's row: gone with
                         // the column, back while the peek card is on screen.
-                        let hidden = !this.sidebar_open && rects.is_empty();
+                        let hidden = !crate::layout::Layout::get(cx).sidebar_open && rects.is_empty();
                         if hidden != this.lights_hidden {
                             this.lights_hidden = hidden;
                             crate::native_lights::set_traffic_lights_hidden(window, hidden, cx);
@@ -6677,7 +6651,7 @@ impl Render for Harness {
             // the handle reports the drag, this only positions it. Hidden
             // with the sidebar: there is no divider to grab on the rail.
             let mut stack = div().relative().size_full().child(shell);
-            if self.sidebar_open {
+            if crate::layout::Layout::get(cx).sidebar_open {
                 let press = cx.entity().downgrade();
                 let travel = cx.entity().downgrade();
                 let release = cx.entity().downgrade();
@@ -6938,7 +6912,7 @@ impl Render for Harness {
                 // close tab after ⌘W = close window). An ancestor wrapper
                 // lost to the deeper `AuiRoot` binding; a child wrapper was
                 // never on the focused path.
-                .key_context(if self.mode == layout::Mode::Browse {
+                .key_context(if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
                     BROWSE_ROOT_CONTEXT
                 } else {
                     aui::keys::ROOT_CONTEXT
@@ -6974,7 +6948,7 @@ impl Render for Harness {
                     // ⌘T lands on the new-tab page with the field focused
                     // (B2a-H4): in Browse it opens a blank person tab,
                     // never a chat session.
-                    if this.mode == layout::Mode::Browse {
+                    if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
                         this.new_browse_sidebar_tab(window, cx);
                         return;
                     }
@@ -7140,25 +7114,25 @@ impl Render for Harness {
                     }
                 }))
                 .on_action(cx.listener(|this, _: &BookmarkPage, window, cx| {
-                    if this.mode == layout::Mode::Browse {
+                    if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
                         this.bookmark_shown_page(window, cx);
                     }
                 }))
                 .on_action(cx.listener(|this, _: &FindInPage, window, cx| {
-                    if this.mode == layout::Mode::Browse {
+                    if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
                         this.open_browse_find(window, cx);
                     }
                 }))
                 .on_action(cx.listener(|this, _: &CopyLink, window, cx| {
-                    if this.mode == layout::Mode::Browse {
+                    if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
                         this.copy_shown_browse_link(cx);
                     }
                     let _ = window;
                 }))
                 .on_action(cx.listener(|this, _: &DevTools, window, cx| {
-                    if this.mode == layout::Mode::Browse
+                    if crate::layout::Layout::get(cx).mode == layout::Mode::Browse
                         && this
-                            .browse_centre_state()
+                            .browse_centre_state(cx)
                             .is_some_and(|state| state.read(cx).supports(aui_webview::BackendFeature::DevTools))
                     {
                         this.open_browse_devtools(cx);
@@ -7366,8 +7340,8 @@ impl Harness {
         }
         // Then a pushed full output or image on the screen the pane shows
         // (docs/43 §2.9–2.10: ←, Esc and ⌘[ go back).
-        if self.layout.right_open {
-            let screen = crate::right::screen_index(crate::layout::right_kind(&self.layout));
+        if crate::layout::Layout::get(cx).right_open {
+            let screen = crate::right::screen_index(crate::layout::right_kind(crate::layout::Layout::get(cx)));
             if self.pop_right_view(screen, cx) {
                 return;
             }
@@ -7501,7 +7475,7 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
-        assert!(vc.update(|_, cx| baaz.read(cx).layout.right_open));
+        assert!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_open));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_palette(PaletteKind::Commands, cx)));
         vc.update(|_, cx| baaz.update(cx, |h, cx| {
             h.overlays.update(cx, |o, _| o.palette = None);
@@ -7785,16 +7759,16 @@ mod tests {
         let baaz = vc.update(|window, cx| {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
-        let start = vc.update(|_, cx| baaz.read(cx).layout.right_open);
+        let start = vc.update(|_, cx| crate::layout::Layout::get(cx).right_open);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).layout.right_open),
+            vc.update(|_, cx| crate::layout::Layout::get(cx).right_open),
             !start,
             "one toggle flips the pane"
         );
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).layout.right_open),
+            vc.update(|_, cx| crate::layout::Layout::get(cx).right_open),
             start,
             "two toggles return to the start"
         );
@@ -7818,7 +7792,7 @@ mod tests {
         assert!(vc.update(|_, cx| baaz.read(cx).settings_page.open));
         let (right_open, terminal_open, overrides) = vc.update(|_, cx| {
             let h = baaz.read(cx);
-            (h.layout.right_open, h.layout.terminal_open, h.overrides.clone())
+            (crate::layout::Layout::get(cx).right_open, crate::layout::Layout::get(cx).terminal_open, h.overrides.clone())
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_terminal(window, cx)));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
@@ -7829,8 +7803,8 @@ mod tests {
         assert!(refused.is_err(), "the right step fails while Settings stands open");
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert_eq!(h.layout.right_open, right_open, "toggle_right changed hidden state");
-            assert_eq!(h.layout.terminal_open, terminal_open, "a dock command changed hidden state");
+            assert_eq!(crate::layout::Layout::get(cx).right_open, right_open, "toggle_right changed hidden state");
+            assert_eq!(crate::layout::Layout::get(cx).terminal_open, terminal_open, "a dock command changed hidden state");
             assert!(h.overrides == overrides, "a per-session pane record was written");
             assert!(h.settings_page.open, "a guarded command closed Settings");
         });
@@ -7853,7 +7827,7 @@ mod tests {
         });
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert_eq!(h.layout.terminal_open, terminal_open, "the palette action flipped the dock");
+            assert_eq!(crate::layout::Layout::get(cx).terminal_open, terminal_open, "the palette action flipped the dock");
             assert!(h.settings_page.open, "the ignored palette action exited Settings");
         });
         restore_state(state);
@@ -8028,7 +8002,7 @@ mod tests {
         );
         // Close again: still no search work and still no synchronous write.
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
-        assert!(!vc.update(|_, cx| baaz.read(cx).layout.right_open), "the toggle closes the pane");
+        assert!(!vc.update(|_, cx| crate::layout::Layout::get(cx).right_open), "the toggle closes the pane");
         assert_eq!(
             Harness::search_rebuild_count(),
             0,
@@ -8289,7 +8263,7 @@ mod tests {
         // History behind it: the menu draws.
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                let id = h.browse_centre_shown().expect("a tab shows");
+                let id = h.browse_centre_shown(cx).expect("a tab shows");
                 h.browser.histories.entry(id).or_default().note_navigated("https://a.example/");
                 h.browser.histories.entry(id).or_default().note_navigated("https://b.example/");
                 h.back_bounds = Some(gpui::Bounds::new(
@@ -8387,7 +8361,7 @@ mod tests {
             })
         });
         vc.update(|_, cx| {
-            let shown = baaz.read(cx).browse_centre_shown().expect("a tab shows");
+            let shown = baaz.read(cx).browse_centre_shown(cx).expect("a tab shows");
             assert_eq!(shown, alpha, "Enter opens the completed row, not the re-ranked index");
             assert_ne!(shown, beta, "the row now at that index does not open");
         });
@@ -8404,7 +8378,7 @@ mod tests {
         });
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            let id = h.browse_centre_shown().expect("a tab shows");
+            let id = h.browse_centre_shown(cx).expect("a tab shows");
             let url = h.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
             assert!(
                 url.starts_with(crate::browser::toolbar::SearchEngine::Google.url_prefix()),
@@ -8429,7 +8403,7 @@ mod tests {
         });
         macro_rules! open {
             () => {
-                vc.update(|_, cx| baaz.read(cx).sidebar_open)
+                vc.update(|_, cx| crate::layout::Layout::get(cx).sidebar_open)
             };
         }
         macro_rules! set {
@@ -8460,7 +8434,7 @@ mod tests {
         assert!(open!(), "switching to Sessions keeps an open sidebar open");
         // The stored state follows the live one after a toggle.
         toggle!();
-        vc.update(|_, cx| assert!(!baaz.read(cx).layout.sidebar_open));
+        vc.update(|_, cx| assert!(!crate::layout::Layout::get(cx).sidebar_open));
         restore_state(state);
     }
 
@@ -8481,29 +8455,29 @@ mod tests {
             .expect("the fixture session opens");
         let carried = vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert_eq!(h.mode, Mode::Browse, "the fixture lands in Browse");
-            assert!(!h.layout.right_open, "Browse's pane stands closed");
-            let shown = h.browse_centre_shown().expect("the carried tab shows");
+            assert_eq!(crate::layout::Layout::get(cx).mode, Mode::Browse, "the fixture lands in Browse");
+            assert!(!crate::layout::Layout::get(cx).right_open, "Browse's pane stands closed");
+            let shown = h.browse_centre_shown(cx).expect("the carried tab shows");
             assert_eq!(h.browse_session_tab, Some(shown));
             shown
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(Mode::Sessions, window, cx)));
         vc.update(|_, cx| {
             let h = baaz.read(cx);
-            assert!(h.layout.right_open, "the Sessions pane comes back open");
-            assert_eq!(h.layout.right_kind, Some(RightKind::Files), "on its kind");
-            assert_eq!(h.browse_centre_shown(), None, "Sessions shows no centre page");
+            assert!(crate::layout::Layout::get(cx).right_open, "the Sessions pane comes back open");
+            assert_eq!(crate::layout::Layout::get(cx).right_kind, Some(RightKind::Files), "on its kind");
+            assert_eq!(h.browse_centre_shown(cx), None, "Sessions shows no centre page");
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(Mode::Browse, window, cx)));
         vc.update(|_, cx| {
-            assert_eq!(baaz.read(cx).browse_centre_shown(), Some(carried), "the shown tab survives the trip");
+            assert_eq!(baaz.read(cx).browse_centre_shown(cx), Some(carried), "the shown tab survives the trip");
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new("https://a.example/", window, cx)))
             .expect("the tab opens");
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert_eq!(h.browse_session_tab, None);
-            let shown = h.browse_centre_shown().expect("the new tab shows");
+            let shown = h.browse_centre_shown(cx).expect("the new tab shows");
             assert_ne!(shown, carried, "the person's new tab takes the centre");
         });
         restore_state(state);
@@ -8523,21 +8497,21 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("search-engine=kagi", cx)))
             .expect("the verb lands on Kagi");
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).layout.search_engine),
+            vc.update(|_, cx| crate::layout::Layout::get(cx).search_engine),
             crate::browser::toolbar::SearchEngine::Kagi,
             "the verb lands on Kagi"
         );
         let refused = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("search-engine=altavista", cx)));
         assert!(refused.is_err(), "an unknown value fails the step");
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).layout.search_engine),
+            vc.update(|_, cx| crate::layout::Layout::get(cx).search_engine),
             crate::browser::toolbar::SearchEngine::Kagi,
             "an unknown value changes nothing"
         );
         let refused = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("engine=google", cx)));
         assert!(refused.is_err(), "an unknown key fails the step");
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).layout.search_engine),
+            vc.update(|_, cx| crate::layout::Layout::get(cx).search_engine),
             crate::browser::toolbar::SearchEngine::Kagi,
             "an unknown key changes nothing"
         );
@@ -8673,7 +8647,7 @@ mod tests {
         .expect("the tab opens");
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
-                if h.sidebar_open {
+                if crate::layout::Layout::get(cx).sidebar_open {
                     h.toggle_sidebar(cx);
                 }
             })
@@ -8748,7 +8722,7 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
-                h.layout.feedback_mode = true;
+                crate::layout::Layout::stage(cx, |layout| layout.feedback_mode = true);
                 h.step_skills("page", window, cx).expect("the Skills page opens");
             })
         });
@@ -8986,8 +8960,8 @@ mod tests {
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert!(!harness.settings_page.open, "the row leaves Settings");
-            assert_eq!(harness.mode, crate::layout::Mode::Browse, "the row lands in Browse");
-            let id = harness.browse_centre_shown().expect("a tab shows");
+            assert_eq!(crate::layout::Layout::get(cx).mode, crate::layout::Mode::Browse, "the row lands in Browse");
+            let id = harness.browse_centre_shown(cx).expect("a tab shows");
             let url = harness.browser.tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
             assert_eq!(url, "chrome://settings", "the new tab loads Chromium's settings");
         });
@@ -9005,7 +8979,7 @@ mod tests {
                 .collect();
             assert_eq!(settings_tabs.len(), 1, "reopening selects the existing tab instead of opening another");
             assert_eq!(
-                harness.browse_centre_shown(),
+                harness.browse_centre_shown(cx),
                 Some(settings_tabs[0]),
                 "the existing tab shows"
             );
@@ -9107,9 +9081,9 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.select_browse_sidebar_tab(second, window, cx)));
         vc.update(|window, cx| {
             let h = baaz.read(cx);
-            assert_eq!(h.browse_centre_shown(), Some(second), "the selection moved");
+            assert_eq!(h.browse_centre_shown(cx), Some(second), "the selection moved");
             assert!(h.browse_address.is_none(), "selecting leaves the address");
-            let new_page = h.browse_centre_state().expect("the new page exists");
+            let new_page = h.browse_centre_state(cx).expect("the new page exists");
             assert_eq!(
                 window.focused(cx),
                 Some(new_page.read(cx).focus_handle().clone()),
@@ -9326,18 +9300,18 @@ mod tests {
         for kind in crate::layout::RightKind::ALL {
             vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(kind, cx)));
             assert!(
-                vc.update(|_, cx| baaz.read(cx).layout.right_open),
+                vc.update(|_, cx| crate::layout::Layout::get(cx).right_open),
                 "{kind:?} opens the pane"
             );
-            assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
+            assert_eq!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_kind), Some(kind));
             // The same kind again closes the pane, keeping the kind so a
             // later reopen restores it.
             vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(kind, cx)));
             assert!(
-                !vc.update(|_, cx| baaz.read(cx).layout.right_open),
+                !vc.update(|_, cx| crate::layout::Layout::get(cx).right_open),
                 "{kind:?} again closes the pane"
             );
-            assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
+            assert_eq!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_kind), Some(kind));
             assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "show_right never opens a session");
         }
         // A different kind while open switches without closing.
@@ -9347,9 +9321,9 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx))
         });
-        assert!(vc.update(|_, cx| baaz.read(cx).layout.right_open));
+        assert!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_open));
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).layout.right_kind),
+            vc.update(|_, cx| crate::layout::Layout::get(cx).right_kind),
             Some(crate::layout::RightKind::Changes)
         );
         restore_state(state);
@@ -9370,17 +9344,17 @@ mod tests {
         for kind in crate::layout::RightKind::ALL {
             vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(kind, cx)));
             assert!(
-                vc.update(|_, cx| baaz.read(cx).layout.right_open),
+                vc.update(|_, cx| crate::layout::Layout::get(cx).right_open),
                 "{kind:?} opens the pane"
             );
-            assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
+            assert_eq!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_kind), Some(kind));
             // The same kind again keeps the pane open on that kind.
             vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(kind, cx)));
             assert!(
-                vc.update(|_, cx| baaz.read(cx).layout.right_open),
+                vc.update(|_, cx| crate::layout::Layout::get(cx).right_open),
                 "{kind:?} again must not close the pane"
             );
-            assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
+            assert_eq!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_kind), Some(kind));
             assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "select_right never opens a session");
         }
         restore_state(state);
@@ -9461,7 +9435,7 @@ mod tests {
             () => {
                 vc.update(|_, cx| {
                     let h = baaz.read(cx);
-                    (h.layout.right_open, h.layout.right_kind, h.right_snap)
+                    (crate::layout::Layout::get(cx).right_open, crate::layout::Layout::get(cx).right_kind, h.right_snap)
                 })
             };
         }
@@ -9533,14 +9507,14 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| baaz2.update(cx, |h, cx| h.resume("sess-a".to_owned(), window, cx)));
-        assert!(vc.update(|_, cx| baaz2.read(cx).layout.right_open), "A restores Changes after restart");
+        assert!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_open), "A restores Changes after restart");
         assert_eq!(
-            vc.update(|_, cx| baaz2.read(cx).layout.right_kind),
+            vc.update(|_, cx| crate::layout::Layout::get(cx).right_kind),
             Some(crate::layout::RightKind::Changes)
         );
         // A brand-new session starts closed.
         vc.update(|window, cx| baaz2.update(cx, |h, cx| h.resume("sess-c".to_owned(), window, cx)));
-        assert!(!vc.update(|_, cx| baaz2.read(cx).layout.right_open), "a new session starts closed");
+        assert!(!vc.update(|_, cx| crate::layout::Layout::get(cx).right_open), "a new session starts closed");
         // Files previews are per session: A previews Cargo.toml, B nothing.
         open_session!("sess-a");
         show!(crate::layout::RightKind::Files);
@@ -9727,9 +9701,9 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert!(harness.layout.right_open, "the link opens the pane");
+            assert!(crate::layout::Layout::get(cx).right_open, "the link opens the pane");
             assert_eq!(
-                crate::layout::right_kind(&harness.layout),
+                crate::layout::right_kind(crate::layout::Layout::get(cx)),
                 crate::layout::RightKind::Browser,
                 "the link opens the pane on Browser"
             );
@@ -9788,9 +9762,9 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert!(harness.layout.right_open, "the link opens the pane");
+            assert!(crate::layout::Layout::get(cx).right_open, "the link opens the pane");
             assert_eq!(
-                crate::layout::right_kind(&harness.layout),
+                crate::layout::right_kind(crate::layout::Layout::get(cx)),
                 crate::layout::RightKind::Files,
                 "a folder link opens the pane on Files"
             );
@@ -9860,7 +9834,7 @@ mod tests {
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert_eq!(
-                crate::layout::right_kind(&harness.layout),
+                crate::layout::right_kind(crate::layout::Layout::get(cx)),
                 crate::layout::RightKind::Files,
                 "a file link opens the pane on Files"
             );
@@ -9921,7 +9895,7 @@ mod tests {
         });
         vc.run_until_parked();
         vc.update(|_, cx| {
-            assert_eq!(crate::layout::right_kind(&baaz.read(cx).layout), crate::layout::RightKind::Browser, "an HTML link opens the Page");
+            assert_eq!(crate::layout::right_kind(crate::layout::Layout::get(cx)), crate::layout::RightKind::Browser, "an HTML link opens the Page");
         });
         assert!(page_shows(vc, &url), "the Page navigates to the file");
         assert!(vc.update(|_, cx| baaz.read(cx).right_cache.preview_for(&root).is_none()), "no code preview opened");
@@ -9948,7 +9922,7 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_file_entry(&root, "index.html", cx)));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(crate::layout::right_kind(&harness.layout), crate::layout::RightKind::Browser, "a Files click on HTML opens the Page");
+            assert_eq!(crate::layout::right_kind(crate::layout::Layout::get(cx)), crate::layout::RightKind::Browser, "a Files click on HTML opens the Page");
             assert!(harness.right_cache.preview_for(&root).is_none(), "no code preview");
         });
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.begin_file_source_for(&root, "notes.md", cx)));

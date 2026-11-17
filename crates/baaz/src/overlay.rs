@@ -368,7 +368,7 @@ impl Harness {
     /// Browse menu at its pointer anchor (window coordinates, offset by the
     /// main window's origin), sized for the menu and its submenu.
     fn wanted_overlay(&self, window: &Window, cx: &App) -> Option<(OverlayKind, Bounds<Pixels>)> {
-        if self.mode != crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return None;
         }
         if self.modal_overlay_wanted(cx) {
@@ -391,7 +391,7 @@ impl Harness {
             let height = (win.height - top - gpui::px(16.0)).min(gpui::px(FIELD_MAX_H)) + pad;
             return Some((OverlayKind::Field, Bounds::new(origin, gpui::size(width, height))));
         }
-        if self.bookmark_edit.is_some() && self.sidebar_open && self.browse_centre_state().is_some() {
+        if self.bookmark_edit.is_some() && crate::layout::Layout::get(cx).sidebar_open && self.browse_centre_state(cx).is_some() {
             let metrics = cx.aui().metrics;
             let pad = gpui::px(SHADOW_PAD);
             let top = metrics.header + metrics.item_px / 2.0 + metrics.control_lg + gpui::px(scale::SP_1);
@@ -399,7 +399,7 @@ impl Harness {
             let height = (window.bounds().size.height - top - metrics.item_px).min(gpui::px(460.0)) + pad;
             return Some((OverlayKind::Bookmark, Bounds::new(origin, gpui::size(gpui::px(bookmark::BOOKMARK_W) + pad * 2.0, height))));
         }
-        if self.site_info_open && self.sidebar_open && self.browse_centre_state().is_some() {
+        if self.site_info_open && crate::layout::Layout::get(cx).sidebar_open && self.browse_centre_state(cx).is_some() {
             // Under the address line, inside a clear rect like the Field's.
             let metrics = cx.aui().metrics;
             let pad = gpui::px(SHADOW_PAD);
@@ -560,11 +560,11 @@ impl Harness {
     /// for the widest toast; the pills sit at its bottom-right and the
     /// clear rest passes the pointer through to the page.
     fn wanted_corner(&self, window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
-        if !self.corner_in_overlay() || self.feedback.capturing {
+        if !self.corner_in_overlay(cx) || self.feedback.capturing {
             return None;
         }
         let toast = !self.overlays.read(cx).toasts.is_empty();
-        let slot = self.feedback_slot_shown();
+        let slot = self.feedback_slot_shown(cx);
         let pills = usize::from(toast) + usize::from(slot);
         if pills == 0 {
             return None;
@@ -664,13 +664,13 @@ impl Harness {
         if self.settings_page.open {
             return None;
         }
-        if self.mode == crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             return self.wanted_agent_line(self.browser.centre_page_rect?, window, cx);
         }
-        if !self.layout.right_open || self.right_strip_moving {
+        if !crate::layout::Layout::get(cx).right_open || self.right_strip_moving {
             return None;
         }
-        if crate::layout::right_kind(&self.layout) != crate::layout::RightKind::Browser || self.right_cache.pushed.contains_key(&2) {
+        if crate::layout::right_kind(crate::layout::Layout::get(cx)) != crate::layout::RightKind::Browser || self.right_cache.pushed.contains_key(&2) {
             return None;
         }
         let state = self.existing_browser(cx)?;
@@ -706,8 +706,8 @@ impl Harness {
     /// The session whose work the line shows: the page on screen's owner, else
     /// whichever session is waiting on the person.
     pub(crate) fn line_session(&self, cx: &App) -> Option<String> {
-        let shown = if self.mode == crate::layout::Mode::Browse {
-            self.browse_centre_shown()
+        let shown = if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
+            self.browse_centre_shown(cx)
                 .and_then(|id| self.browser.tabs.get(id))
                 .and_then(|tab| match &tab.owner {
                     crate::browser::tabs::Owner::Session(session) => Some(session.clone()),
@@ -722,7 +722,7 @@ impl Harness {
             // A browser chat working on the person's tab (its grant) drives
             // the line too (R3).
             .or_else(|| {
-                (self.mode == crate::layout::Mode::Browse)
+                (crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse)
                     .then(|| self.browser_chat_id(cx))
                     .flatten()
                     .filter(|session| self.terminal_service.agent_activity(session).is_some())
@@ -740,7 +740,7 @@ impl Harness {
                 return Some((Self::agent_line_state(&activity, name, &host), Some(session)));
             }
         }
-        if self.mode != crate::layout::Mode::Browse || self.settings_open() {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.settings_open() {
             return None;
         }
         self.own_line_state(cx).map(|state| (state, None))
@@ -880,7 +880,7 @@ impl Harness {
         let baaz = cx.entity().downgrade();
         // The ask row types: its float takes the keyboard (R3). Every other
         // state leaves it with the page.
-        let keys = self.line_wants_keys && self.mode == crate::layout::Mode::Browse;
+        let keys = self.line_wants_keys && crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
         let input = keys.then(|| self.agent_line_input.clone()).flatten();
         cx.spawn(async move |this, cx| {
             let opened = cx.update(|cx| {
@@ -929,7 +929,7 @@ impl Harness {
     /// The Page float's content: the notes panel or the agent pill. Their
     /// clicks run on the main window, where the page's state lives.
     fn render_page_float(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if self.mode == crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             return self.render_agent_line(window, cx);
         }
         let state = self.existing_browser(cx)?;
@@ -1006,8 +1006,9 @@ impl Harness {
                     (Some(session), LineIntent::HandBack) => this.terminal_service.hand_back(&session),
                     (Some(session), LineIntent::AllowAlways) => {
                         if let Some(host) = this.terminal_service.page_host(&session, cx).filter(|h| !h.is_empty()) {
-                            this.layout.agents.set_site(&host, Some(crate::browser::agents::SiteRule::Always));
-                            this.persist_layout();
+                            crate::layout::Layout::update(cx, |layout| {
+                                layout.agents.set_site(&host, Some(crate::browser::agents::SiteRule::Always))
+                            });
                         }
                         this.terminal_service.answer_person(&session, true);
                     }
@@ -1056,7 +1057,7 @@ impl Harness {
         if let Some(edit) = self.bookmark_edit.as_ref() {
             (edit.id, edit.folder, edit.folders_open).hash(&mut hasher);
         }
-        self.browse_centre_shown().hash(&mut hasher);
+        self.browse_centre_shown(cx).hash(&mut hasher);
         if self.browse_address.is_some() {
             self.browse_address_text(cx).hash(&mut hasher);
             self.browse_omnibox_selected.hash(&mut hasher);
@@ -1086,7 +1087,7 @@ impl Harness {
     /// mode, so a page loading under an open palette never moves it.
     pub(crate) fn modal_overlay_wanted(&self, cx: &App) -> bool {
         let overlays = self.overlays.read(cx);
-        self.mode == crate::layout::Mode::Browse && (overlays.palette.is_some() || overlays.dialog.is_some())
+        crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse && (overlays.palette.is_some() || overlays.dialog.is_some())
     }
 
     /// The handle the hosted modal's keyboard belongs to: the palette's own
@@ -1110,12 +1111,12 @@ impl Harness {
     /// Browse with the sidebar (vertical tabs) open and the page is not the new-tab page
     /// (which carries the Field inline).
     pub(crate) fn field_overlay_wanted(&self, cx: &App) -> bool {
-        self.mode == crate::layout::Mode::Browse
-            && self.sidebar_open
+        crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse
+            && crate::layout::Layout::get(cx).sidebar_open
             && !self.settings_open()
             && self.browse_address.is_some()
-            && !(self.browse_centre_state().is_some_and(|state| matches!(state.read(cx).url().as_ref(), "" | crate::browser::tabs::BLANK))
-                && self.browse_centre_tab_blank())
+            && !(self.browse_centre_state(cx).is_some_and(|state| matches!(state.read(cx).url().as_ref(), "" | crate::browser::tabs::BLANK))
+                && self.browse_centre_tab_blank(cx))
     }
 
     /// The overlay's content for `kind`: the Browse menu panel, its intents
@@ -1357,7 +1358,7 @@ impl Harness {
     fn render_site_info(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let p = cx.aui().colors;
         let metrics = cx.aui().metrics;
-        let state = self.browse_centre_state();
+        let state = self.browse_centre_state(cx);
         let (url, security, cert) = match state.as_ref() {
             Some(state) => {
                 let page = state.read(cx);

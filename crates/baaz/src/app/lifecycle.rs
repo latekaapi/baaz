@@ -1262,7 +1262,7 @@ impl Harness {
         let width = rest.trim().parse::<f32>().map_err(|_| format!("`{rest}` is not a width"))?;
         self.resize.width = clamp_sidebar_width(width);
         self.resize.active = false;
-        self.resize.persist();
+        self.resize.persist(cx);
         cx.notify();
         Ok(())
     }
@@ -1691,7 +1691,7 @@ impl Harness {
         // sidebar button and the provider picks switch out of Browse
         // before the session starts. (⌘T opens a person tab while in
         // Browse and never reaches here.)
-        if self.mode == crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             self.set_mode(crate::layout::Mode::Sessions, window, cx);
         }
         // A new session (possibly in another project) drops the session tab
@@ -2000,11 +2000,6 @@ impl Harness {
             terminal_host: Some(self.terminal_host.clone()),
         };
         let view = cx.new(|cx| SessionView::new(draft_id.clone(), host, window, cx));
-        let fold_on = self.layout.fold_finished_turns;
-        view.update(cx, |view, cx| {
-            view.fold_finished_turns = fold_on;
-            cx.notify();
-        });
         view.update(cx, |view, cx| view.load_history(cx));
         // Live, Muse is starting under this draft: the chip and the model
         // menu say so (the promotion replaces the view once it is up).
@@ -2162,7 +2157,7 @@ impl Harness {
         // Sessions first — the palettes, search, the rail, the `open:`
         // step and boot all funnel through here, and a session opened
         // behind Browse would otherwise stay invisible.
-        if self.mode == crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             self.set_mode(crate::layout::Mode::Sessions, window, cx);
         }
         self.adopt_session_project(&session_id, cx);
@@ -2427,11 +2422,6 @@ impl Harness {
         let overlays = self.overlays.clone();
         let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone(), terminal_host: Some(self.terminal_host.clone()) };
         let view = cx.new(|cx| SessionView::new(session_id.clone(), host, window, cx));
-        let fold_on = self.layout.fold_finished_turns;
-        view.update(cx, |view, cx| {
-            view.fold_finished_turns = fold_on;
-            cx.notify();
-        });
         view.update(cx, |view, cx| view.load_history(cx));
         self.activate(view, quiet, window, cx);
         self.adopt_session_project(&session_id, cx);
@@ -2820,11 +2810,6 @@ impl Harness {
         let view = cx.new(|cx| {
             SessionView::new_on_provider(session_id.clone(), provider, events, host, window, cx)
         });
-        let fold_on = self.layout.fold_finished_turns;
-        view.update(cx, |view, cx| {
-            view.fold_finished_turns = fold_on;
-            cx.notify();
-        });
         // A disabled open lands readable with the quiet banner instead of
         // a live child: the view above rides the scripted lane, so there
         // is no child to hang up and nothing was ever sent.
@@ -3013,8 +2998,6 @@ impl Harness {
             terminal_host: Some(self.terminal_host.clone()),
         };
         let view = cx.new(|cx| SessionView::new_provider_opening(request_id.clone(), mode, host, window, cx));
-        let fold_on = self.layout.fold_finished_turns;
-        view.update(cx, |view, _| view.fold_finished_turns = fold_on);
         // A switch carries the replaced draft's mode and effort; otherwise
         // the last effort picked on this provider is the level the first
         // turn asks for (owner 2026-10-21: a Claude Code draft never read
@@ -4922,7 +4905,7 @@ impl Harness {
             // "Enable" on a disabled-provider banner: Settings on the
             // Providers page, where the switch lives.
             SessionEvent::OpenProviders => {
-                let sections = self.settings_sections();
+                let sections = self.settings_sections(cx);
                 let section = crate::settings::settings_section_index(
                     &sections,
                     crate::settings_providers::PROVIDERS_SECTION_ID,
@@ -5179,9 +5162,10 @@ impl Harness {
     }
 
     /// B12fix `transcript:fold`: flip the persisted "Fold finished
-    /// turns" switch (Settings → General, default on) and apply it live
-    /// to every open view — the same backing as the settings row, so the
-    /// probe, the palette and the switch never disagree. Registered in
+    /// turns" switch (Settings → General, default on); every open view
+    /// observes the layout global and re-folds — the same path as the
+    /// settings row, so the probe, the palette and the switch never
+    /// disagree. Registered in
     /// [`crate::steps::WINDOW_VERBS`]; any other payload fails the step
     /// instead of toggling something nobody asked for.
     pub(crate) fn step_transcript_fold(
@@ -5194,29 +5178,11 @@ impl Harness {
         if rest.trim() != "fold" {
             return Err(format!("unknown transcript payload `{rest}`; the only one is fold"));
         }
-        let on = !self.layout.fold_finished_turns;
-        crate::settings::apply_setting(&mut self.layout, "fold_finished_turns", on);
-        self.persist_layout();
-        self.apply_fold_to_views(on, cx);
+        let on = !crate::layout::Layout::get(cx).fold_finished_turns;
+        crate::layout::Layout::update(cx, |layout| crate::settings::apply_setting(layout, "fold_finished_turns", on));
         self.invalidate_list();
-        cx.notify();
         Ok(())
     }
-
-    /// Push the persisted "Fold finished turns" switch into every open
-    /// session view (active and parked) and rebuild their row mappings,
-    /// so the transcript re-folds from the next frame. Shared with
-    /// [`Harness::flip_setting`](crate::settings::Harness::flip_setting).
-    pub(crate) fn apply_fold_to_views(&mut self, on: bool, cx: &mut Context<Self>) {
-        for view in self.registry.live(self.active.as_ref()) {
-            view.update(cx, |view, cx| {
-                view.fold_finished_turns = on;
-                view.refresh_render_cache();
-                cx.notify();
-            });
-        }
-    }
-
 }
 
 /// The `<dy,finger_ticks,tail_ticks>` payload of the two scroll-sweep
@@ -5450,7 +5416,7 @@ impl Harness {
             .and_then(|run| run.pack.as_ref())
             .filter(|pack| {
                 crate::handoff::should_model_summary(
-                    self.layout.handoff_model_summary,
+                    crate::layout::Layout::get(cx).handoff_model_summary,
                     self.utility_available(self.session_lane_provider(&source)),
                     pack,
                 )
@@ -5478,7 +5444,7 @@ impl Harness {
         // a second while the run is in flight, re-armed only while live —
         // settled runs own no timer.
         self.arm_handoff_tick(source.clone(), epoch, cx);
-        let prefix = view.update(cx, |view, _| view.handoff_snapshot_turns());
+        let prefix = view.update(cx, |view, cx| view.handoff_snapshot_turns(cx));
         self.pending_handoff =
             Some(crate::handoff::PendingHandoff { source_session: source, epoch, prefix });
         // Every destination opens the same way (docs/70): on its provider's
@@ -5576,7 +5542,7 @@ impl Harness {
         let mut prefix = pending.prefix.clone();
         if prefix.is_empty() {
             if let Some(source) = self.find_view(&pending.source_session, cx) {
-                prefix = source.update(cx, |view, _| view.handoff_snapshot_turns());
+                prefix = source.update(cx, |view, cx| view.handoff_snapshot_turns(cx));
             }
         }
         let text = crate::handoff::pack_text(&pack, run.from);
@@ -5650,7 +5616,7 @@ impl Harness {
         // the one divider.
         let snap_turns = self
             .find_view(&source, cx)
-            .map(|view| view.update(cx, |view, _| view.handoff_snapshot_turns()))
+            .map(|view| view.update(cx, |view, cx| view.handoff_snapshot_turns(cx)))
             .unwrap_or_default();
         let (pack_full, pack_display) = run
             .pack
@@ -7658,7 +7624,7 @@ mod tests {
                 for entry in harness.sessions.iter_mut().filter(|e| e.id == "s-codex-old") {
                     entry.turns = 0;
                 }
-                harness.layout.auto_title = true;
+                crate::layout::Layout::stage(cx, |layout| layout.auto_title = true);
                 harness.maybe_start_title("s-codex-old", Some("why does the parser panic".into()), cx);
             });
         });
@@ -7702,7 +7668,7 @@ mod tests {
                     None,
                     chrono::Local::now(),
                 ));
-                harness.layout.auto_title = true;
+                crate::layout::Layout::stage(cx, |layout| layout.auto_title = true);
                 harness.maybe_start_title("s-muse-new", Some("chart the ferry routes".into()), cx);
                 assert_eq!(harness.side_sessions.len(), 1, "the side session is recorded before the call");
                 let side = harness.side_sessions.iter().next().cloned().expect("a side id");
@@ -7844,7 +7810,7 @@ mod tests {
                     .label
                     .clone();
                 assert_eq!(header, row, "header title == selected row title");
-                assert!(harness.layout.right_open, "the failure lands on the failed session's pane");
+                assert!(crate::layout::Layout::get(cx).right_open, "the failure lands on the failed session's pane");
             });
         });
         lane_restore(state);
@@ -8018,7 +7984,7 @@ mod tests {
                     "the right pane is neutral while the switch is pending"
                 );
                 assert!(
-                    !harness.layout.right_open,
+                    !crate::layout::Layout::get(cx).right_open,
                     "the pane keeps the previous session's closed state at the click, never the destination's"
                 );
                 assert!(
@@ -8056,7 +8022,7 @@ mod tests {
                     "the previous draft survives the landing"
                 );
                 assert!(
-                    harness.layout.right_open,
+                    crate::layout::Layout::get(cx).right_open,
                     "the landed destination keeps its own pane"
                 );
             });
@@ -8107,7 +8073,7 @@ mod tests {
                     "https://a.example/".to_owned(),
                     cx,
                 );
-                harness.layout.right_kind = Some(crate::layout::RightKind::Browser);
+                crate::layout::Layout::stage(cx, |layout| layout.right_kind = Some(crate::layout::RightKind::Browser));
             });
         });
         let a_pane = vc.update(|_, cx| {
@@ -8143,11 +8109,11 @@ mod tests {
                     "the right pane is neutral while the switch is pending"
                 );
                 assert!(
-                    harness.layout.right_open,
+                    crate::layout::Layout::get(cx).right_open,
                     "the live pane keeps its width instead of following the destination"
                 );
                 assert_eq!(
-                    harness.layout.right_kind,
+                    crate::layout::Layout::get(cx).right_kind,
                     Some(crate::layout::RightKind::Browser),
                     "the live kind is untouched at the click"
                 );
@@ -8174,7 +8140,7 @@ mod tests {
                 // stored pane moves.
                 harness.toggle_right(cx);
                 assert!(
-                    !harness.layout.right_open,
+                    !crate::layout::Layout::get(cx).right_open,
                     "the toggle flips the live pane"
                 );
                 assert_eq!(
@@ -8235,11 +8201,11 @@ mod tests {
                     "the pane leaves its neutral state with the landing"
                 );
                 assert!(
-                    harness.layout.right_open,
+                    crate::layout::Layout::get(cx).right_open,
                     "the landed destination restores its own open pane"
                 );
                 assert_eq!(
-                    harness.layout.right_kind,
+                    crate::layout::Layout::get(cx).right_kind,
                     Some(crate::layout::RightKind::Files),
                     "the landed destination restores its own kind, not the discarded toggle"
                 );
@@ -8457,7 +8423,7 @@ mod tests {
                     "the pane stays neutral across the superseding click"
                 );
                 assert!(
-                    !harness.layout.right_open,
+                    !crate::layout::Layout::get(cx).right_open,
                     "no click applied a destination pane: the live pane is still the first session's closed one"
                 );
                 assert!(
@@ -8490,7 +8456,7 @@ mod tests {
                     "no loading state outlives the landing"
                 );
                 assert!(
-                    !harness.layout.right_open,
+                    !crate::layout::Layout::get(cx).right_open,
                     "the pane is the winner's, never the late landing's"
                 );
                 let parked = harness
@@ -8812,7 +8778,7 @@ mod tests {
                 let view = harness.active.clone().expect("the session stays open");
                 assert_eq!(view.read(cx).session_id, first, "still the same view");
                 assert!(
-                    harness.layout.right_open,
+                    crate::layout::Layout::get(cx).right_open,
                     "the restored session's pane is exactly as it was"
                 );
             });
@@ -11342,8 +11308,10 @@ done
                     record.turns = 1;
                     record.title = None;
                 }
-                harness.layout.auto_summary = true;
-                harness.layout.auto_title = true;
+                crate::layout::Layout::stage(cx, |layout| {
+                    layout.auto_summary = true;
+                    layout.auto_title = true;
+                });
                 harness.set_override(
                     "s-codex-old",
                     |meta| {
@@ -11401,7 +11369,7 @@ done
         std::fs::create_dir_all(&folder).expect("the folder");
         let folder = folder.to_string_lossy().into_owned();
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, _| {
+            baaz.update(cx, |harness, cx| {
                 let mut record = crate::provider_sessions::ProviderSessionRecord {
                     provider: "claude-code".into(),
                     session_id: "imp-1".into(),
@@ -11422,7 +11390,7 @@ done
                 record.project = None;
                 harness.index_loaded = true;
                 harness.sessions_loaded = true;
-                harness.layout.group_by = Some(crate::layout::GroupBy::Project);
+                crate::layout::Layout::stage(cx, |layout| layout.group_by = Some(crate::layout::GroupBy::Project));
                 let added = crate::import::land(&mut harness.provider_sessions, vec![record]);
                 assert_eq!(added, vec!["imp-1".to_owned()]);
                 harness.merge_provider_rows();
@@ -11857,8 +11825,8 @@ done
                     view.read(cx).has_handoff_prefix(),
                     "the acknowledgement keeps the landed prefix"
                 );
-                let ids: Vec<String> = view.update(cx, |view, _| {
-                    view.handoff_snapshot_turns().iter().map(|turn| turn.id().to_owned()).collect()
+                let ids: Vec<String> = view.update(cx, |view, cx| {
+                    view.handoff_snapshot_turns(cx).iter().map(|turn| turn.id().to_owned()).collect()
                 });
                 assert_eq!(
                     ids,
@@ -11910,7 +11878,7 @@ done
         let dest = open_b3_destination(vc, &baaz);
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
-                assert!(harness.layout.auto_title, "the switch is on: the guard does the work");
+                assert!(crate::layout::Layout::get(cx).auto_title, "the switch is on: the guard does the work");
                 harness.land_handoff_destination(dest.clone(), cx);
                 harness.maybe_start_title(
                     &dest,

@@ -100,7 +100,7 @@ impl Harness {
             }
             PageMenuPress::Open => {}
         }
-        let Some(state) = self.browse_centre_state() else {
+        let Some(state) = self.browse_centre_state(cx) else {
             return;
         };
         let page = state.read(cx);
@@ -223,7 +223,7 @@ impl Harness {
     /// The Ask button: a new session with the page as its unsent draft
     /// (the omnibox Ask's path), until the agent line lands (docs/27 R3).
     pub(crate) fn browse_ask_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let shown = self.browse_centre_shown().and_then(|id| self.browser.tabs.get(id)).map(|tab| (tab.title.clone(), tab.url.clone()));
+        let shown = self.browse_centre_shown(cx).and_then(|id| self.browser.tabs.get(id)).map(|tab| (tab.title.clone(), tab.url.clone()));
         let query = match shown {
             Some((title, url)) if url != tabs::BLANK && !url.is_empty() => {
                 let title = tabs::tab_label(&title, &url);

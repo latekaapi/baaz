@@ -552,41 +552,37 @@ impl Harness {
     /// Project (docs/83 §4, task 2.5: group by project by default). An
     /// install that never chose reads Project now even with one adopted
     /// project, where it used to read Date; a stored choice of Date stands.
-    pub(crate) fn effective_group_by(&self) -> crate::layout::GroupBy {
-        self.layout.group_by.unwrap_or(crate::layout::GroupBy::Project)
+    pub(crate) fn effective_group_by(&self, cx: &gpui::App) -> crate::layout::GroupBy {
+        crate::layout::Layout::get(cx).group_by.unwrap_or(crate::layout::GroupBy::Project)
     }
 
     /// The Sessions view menu's "Group by project": persist the other mode
     /// and regroup. The first toggle is what persists the choice at all —
     /// until then the grouping follows the data.
     pub(crate) fn toggle_group_by(&mut self, cx: &mut Context<Self>) {
-        let next = match self.effective_group_by() {
+        let next = match self.effective_group_by(cx) {
             crate::layout::GroupBy::Project => crate::layout::GroupBy::Date,
             crate::layout::GroupBy::Date => crate::layout::GroupBy::Project,
         };
-        self.layout.group_by = Some(next);
-        layout::write(&self.layout);
+        crate::layout::Layout::update(cx, |layout| layout.group_by = Some(next));
         self.invalidate_list();
-        cx.notify();
     }
 
     /// The view menu's Group by submenu: persist `group` and regroup (a
     /// no-op when it already is the grouping).
     pub(crate) fn set_group_by(&mut self, group: crate::layout::GroupBy, cx: &mut Context<Self>) {
-        if self.effective_group_by() != group {
+        if self.effective_group_by(cx) != group {
             self.toggle_group_by(cx);
         }
     }
 
     /// The view menu's Sort by submenu: persist the order and regroup.
     pub(crate) fn set_sort_by(&mut self, order: crate::layout::SortBy, cx: &mut Context<Self>) {
-        if self.layout.sort_by == order {
+        if crate::layout::Layout::get(cx).sort_by == order {
             return;
         }
-        self.layout.sort_by = order;
-        layout::write(&self.layout);
+        crate::layout::Layout::update(cx, |layout| layout.sort_by = order);
         self.invalidate_list();
-        cx.notify();
     }
 
     /// The view menu's "Clear empty sessions": hide every session with no
@@ -634,14 +630,14 @@ impl Harness {
     /// `closed_groups` and the layout is written. Every group, the unfiled
     /// one included, reads that set the same way.
     pub(crate) fn toggle_group(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.layout.closed_groups.iter().any(|g| g == &id) {
-            self.layout.closed_groups.retain(|g| g != &id);
-        } else {
-            self.layout.closed_groups.push(id);
-        }
-        layout::write(&self.layout);
+        crate::layout::Layout::update(cx, |layout| {
+            if layout.closed_groups.iter().any(|g| g == &id) {
+                layout.closed_groups.retain(|g| g != &id);
+            } else {
+                layout.closed_groups.push(id);
+            }
+        });
         self.invalidate_list();
-        cx.notify();
     }
 
     /// Flip a project group's "Show N more": its id moves in or out of
@@ -649,21 +645,21 @@ impl Harness {
     /// list regroups. The group's own disclosure is untouched — an expanded
     /// group can stand closed and open folded.
     pub(crate) fn toggle_expanded(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.layout.expanded_groups.iter().any(|g| g == &id) {
-            self.layout.expanded_groups.retain(|g| g != &id);
-        } else {
-            self.layout.expanded_groups.push(id);
-        }
-        layout::write(&self.layout);
+        crate::layout::Layout::update(cx, |layout| {
+            if layout.expanded_groups.iter().any(|g| g == &id) {
+                layout.expanded_groups.retain(|g| g != &id);
+            } else {
+                layout.expanded_groups.push(id);
+            }
+        });
         self.invalidate_list();
-        cx.notify();
     }
 
     pub(crate) fn visible_sessions(&self, cx: &gpui::App) -> Rc<Vec<SessionEntry>> {
         let active = self.active_id(cx);
-        let group_by = self.effective_group_by();
-        let closed = self.layout.closed_groups.clone();
-        let expanded = self.layout.expanded_groups.clone();
+        let group_by = self.effective_group_by(cx);
+        let closed = crate::layout::Layout::get(cx).closed_groups.clone();
+        let expanded = crate::layout::Layout::get(cx).expanded_groups.clone();
         // The click's target rides the key: the grouping rescues it past the
         // fold, so a click (or an `open:` step) that names a held-back row
         // must rebuild the grouping on its own frame.
@@ -787,13 +783,13 @@ impl Harness {
         }
         let at = std::time::Instant::now();
         let was_boot = !self.sessions_loaded || !self.index_loaded;
-        let grouping = match self.effective_group_by() {
+        let grouping = match self.effective_group_by(cx) {
             crate::layout::GroupBy::Date => sidebar::grouping_at(&visible, now),
             crate::layout::GroupBy::Project if self.index_loaded => {
                 let closed: std::collections::HashSet<String> =
-                    self.layout.closed_groups.iter().cloned().collect();
+                    crate::layout::Layout::get(cx).closed_groups.iter().cloned().collect();
                 let expanded: std::collections::HashSet<String> =
-                    self.layout.expanded_groups.iter().cloned().collect();
+                    crate::layout::Layout::get(cx).expanded_groups.iter().cloned().collect();
                 let active = self.active_id(cx);
                 // A brand-new session has no row yet: resolve its project
                 // past the rows so its group still counts as current.
@@ -812,7 +808,7 @@ impl Harness {
                     active_project: active_project.as_deref(),
                     pending: self.pending_id.as_deref(),
                 };
-                sidebar::grouping_by_project(&visible, &self.projects, &self.branches, &view, &self.layout, now)
+                sidebar::grouping_by_project(&visible, &self.projects, &self.branches, &view, crate::layout::Layout::get(cx), now)
             }
             // The index hasn't landed yet: a flat date view, exactly what
             // the window showed while loading before projects existed.

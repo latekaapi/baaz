@@ -589,6 +589,8 @@ fn run_bench(args: Args) {
     let (bench_bare, shell_args) = (args.bench_bare, args.clone());
     gpui_kit::application().with_assets(crate::mascot::BaazAssets).run(move |cx| {
         aui::init(theme.unwrap_or_default(), cx);
+        // The window preferences, read once into their gpui global.
+        crate::layout::Layout::init(cx);
         crate::settings::boot_type(cx);
         // Same reduced-motion hold as the shell boot: a deterministic bench
         // measures stable numbers.
@@ -926,6 +928,9 @@ fn main() {
     });
     app.run(move |cx| {
         crate::log::boot_mark("app-running");
+        // 1b. The window preferences (`layout.json`), read once into their
+        // gpui global: the theme, the type scale and the window all read it.
+        crate::layout::Layout::init(cx);
         // 2. One call does gpui_kit::init, the fonts, the themes and the keymap.
         aui::init(crate::settings::boot_theme(theme, cx), cx);
         crate::settings::boot_type(cx);
@@ -967,9 +972,9 @@ fn main() {
         // first frames (perf audit 2026-10-16).
         #[cfg(feature = "cef")]
         {
-            let restored = crate::layout::read();
+            let restored = crate::layout::Layout::get(cx);
             let page_on_screen = restored.mode == crate::layout::Mode::Browse
-                || (restored.right_open && crate::layout::right_kind(&restored) == crate::layout::RightKind::Browser);
+                || (restored.right_open && crate::layout::right_kind(restored) == crate::layout::RightKind::Browser);
             if page_on_screen {
                 aui_cef::warm_up_soon();
             } else {
@@ -1014,7 +1019,7 @@ fn main() {
                                             this.close_peek(cx);
                                             this.flush_stores();
                                             this.flush_tabs_save();
-                                            this.persist_layout();
+                                            crate::layout::Layout::save(cx);
                                         })
                                     })
                                     .unwrap_or(())

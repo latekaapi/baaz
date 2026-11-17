@@ -80,7 +80,7 @@ fn mode_steps_set_idempotently_and_are_window_steps() {
     );
     let app = source("app.rs");
     assert!(
-        app.contains("if self.mode == mode {"),
+        app.contains("if layout::Layout::get(cx).mode == mode {"),
         "asking for the current mode sets nothing and never toggles"
     );
     assert!(
@@ -121,7 +121,7 @@ fn browse_centre_has_its_own_visibility_and_bounds() {
         "the centre page has its own rect"
     );
     assert!(
-        browser.contains("let centre_shown = self.browse_centre_shown();"),
+        browser.contains("let centre_shown = self.browse_centre_shown(cx);"),
         "sync resolves the centre tab every frame"
     );
     assert!(

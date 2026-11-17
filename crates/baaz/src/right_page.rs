@@ -49,7 +49,7 @@ impl Harness {
         cx.subscribe(&input, |this: &mut Self, input, event: &InputEvent, cx| {
             if let InputEvent::PressEnter { .. } = event {
                 let text = input.read(cx).value().to_string();
-                let engine = this.layout.search_engine;
+                let engine = crate::layout::Layout::get(cx).search_engine;
                 let url = match crate::browser::toolbar::classify_address_input_with(&text, engine) {
                     crate::browser::toolbar::NavTarget::Url(url) => url,
                     crate::browser::toolbar::NavTarget::Search(q) if q.is_empty() => return,

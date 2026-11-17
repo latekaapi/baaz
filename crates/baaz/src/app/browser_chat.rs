@@ -19,10 +19,10 @@ use crate::session::{SessionHost, SessionView};
 impl Harness {
     /// The provider and model a new browser chat starts with, or `None`
     /// when no provider can start a session.
-    pub(crate) fn assistant_choice(&self) -> Option<ModelChoice> {
+    pub(crate) fn assistant_choice(&self, cx: &gpui::App) -> Option<ModelChoice> {
         let statuses = crate::provider_status::live_statuses();
         let default = crate::settings_providers::default_new_provider(&statuses);
-        assistant::resolve(&self.layout.assistant, |p| crate::settings_providers::usable_provider(&statuses, p), default)
+        assistant::resolve(&crate::layout::Layout::get(cx).assistant, |p| crate::settings_providers::usable_provider(&statuses, p), default)
     }
 
     /// The browser chat's session id, if one is open.
@@ -36,7 +36,7 @@ impl Harness {
     /// lands. Returns the provisional id, or `None` when no provider can
     /// start (the caller says so on the line).
     pub(crate) fn start_browser_chat(&mut self, ask: String, window: &mut Window, cx: &mut Context<Self>) -> Option<String> {
-        let choice = self.assistant_choice()?;
+        let choice = self.assistant_choice(cx)?;
         let workspace = assistant::browser_workspace_dir().to_string_lossy().into_owned();
         let request_id = provider::new_request_id();
         self.register_terminal_session(&request_id, std::path::PathBuf::from(workspace.clone()), choice.provider.as_str());

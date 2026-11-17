@@ -101,8 +101,8 @@ impl Harness {
     /// Push `view` on the screen the pane shows (opening the pane on its
     /// last screen when closed).
     pub(crate) fn push_right_view(&mut self, view: Pushed, cx: &mut Context<Self>) {
-        let kind = crate::layout::right_kind(&self.layout);
-        if !self.layout.right_open {
+        let kind = crate::layout::right_kind(crate::layout::Layout::get(cx));
+        if !crate::layout::Layout::get(cx).right_open {
             self.select_right(kind, cx);
         }
         let screen = crate::right::screen_index(kind);

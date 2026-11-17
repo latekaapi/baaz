@@ -44,7 +44,7 @@ fn fn_body<'a>(text: &'a str, name: &str) -> &'a str {
 fn cmd_t_in_browse_opens_a_blank_tab_with_the_field_focused() {
     let app = source("app.rs");
     assert!(
-        app.contains("if this.mode == layout::Mode::Browse {"),
+        app.contains("if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {"),
         "NewSession branches in Browse"
     );
     assert!(app.contains("this.new_browse_sidebar_tab(window, cx);"), "⌘T in Browse opens a tab");

@@ -144,14 +144,13 @@ impl ResizeDrag {
         }
     }
 
-    /// The divider's settled x, for `layout.json`. Small and synchronous like
-    /// the sessions store: one pretty object, best-effort. A read-modify-write
-    /// rather than a fresh object, so a drag never drops the grouping, the
-    /// closed groups or the search scope the person chose.
-    pub(crate) fn persist(&self) {
-        let mut layout = layout::read();
-        layout.sidebar_width = Some(self.width);
-        layout::write(&layout);
+    /// The divider's settled x, for `layout.json`: one field of the layout
+    /// global, written with the rest. It used to be a read-modify-write of
+    /// the file beside the window's own copy, which the next preference
+    /// write then overwrote with the width the window booted at.
+    pub(crate) fn persist(&self, cx: &mut gpui::App) {
+        let width = self.width;
+        layout::Layout::update(cx, |layout| layout.sidebar_width = Some(width));
     }
 }
 
@@ -200,13 +199,12 @@ impl RightResizeDrag {
         }
     }
 
-    /// The divider's settled width, for `layout.json`'s `rightWidth`. A
-    /// read-modify-write rather than a fresh object, so a drag never drops
-    /// the grouping, the closed groups or anything else the person chose.
-    pub(crate) fn persist(&self) {
-        let mut layout = layout::read();
-        layout.right_width = Some(self.width);
-        layout::write(&layout);
+    /// The divider's settled width, for `layout.json`'s `rightWidth`: one
+    /// field of the layout global, written with the rest (see
+    /// [`ResizeDrag::persist`]).
+    pub(crate) fn persist(&self, cx: &mut gpui::App) {
+        let width = self.width;
+        layout::Layout::update(cx, |layout| layout.right_width = Some(width));
     }
 }
 
@@ -265,7 +263,7 @@ impl Harness {
         } else {
             drag.last_release = Some(now);
         }
-        drag.persist();
+        drag.persist(cx);
         cx.notify();
     }
 
@@ -322,7 +320,7 @@ impl Harness {
         } else {
             drag.last_release = Some(now);
         }
-        drag.persist();
+        drag.persist(cx);
         cx.notify();
     }
 }

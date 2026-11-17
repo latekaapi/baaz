@@ -180,7 +180,7 @@ impl Harness {
         let first = notifier.epoch.is_none();
         let before = std::mem::take(&mut notifier.states);
         let front = self.active_id(cx);
-        let prefs = self.layout.notify_prefs();
+        let prefs = crate::layout::Layout::get(cx).notify_prefs();
         let look = transitions(&before, self.sessions.iter(), front.as_deref(), app_is_active(), prefs);
         let badge = if prefs.badge { look.needs_you } else { 0 };
         let notifier = cx.default_global::<Notifier>();
@@ -220,7 +220,7 @@ impl Harness {
         let order: Vec<String> = waiting(visible.iter()).into_iter().map(|row| row.id.clone()).collect();
         let current = self.active_id(cx);
         let Some(next) = next_waiting(&order, current.as_deref()) else { return };
-        if self.mode == crate::layout::Mode::Browse {
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
             self.set_mode(crate::layout::Mode::Sessions, window, cx);
         }
         self.resume_quiet(next, window, cx);

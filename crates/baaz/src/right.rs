@@ -804,7 +804,7 @@ impl Harness {
             return;
         }
         let Some(kind) = RightKind::parse(id) else { return };
-        let on_files = self.layout.right_open && crate::layout::right_kind(&self.layout) == RightKind::Files;
+        let on_files = crate::layout::Layout::get(cx).right_open && crate::layout::right_kind(crate::layout::Layout::get(cx)) == RightKind::Files;
         if let (RightKind::Files, true, Some(root)) = (kind, on_files, preview_root) {
             self.close_file_preview_for(root, cx);
             window.focus(&self.right_files_focus.clone(), cx);
@@ -818,7 +818,7 @@ impl Harness {
     /// drag does.
     pub(crate) fn toggle_right_maximised(&mut self, cx: &mut Context<Self>) {
         self.right_resize.width = if right_maximised(self.right_resize.width) { aui::shell::RIGHT_WIDTH } else { aui::shell::RIGHT_MAX_WIDTH };
-        self.right_resize.persist();
+        self.right_resize.persist(cx);
         cx.notify();
     }
 
@@ -2979,17 +2979,16 @@ mod tests {
         });
         vc.run_until_parked();
         assert!(vc.update(|_, cx| baaz.read(cx).code_preview_open()), "a .py file previews as code");
-        assert!(vc.update(|_, cx| baaz.read(cx).right_cache.files_ui.code_wrap.0), "wrapping is on by default");
+        assert!(vc.update(|_, cx| crate::layout::Layout::get(cx).code_wrap), "wrapping is on by default");
         // ⌥Z is the preview body's key (VS Code's Toggle Word Wrap); the
         // Wrap button and the key both land in `toggle_code_wrap`.
         assert!(crate::right_files::is_wrap_key(&crate::keymap::parse_keystroke("alt-z").unwrap()));
         assert!(!crate::right_files::is_wrap_key(&crate::keymap::parse_keystroke("cmd-alt-z").unwrap()));
         assert!(!crate::right_files::is_wrap_key(&crate::keymap::parse_keystroke("z").unwrap()));
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.toggle_code_wrap(cx)));
-        assert!(!vc.update(|_, cx| baaz.read(cx).right_cache.files_ui.code_wrap.0), "the toggle turns wrapping off");
-        assert!(!vc.update(|_, cx| baaz.read(cx).layout.code_wrap), "the choice goes into the layout");
+        assert!(!vc.update(|_, cx| crate::layout::Layout::get(cx).code_wrap), "the toggle turns wrapping off, in the layout");
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.toggle_code_wrap(cx)));
-        assert!(vc.update(|_, cx| baaz.read(cx).right_cache.files_ui.code_wrap.0), "the Wrap button turns it back on");
+        assert!(vc.update(|_, cx| crate::layout::Layout::get(cx).code_wrap), "the Wrap button turns it back on");
         restore_harness_dir(state);
     }
 

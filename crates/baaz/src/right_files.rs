@@ -38,19 +38,6 @@ pub(crate) struct FilesUi {
     pub lines_memo: std::cell::RefCell<Option<LinesMemo>>,
     /// The reveal token the code view last banded with.
     pub band_token: u64,
-    /// Whether the code preview soft-wraps: `layout.json`'s `codeWrap`,
-    /// read when the pane state is made and flipped with it.
-    pub code_wrap: CodeWrap,
-}
-
-/// The preview's wrap choice, starting from `layout.json` (ON when unset).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CodeWrap(pub bool);
-
-impl Default for CodeWrap {
-    fn default() -> Self {
-        Self(crate::layout::read().code_wrap)
-    }
 }
 
 /// The lines of a text preview, split once per file and kept.
@@ -393,7 +380,8 @@ fn preview_screen(
         }));
     }
     let image = crate::right::is_image_path(&preview.name);
-    let wrap = cache.files_ui.code_wrap.0;
+    // Whether the preview soft-wraps: `layout.json`'s `codeWrap`.
+    let wrap = crate::layout::Layout::get(cx).code_wrap;
     if matches!(&preview.content, PreviewContent::Text { .. }) && !gone {
         row = row.action(
             pane_action("right-file-wrap", IconName::Wrap, if wrap { "Don't wrap lines (⌥Z)" } else { "Wrap lines (⌥Z)" })
@@ -479,10 +467,7 @@ impl Harness {
     /// The preview's Wrap button and ⌥Z: soft wrap on or off, for every
     /// file, kept in `layout.json`.
     pub(crate) fn toggle_code_wrap(&mut self, cx: &mut Context<Self>) {
-        self.layout.code_wrap = !self.layout.code_wrap;
-        self.right_cache.files_ui.code_wrap = CodeWrap(self.layout.code_wrap);
-        self.persist_layout();
-        cx.notify();
+        crate::layout::Layout::update(cx, |layout| layout.code_wrap = !layout.code_wrap);
     }
 }
 

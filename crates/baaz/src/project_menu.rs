@@ -335,7 +335,7 @@ impl Harness {
             .find(|p| p.name == name)
             .map(|p| p.id.clone())
             .ok_or_else(|| format!("no project named `{name}`"))?;
-        if !self.layout.closed_groups.iter().any(|g| g == &id) {
+        if !crate::layout::Layout::get(cx).closed_groups.iter().any(|g| g == &id) {
             self.toggle_group(id, cx);
         }
         Ok(())
@@ -382,30 +382,24 @@ impl Harness {
             "project" => crate::layout::GroupBy::Project,
             other => return Err(format!("unknown grouping `{other}`; known groupings are date, project")),
         };
-        self.layout.group_by = Some(mode);
-        crate::layout::write(&self.layout);
+        crate::layout::Layout::update(cx, |layout| layout.group_by = Some(mode));
         self.invalidate_list();
-        cx.notify();
         Ok(())
     }
 
     /// `group-bar`: flip the current-project accent bar flag and persist it.
     /// The flag no longer draws anything (see `Layout::group_bar`).
     pub(crate) fn step_group_bar(&mut self, cx: &mut Context<Self>) -> StepResult {
-        self.layout.group_bar = !self.layout.group_bar;
-        crate::layout::write(&self.layout);
+        crate::layout::Layout::update(cx, |layout| layout.group_bar = !layout.group_bar);
         self.invalidate_list();
-        cx.notify();
         Ok(())
     }
 
     /// `group-branch`: flip the trailing-branch flag and persist it, as the
     /// Settings › Sidebar switch does.
     pub(crate) fn step_group_branch(&mut self, cx: &mut Context<Self>) -> StepResult {
-        self.layout.group_branch = !self.layout.group_branch;
-        crate::layout::write(&self.layout);
+        crate::layout::Layout::update(cx, |layout| layout.group_branch = !layout.group_branch);
         self.invalidate_list();
-        cx.notify();
         Ok(())
     }
 
@@ -571,7 +565,7 @@ impl Harness {
         let trigger = self.group_menu_bounds.get(&key).copied();
         let Some(trigger) = trigger else {
             crate::baaz_log!("project menu: no trigger bounds for {key}");
-            if from_header || self.sidebar_open {
+            if from_header || crate::layout::Layout::get(cx).sidebar_open {
                 cx.notify();
             }
             return None;

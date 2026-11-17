@@ -463,12 +463,12 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "sidebar-wheel", run: |this, rest, window, cx| this.step_sidebar_wheel(rest, window, cx) },
     WindowVerb { verb: "pointer", run: |this, rest, window, cx| this.step_pointer(rest, window, cx) },
     WindowVerb { verb: "page-eval", run: |this, rest, _, cx| {
-        let state = this.browse_centre_state().ok_or("no page is open")?;
+        let state = this.browse_centre_state(cx).ok_or("no page is open")?;
         state.update(cx, |state, _| state.eval_with_result(u64::MAX, rest));
         Ok(())
     } },
     WindowVerb { verb: "site-info", run: |this, _, _, cx| {
-        this.site_info_open = this.browse_centre_state().is_some();
+        this.site_info_open = this.browse_centre_state(cx).is_some();
         cx.notify();
         if this.site_info_open { Ok(()) } else { Err("no page is open".into()) }
     } },
@@ -679,15 +679,17 @@ impl Harness {
         // kind and the same step closed it again, and the probe's
         // two-captures-must-agree rule failed four entries out of five.
         if slug.eq_ignore_ascii_case("off") || slug.eq_ignore_ascii_case("closed") {
-            self.layout.right_open = false;
+            crate::layout::Layout::stage(cx, |layout| layout.right_open = false);
             self.save_right_for_active(cx);
             cx.notify();
             return Ok(());
         }
         match crate::layout::RightKind::parse(slug) {
             Some(kind) => {
-                self.layout.right_kind = Some(kind);
-                self.layout.right_open = true;
+                crate::layout::Layout::stage(cx, |layout| {
+                    layout.right_kind = Some(kind);
+                    layout.right_open = true;
+                });
                 self.save_right_for_active(cx);
                 cx.notify();
                 Ok(())
@@ -740,8 +742,10 @@ impl Harness {
             return Err("no path".into());
         }
         let (root, _) = self.right_project().ok_or("no current project")?;
-        self.layout.right_kind = Some(crate::layout::RightKind::Files);
-        self.layout.right_open = true;
+        crate::layout::Layout::stage(cx, |layout| {
+            layout.right_kind = Some(crate::layout::RightKind::Files);
+            layout.right_open = true;
+        });
         self.refresh_right_now(cx);
         self.begin_file_preview_for(&root, id, cx);
         Ok(())
@@ -762,7 +766,7 @@ impl Harness {
             // the verb inert for the capture, so every right-pane entry drew
             // at whatever width the person had last dragged to and persisted —
             // the baselines were pinned to user state without anyone noticing.
-            self.layout.right_width = Some(width);
+            crate::layout::Layout::stage(cx, |layout| layout.right_width = Some(width));
             self.right_resize.width = width;
         }
         cx.notify();
@@ -1598,10 +1602,10 @@ mod tests {
         for kind in crate::layout::RightKind::ALL {
             vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right(kind.slug(), cx))).expect("a known kind opens");
             assert!(
-                vc.update(|_, cx| baaz.read(cx).layout.right_open),
+                vc.update(|_, cx| crate::layout::Layout::get(cx).right_open),
                 "{kind:?} opens the pane"
             );
-            assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_kind), Some(kind));
+            assert_eq!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_kind), Some(kind));
         }
         restore_state(state);
     }
@@ -1616,22 +1620,22 @@ mod tests {
         let baaz = vc.update(|window, cx| {
             cx.new(|cx| Harness::new(step_test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
-        let start = vc.update(|_, cx| baaz.read(cx).layout.right_open);
+        let start = vc.update(|_, cx| crate::layout::Layout::get(cx).right_open);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("", cx))).expect("empty toggles");
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).layout.right_open),
+            vc.update(|_, cx| crate::layout::Layout::get(cx).right_open),
             !start,
             "empty payload toggles the pane"
         );
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("", cx))).expect("empty toggles");
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).layout.right_open),
+            vc.update(|_, cx| crate::layout::Layout::get(cx).right_open),
             start,
             "empty payload toggles back"
         );
         let refused = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("not-a-kind", cx)));
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).layout.right_open),
+            vc.update(|_, cx| crate::layout::Layout::get(cx).right_open),
             start,
             "unknown slug changes nothing on screen"
         );
@@ -1656,7 +1660,7 @@ mod tests {
         // at RIGHT_WIDTH, which is the very value most captures ask for.
         vc.update(|_, cx| baaz.update(cx, |h, _| h.right_resize.width = 615.0));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("400", cx))).expect("a width");
-        assert_eq!(vc.update(|_, cx| baaz.read(cx).layout.right_width), Some(400.0));
+        assert_eq!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_width), Some(400.0));
         // The field the shell actually renders (`app.rs` hands the shell
         // `self.right_resize.width`). Asserting only the layout field above is
         // what let this verb ship inert: the captures drew at whatever width
@@ -1664,12 +1668,12 @@ mod tests {
         assert_eq!(vc.update(|_, cx| baaz.read(cx).right_resize.width), 400.0);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("10000", cx))).expect("a width");
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).layout.right_width),
+            vc.update(|_, cx| crate::layout::Layout::get(cx).right_width),
             Some(aui::shell::RIGHT_MAX_WIDTH)
         );
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("1", cx))).expect("a width");
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).layout.right_width),
+            vc.update(|_, cx| crate::layout::Layout::get(cx).right_width),
             Some(aui::shell::RIGHT_MIN_WIDTH)
         );
         let refused = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_width("wide", cx)));
