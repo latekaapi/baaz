@@ -354,7 +354,6 @@ pub(super) fn parking_factory() -> crate::providers::ProviderFactory {
 /// Seed a stored Codex session with history, as a restart would leave
 /// it: the record plus its sidebar row.
 pub(super) fn z4_seed_stored_codex(harness: &mut Harness, cx: &mut Context<Harness>) {
-    use std::collections::HashMap;
     harness.session_list.update(cx, |list, _| {
         list.provider_sessions.insert(
             "s-codex-old".into(),
@@ -362,20 +361,15 @@ pub(super) fn z4_seed_stored_codex(harness: &mut Harness, cx: &mut Context<Harne
                 provider: "codex".into(),
                 session_id: "s-codex-old".into(),
                 workspace: None,
-                project: None,
                 created_ms: 1_700_000_000_000,
                 updated_ms: 1_700_000_000_000,
                 turns: 2,
-                title: Some("Inquiry About Current Model".into()),
-                first_prompt: Some("which model is this".into()),
-                handoff_to: None,
-                handoff_from: None,
-                handoff_from_provider: None,
-                handoff_title: None,
-                display_texts: HashMap::new(),
                 origin: None,
             },
         );
+        let facts = list.overrides.entry("s-codex-old".into()).or_default();
+        facts.provider_title = Some("Inquiry About Current Model".into());
+        facts.first_prompt = Some("which model is this".into());
     });
     harness.merge_provider_rows(cx);
     // The failed session's own right pane stands open: the failure

@@ -370,16 +370,17 @@ impl Harness {
         // draft any more, whether it already had a row or not.
         self.open_state.admit_turn(&session_id);
         let handoff_dest =
-            sidebar::is_handoff_dest(&session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides);
+            sidebar::is_handoff_dest(&session_id, &self.session_list.read(cx).overrides);
         // A handoff destination's first words are the pack, then the
         // person's next message on the same chain: neither is the
         // session's own first prompt (Y2a).
-        if !handoff_dest {
-            self.session_list.update(cx, |list, _| {
-                crate::provider_sessions::note_first_prompt(&mut list.provider_sessions, &session_id, &prompt)
+        let noted = !handoff_dest
+            && self.session_list.update(cx, |list, _| {
+                crate::provider_sessions::note_first_prompt(&list.provider_sessions, &mut list.overrides, &session_id, &prompt)
             });
-        }
-        if self.session_list.update(cx, |list, _| crate::provider_sessions::touch(&mut list.provider_sessions, &session_id)) {
+        let touched =
+            self.session_list.update(cx, |list, _| crate::provider_sessions::touch(&mut list.provider_sessions, &session_id));
+        if touched || noted {
             self.persist_provider_sessions(cx);
         }
         // A generated title outranks the prompt, even on a retry
@@ -398,7 +399,7 @@ impl Harness {
                 // A handoff destination's rowless first turn is the
                 // pack: the row carries the chain title (Y2a).
                 if handoff_dest {
-                    let label = sidebar::handoff_title_of(&session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides)
+                    let label = sidebar::handoff_title_of(&session_id, &self.session_list.read(cx).overrides)
                         .map(|t| sidebar::one_line(&t));
                     if let Some(label) = label {
                         self.session_list.update(cx, |list, _| {

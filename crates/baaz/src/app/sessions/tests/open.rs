@@ -522,13 +522,14 @@ fn new_after_open_lands_a_draft(cx: &mut gpui::TestAppContext, name: &str, provi
             // reads zero turns, like a draft's.
             harness.session_list.update(cx, |list, _| {
                 let record = list.provider_sessions.get_mut("s-codex-old").expect("seeded");
-                record.project = Some(project);
                 record.turns = 1;
-                record.handoff_from = Some("s-claude-src".into());
-                record.handoff_from_provider = Some("claude-code".into());
-                record.handoff_title = Some("Project Layout Overview Explained".into());
-                record.title = None;
-                record.first_prompt = None;
+                let facts = list.overrides.entry("s-codex-old".into()).or_default();
+                facts.project = Some(project);
+                facts.handoff_from = Some("s-claude-src".into());
+                facts.handoff_from_provider = Some("claude-code".into());
+                facts.handoff_title = Some("Project Layout Overview Explained".into());
+                facts.provider_title = None;
+                facts.first_prompt = None;
             });
             harness.merge_provider_rows(cx);
         });

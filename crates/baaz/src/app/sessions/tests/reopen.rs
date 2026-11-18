@@ -214,7 +214,9 @@ fn a_replayed_reopen_asks_no_model_for_anything(cx: &mut gpui::TestAppContext) {
             harness.session_list.update(cx, |list, _| {
                 if let Some(record) = list.provider_sessions.get_mut("s-codex-old") {
                     record.turns = 1;
-                    record.title = None;
+                }
+                if let Some(facts) = list.overrides.get_mut("s-codex-old") {
+                    facts.provider_title = None;
                 }
             });
             crate::layout::Layout::stage(cx, |layout| {
@@ -279,28 +281,23 @@ fn an_imported_session_from_an_unadopted_folder_shows_in_unfiled(cx: &mut gpui::
     let folder = folder.to_string_lossy().into_owned();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            let mut record = crate::provider_sessions::ProviderSessionRecord {
-                provider: "claude-code".into(),
-                session_id: "imp-1".into(),
-                workspace: Some(folder.clone()),
+            let record = crate::import::Imported {
+                record: crate::provider_sessions::ProviderSessionRecord {
+                    provider: "claude-code".into(),
+                    session_id: "imp-1".into(),
+                    workspace: Some(folder.clone()),
+                    created_ms: 1_790_000_000_000,
+                    updated_ms: 1_790_419_872_640,
+                    turns: 4,
+                    origin: Some(crate::provider_sessions::ORIGIN_IMPORTED.into()),
+                },
                 project: None,
-                created_ms: 1_790_000_000_000,
-                updated_ms: 1_790_419_872_640,
-                turns: 4,
-                title: None,
                 first_prompt: Some("Build and run Cockpit".into()),
-                handoff_to: None,
-                handoff_from: None,
-                handoff_from_provider: None,
-                handoff_title: None,
-                display_texts: std::collections::HashMap::new(),
-                origin: Some(crate::provider_sessions::ORIGIN_IMPORTED.into()),
             };
-            record.project = None;
             harness.session_list.update(cx, |list, _| list.index_loaded = true);
             harness.session_list.update(cx, |list, _| list.sessions_loaded = true);
             crate::layout::Layout::stage(cx, |layout| layout.group_by = Some(crate::layout::GroupBy::Project));
-            let added = harness.session_list.update(cx, |list, _| crate::import::land(&mut list.provider_sessions, vec![record]));
+            let added = harness.session_list.update(cx, |list, _| crate::import::land(&mut list.provider_sessions, &mut list.overrides, vec![record]));
             assert_eq!(added, vec!["imp-1".to_owned()]);
             harness.merge_provider_rows(cx);
         });
@@ -492,11 +489,10 @@ fn a_provider_session_reopens_with_its_history_after_a_restart(cx: &mut gpui::Te
     // The replayed turn lands in the ledger once, tagged with its
     // lane and the adapter-reported cost.
     vc.update(|_, _| {
-        let connection = crate::usage::open_at(&crate::usage::db_path()).expect("ledger opens");
-        let kept = crate::usage::find_turn(&connection, &open_id, "a-old").expect("replayed turn recorded");
+        let kept = crate::usage::find_recorded(&open_id, "a-old").expect("replayed turn recorded");
         assert_eq!(kept.provider, "codex");
         assert_eq!(kept.cost_usd, 0.04);
-        assert_eq!(crate::usage::count_for_session(&connection, &open_id), 1);
+        assert_eq!(crate::usage::count_recorded(&open_id), 1);
     });
     lane_restore(state);
 }
@@ -678,8 +674,9 @@ fn a_muse_reopen_without_a_record_writes_one_from_its_row_then_reads_it(cx: &mut
         let record = harness.session_list.read(cx).provider_sessions.get("s-muse-old").expect("the open wrote a record");
         assert_eq!(record.provider, "muse");
         assert_eq!(record.turns, 3, "the row's turns, so the open-fresh rule cannot drop it");
-        assert_eq!(record.title.as_deref(), Some("Ferry routes"));
-        assert_eq!(record.first_prompt.as_deref(), Some("chart the ferry routes"));
+        let facts = &harness.session_list.read(cx).overrides["s-muse-old"];
+        assert_eq!(facts.provider_title.as_deref(), Some("Ferry routes"), "the list row's title is the row's own");
+        assert_eq!(facts.first_prompt.as_deref(), Some("chart the ferry routes"));
         assert_eq!(record.workspace.as_deref(), Some(state.2.to_string_lossy().as_ref()));
         let view = harness.active.clone().expect("the session opened");
         assert_eq!(view.read(cx).rt(cx).session_id, "s-muse-old");
@@ -821,7 +818,7 @@ fn a_muse_turn_moves_one_row_and_never_relists(cx: &mut gpui::TestAppContext) {
             harness.on_session_event(view.read(cx).runtime().clone(), &event, cx);
             assert!(!harness.session_list.read(cx).fetch.in_flight, "an admission never relists");
             assert_eq!(
-                harness.session_list.read(cx).provider_sessions.get("s-muse-old").and_then(|r| r.first_prompt.clone()).as_deref(),
+                harness.session_list.read(cx).overrides.get("s-muse-old").and_then(|r| r.first_prompt.clone()).as_deref(),
                 Some("chart the ferry routes"),
                 "the record keeps the session's own first words"
             );
@@ -914,7 +911,7 @@ fn a_record_never_conjures_rows_for_chain_members_it_does_not_hold(cx: &mut gpui
             harness.session_list.update(cx, |list, _| {
                 // The trigger: one Muse record (a reopened session).
                 crate::provider_sessions::upsert_listed(
-                    &mut list.provider_sessions,
+                    &mut list.provider_sessions, &mut list.overrides,
                     "muse",
                     "s-muse-opened",
                     None,

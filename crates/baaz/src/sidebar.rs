@@ -1545,17 +1545,9 @@ pub(crate) mod tests {
             provider: "claude-code".into(),
             session_id: "s-provider".into(),
             workspace: None,
-            project: None,
             created_ms: 1_700_000_000_000,
             updated_ms: 1_700_000_000_000,
             turns: 2,
-            title: None,
-            first_prompt: None,
-            handoff_to: None,
-            handoff_from: None,
-            handoff_from_provider: None,
-            handoff_title: None,
-            display_texts: std::collections::HashMap::new(),
             origin: None,
         }
     }

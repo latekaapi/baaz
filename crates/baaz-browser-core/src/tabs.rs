@@ -960,7 +960,7 @@ fn host_of(url: &str) -> Option<String> {
 
 /// Whether `current` is a real navigation worth persisting: non-empty, not
 /// the blank default, and different from what is already stored. The poll
-/// drains many times a second; only a change writes `sessions.json`. Merely
+/// drains many times a second; only a change writes the session's row. Merely
 /// showing the pane must leave the stored state untouched — `about:blank`
 /// is where a fresh webview starts, not somewhere the person went.
 pub fn should_remember(current: &str, stored: Option<&str>) -> bool {

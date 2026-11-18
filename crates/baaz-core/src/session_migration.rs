@@ -16,8 +16,9 @@
 //!   owner-side files still exist and whose Baaz-side targets do not
 //!   (already-moved items are skipped: the plan is idempotent);
 //! * the executor ([`execute_plan`]): `rename`, falling back to
-//!   copy-plus-verify-plus-remove only across devices, with a journal file
-//!   in the state dir ([`journal_path`]) so a crash resumes;
+//!   copy-plus-verify-plus-remove only across devices, with a journal in
+//!   the state dir's database (`migration_journal`, [`crate::db::journals`])
+//!   so a crash resumes;
 //! * the prompt (title/detail builders here; the dialog and Providers-row
 //!   wiring on the app's `Harness`, in the app's `session_migration`
 //!   module) and the lazy move on first resume ([`ensure_session_moved`]),
@@ -30,8 +31,6 @@ use std::path::{Path, PathBuf};
 pub const CLAUDE_PROVIDER: &str = "claude-code";
 /// The registry wire id for Codex sessions.
 pub const CODEX_PROVIDER: &str = "codex";
-/// The journal file's name under the state dir.
-pub const JOURNAL_FILE_NAME: &str = "session-migration-journal.json";
 /// The one-time prompt's dismissal marker under the state dir.
 pub const DISMISSED_FILE_NAME: &str = "session-migration.dismissed";
 
@@ -158,11 +157,6 @@ pub fn plan_single(
 
 // ---------------------------------------------------------------- journal
 
-/// The journal file: the crash-resume record of finished moves.
-pub fn journal_path(state_dir: &Path) -> PathBuf {
-    state_dir.join(JOURNAL_FILE_NAME)
-}
-
 /// The journal key for one move: provider plus its Baaz-side relative
 /// path, so two sessions never share a key.
 pub fn move_key(planned: &PlannedMove) -> String {
@@ -192,87 +186,70 @@ struct CompletedEntry {
     outcome: &'static str,
 }
 
-/// The journal, parsed best-effort like every store read: a missing or
-/// unparseable journal is empty, and the target-exists skip keeps the
-/// executor idempotent regardless.
-///
-/// Reads both shapes: the current `{"completed": {key: {at, outcome}},
-/// "in_progress": {key: {at}}}` map and the first version's
-/// `{"completed": [key, …]}` list (whose entries are stamped with now —
-/// conservatively fresh, so they age out from this run, not from epoch).
-fn read_journal(state_dir: &Path) -> (HashMap<String, CompletedEntry>, HashMap<String, u64>) {
-    let mut done = HashMap::new();
-    let mut live = HashMap::new();
-    let text = std::fs::read_to_string(journal_path(state_dir)).unwrap_or_default();
-    if text.is_empty() {
-        return (done, live);
-    }
-    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+/// The journal as the file before the database held it: the current
+/// `{"completed": {key: {at, outcome}}, "in_progress": {key: {at}}}` map, or
+/// the first version's `{"completed": [key, …]}` list (whose entries are
+/// stamped with now — conservatively fresh, so they age out from this run,
+/// not from epoch). Only the first-launch import reads it
+/// ([`crate::db::json_import`]).
+pub fn parse_journal(parsed: &serde_json::Value) -> (Vec<crate::db::journals::Done>, Vec<crate::db::journals::Live>) {
+    let mut done = Vec::new();
+    let mut live = Vec::new();
     if let Some(entries) = parsed.get("completed") {
         if let Some(map) = entries.as_object() {
             for (key, entry) in map {
-                done.insert(
-                    key.clone(),
-                    CompletedEntry {
-                        at: entry.get("at").and_then(|at| at.as_u64()).unwrap_or_else(now_secs),
-                        outcome: if entry
-                            .get("outcome")
-                            .and_then(|outcome| outcome.as_str())
-                            == Some("copied")
-                        {
-                            "copied"
-                        } else {
-                            "moved"
-                        },
-                    },
-                );
+                let at = entry.get("at").and_then(|at| at.as_u64()).unwrap_or_else(now_secs);
+                let copied = entry.get("outcome").and_then(|outcome| outcome.as_str()) == Some("copied");
+                done.push((key.clone(), at, if copied { "copied" } else { "moved" }.to_owned()));
             }
         } else if let Some(list) = entries.as_array() {
-            // The first version's list shape: stamp with now (see above).
             let at = now_secs();
             for key in list.iter().filter_map(|key| key.as_str()) {
-                done.insert(key.to_owned(), CompletedEntry { at, outcome: "moved" });
+                done.push((key.to_owned(), at, "moved".to_owned()));
             }
         }
     }
     if let Some(map) = parsed.get("in_progress").and_then(|live| live.as_object()) {
         for (key, entry) in map {
             if let Some(at) = entry.get("at").and_then(|at| at.as_u64()) {
-                live.insert(key.clone(), at);
+                live.push((key.clone(), at));
             }
         }
     }
     (done, live)
 }
 
-/// Write the journal back, atomically. Best-effort: a journal that cannot
-/// be written loses resume hints, never a session (the target-exists skip
-/// still recognises every finished move).
+/// The journal from `state_dir`'s database, best-effort like every store
+/// read: a database that cannot answer is an empty journal, and the
+/// target-exists skip keeps the executor idempotent regardless.
+fn read_journal(state_dir: &Path) -> (HashMap<String, CompletedEntry>, HashMap<String, u64>) {
+    let read = crate::db::read(crate::db::path_in(state_dir), |db| crate::db::journals::read_migration(&db.conn))
+        .and_then(|read| read.ok())
+        .unwrap_or_default();
+    let done = read
+        .0
+        .into_iter()
+        .map(|(key, at, outcome)| (key, CompletedEntry { at, outcome: if outcome == "copied" { "copied" } else { "moved" } }))
+        .collect();
+    (done, read.1.into_iter().collect())
+}
+
+/// Write the journal back whole, in one transaction, and wait for it.
+/// Best-effort: a journal that cannot be written loses resume hints, never
+/// a session (the target-exists skip still recognises every finished move).
 fn write_journal(
     state_dir: &Path,
     done: &HashMap<String, CompletedEntry>,
     live: &HashMap<String, u64>,
 ) {
-    let mut completed = serde_json::Map::new();
-    let mut keys: Vec<&String> = done.keys().collect();
-    keys.sort();
-    for key in keys {
-        let entry = &done[key];
-        completed.insert(
-            key.clone(),
-            serde_json::json!({"at": entry.at, "outcome": entry.outcome}),
-        );
-    }
-    let mut in_progress = serde_json::Map::new();
-    let mut live_keys: Vec<&String> = live.keys().collect();
-    live_keys.sort();
-    for key in live_keys {
-        in_progress.insert(key.clone(), serde_json::json!({"at": live[key]}));
-    }
-    let body = serde_json::json!({"completed": completed, "in_progress": in_progress});
-    if let Ok(text) = serde_json::to_vec_pretty(&body) {
-        let _ = crate::store::write_atomic(&journal_path(state_dir), &text);
-    }
+    let done: Vec<crate::db::journals::Done> =
+        done.iter().map(|(key, entry)| (key.clone(), entry.at, entry.outcome.to_owned())).collect();
+    let live: Vec<crate::db::journals::Live> = live.iter().map(|(key, at)| (key.clone(), *at)).collect();
+    crate::db::call(crate::db::path_in(state_dir), move |db| {
+        if let Err(error) = crate::db::journals::write_migration(&mut db.conn, &done, &live) {
+            crate::baaz_log!("db: migration journal not saved ({error})");
+        }
+    });
 }
 
 /// The finished keys the journal holds.
@@ -1059,13 +1036,13 @@ mod tests {
     fn registry_with(claude: &[&str], codex: &[&str]) -> ProviderSessionStore {
         let mut store = ProviderSessionStore::new();
         for id in claude {
-            upsert_open(&mut store, CLAUDE_PROVIDER, id, None, None, None);
+            upsert_open(&mut store, &mut crate::sessions::Overrides::new(), CLAUDE_PROVIDER, id, None, None, None);
         }
         for id in codex {
-            upsert_open(&mut store, CODEX_PROVIDER, id, None, None, None);
+            upsert_open(&mut store, &mut crate::sessions::Overrides::new(), CODEX_PROVIDER, id, None, None, None);
         }
         // A muse record plans nothing, whatever its id.
-        upsert_open(&mut store, "muse", "muse-1", None, None, None);
+        upsert_open(&mut store, &mut crate::sessions::Overrides::new(), "muse", "muse-1", None, None, None);
         store
     }
 
@@ -1203,7 +1180,7 @@ mod tests {
         let first = &plan[0];
         move_one(&first.source, &first.target, first.is_dir).expect("first move");
         mark_completed(&homes.state, &move_key(first), "moved");
-        assert!(journal_path(&homes.state).exists(), "the journal records finished moves");
+        assert!(read_completed(&homes.state).contains(&move_key(first)), "the journal records finished moves");
 
         // Resume skips the journaled move and runs the rest.
         let remaining = pending_moves(&homes.state, plan.clone());
@@ -1622,14 +1599,11 @@ mod tests {
         let kept = read_completed(&homes.state);
         assert!(!kept.contains("codex/old"), "the 31-day entry is gone: {kept:?}");
         assert!(kept.contains("codex/fresh"), "the fresh entry stays: {kept:?}");
-        // And the first version's list shape still parses (stamped fresh).
-        std::fs::write(
-            journal_path(&homes.state),
-            "{\"completed\": [\"codex/legacy\"]}",
-        )
-        .expect("legacy journal");
+        // And the first version's list shape still parses (stamped fresh)
+        // when the import reads an old file.
+        let (legacy, _) = parse_journal(&serde_json::json!({"completed": ["codex/legacy"]}));
         assert!(
-            read_completed(&homes.state).contains("codex/legacy"),
+            legacy.iter().any(|(key, at, _)| key == "codex/legacy" && *at > 0),
             "legacy entries are honoured, not dropped"
         );
     }

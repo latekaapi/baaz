@@ -2426,7 +2426,7 @@ impl Harness {
             }
             "providers" => {
                 let empty: &[crate::session_migration::PlannedMove] = &[];
-                let plan = self.migration.cache.as_ref().map(|cache| cache.plan_for_render()).unwrap_or(empty);
+                let plan = self.session_list.read(cx).migration.cache.as_ref().map(|cache| cache.plan_for_render()).unwrap_or(empty);
                 if !plan.is_empty() {
                     let (n_claude, n_codex) = crate::session_migration::session_counts(plan);
                     facts.migration = Some(MigrationRow {

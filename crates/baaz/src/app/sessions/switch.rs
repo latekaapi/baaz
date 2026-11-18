@@ -148,7 +148,7 @@ impl Harness {
             let unsent = self
                 .session_list.read(cx).provider_sessions
                 .get(old_id)
-                .is_some_and(|record| record.turns == 0 && record.first_prompt.is_none());
+                .is_some_and(|record| record.turns == 0 && !self.first_prompt_sent(old_id, cx));
             if unsent {
                 self.registry.forget_where(|id| id == old_id);
                 self.session_list.update(cx, |list, _| list.sessions.retain(|entry| entry.id != old_id));

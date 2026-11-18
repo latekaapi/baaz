@@ -665,6 +665,7 @@ impl Harness {
         let changed = self.session_list.update(cx, |list, _| {
             crate::provider_sessions::upsert_listed(
                 &mut list.provider_sessions,
+                &mut list.overrides,
                 provider.as_str(),
                 session_id,
                 workspace,
@@ -682,12 +683,18 @@ impl Harness {
         }
     }
 
+    /// Whether the session's row records a first prompt: a prompt was
+    /// sent (or imported), so it has history somewhere.
+    pub(crate) fn first_prompt_sent(&self, session_id: &str, cx: &gpui::App) -> bool {
+        self.session_list.read(cx).overrides.get(session_id).is_some_and(|meta| meta.first_prompt.is_some())
+    }
+
     /// Whether a record holds no history anywhere — no settled turn, no
     /// prompt ever sent — so its reopen opens fresh instead. A session its
     /// provider lists counts only when its list row confirms zero turns: a
     /// record written with no row behind it never drops a real session.
     pub(super) fn record_holds_no_history(&self, record: &crate::provider_sessions::ProviderSessionRecord, cx: &gpui::App) -> bool {
-        if record.turns > 0 || record.first_prompt.is_some() {
+        if record.turns > 0 || self.first_prompt_sent(&record.session_id, cx) {
             return false;
         }
         let listed = ProviderId::parse_known(&record.provider).is_some_and(|id| id.lists_sessions());
@@ -928,7 +935,7 @@ impl Harness {
         let unsent_draft = self
             .session_list.read(cx).provider_sessions
             .get(session_id)
-            .is_some_and(|record| record.turns == 0 && record.first_prompt.is_none());
+            .is_some_and(|record| record.turns == 0 && !self.first_prompt_sent(session_id, cx));
         if unsent_draft {
             self.delete_provider_session(session_id, cx);
             return;

@@ -563,36 +563,27 @@ impl SessionEntry {
     /// come from the provider record, because `session/list` never names
     /// these sessions.
     ///
-    /// The label, best first: the name someone gave it, the generated
-    /// title one cheap model call wrote, the provider's own ack title, the
-    /// first prompt this app sent, the transcript-derived title, else
-    /// [`UNNAMED`]. `needs_title` stays false on purpose: the derived
-    /// title for these rows is the first prompt, already held, and no
-    /// `session/read` may ever spend itself on an id the muse wire never
-    /// listed.
+    /// The label is the session row's own title ([`SessionMeta::title`]:
+    /// the name someone gave it, the chain's title, the generated title,
+    /// the provider's own ack title, the first prompt this app sent, the
+    /// transcript-derived title), else [`UNNAMED`]. `needs_title` stays
+    /// false on purpose: the derived title for these rows is the first
+    /// prompt, already held, and no `session/read` may ever spend itself on
+    /// an id the muse wire never listed.
     pub fn provider_row(
         record: &crate::provider_sessions::ProviderSessionRecord,
         meta: Option<&SessionMeta>,
         projects: &crate::projects::Projects,
     ) -> Self {
-        fn pick(value: Option<&str>) -> Option<&str> {
-            value.map(str::trim).filter(|s| !s.is_empty())
-        }
-        let name = pick(meta.and_then(|m| m.name.as_deref()));
-        let label = name
-            .or_else(|| pick(record.handoff_title.as_deref()))
-            .or_else(|| pick(meta.and_then(|m| m.handoff_title.as_deref())))
-            .or_else(|| pick(meta.and_then(|m| m.generated_title.as_deref())))
-            .or_else(|| pick(record.title.as_deref()))
-            .or_else(|| pick(record.first_prompt.as_deref()))
-            .or_else(|| pick(meta.and_then(|m| m.derived_title.as_deref())));
+        let name = meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+        let label = meta.and_then(SessionMeta::title);
         let user_named = name.is_some();
         let text = label.unwrap_or(UNNAMED);
         let updated = DateTime::from_timestamp_millis(record.updated_ms)
             .map(|t| t.with_timezone(&Local))
             .unwrap_or_else(crate::clock::now_local);
         let workspace = record.workspace.as_deref().map(crate::projects::canonical_cached);
-        let stored_project = meta.and_then(|m| m.project.as_deref()).or(record.project.as_deref());
+        let stored_project = meta.and_then(|m| m.project.as_deref());
         let resolved = projects.resolve_available(record.workspace.as_deref(), stored_project);
         let project = resolved.as_ref().map(|p| p.id.clone());
         let project_name = resolved.as_ref().map(|p| p.name.clone());
@@ -607,14 +598,14 @@ impl SessionEntry {
             // lone destination row reads this too, wherever it is shown.
             turns: visible_turns(
                 record.turns,
-                record.handoff_from.as_deref().map(str::trim).is_some_and(|s| !s.is_empty()),
+                meta.and_then(|m| m.handoff_from.as_deref()).map(str::trim).is_some_and(|s| !s.is_empty()),
             ),
             hidden: meta.is_some_and(|m| m.hidden),
             pinned: meta.is_some_and(|m| m.pinned),
             archived: meta.is_some_and(|m| m.archived),
             description: with_handoff_origin(
                 describe(meta, None, text, user_named),
-                record.handoff_from_provider.as_deref(),
+                meta.and_then(|m| m.handoff_from_provider.as_deref()),
             ),
             last_ask: meta
                 .and_then(|m| m.last_ask.as_deref())
@@ -914,14 +905,10 @@ pub fn local_started_row(
 /// lane noted on admission. Either means a person typed into it, so the
 /// empty filter keeps its row even while `turns` still reads 0 — the
 /// admission writes the first prompt before any turn settles.
-pub fn sent_to(
-    session_id: &str,
-    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
-    overrides: &crate::sessions::Overrides,
-) -> bool {
+pub fn sent_to(session_id: &str, overrides: &crate::sessions::Overrides) -> bool {
     let said = |value: Option<&str>| value.map(str::trim).is_some_and(|s| !s.is_empty());
     said(overrides.get(session_id).and_then(|m| m.last_ask.as_deref()))
-        || said(provider_sessions.get(session_id).and_then(|r| r.first_prompt.as_deref()))
+        || said(overrides.get(session_id).and_then(|m| m.first_prompt.as_deref()))
 }
 
 /// The prompt a send may title `session_id`'s row from: none once a
@@ -1008,27 +995,16 @@ pub fn byline_landable(
     }
 }
 
-/// Whether `id` was born from a handoff (whichever store holds the link).
-pub fn is_handoff_dest(
-    id: &str,
-    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
-    overrides: &crate::sessions::Overrides,
-) -> bool {
-    handoff_from_of(id, provider_sessions, overrides).is_some()
+/// Whether `id` was born from a handoff.
+pub fn is_handoff_dest(id: &str, overrides: &crate::sessions::Overrides) -> bool {
+    handoff_from_of(id, overrides).is_some()
 }
 
-/// The persisted chain title for `id`, whichever store holds it: the
-/// record's own half first, then the override's, so mixed chains read it
-/// either way.
-pub fn handoff_title_of(
-    id: &str,
-    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
-    overrides: &crate::sessions::Overrides,
-) -> Option<String> {
-    provider_sessions
+/// The persisted chain title for `id`.
+pub fn handoff_title_of(id: &str, overrides: &crate::sessions::Overrides) -> Option<String> {
+    overrides
         .get(id)
-        .and_then(|r| r.handoff_title.clone())
-        .or_else(|| overrides.get(id).and_then(|m| m.handoff_title.clone()))
+        .and_then(|m| m.handoff_title.clone())
         .map(|t| t.trim().to_owned())
         .filter(|t| !t.is_empty())
 }
@@ -1064,40 +1040,30 @@ pub fn list_apply_unchanged(existing: &[SessionEntry], wire: &[SessionEntry]) ->
 
 // A handoff chain is one sidebar row (`docs/22-handoff.md` §8).
 //
-// Sessions linked by `handoff_to` / `handoff_from` — the halves live in two
-// stores (provider records for lane sessions, overrides for muse ones) — form
-// a chain whose head (no `handoff_to`) is the only listed row. The helpers
+// Sessions linked by `handoff_to` / `handoff_from` — each half on its own
+// session's facts, whatever the provider — form a chain whose head (no
+// `handoff_to`) is the only listed row. The helpers
 // below are pure: links in, rows out. The application owns fetching and
 // opening, like everything else in this module.
 //
-// A link counts only when its destination still exists in either store or in
-// the rows: a dangling `handoff_to` (destination missing) keeps the source
+// A link counts only when its destination is a known session (a record or
+// facts) or a row: a dangling `handoff_to` (destination missing) keeps the source
 // listed, exactly like an unlinked session.
 
-/// The `handoff_to` half for one id, whichever store holds it.
-fn handoff_to_of(
-    id: &str,
-    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
-    overrides: &crate::sessions::Overrides,
-) -> Option<String> {
-    provider_sessions
+/// The `handoff_to` half for one id.
+fn handoff_to_of(id: &str, overrides: &crate::sessions::Overrides) -> Option<String> {
+    overrides
         .get(id)
-        .and_then(|record| record.handoff_to.clone())
-        .or_else(|| overrides.get(id).and_then(|meta| meta.handoff_to.clone()))
+        .and_then(|meta| meta.handoff_to.clone())
         .map(|dest| dest.trim().to_owned())
         .filter(|dest| !dest.is_empty() && dest != id)
 }
 
-/// The `handoff_from` half for one id, whichever store holds it.
-fn handoff_from_of(
-    id: &str,
-    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
-    overrides: &crate::sessions::Overrides,
-) -> Option<String> {
-    provider_sessions
+/// The `handoff_from` half for one id.
+fn handoff_from_of(id: &str, overrides: &crate::sessions::Overrides) -> Option<String> {
+    overrides
         .get(id)
-        .and_then(|record| record.handoff_from.clone())
-        .or_else(|| overrides.get(id).and_then(|meta| meta.handoff_from.clone()))
+        .and_then(|meta| meta.handoff_from.clone())
         .map(|source| source.trim().to_owned())
         .filter(|source| !source.is_empty() && source != id)
 }
@@ -1134,7 +1100,7 @@ impl ChainIndex {
         // The live `handoff_to` step for one id: the destination when the
         // link names another known session, else the walk stops here.
         let step = |id: &str| -> Option<String> {
-            let next = handoff_to_of(id, provider_sessions, overrides)?;
+            let next = handoff_to_of(id, overrides)?;
             (next != id && known.contains(&next)).then_some(next)
         };
         let mut heads: HashMap<String, String> = HashMap::with_capacity(known.len());
@@ -1254,16 +1220,11 @@ pub fn chain_members(
 /// Walk `handoff_from` back from the head to the tail member: the chain's
 /// first session, whose title the collapsed row keeps. Stops at an unknown
 /// source or a cycle; `None` when the head itself names no source.
-fn chain_tail(
-    head: &str,
-    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
-    overrides: &crate::sessions::Overrides,
-    index: &ChainIndex,
-) -> Option<String> {
+fn chain_tail(head: &str, overrides: &crate::sessions::Overrides, index: &ChainIndex) -> Option<String> {
     let mut tail = head.to_owned();
     let mut seen = HashSet::from([tail.clone()]);
     let mut found = false;
-    while let Some(source) = handoff_from_of(&tail, provider_sessions, overrides) {
+    while let Some(source) = handoff_from_of(&tail, overrides) {
         if !index.contains(&source) || !seen.insert(source.clone()) {
             break;
         }
@@ -1282,15 +1243,11 @@ pub fn visible_turns(turns: u64, has_handoff_from: bool) -> u64 {
     if has_handoff_from { turns.saturating_sub(1) } else { turns }
 }
 
-/// Whether `id` carries a handoff link in either direction, whichever store
-/// holds it. Blank links read as none, like [`handoff_to_of`] treats them.
-fn has_handoff_link(
-    id: &str,
-    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
-    overrides: &crate::sessions::Overrides,
-) -> bool {
-    handoff_to_of(id, provider_sessions, overrides).is_some()
-        || handoff_from_of(id, provider_sessions, overrides).is_some()
+/// Whether `id` carries a handoff link in either direction. Blank links read
+/// as none, like [`handoff_to_of`] treats them.
+fn has_handoff_link(id: &str, overrides: &crate::sessions::Overrides) -> bool {
+    handoff_to_of(id, overrides).is_some()
+        || handoff_from_of(id, overrides).is_some()
 }
 
 /// Whether settling `id` can change the chain collapse: the touched session
@@ -1298,12 +1255,8 @@ fn has_handoff_link(
 /// What keeps an unlinked settle on the O(1) row refresh instead of the
 /// full clone + scan (`docs/22-handoff.md` §8.4).
 ///
-pub fn needs_collapse(
-    id: &str,
-    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
-    overrides: &crate::sessions::Overrides,
-) -> bool {
-    if has_handoff_link(id, provider_sessions, overrides) {
+pub fn needs_collapse(id: &str, overrides: &crate::sessions::Overrides) -> bool {
+    if has_handoff_link(id, overrides) {
         return true;
     }
     // The touched id may carry no link itself and still anchor a chain:
@@ -1311,9 +1264,7 @@ pub fn needs_collapse(
     fn names(id: &str, link: Option<&str>) -> bool {
         link.map(str::trim).is_some_and(|target| target == id)
     }
-    provider_sessions.values().any(|record| {
-        names(id, record.handoff_to.as_deref()) || names(id, record.handoff_from.as_deref())
-    }) || overrides
+    overrides
         .values()
         .any(|meta| names(id, meta.handoff_to.as_deref()) || names(id, meta.handoff_from.as_deref()))
 }
@@ -1327,7 +1278,7 @@ pub fn collapse_handoff_chains(
     // One index build for the whole view: every row reads its head from
     // the same map, never a walk per row (Y2a3).
     let index = ChainIndex::build(provider_sessions, overrides, &entries);
-    collapse_with_index(entries, &index, provider_sessions, overrides)
+    collapse_with_index(entries, &index, overrides)
 }
 
 /// Collapse the rows against a caller-held [`ChainIndex`]: the same
@@ -1337,7 +1288,6 @@ pub fn collapse_handoff_chains(
 pub fn collapse_with_index(
     entries: Vec<SessionEntry>,
     index: &ChainIndex,
-    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
     overrides: &crate::sessions::Overrides,
 ) -> Vec<SessionEntry> {
     let heads: Vec<String> = entries.iter().map(|entry| index.head(&entry.id)).collect();
@@ -1370,10 +1320,10 @@ pub fn collapse_with_index(
     for head in &collapsible {
         let mut row = entries.iter().find(|entry| entry.id == *head).expect("collapsible heads have a row").clone();
         if !row.named {
-            if let Some(kept) = handoff_title_of(head, provider_sessions, overrides) {
+            if let Some(kept) = handoff_title_of(head, overrides) {
                 row.label = one_line(&kept);
             } else {
-                let original = chain_tail(head, provider_sessions, overrides, index)
+                let original = chain_tail(head, overrides, index)
                     .filter(|tail| tail != head)
                     .and_then(|tail| entries.iter().find(|entry| entry.id == tail).map(|tail_row| tail_row.label.clone()));
                 if let Some(original) = original {
@@ -1678,14 +1628,12 @@ pub fn rowless_session_project(
     session_id: &str,
     entries: &[SessionEntry],
     overrides: &crate::sessions::Overrides,
-    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
 ) -> Option<String> {
     entries
         .iter()
         .find(|e| e.id == session_id)
         .and_then(|e| e.project.clone())
         .or_else(|| overrides.get(session_id).and_then(|m| m.project.clone()))
-        .or_else(|| provider_sessions.get(session_id).and_then(|r| r.project.clone()))
         .map(|p| p.trim().to_owned())
         .filter(|p| !p.is_empty())
 }
@@ -1776,26 +1724,25 @@ pub mod tests {
         assert!(row.label.ends_with("\u{2026}"), "a cut title carries its elision");
     }
 
-    /// [`rowless_session_project`]: the row first, then the override a
-    /// draft files before its first send, then the provider-lane record.
+    /// [`rowless_session_project`]: the row first, then the facts a draft
+    /// files before its first send.
     #[test]
     fn a_rowless_session_names_its_project_past_the_rows() {
         let entries = vec![grouped_entry("s1", Some("p-baaz"), Some("/work/p-baaz"), 0)];
         let overrides: crate::sessions::Overrides = HashMap::new();
-        let records: crate::provider_sessions::ProviderSessionStore = HashMap::new();
         assert_eq!(
-            rowless_session_project("s1", &entries, &overrides, &records).as_deref(),
+            rowless_session_project("s1", &entries, &overrides).as_deref(),
             Some("p-baaz"),
             "a row names its own project"
         );
-        assert_eq!(rowless_session_project("s-new", &entries, &overrides, &records), None);
+        assert_eq!(rowless_session_project("s-new", &entries, &overrides), None);
         let mut overrides = overrides;
         overrides.insert(
             "s-new".to_owned(),
             crate::sessions::SessionMeta { project: Some("p-agentic".to_owned()), ..Default::default() },
         );
         assert_eq!(
-            rowless_session_project("s-new", &entries, &overrides, &records).as_deref(),
+            rowless_session_project("s-new", &entries, &overrides).as_deref(),
             Some("p-agentic"),
             "a draft's override files its project before the first send"
         );
@@ -2280,10 +2227,10 @@ pub mod tests {
         sent.last_ask = Some("Explain the schema".into());
         assert!(!sent.is_empty(), "a recorded ask is a send");
         let mut store = crate::provider_sessions::ProviderSessionStore::new();
-        assert!(!sent_to("s-3", &store, &overrides));
-        crate::provider_sessions::upsert_open(&mut store, "codex", "s-3", None, None, None);
-        crate::provider_sessions::note_first_prompt(&mut store, "s-3", "Draw the db");
-        assert!(sent_to("s-3", &store, &overrides), "an admitted first prompt is a send");
+        assert!(!sent_to("s-3", &overrides));
+        crate::provider_sessions::upsert_open(&mut store, &mut overrides, "codex", "s-3", None, None, None);
+        crate::provider_sessions::note_first_prompt(&store, &mut overrides, "s-3", "Draw the db");
+        assert!(sent_to("s-3", &overrides), "an admitted first prompt is a send");
     }
 
     /// The pre-1.3.0 shape still works the same way: a `local` placeholder
@@ -2399,6 +2346,12 @@ pub mod tests {
         // Reads the state dir (`support_dir`), so it holds the lock the
         // tests that point `BAAZ_STATE_DIR` elsewhere hold.
         let _guard = crate::store::test_env_lock();
+        // The state dir exists before the first look: the own-root check
+        // canonicalizes it once, and a missing dir keeps its raw (`/var/…`)
+        // spelling while the workspace made under it later resolves
+        // (`/private/var/…`). Nothing else in the run is relied on to have
+        // made it.
+        let _ = std::fs::create_dir_all(crate::store::support_dir().join("workspace"));
         let projects = Projects::default();
         let made_by = |creator: Option<&str>| IndexEntry {
             title: "You are writing items for an exam".into(),
@@ -2644,35 +2597,32 @@ pub mod tests {
             provider: "claude-code".into(),
             session_id: "s-provider".into(),
             workspace: None,
-            project: None,
             created_ms: 1_700_000_000_000,
             updated_ms: 1_700_000_000_000,
             turns: 2,
-            title: None,
-            first_prompt: None,
-            handoff_to: None,
-            handoff_from: None,
-            handoff_from_provider: None,
-            handoff_title: None,
-            display_texts: std::collections::HashMap::new(),
             origin: None,
         }
     }
 
-    /// The W5 title arm: the provider label ladder reads name, generated
-    /// title, ack title, first prompt, derived title — in that order.
+    /// The W5 title arm: the provider row's label is its row's own title —
+    /// name, generated title, ack title, first prompt, derived title — in
+    /// that order, all read from the one row.
     #[test]
     fn provider_labels_prefer_a_name_then_the_generated_title() {
         let projects = Projects::default();
-        let mut record = provider_record();
-        record.title = Some("Ack title".into());
-        record.first_prompt = Some("Fix the header".into());
-        let row = SessionEntry::provider_row(&record, None, &projects);
+        let record = provider_record();
+        let mut facts = SessionMeta {
+            provider_title: Some("Ack title".into()),
+            first_prompt: Some("Fix the header".into()),
+            ..SessionMeta::default()
+        };
+        let row = SessionEntry::provider_row(&record, Some(&facts), &projects);
         assert_eq!(row.label, "Ack title");
-        record.title = None;
-        let row = SessionEntry::provider_row(&record, None, &projects);
+        facts.provider_title = None;
+        let row = SessionEntry::provider_row(&record, Some(&facts), &projects);
         assert_eq!(row.label, "Fix the header");
         let meta = SessionMeta {
+            first_prompt: Some("Fix the header".into()),
             generated_title: Some("Shiny generated".into()),
             last_ask: Some("Fix the header".into()),
             last_summary: Some("Fixed it".into()),
@@ -2712,6 +2662,7 @@ pub mod tests {
     /// destination's half in the overrides — exactly what
     /// `persist_handoff_links` writes.
     fn chain_record(
+        facts: &mut crate::sessions::Overrides,
         id: &str,
         provider: &str,
         turns: u64,
@@ -2719,34 +2670,33 @@ pub mod tests {
         to: Option<&str>,
         from: Option<(&str, &str)>,
     ) -> crate::provider_sessions::ProviderSessionRecord {
+        let meta = facts.entry(id.to_owned()).or_default();
+        meta.first_prompt = prompt.map(str::to_owned);
+        meta.handoff_to = to.map(str::to_owned);
+        meta.handoff_from = from.map(|(source, _)| source.to_owned());
+        meta.handoff_from_provider = from.map(|(_, provider)| provider.to_owned());
         crate::provider_sessions::ProviderSessionRecord {
             provider: provider.into(),
             session_id: id.into(),
             workspace: None,
-            project: None,
             created_ms: 1_700_000_000_000,
             updated_ms: 1_700_000_000_000,
             turns,
-            title: None,
-            first_prompt: prompt.map(str::to_owned),
-            handoff_to: to.map(str::to_owned),
-            handoff_from: from.map(|(source, _)| source.to_owned()),
-            handoff_from_provider: from.map(|(_, provider)| provider.to_owned()),
-            handoff_title: None,
-            display_texts: std::collections::HashMap::new(),
             origin: None,
         }
     }
 
     fn chain_stores() -> (crate::provider_sessions::ProviderSessionStore, crate::sessions::Overrides) {
         let mut provider = crate::provider_sessions::ProviderSessionStore::new();
+        let mut overrides = crate::sessions::Overrides::new();
         provider.insert(
             "chain-a".into(),
-            chain_record("chain-a", "claude-code", 2, Some("Chart the Greyport ferry routes"), Some("chain-b"), None),
+            chain_record(&mut overrides, "chain-a", "claude-code", 2, Some("Chart the Greyport ferry routes"), Some("chain-b"), None),
         );
         provider.insert(
             "chain-b".into(),
             chain_record(
+                &mut overrides,
                 "chain-b",
                 "codex",
                 3,
@@ -2755,24 +2705,26 @@ pub mod tests {
                 Some(("chain-a", "claude-code")),
             ),
         );
-        let mut overrides = crate::sessions::Overrides::new();
         overrides.insert(
             "chain-c".into(),
             SessionMeta {
                 handoff_from: Some("chain-b".into()),
                 handoff_from_provider: Some("codex".into()),
-            handoff_title: None,
+                handoff_title: None,
                 ..SessionMeta::default()
             },
         );
         (provider, overrides)
     }
 
-    fn chain_rows(provider: &crate::provider_sessions::ProviderSessionStore) -> Vec<SessionEntry> {
+    fn chain_rows(
+        provider: &crate::provider_sessions::ProviderSessionStore,
+        overrides: &crate::sessions::Overrides,
+    ) -> Vec<SessionEntry> {
         let projects = Projects::default();
-        let mut row_a = SessionEntry::provider_row(&provider["chain-a"], None, &projects);
+        let mut row_a = SessionEntry::provider_row(&provider["chain-a"], overrides.get("chain-a"), &projects);
         row_a.updated = Local::now() - chrono::Duration::days(2);
-        let mut row_b = SessionEntry::provider_row(&provider["chain-b"], None, &projects);
+        let mut row_b = SessionEntry::provider_row(&provider["chain-b"], overrides.get("chain-b"), &projects);
         row_b.updated = Local::now() - chrono::Duration::days(1);
         let mut row_c = entry("chain-c");
         row_c.label = "Later words".into();
@@ -2788,7 +2740,7 @@ pub mod tests {
     #[test]
     fn a_two_hop_mixed_chain_lists_one_row_with_the_original_title_and_summed_turns() {
         let (provider, overrides) = chain_stores();
-        let rows = chain_rows(&provider);
+        let rows = chain_rows(&provider, &overrides);
         assert_eq!(rows[0].label, "Chart the Greyport ferry routes");
         let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
         assert_eq!(collapsed.len(), 1, "three members, one row, drew {collapsed:?}");
@@ -2804,7 +2756,7 @@ pub mod tests {
     #[test]
     fn the_collapsed_row_reads_the_heads_own_time() {
         let (provider, overrides) = chain_stores();
-        let rows = chain_rows(&provider);
+        let rows = chain_rows(&provider, &overrides);
         let head_time = rows[2].updated;
         let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
         assert_eq!(collapsed[0].updated, head_time);
@@ -2814,7 +2766,7 @@ pub mod tests {
     #[test]
     fn member_ids_resolve_to_the_head() {
         let (provider, overrides) = chain_stores();
-        let rows = chain_rows(&provider);
+        let rows = chain_rows(&provider, &overrides);
         assert_eq!(chain_head("chain-a", &provider, &overrides, &rows), "chain-c");
         assert_eq!(chain_head("chain-b", &provider, &overrides, &rows), "chain-c");
         assert_eq!(chain_head("chain-c", &provider, &overrides, &rows), "chain-c");
@@ -2826,7 +2778,7 @@ pub mod tests {
     #[test]
     fn chain_members_cover_the_whole_chain() {
         let (provider, overrides) = chain_stores();
-        let rows = chain_rows(&provider);
+        let rows = chain_rows(&provider, &overrides);
         for id in ["chain-a", "chain-b", "chain-c"] {
             assert_eq!(
                 chain_members(id, &provider, &overrides, &rows),
@@ -2863,7 +2815,7 @@ pub mod tests {
     #[test]
     fn a_renamed_head_keeps_its_own_title() {
         let (provider, overrides) = chain_stores();
-        let mut rows = chain_rows(&provider);
+        let mut rows = chain_rows(&provider, &overrides);
         rows[2].label = "Mine".into();
         rows[2].named = true;
         let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
@@ -2919,44 +2871,35 @@ pub mod tests {
     }
 
     /// Y2a: the persisted chain title outranks the destination's own
-    /// title and first prompt — record half first, then the override's.
+    /// title and first prompt, all on the destination's one row.
     #[test]
     fn the_chain_title_outranks_a_destinations_own_words() {
         let projects = Projects::default();
         let mut record = provider_record();
         record.session_id = "dest".into();
-        record.title = Some("Handed off from Muse: Fix it".into());
-        record.first_prompt = Some("my next message".into());
-        record.handoff_title = Some("Chart the Greyport ferry routes".into());
-        let row = SessionEntry::provider_row(&record, None, &projects);
-        assert_eq!(row.label, "Chart the Greyport ferry routes");
-        record.handoff_title = None;
-        let meta = SessionMeta {
+        let mut meta = SessionMeta {
+            provider_title: Some("Handed off from Muse: Fix it".into()),
+            first_prompt: Some("my next message".into()),
             handoff_title: Some("Chart the Greyport ferry routes".into()),
             ..SessionMeta::default()
         };
         let row = SessionEntry::provider_row(&record, Some(&meta), &projects);
-        assert_eq!(row.label, "Chart the Greyport ferry routes", "the override half reads too");
-        let row = SessionEntry::provider_row(&record, None, &projects);
+        assert_eq!(row.label, "Chart the Greyport ferry routes");
+        meta.handoff_title = None;
+        let row = SessionEntry::provider_row(&record, Some(&meta), &projects);
         assert_eq!(row.label, "Handed off from Muse: Fix it", "without a chain title the ladder is untouched");
     }
 
-    /// Y2a: whichever store holds the chain title, the head reads it.
+    /// Y2a: the head reads the chain title from its row.
     #[test]
-    fn handoff_title_reads_from_whichever_store_holds_it() {
-        let mut provider = crate::provider_sessions::ProviderSessionStore::new();
+    fn handoff_title_reads_from_the_row() {
         let mut overrides = crate::sessions::Overrides::new();
-        assert!(handoff_title_of("dest", &provider, &overrides).is_none());
+        assert!(handoff_title_of("dest", &overrides).is_none());
         overrides.insert(
             "dest".into(),
             SessionMeta { handoff_title: Some("  Chart the routes  ".into()), ..SessionMeta::default() },
         );
-        assert_eq!(handoff_title_of("dest", &provider, &overrides).as_deref(), Some("Chart the routes"));
-        let mut record = provider_record();
-        record.session_id = "dest".into();
-        record.handoff_title = Some("Record half wins".into());
-        provider.insert("dest".into(), record);
-        assert_eq!(handoff_title_of("dest", &provider, &overrides).as_deref(), Some("Record half wins"));
+        assert_eq!(handoff_title_of("dest", &overrides).as_deref(), Some("Chart the routes"));
     }
 
     /// Y2a: the pack turn and its acknowledgement never become the
@@ -2993,15 +2936,11 @@ pub mod tests {
     /// arrived.
     #[test]
     fn collapse_is_idempotent_in_any_order() {
-        let (mut provider, mut overrides) = chain_stores();
-        for id in ["chain-b", "chain-c"] {
-            if let Some(record) = provider.get_mut(id) {
-                record.handoff_title = Some("Chart the Greyport ferry routes".into());
-            }
-        }
+        let (provider, mut overrides) = chain_stores();
+        overrides.entry("chain-b".into()).or_default().handoff_title = Some("Chart the Greyport ferry routes".into());
         overrides.entry("chain-c".into()).or_default().handoff_title =
             Some("Chart the Greyport ferry routes".into());
-        let mut rows = chain_rows(&provider);
+        let mut rows = chain_rows(&provider, &overrides);
         // The tail row reads stale words now; the persisted chain title —
         // copied at activation — still wins over any member relabel.
         rows[0].label = "Stale tail words".into();
@@ -3024,7 +2963,7 @@ pub mod tests {
     fn the_collapsed_head_carries_the_chains_state() {
         use Attention;
         let (provider, overrides) = chain_stores();
-        let mut rows = chain_rows(&provider);
+        let mut rows = chain_rows(&provider, &overrides);
         rows[0].pinned = true;
         rows[0].running = true;
         rows[0].attention = vec![Attention::ApprovalPending];
@@ -3055,14 +2994,14 @@ pub mod tests {
     /// rows) keeps the source listed.
     #[test]
     fn a_dangling_handoff_to_keeps_the_source_listed() {
-        let (mut provider, overrides) = chain_stores();
+        let (mut provider, mut overrides) = chain_stores();
         provider.insert(
             "dangling".into(),
-            chain_record("dangling", "codex", 1, Some("Lost leg"), Some("gone"), None),
+            chain_record(&mut overrides, "dangling", "codex", 1, Some("Lost leg"), Some("gone"), None),
         );
         let projects = Projects::default();
         let rows = vec![
-            SessionEntry::provider_row(&provider["dangling"], None, &projects),
+            SessionEntry::provider_row(&provider["dangling"], overrides.get("dangling"), &projects),
             entry("plain"),
         ];
         assert_eq!(chain_head("dangling", &provider, &overrides, &rows), "dangling");
@@ -3076,7 +3015,7 @@ pub mod tests {
     #[test]
     fn the_head_takes_the_source_rows_place() {
         let (provider, overrides) = chain_stores();
-        let mut rows = chain_rows(&provider);
+        let mut rows = chain_rows(&provider, &overrides);
         let plain = entry("plain");
         rows.insert(1, plain);
         let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
@@ -3090,7 +3029,7 @@ pub mod tests {
     #[test]
     fn a_headless_chain_waits_for_the_heads_row() {
         let (provider, overrides) = chain_stores();
-        let rows = chain_rows(&provider);
+        let rows = chain_rows(&provider, &overrides);
         let member_rows = vec![rows[0].clone(), rows[1].clone()];
         let collapsed = collapse_handoff_chains(member_rows, &provider, &overrides);
         assert_eq!(collapsed.len(), 2, "no head row, no collapse");
@@ -3101,12 +3040,12 @@ pub mod tests {
     /// re-sums the chain.
     #[test]
     fn x3d_an_unlinked_settle_needs_no_collapse() {
-        let (provider, overrides) = chain_stores();
-        assert!(!needs_collapse("unlinked", &provider, &overrides));
-        assert!(!needs_collapse("no-such-session", &provider, &overrides));
-        assert!(needs_collapse("chain-a", &provider, &overrides));
-        assert!(needs_collapse("chain-b", &provider, &overrides));
-        assert!(needs_collapse("chain-c", &provider, &overrides));
+        let (_, overrides) = chain_stores();
+        assert!(!needs_collapse("unlinked", &overrides));
+        assert!(!needs_collapse("no-such-session", &overrides));
+        assert!(needs_collapse("chain-a", &overrides));
+        assert!(needs_collapse("chain-b", &overrides));
+        assert!(needs_collapse("chain-c", &overrides));
     }
 
     /// X3d: the hidden pack exchange is exactly one counted turn per
@@ -3123,19 +3062,19 @@ pub mod tests {
     #[test]
     fn a_handoff_cycle_lists_rather_than_loops() {
         let mut provider = crate::provider_sessions::ProviderSessionStore::new();
+        let mut overrides = crate::sessions::Overrides::new();
         provider.insert(
             "loop-a".into(),
-            chain_record("loop-a", "claude-code", 1, Some("A leg"), Some("loop-b"), None),
+            chain_record(&mut overrides, "loop-a", "claude-code", 1, Some("A leg"), Some("loop-b"), None),
         );
         provider.insert(
             "loop-b".into(),
-            chain_record("loop-b", "codex", 1, Some("B leg"), Some("loop-a"), None),
+            chain_record(&mut overrides, "loop-b", "codex", 1, Some("B leg"), Some("loop-a"), None),
         );
-        let overrides = crate::sessions::Overrides::new();
         let projects = Projects::default();
         let rows = vec![
-            SessionEntry::provider_row(&provider["loop-a"], None, &projects),
-            SessionEntry::provider_row(&provider["loop-b"], None, &projects),
+            SessionEntry::provider_row(&provider["loop-a"], overrides.get("loop-a"), &projects),
+            SessionEntry::provider_row(&provider["loop-b"], overrides.get("loop-b"), &projects),
         ];
         let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
         assert_eq!(collapsed.len(), 2, "a cycle is two singletons, never a hang");

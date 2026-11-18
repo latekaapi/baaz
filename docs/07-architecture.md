@@ -279,8 +279,23 @@ Delete, Upload, Sign in), then the Ask mode.
 Unit tests and deterministic captures that set no dir use a per-process temp
 dir. `store::migrate_legacy_support_dir` moves the pre-rename directory once.
 
-`JsonStore<T>` (`crates/baaz/src/store.rs`) is the one way a ported JSON file
-is written. Each store has one writer thread. `save` takes the generation and
+`baaz.db` (`crates/baaz-core/src/db/`, task 4.12) holds every fact Baaz keeps
+about a session: one `session` row per session keyed `(provider_key,
+provider_session_id)` with Baaz's own uuid, its `turn` rows (the usage ledger
+and the bubble text a submit showed), its `attachment` rows keyed by the user
+turn, the prompt history, and the import and migration journals. One writer
+thread owns every connection; work reaches it as a queued job, so the UI
+thread never touches SQLite (`db::check_off_ui`). Migrations step
+`PRAGMA user_version`; the file is in WAL mode; a multi-row write is one
+transaction. The first open of a state dir's database imports the JSON stores
+it replaces (`db/json_import.rs`, the only reader of those files) in one
+transaction with its marker, and never renames, rewrites or deletes them: they
+stay as the backup. The window keeps the session list in memory as two maps
+(the facts per session, the provider record per session) and writes a
+snapshot back; the writer writes only the rows that changed.
+
+`JsonStore<T>` (`crates/baaz-core/src/store.rs`) is the one way the remaining
+JSON files are written. Each store has one writer thread. `save` takes the generation and
 resolves the path when the snapshot is taken, on the caller's thread, and the
 newest snapshot wins. `save_soon` waits 750 ms to coalesce a burst.
 `write_now` writes on the caller's thread, ordered against the writer.
@@ -294,24 +309,20 @@ problem is queued and shown as one toast per problem.
 
 | file under `<S>` | writer | how | role |
 |---|---|---|---|
-| `session-meta.json` | `sessions.rs` | JsonStore | the person's facts per session: name, hidden, pinned, archived, project, handoff links. Canonical |
-| `session-cache.json` | `sessions.rs` | JsonStore | titles, byline, last error, pane state. Regenerable |
-| `sessions.json` | (legacy) | read once if neither half exists; never deleted | the pre-split file |
-| `provider-sessions.json` | `provider_sessions.rs` | JsonStore | the list of Claude Code and Codex sessions: provider, workspace, project, origin. Canonical |
+| `baaz.db` | `db/` (one writer thread) | SQLite, WAL, `user_version` steps | `session` (facts, titles, record: provider, workspace, turns, origin), `turn` (usage ledger, bubble texts), `attachment`, `prompt_history`, `import_job`/`import_item`, `migration_journal`, `account` and `worktree` (empty until something fills them), `meta`. Canonical |
+| `session-meta.json`, `session-cache.json`, `sessions.json`, `provider-sessions.json`, `history.json`, `import-journal.json`, `session-migration-journal.json`, `sent/<id>.json` | (retired) | read once by the first-launch import; never written or renamed (a forgotten session's `sent/<id>.json` goes with it) | the backup of what `baaz.db` imported |
 | `projects.json` | `projects.rs` | JsonStore, with a migration | projects, defaults, last picks. Canonical |
-| `history.json` | `history.rs` | JsonStore | prompt history per workspace |
 | `provider.json` | `providers.rs` | JsonStore | the last provider picked |
 | `layout.json` | `layout.rs` | JsonStore | window layout, mode, right pane, browser and agent prefs |
 | `Browser/tabs.json` | `browser/tabs.rs` | JsonStore (`save_soon`) | open tabs and spaces |
-| `baaz.db` | `usage.rs` | SQLite, versioned migrations | the per-turn usage ledger |
 | `search.db` | `search.rs` | SQLite FTS5 | `sessions_fts` (regenerable) and `files_fts` (files agents wrote; refilled only as turns complete) |
 | `Browser/browser.db` | `browser/history.rs`, `browser/bookmarks.rs` | SQLite | browsing history and bookmarks |
 | `Browser/Chromium/`, `Browser/cef.log`, `Browser/adblock/` | CEF, `browser/adblock.rs` | the engine's own | browser profile, log, filter lists |
 | `tier.json`, `provider-status.json`, `index-cache.json`, `session-list-cache.json`, `provider-paths.json`, `claude-code-last-model.json`, `keymap.json` | `tier.rs`, `provider_status.rs`, `index.rs`, `list_cache.rs`, `details.rs`, `providers.rs`, `keymap.rs` | `write_atomic` directly | probe and list caches (regenerable), the path overrides and the keymap (authored) |
-| `session-migration-journal.json` (+ `.consented`, `.dismissed`), `import-journal.json` | `session_migration.rs`, `import.rs` | `write_atomic` | migration and import journals |
+| `session-migration.consented`, `.dismissed` | `session_migration.rs` | marker files | the migration's consent and dismissal |
 | `onboarding_completed` | `provider_status.rs` | marker file | first-run flag |
-| `sent/<id>.json`, `sent/<id>/` | `sent.rs` | files | the attachments each turn was sent with |
-| `handoff/<dest>.json` | `handoff_snapshot.rs` | `write_atomic` | the source transcript copied at handoff |
+| `sent/<id>/` | `sent.rs` | files | the pictures each turn was sent with (the rows are `attachment` in `baaz.db`); removed when the session is forgotten |
+| `handoff/<dest>.json` | `handoff_snapshot.rs` | `write_atomic` | the source transcript copied at handoff; removed when the destination is forgotten |
 | `claude-home/`, `codex-home/` | the CLI children | the CLIs' own | Claude Code and Codex transcripts and config (with links into `~/.claude` / `~/.codex` for auth and settings). Canonical transcripts for those providers |
 | `mcp/` | `terminal/relay.rs` | files | per-session MCP configs for Claude Code |
 | `run/terminal-<pid>.sock`, `lock` | `terminal/service.rs`, `instance.rs` | socket, flock | runtime only |
@@ -402,8 +413,13 @@ These are true of the code today.
 - **Not every state file is a `JsonStore`.** The caches, journals,
   `keymap.json` and `provider-paths.json` still call `write_atomic` directly
   and ignore its result in several places.
-- **Some state never shrinks.** `sent/` and `handoff/` are not pruned, and
-  `files_fts` in `search.db` is lost on a schema bump.
+- **Some state never shrinks.** `sent/` and `handoff/` lose a session's
+  files only when it is forgotten, and `files_fts` in `search.db` is lost on
+  a schema bump.
+- **The window's session list is keyed by the bare session id.** `baaz.db`
+  keys a session by provider and id, but the in-memory maps (and every
+  holder of a session id in the window) still use the id alone; with two
+  rows for one id the list shows the one its record names.
 - **Stale prose.** `wire.rs` still says the legacy lane carries every
   command; `providers.rs` calls Muse "the legacy pump"; the `login.rs` header
   describes a login screen that no longer exists; the `ProviderAdapter::dispatch`

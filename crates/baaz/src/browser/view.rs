@@ -77,7 +77,7 @@ pub(crate) struct BrowserView {
     /// The tab model: tabs per session and per project, persisted.
     pub tabs: Tabs,
     /// Whether [`Tabs`] has been loaded and migrated yet. Lazy: the
-    /// registry is built before `sessions.json` is read, so the first
+    /// registry is built before the session facts are read, so the first
     /// browser use loads.
     pub tabs_loaded: bool,
     /// The tab the agent tools act on per session key, so discard never

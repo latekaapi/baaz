@@ -325,7 +325,7 @@ impl SessionRuntime {
             // provisional id: it moves to the real one, beside anything
             // already recorded there, never dropped.
             let made_while_opening = std::mem::take(&mut self.sent_items);
-            self.sent_items = crate::sent::rekey(&provisional, &self.session_id, made_while_opening);
+            self.sent_items = crate::sent::rekey(&self.provider_id, &provisional, &self.session_id, made_while_opening);
         }
         let requested = self.opening_mode();
         self.install_lane(provider, events, cx);
@@ -432,7 +432,7 @@ impl SessionRuntime {
                     .into_iter()
                     .map(|delta| match delta {
                         Delta::TurnStarted { turn: Turn::User { id, text, attachments, mentions, timestamp } } => {
-                            let text = self.display_override_for(&text).unwrap_or(text);
+                            let text = self.display_override_for(&id, &text).unwrap_or(text);
                             Delta::TurnStarted {
                                 turn: Turn::User { id, text, attachments, mentions, timestamp },
                             }
@@ -1224,6 +1224,16 @@ impl SessionRuntime {
         let take = echoes.min(self.pending_optimistic.len());
         let removed: Vec<String> =
             self.pending_optimistic.drain(..take).map(|pending| pending.id).collect();
+        // Each echo replaces the oldest waiting bubble: what that send went
+        // out with is kept under the provider's own user turn from now on
+        // (D-3), not under the bubble's id or its text.
+        let echoed = deltas.iter().filter_map(|delta| match delta {
+            Delta::TurnStarted { turn: Turn::User { id, .. } } => Some(id.clone()),
+            _ => None,
+        });
+        for (bubble, turn) in removed.iter().zip(echoed) {
+            self.bind_sent_turn(bubble, &turn);
+        }
         let shift = match self.store.session().and_then(|session| session.turns.last()) {
             Some(Turn::Assistant { blocks, .. }) if blocks.is_empty() => self
                 .store
@@ -1244,6 +1254,20 @@ impl SessionRuntime {
             out.push(Delta::TurnStarted { turn });
         }
         out
+    }
+
+    /// The send shown as the optimistic bubble `bubble` is the provider's
+    /// user turn `turn` now: its attachments follow the id, here and in the
+    /// database.
+    fn bind_sent_turn(&mut self, bubble: &str, turn: &str) {
+        let mut bound = false;
+        for item in self.sent_items.iter_mut().filter(|item| item.turn_id.as_deref() == Some(bubble)) {
+            item.turn_id = Some(turn.to_owned());
+            bound = true;
+        }
+        if bound {
+            crate::sent::bind_turn(&self.provider_id, &self.session_id, bubble, turn);
+        }
     }
 
     /// Adopt the transcript's open assistant turn, if any: an ack can beat
@@ -4895,6 +4919,80 @@ mod tests {
     /// X1b.3: one batch carrying two user echoes (queued sends, catch-up)
     /// reconciles both pending optimistic turns — exactly two user turns,
     /// no leftovers, an empty pending queue.
+    /// D-3: what a send went out with is kept under the provider's own
+    /// user turn once its echo lands, here and in `baaz.db`: two sends with
+    /// the same words keep their own attachments.
+    #[gpui::test]
+    fn sends_with_the_same_words_keep_their_own_attachments_by_turn(cx: &mut gpui::TestAppContext) {
+        // Its own state dir, the env lock held: the sends and the read-back
+        // must name one database while other tests repoint the store.
+        let _guard = crate::store::test_env_lock();
+        let old = std::env::var_os("BAAZ_STATE_DIR");
+        let dir = std::env::temp_dir().join(format!("baaz-same-words-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("state dir");
+        std::env::set_var("BAAZ_STATE_DIR", &dir);
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let session = "s-same-words";
+        let (view, tx) = open_recording_view(vc, session, "codex", adapter);
+        for name in ["one.txt", "two.txt"] {
+            vc.update(|_, cx| {
+                view.update(cx, |view, cx| {
+                    view.runtime().clone().update(cx, |rt, cx| {
+                        rt.files.push(crate::attachments::AttachedFile {
+                            id: name.to_owned(),
+                            name: name.to_owned(),
+                            size_bytes: 1,
+                            text: "x".to_owned(),
+                            truncated: false,
+                            path: None,
+                        });
+                        rt.send_text("same".to_owned(), cx)
+                    })
+                })
+            });
+            vc.run_until_parked();
+        }
+        let echo = |id: &str| aui_protocol::Delta::TurnStarted {
+            turn: aui_protocol::Turn::User {
+                id: id.to_owned(),
+                text: "same".to_owned(),
+                attachments: Vec::new(),
+                mentions: Vec::new(),
+                timestamp: None,
+            },
+        };
+        vc.update(|_, _| {
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some(session.to_owned()),
+                deltas: vec![echo("u-1"), echo("u-2")],
+            })
+            .expect("the lane channel is open");
+        });
+        vc.run_until_parked();
+        let keyed = |items: &[crate::sent::SentItem]| -> Vec<(Option<String>, String)> {
+            items.iter().map(|item| (item.turn_id.clone(), item.attachments[0].name.clone())).collect()
+        };
+        let want = vec![(Some("u-1".to_owned()), "one.txt".to_owned()), (Some("u-2".to_owned()), "two.txt".to_owned())];
+        vc.update(|_, cx| assert_eq!(keyed(&view.read(cx).rt(cx).sent_items), want, "in memory"));
+        crate::db::flush();
+        assert_eq!(keyed(&crate::sent::load("codex", session)), want, "and in baaz.db");
+        let turns: Vec<std::rc::Rc<aui_protocol::Turn>> = vc.update(|_, cx| {
+            view.read(cx).rt(cx).session().map(|s| s.turns.iter().cloned().map(std::rc::Rc::new).collect()).unwrap_or_default()
+        });
+        let paired = crate::sent::pair(&turns, &crate::sent::load("codex", session));
+        assert_eq!(paired["u-1"].attachments[0].name, "one.txt");
+        assert_eq!(paired["u-2"].attachments[0].name, "two.txt");
+        crate::db::close(crate::db::path_in(&dir));
+        match old {
+            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+            None => std::env::remove_var("BAAZ_STATE_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[gpui::test]
     fn one_batch_with_two_echoes_reconciles_both_pending(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));

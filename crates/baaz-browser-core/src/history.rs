@@ -18,26 +18,11 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use std::cell::Cell;
-
-thread_local! {
-    /// Set on the thread that built the app's `BrowserData`: the UI thread.
-    pub static UI_THREAD: Cell<bool> = const { Cell::new(false) };
-    /// Set while the worker runs a job, on whatever thread runs it.
-    pub static IN_JOB: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Every `BrowserDb` call asserts this: SQLite never runs on the UI thread
-/// outside a worker job (the app's `BrowserData` worker). In production the
-/// worker runs on the background
-/// executor's threads; under gpui's test executor it runs on the test
-/// thread, inside a job. Checked in tests and debug builds.
-pub fn check_off_ui(what: &str) {
-    if cfg!(any(test, debug_assertions)) {
-        let on_ui = UI_THREAD.with(Cell::get) && !IN_JOB.with(Cell::get);
-        assert!(!on_ui, "browser.db: `{what}` ran on the UI thread outside the BrowserData worker");
-    }
-}
+/// The thread flags and the assert every `BrowserDb` call makes: SQLite
+/// never runs on the UI thread outside a worker job (the app's
+/// `BrowserData` worker). One assert for every SQLite file Baaz keeps, owned
+/// by `baaz.db`'s module ([`baaz_core::db::check_off_ui`]).
+pub use baaz_core::db::{check_off_ui, IN_JOB, UI_THREAD};
 
 /// Page words are kept once a page has been shown this long.
 pub const DWELL_MS: u64 = 10_000;

@@ -717,10 +717,6 @@ pub struct Harness {
     pub(crate) tier_retry: crate::tier::ProbeRetry,
     /// Its timer. Replacing or clearing this cancels it.
     pub(crate) tier_retry_timer: Option<gpui::Task<()>>,
-    /// The B4M plan: the cache computed once off the UI thread by
-    /// [`Harness::refresh_migration_cache`] and read by every render, and
-    /// whether a recompute is running.
-    pub(crate) migration: crate::session_migration::MigrationPlan,
     /// P7 import (docs/72): the cached scan plan, the open sheet, the run in
     /// flight and the journal Undo reads ([`crate::import_ui`]).
     pub(crate) import: crate::import_ui::ImportUi,
@@ -785,6 +781,9 @@ impl Harness {
     /// Boot: read `auth.json`, then connect and finish the probe.
     pub fn new(args: Args, capture: CaptureToken, window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::log::boot_mark("harness-new-start");
+        // The window's thread: from here on, SQLite on it outside a worker
+        // job fails the `check_off_ui` assert (tests, debug builds).
+        crate::db::mark_ui_thread();
         // Task 3.3: a click on a notification opens its session, and the
         // first attention look (the Dock badge) runs once construction is
         // over — whichever of the boot paths below returns, scripted
@@ -922,7 +921,6 @@ impl Harness {
             tier_probing: false,
             tier_retry: Default::default(),
             tier_retry_timer: None,
-            migration: crate::session_migration::MigrationPlan::default(),
             import: crate::import_ui::ImportUi::boot(),
             current_project: None,
             terminal_dock,
@@ -1302,7 +1300,7 @@ impl Harness {
         self.session_list.read(cx).sessions.iter().find(|e| e.id == head).map(|e| {
             let pending = e.title_pending || self.session_list.read(cx).titles_pending.contains(&e.id);
             let text = if !e.named {
-                sidebar::handoff_title_of(head, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides)
+                sidebar::handoff_title_of(head, &self.session_list.read(cx).overrides)
                     .map(|t| sidebar::one_line(&t))
                     .unwrap_or_else(|| e.label.clone())
             } else {
@@ -1904,7 +1902,7 @@ impl Harness {
 
     /// Persist one session's right-pane state without the session-list
     /// settle (B7): the in-memory override is edited at once, and the
-    /// `sessions.json` write follows debounced off the UI thread. No
+    /// session row's write follows debounced off the UI thread. No
     /// `rejoin`, no `rebuild_search_index` — pane state is not searchable —
     /// and no synchronous store write on the gesture. Callers notify
     /// themselves; this only arms the write.
@@ -1951,12 +1949,12 @@ impl Harness {
         }
     }
 
-    /// The cheap right-pane persists' write: a snapshot queued on the
-    /// sessions store after its delay, so a burst of toggles, expansions and
-    /// navigations coalesces into one write and a toggle never blocks its
-    /// own animation frame on the disk. Newest wins: a rename, pin or
+    /// The cheap right-pane persists' write: a snapshot queued for the
+    /// session rows after a short delay, so a burst of toggles, expansions
+    /// and navigations coalesces into one write and a toggle never blocks
+    /// its own animation frame on the disk. Newest wins: a rename, pin or
     /// archive saved inside the window replaces this snapshot
-    /// ([`crate::store::JsonStore`]).
+    /// ([`crate::sessions::save_soon`]).
     pub(crate) fn schedule_overrides_write(&mut self, cx: &mut Context<Self>) {
         crate::sessions::save_soon(&self.session_list.read(cx).overrides);
     }
@@ -2032,7 +2030,7 @@ impl Harness {
     /// global and is never saved here.
     ///
     /// B7: the persist is the cheap debounced write above — no `rejoin`,
-    /// no search rebuild, no synchronous `sessions.json` write.
+    /// no search rebuild, no synchronous store write.
     ///
     /// Q4c: while a provider switch is pending the pane is neutral — it
     /// describes neither session — so no gesture persists onto either
@@ -4226,13 +4224,24 @@ impl Harness {
                         format!("{name} could not be read"),
                         format!("Baaz started without it. The file was kept as {}.", aside_name(&aside)),
                     ),
-                    StoreProblem::EntriesDropped { name, count, aside } => (
+                    StoreProblem::Unreadable { name, restored: true } => (
+                        format!("Restored {name} from its backup"),
+                        "The file could not be read, so its backup was used. The file is unchanged.".to_owned(),
+                    ),
+                    StoreProblem::Unreadable { name, restored: false } => (
+                        format!("{name} could not be read"),
+                        "Baaz started without it. The file is unchanged.".to_owned(),
+                    ),
+                    StoreProblem::EntriesSkipped { name, count } => (
                         format!("Part of {name} could not be read"),
                         format!(
-                            "{count} {} skipped. The whole file was kept as {}.",
+                            "{count} {} skipped. The file is unchanged.",
                             if count == 1 { "entry was" } else { "entries were" },
-                            aside_name(&aside)
                         ),
+                    ),
+                    StoreProblem::DatabaseUnavailable { error } => (
+                        "Couldn't open Baaz's database".to_owned(),
+                        format!("{error}. Changes made now will not be saved."),
                     ),
                     StoreProblem::WriteFailed { name, error } => (
                         format!("Couldn't save {name}"),
@@ -5368,17 +5377,9 @@ mod tests {
                             provider: "codex".to_owned(),
                             session_id: "minted-1".to_owned(),
                             workspace: None,
-                            project: None,
                             created_ms: 0,
                             updated_ms: 0,
                             turns: 0,
-                            title: None,
-                            first_prompt: None,
-                            handoff_to: None,
-                            handoff_from: None,
-                            handoff_from_provider: None,
-                handoff_title: None,
-                            display_texts: std::collections::HashMap::new(),
                             origin: None,
                         },
                     );
@@ -6016,10 +6017,10 @@ mod tests {
     }
 
     /// B7: opening or closing the right pane does no session-list or search
-    /// work and no synchronous `sessions.json` write. Pane state is not
+    /// work and no synchronous store write. Pane state is not
     /// searchable, so the toggle persists through the cheap debounced
     /// off-thread write only: the search-rebuild counter stays put and no
-    /// `sessions.json` exists synchronously afterwards. Opening on Browser
+    /// session facts are stored synchronously afterwards. Opening on Browser
     /// also prepares the webview ahead of the animation, off the render
     /// path: the state exists before any frame draws it.
     #[gpui::test]
@@ -6050,7 +6051,7 @@ mod tests {
         );
         assert!(
             !crate::sessions::stored(),
-            "opening the pane must not synchronously write sessions.json"
+            "opening the pane must not synchronously write the session's row"
         );
         // The in-memory state still lands at once: the cheap path defers
         // only the disk write, never the state itself.
@@ -6075,14 +6076,14 @@ mod tests {
         );
         assert!(
             !crate::sessions::stored(),
-            "closing the pane must not synchronously write sessions.json"
+            "closing the pane must not synchronously write the session's row"
         );
         restore_state(state);
     }
 
     /// B7fix: the debounced disk write eventually persists the per-session
     /// pane state. The toggle lands it in memory at once with no synchronous
-    /// `sessions.json`; once the debounce elapses, the off-thread write
+    /// write; once the debounce elapses, the off-thread write
     /// carries the same open/kind the restore path reads.
     #[gpui::test]
     fn debounced_right_save_eventually_persists_per_session_state(cx: &mut gpui::TestAppContext) {

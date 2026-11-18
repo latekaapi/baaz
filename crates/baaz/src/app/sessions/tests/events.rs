@@ -623,14 +623,16 @@ fn a_parked_session_finishing_its_turn_settles_its_row(cx: &mut gpui::TestAppCon
     lane_restore(state);
 }
 
-/// docs/81 A F8: a truncated `sessions.json` is set aside, never
-/// overwritten, and the window starts with one toast saying so.
+/// docs/81 A F8, docs/82 4.12: a truncated store the first launch imports
+/// is left exactly as it is — never renamed, never overwritten — and the
+/// window starts with one toast saying so.
 #[gpui::test]
-fn a_truncated_sessions_store_is_set_aside_with_a_toast(cx: &mut gpui::TestAppContext) {
+fn a_truncated_sessions_store_is_left_as_it_is_with_a_toast(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
     let state = lane_state("f8-truncated");
-    let path = state.2.join("sessions.json");
-    std::fs::write(&path, br#"{"s-1":{"name":"My session","pinn"#).expect("seed");
+    let path = state.2.join(crate::db::json_import::SESSIONS_LEGACY);
+    let damaged = br#"{"s-1":{"name":"My session","pinn"#;
+    std::fs::write(&path, damaged).expect("seed");
     let _ = crate::store::take_problems();
     let vc = cx.add_empty_window();
     let baaz = lane_harness(vc, &state.2);
@@ -638,20 +640,22 @@ fn a_truncated_sessions_store_is_set_aside_with_a_toast(cx: &mut gpui::TestAppCo
     let titles: Vec<String> = vc.update(|_, cx| {
         baaz.read(cx).overlays.read(cx).toasts.iter().map(|toast| toast.title.to_string()).collect()
     });
-    assert_eq!(titles, vec!["sessions.json could not be read".to_owned()]);
-    let aside: Vec<_> = std::fs::read_dir(&state.2)
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("sessions.json.corrupt-"))
-        .collect();
-    assert_eq!(aside.len(), 1, "the damaged file is kept");
-    assert_eq!(std::fs::read(aside[0].path()).unwrap(), br#"{"s-1":{"name":"My session","pinn"#);
-    // A write after boot never touches the kept copy.
+    assert_eq!(titles, vec![format!("{} could not be read", crate::db::json_import::SESSIONS_LEGACY)]);
+    assert_eq!(std::fs::read(&path).unwrap(), damaged, "the damaged file stays exactly as it was");
+    // A write after boot goes to the database, never to the file.
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| harness.set_override("s-2", |meta| meta.pinned = true, cx));
     });
     vc.run_until_parked();
-    assert_eq!(std::fs::read(aside[0].path()).unwrap(), br#"{"s-1":{"name":"My session","pinn"#);
+    crate::sessions::flush();
+    assert_eq!(std::fs::read(&path).unwrap(), damaged);
+    assert!(crate::sessions::read().get("s-2").is_some_and(|meta| meta.pinned), "the edit is in the database");
+    let aside = std::fs::read_dir(&state.2)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+        .count();
+    assert_eq!(aside, 0, "nothing was set aside");
     lane_restore(state);
 }
 
@@ -1304,9 +1308,73 @@ fn deleting_a_provider_session_forgets_it_entirely(cx: &mut gpui::TestAppContext
         );
         assert!(
             !crate::provider_sessions::read().contains_key(&open_id),
-            "the file forgets it too"
+            "the database forgets it too"
         );
     });
+    lane_restore(state);
+}
+
+/// D-8: forgetting a provider session also removes what Baaz kept for it —
+/// its sent pictures (and their pre-database index) and its hand-off
+/// snapshot — and offers its transcript in Baaz's own home for the Trash
+/// through a dialog: the decision only. The dialog is never confirmed here,
+/// so nothing reaches the Trash and the transcript stays.
+#[gpui::test]
+fn forgetting_a_session_clears_its_files_and_offers_its_transcript_for_the_trash(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("forget-files");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    let id = "c0de0000-0000-4000-8000-00000000f0f0";
+    let kept: Vec<std::path::PathBuf> = ["sent/x/a.png", "handoff/x.json"]
+        .iter()
+        .map(|rel| state.2.join(rel))
+        .collect();
+    let mine = [
+        state.2.join(format!("sent/{id}/a1.png")),
+        state.2.join(format!("sent/{id}.json")),
+        state.2.join(format!("handoff/{id}.json")),
+    ];
+    let transcript = state.2.join(format!("codex-home/sessions/2026/11/19/rollout-2026-11-19T09-00-00-{id}.jsonl"));
+    for path in mine.iter().chain(kept.iter()).chain(std::iter::once(&transcript)) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+    }
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, cx| {
+            harness.session_list.update(cx, |list, _| {
+                crate::provider_sessions::upsert_open(
+                    &mut list.provider_sessions,
+                    &mut list.overrides,
+                    "codex",
+                    id,
+                    Some("/w".into()),
+                    None,
+                    Some("Doomed".into()),
+                )
+            });
+            harness.persist_provider_sessions(cx);
+            harness.delete_provider_session(id, cx);
+        });
+    });
+    vc.run_until_parked();
+    crate::db::flush();
+    for path in &mine {
+        assert!(!path.exists(), "{} goes with the session", path.display());
+    }
+    for path in &kept {
+        assert!(path.exists(), "{} belongs to another session", path.display());
+    }
+    assert!(transcript.exists(), "the transcript is only offered, never removed unasked");
+    vc.update(|_, cx| {
+        let dialog = baaz.read(cx).overlays.read(cx).dialog().cloned().expect("the Trash is offered");
+        assert_eq!(dialog.action, crate::overlays::DialogAction::TrashTranscript);
+        assert_eq!(dialog.primary, "Move to Trash");
+        assert_eq!(dialog.archive_target.as_deref(), Some(transcript.to_string_lossy().as_ref()));
+        assert!(!dialog.title.contains("Codex") && !dialog.detail.contains("Codex"), "no provider name in the copy");
+    });
+    assert!(!crate::provider_sessions::read().contains_key(id));
+    assert!(!crate::sessions::read().contains_key(id));
     lane_restore(state);
 }
 
@@ -1447,8 +1515,7 @@ fn a_session_runs_to_completion_with_no_view(cx: &mut gpui::TestAppContext) {
             rt.session().is_some_and(|session| session.turns.iter().any(|turn| turn.id() == "a-1")),
             "the store holds the turn"
         );
-        let connection = crate::usage::open_at(&crate::usage::db_path()).expect("ledger opens");
-        assert!(crate::usage::find_turn(&connection, &first, "a-1").is_some(), "the ledger got its row");
+        assert!(crate::usage::find_recorded(&first, "a-1").is_some(), "the ledger got its row");
     });
     // Reopen: a new view over the same runtime shows the finished turn.
     vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet(first.clone(), window, cx)));
@@ -1508,8 +1575,7 @@ fn reopening_n_turns_emits_one_history_replayed_and_settles_once(cx: &mut gpui::
     assert_eq!(finishes.get(), 0, "no per-turn settle for replayed history");
     assert_eq!(settles() - before, 1, "the root's settle ran once");
     vc.update(|_, cx| {
-        let connection = crate::usage::open_at(&crate::usage::db_path()).expect("ledger opens");
-        assert_eq!(crate::usage::count_for_session(&connection, &id), 3, "every replayed turn has its ledger row");
+        assert_eq!(crate::usage::count_recorded(&id), 3, "every replayed turn has its ledger row");
         let record = baaz.read(cx).session_list.read(cx).provider_sessions.get(&id).map(|record| record.turns);
         assert_eq!(record, Some(3), "the record counts the three exchanges");
     });

@@ -84,6 +84,10 @@ pub enum DialogAction {
     /// one-time prompt's Move. The plan runs through the journaling
     /// executor; dismissing any other way moves nothing.
     MigrateSessions,
+    /// Move a forgotten session's transcript, still in Baaz's own home, to
+    /// the Trash (D-8). The paths ride the dialog's `archive_target`, one
+    /// per line; dismissing any other way keeps them.
+    TrashTranscript,
 }
 
 /// Which popover is open over the composer.
@@ -538,7 +542,7 @@ pub enum Command {
     Compact,
     /// Fork the session.
     Fork,
-    /// Rename the session (`sessions.json`, not the wire).
+    /// Rename the session (its row in `baaz.db`, not the wire).
     Name,
     /// Resume another session — the command palette over `session/list`.
     Resume,

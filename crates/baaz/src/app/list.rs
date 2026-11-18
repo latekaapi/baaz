@@ -87,7 +87,7 @@ impl Harness {
         // a change neither could see. The store is still written.
         let inert = !self.session_list.read(cx).sessions.iter().any(|entry| entry.id == session_id)
             && !self.session_list.read(cx).index.contains_key(session_id)
-            && !crate::sidebar::needs_collapse(session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides);
+            && !crate::sidebar::needs_collapse(session_id, &self.session_list.read(cx).overrides);
         if inert {
             crate::sessions::save(&self.session_list.read(cx).overrides);
             cx.notify();
@@ -124,10 +124,11 @@ impl Harness {
 
     /// What every override edit costs once it is made: the rows rejoin, the
     /// store is written, and the search index is synced around the change.
-    /// The snapshot is taken here and written off the UI thread (perf audit
-    /// 2026-10-16: 110 KB of JSON per pin, rename or title); it replaces any
-    /// queued pane-state snapshot, so stale state never lands over this
-    /// edit, and the quit flush waits for it ([`crate::store::JsonStore`]).
+    /// The snapshot is taken here and written off the UI thread, only the
+    /// rows that changed (perf audit 2026-10-16: it used to be 110 KB of
+    /// JSON per pin, rename or title); it replaces any queued pane-state
+    /// snapshot, so stale state never lands over this edit, and the quit
+    /// flush waits for it ([`crate::sessions::save`]).
     fn settle_overrides(&mut self, cx: &mut Context<Self>) {
         self.settle_overrides_scoped(None, cx);
     }
@@ -144,13 +145,16 @@ impl Harness {
         cx.notify();
     }
 
-    /// Write the provider records (`provider-sessions.json`) off the UI
-    /// thread: the snapshot is taken here and queued on the store's writer,
-    /// so a later snapshot always wins and the store can grow (a record per
-    /// opened Muse session, docs/70) without costing a frame. The quit
-    /// flush waits for it ([`Self::flush_stores`]).
+    /// Write the provider records off the UI thread, and the sessions'
+    /// facts beside them (a record's title, first prompt, project and
+    /// hand-off links are the same row's facts): the snapshots are taken
+    /// here and queued on `baaz.db`'s writer, which writes only the rows
+    /// that changed, so a later snapshot always wins and the store can grow
+    /// (a record per opened Muse session, docs/70) without costing a frame.
+    /// The quit flush waits for it ([`Self::flush_stores`]).
     pub(crate) fn persist_provider_sessions(&mut self, cx: &mut Context<Self>) {
         crate::provider_sessions::save(&self.session_list.read(cx).provider_sessions);
+        crate::sessions::save(&self.session_list.read(cx).overrides);
     }
 
     /// Forget `project_id` on every session that carries it, settled once:
@@ -391,7 +395,7 @@ impl Harness {
         // summary is its acknowledgement, so neither lands (Y2a). The
         // skip is gated on the destination: any other session's words
         // land untouched, even pack-shaped ones (Y2a3).
-        let dest = crate::sidebar::is_handoff_dest(&session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides);
+        let dest = crate::sidebar::is_handoff_dest(&session_id, &self.session_list.read(cx).overrides);
         let newest_ask_is_pack = dest && ask.as_deref().is_some_and(crate::sidebar::is_pack_text);
         let (summary, ask) = crate::sidebar::byline_landable(summary, ask, newest_ask_is_pack);
         if summary.is_none() && ask.is_none() {
@@ -771,7 +775,7 @@ impl Harness {
         let session_id = runtime.read(cx).session_id.clone();
         // A handoff destination keeps the chain title: no rename from the
         // pack or anything after it (Y2a).
-        if crate::sidebar::is_handoff_dest(&session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides) {
+        if crate::sidebar::is_handoff_dest(&session_id, &self.session_list.read(cx).overrides) {
             return;
         }
         // The row may not be in the list yet — `session/list` is a round-trip

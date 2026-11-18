@@ -551,7 +551,10 @@ impl Harness {
     /// thread), the journal noted, the sidebar merged, the bar moved.
     fn land_import_batch(&mut self, batch: Vec<(Found, Option<String>)>, result: import::BatchResult, cx: &mut Context<Self>) {
         let records = result.records;
-        let added = self.session_list.update(cx, |list, _| import::land(&mut list.provider_sessions, records));
+        let added = self.session_list.update(cx, |list, _| {
+            let list = &mut *list;
+            import::land(&mut list.provider_sessions, &mut list.overrides, records)
+        });
         let plan = self.import.plan().cloned().unwrap_or_default();
         let Some(run) = self.import.run.as_mut() else { return };
         run.in_flight = false;
@@ -1502,7 +1505,7 @@ mod tests {
             ..Plan::default()
         };
         let mut store = crate::provider_sessions::ProviderSessionStore::new();
-        crate::provider_sessions::upsert_open(&mut store, CLAUDE, "a", None, None, None);
+        crate::provider_sessions::upsert_open(&mut store, &mut crate::sessions::Overrides::new(), CLAUDE, "a", None, None, None);
         let live = live_tally(&plan, CLAUDE, &store);
         assert_eq!(live, Tally { offered: 1, scripted: 1, known: 5, folders: 1 });
     }

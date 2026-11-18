@@ -215,7 +215,7 @@ impl SessionRuntime {
             display_text: Some(text.clone()),
             effort: crate::projects::effort_string(self.effort),
         };
-        self.record_sent(&text);
+        self.record_sent(&text, &optimistic_id);
         self.images.clear();
         self.files.clear();
         // The first frame after send already shows the turn (X1): fold an

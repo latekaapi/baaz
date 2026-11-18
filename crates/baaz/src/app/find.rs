@@ -201,13 +201,12 @@ impl Harness {
             }
             let meta = self.session_list.read(cx).overrides.get(session_id);
             let trimmed = |text: Option<&String>| text.map(|t| t.trim()).filter(|t| !t.is_empty()).map(str::to_owned);
-            let title = trimmed(record.title.as_ref()).unwrap_or_default();
-            let first_prompt = trimmed(record.first_prompt.as_ref()).unwrap_or_default();
-            let label = trimmed(meta.and_then(|m| m.name.as_ref()))
-                .or_else(|| trimmed(meta.and_then(|m| m.derived_title.as_ref())))
-                .or_else(|| trimmed(record.handoff_title.as_ref()))
-                .or_else(|| (!title.is_empty()).then(|| title.clone()))
-                .or_else(|| (!first_prompt.is_empty()).then(|| first_prompt.clone()))
+            let title = trimmed(meta.and_then(|m| m.provider_title.as_ref())).unwrap_or_default();
+            let first_prompt = trimmed(meta.and_then(|m| m.first_prompt.as_ref())).unwrap_or_default();
+            // The row's own title, the one the sidebar shows.
+            let label = meta
+                .and_then(crate::sessions::SessionMeta::title)
+                .map(str::to_owned)
                 .unwrap_or_else(|| crate::sidebar::UNNAMED.to_owned());
             let workspace = record.workspace.as_deref().map(|root| canon.get(root));
             let adopted = workspace

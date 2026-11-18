@@ -468,20 +468,15 @@ fn q4b_late_landing_never_steals_the_centre(cx: &mut gpui::TestAppContext) {
                         provider: "codex".into(),
                         session_id: "s-codex-second".into(),
                         workspace: None,
-                        project: None,
                         created_ms: 1_700_000_000_001,
                         updated_ms: 1_700_000_000_001,
                         turns: 3,
-                        title: Some("Second inquiry".into()),
-                        first_prompt: Some("second prompt".into()),
-                        handoff_to: None,
-                        handoff_from: None,
-                        handoff_from_provider: None,
-                        handoff_title: None,
-                        display_texts: std::collections::HashMap::new(),
                         origin: None,
                     },
                 );
+                let facts = list.overrides.entry("s-codex-second".into()).or_default();
+                facts.provider_title = Some("Second inquiry".into());
+                facts.first_prompt = Some("second prompt".into());
             });
             harness.merge_provider_rows(cx);
             harness.set_override(

@@ -5,7 +5,7 @@
 //! * `sessions_fts(session_id UNINDEXED, label, title, first_prompt, body,
 //!   project, workspace UNINDEXED)` —
 //!   fed from [`crate::index::read`] (Muse's `search_text`, which carries
-//!   transcript text) plus the `sessions.json` overrides that name the rows.
+//!   transcript text) plus the session facts that name the rows.
 //!   It is a cache: Muse's index stays the freshness source and this db is
 //!   rebuilt off the UI thread at boot and after each index refresh.
 //! * `files_fts(path, session_id UNINDEXED, kind, project, workspace

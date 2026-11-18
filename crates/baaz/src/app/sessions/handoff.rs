@@ -261,7 +261,7 @@ impl Harness {
     /// none (B7fix2): through the cheap debounced persist — never the
     /// session-list settle, so the landing rejoins no rows and rebuilds no
     /// search index. The restore that follows flushes the armed write, so
-    /// the carried state still reaches `sessions.json` synchronously.
+    /// the carried state still reaches the store synchronously.
     pub(super) fn carry_right_state_for_handoff(
         &mut self,
         dest: &str,
@@ -533,13 +533,11 @@ impl Harness {
         cx.notify();
     }
 
-    /// Undo what landing linked: the chain halves in both stores leave,
-    /// so a Failed or Cancelled handoff lists the source on its own again
-    /// and leaves the destination standing alone. Only this handoff's own
+    /// Undo what landing linked: the chain halves on both rows leave, so a
+    /// Failed or Cancelled handoff lists the source on its own again and
+    /// leaves the destination standing alone. Only this handoff's own
     /// halves unlink — another chain's links are never touched.
     fn clear_handoff_links(&mut self, source: &str, dest: &str, cx: &mut Context<Self>) {
-        self.session_list.update(cx, |list, _| crate::provider_sessions::clear_handoff(&mut list.provider_sessions, source, dest));
-        self.persist_provider_sessions(cx);
         let (source, dest) = (source.to_owned(), dest.to_owned());
         if let Some(meta) = self.session_list.read(cx).overrides.get(source.as_str()) {
             if meta.handoff_to.as_deref() == Some(dest.as_str()) {
@@ -703,17 +701,9 @@ impl Harness {
             });
             return;
         }
-        let linked = self
-            .session_list.read(cx).provider_sessions
-            .get(&session_id)
-            .and_then(|record| {
-                record.handoff_from.clone().map(|source| (source, record.handoff_from_provider.clone()))
-            })
-            .or_else(|| {
-                self.session_list.read(cx).overrides.get(&session_id).and_then(|meta| {
-                    meta.handoff_from.clone().map(|source| (source, meta.handoff_from_provider.clone()))
-                })
-            });
+        let linked = self.session_list.read(cx).overrides.get(&session_id).and_then(|meta| {
+            meta.handoff_from.clone().map(|source| (source, meta.handoff_from_provider.clone()))
+        });
         let Some((source, from_wire)) = linked else { return };
         let from = ProviderId::parse(from_wire.as_deref().unwrap_or("muse"));
         let origin = crate::handoff::HandoffOrigin {
@@ -748,53 +738,25 @@ impl Harness {
             .find(|e| e.id == source)
             .map(|e| e.label.clone())
             .or_else(|| {
-                self.session_list.read(cx).overrides.get(source).and_then(|m| {
-                    m.name
-                        .clone()
-                        .or_else(|| m.handoff_title.clone())
-                        .or_else(|| m.generated_title.clone())
-                        .or_else(|| m.derived_title.clone())
-                })
-            })
-            .or_else(|| {
-                self.session_list.read(cx).provider_sessions.get(source).and_then(|r| {
-                    r.handoff_title
-                        .clone()
-                        .or_else(|| r.title.clone())
-                        .or_else(|| r.first_prompt.clone())
-                })
+                self.session_list.read(cx).overrides.get(source).and_then(|m| m.title().map(str::to_owned))
             })
             .map(|t| t.trim().to_owned())
             .filter(|t| !t.is_empty());
         let source_meta = self.session_list.read(cx).overrides.get(source).cloned();
-        let source_record = self.session_list.read(cx).provider_sessions.get(source).cloned();
         if self.session_list.read(cx).provider_sessions.contains_key(source) || self.session_list.read(cx).provider_sessions.contains_key(dest) {
-            self.session_list.update(cx, |list, _| crate::provider_sessions::note_handoff(&mut list.provider_sessions, source, from.as_str(), dest));
+            self.session_list.update(cx, |list, _| {
+                crate::provider_sessions::note_handoff(&list.provider_sessions, &mut list.overrides, source, from.as_str(), dest)
+            });
             if let Some(title) = chain_title.clone() {
                 self.session_list.update(cx, |list, _| {
-                    if let Some(record) = list.provider_sessions.get_mut(dest) {
-                        record.handoff_title = Some(title);
+                    if list.provider_sessions.contains_key(dest) {
+                        list.overrides.entry(dest.to_owned()).or_default().handoff_title = Some(title);
                     }
                 });
             }
             // Row state rides to the destination: pinned, project, user
-            // name and archived survive the hop (Y2a). Pinned/archived
-            // live in the overrides even for lane sessions, so they land
-            // there whatever the destination lane is.
-            self.session_list.update(cx, |list, _| {
-                if let Some(dest_record) = list.provider_sessions.get_mut(dest) {
-                    if let Some(meta) = source_meta.as_ref() {
-                        if dest_record.project.is_none() {
-                            dest_record.project = meta.project.clone();
-                        }
-                    }
-                    if let Some(record) = source_record.as_ref() {
-                        if dest_record.project.is_none() {
-                            dest_record.project = record.project.clone();
-                        }
-                    }
-                }
-            });
+            // name and archived survive the hop (Y2a), on the
+            // destination's own facts whatever its lane.
             if let Some(src) = source_meta.clone() {
                 self.set_override(
                     dest,
@@ -826,7 +788,6 @@ impl Harness {
             if solo_dest {
                 let title = chain_title.clone();
                 let src = source_meta.clone();
-                let src_record = source_record.clone();
                 self.set_override(
                     dest,
                     |meta| {
@@ -849,11 +810,6 @@ impl Harness {
                             }
                             if meta.name.is_none() {
                                 meta.name = s.name.clone();
-                            }
-                        }
-                        if let Some(r) = src_record.as_ref() {
-                            if meta.project.is_none() {
-                                meta.project = r.project.clone();
                             }
                         }
                     },

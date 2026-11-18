@@ -9,7 +9,7 @@
 //! an adoption and never a session.
 //!
 //! A session resolves to a project in one order only: the `project` id the
-//! baaz wrote into its own `sessions.json` when that id still names a
+//! baaz wrote on the session's own row when that id still names a
 //! project; else the project whose canonical root equals the row's
 //! `workspace_root`; else nothing. Never by prefix, never by the current
 //! project — a worktree session's folder differs from its project's root, and

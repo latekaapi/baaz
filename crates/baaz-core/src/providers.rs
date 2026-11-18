@@ -53,7 +53,7 @@ pub enum ProviderId {
 impl ProviderId {
     /// Whether the provider keeps its own session list (Muse's
     /// `session/list`), which Baaz reads and merges; the others' sessions
-    /// are Baaz's own records (`provider-sessions.json`), which survive any
+    /// are Baaz's own records (their rows in `baaz.db`), which survive any
     /// listing.
     pub fn lists_sessions(self) -> bool {
         matches!(self, ProviderId::Muse)

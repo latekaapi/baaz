@@ -7,8 +7,8 @@
 //! and a database another process has locked are all ordinary, and every one of
 //! them yields an empty map rather than an error the person has to see.
 //!
-//! Nothing here ever writes. Rename and hide land in Baaz's own
-//! `sessions.json` in a later phase; the muse index stays Muse's.
+//! Nothing here ever writes. Rename and hide land in Baaz's own session
+//! rows (`baaz.db`, [`crate::sessions`]); the muse index stays Muse's.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

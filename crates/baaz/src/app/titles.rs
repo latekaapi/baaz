@@ -74,7 +74,7 @@ impl Harness {
         // paid titler there, whatever the turn count reads (Y2a). Any
         // other session has no pack turn, so its first message always
         // qualifies, pack-shaped or not (Y2a3).
-        if crate::sidebar::is_handoff_dest(session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides) {
+        if crate::sidebar::is_handoff_dest(session_id, &self.session_list.read(cx).overrides) {
             return;
         }
         let entry = self.session_list.read(cx).sessions.iter().find(|e| e.id == session_id);
@@ -534,7 +534,7 @@ impl Harness {
         // The pack turn and its acknowledgement are the handoff speaking,
         // never words to rewrite a byline from — but only a handoff
         // destination ever has a pack turn (Y2a, Y2a3).
-        if crate::sidebar::is_handoff_dest(&session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides)
+        if crate::sidebar::is_handoff_dest(&session_id, &self.session_list.read(cx).overrides)
             && ask.as_deref().is_some_and(crate::sidebar::is_pack_text)
         {
             return;

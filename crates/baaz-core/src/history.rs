@@ -1,32 +1,24 @@
-//! Prompt history: every sent prompt, per workspace, on disk.
+//! Prompt history: every sent prompt, per workspace.
 //!
-//! `~/Library/Application Support/baaz/history.json`, keyed by the canonical
-//! workspace path — the same canonicalization `session/list` needs, so `/tmp/x`
-//! and `/private/tmp/x` are one history and not two. The newest 200 are kept and
-//! a prompt identical to the one before it is not appended twice.
+//! Kept in `baaz.db`'s `prompt_history` ([`crate::db::history`]), keyed by
+//! the canonical workspace path — the same canonicalization `session/list`
+//! needs, so `/tmp/x` and `/private/tmp/x` are one history and not two. The
+//! newest 200 are kept and a prompt identical to one of the last few is not
+//! appended again.
 //!
-//! It is a convenience, not a record: every read tolerates a missing, truncated
-//! or unreadable file by returning an empty history, and every write is
-//! best-effort.
-
-use std::collections::BTreeMap;
+//! It is a convenience, not a record: a database that cannot answer reads
+//! as an empty history, and every write is best-effort. Both calls block on
+//! the database's writer: callers run them off the UI thread.
 
 /// How many prompts are remembered per workspace.
 const CAP: usize = 200;
 
-/// The prompts' one writer ([`crate::store::JsonStore`]). A file that does
-/// not parse is set aside and reported, never overwritten by the next send
-/// (it used to read as empty and be replaced).
-static STORE: crate::store::JsonStore<BTreeMap<String, Vec<String>>> =
-    crate::store::JsonStore::new("history.json");
-
-fn read_all() -> BTreeMap<String, Vec<String>> {
-    STORE.read()
-}
-
 /// Every prompt sent in `workspace`, oldest first.
 pub fn read(workspace: &str) -> Vec<String> {
-    read_all().remove(workspace).unwrap_or_default()
+    let workspace = workspace.to_owned();
+    crate::db::read(crate::db::path(), move |db| crate::db::history::read(&db.conn, &workspace))
+        .and_then(|read| read.map_err(|error| crate::baaz_log!("db: prompt history does not read ({error})")).ok())
+        .unwrap_or_default()
 }
 
 /// How many of the most recent entries a resend is checked against (finding
@@ -35,25 +27,39 @@ pub fn read(workspace: &str) -> Vec<String> {
 /// duplicates instead of settling into two.
 const RECENT_DEDUP_WINDOW: usize = 3;
 
-/// Append `text` to `workspace`'s history and write the file back.
+/// Append `text` to `workspace`'s history and write it back, in one
+/// transaction on the writer.
 ///
 /// Returns the history as it now stands, so the caller does not have to read it
 /// again. A prompt equal to any of the last few is not appended again: holding
 /// Enter on the same message, or bouncing between a couple of prompts, should
 /// not fill the history with repeats.
 pub fn append(workspace: &str, text: &str) -> Vec<String> {
-    let mut all = read_all();
-    let entry = all.entry(workspace.to_owned()).or_default();
-    if !is_recent_duplicate(entry, text) {
-        entry.push(text.to_owned());
+    let (workspace, text) = (workspace.to_owned(), text.to_owned());
+    crate::db::call(crate::db::path(), move |db| {
+        let mut entries = crate::db::history::read(&db.conn, &workspace).unwrap_or_default();
+        let before = entries.clone();
+        appended(&mut entries, &text);
+        if entries != before {
+            if let Err(error) = crate::db::history::replace(&mut db.conn, &workspace, &entries) {
+                crate::baaz_log!("db: prompt history not saved ({error})");
+            }
+        }
+        entries
+    })
+    .unwrap_or_default()
+}
+
+/// `entries` with `text` appended (unless it repeats one of the last few),
+/// cut to the newest [`CAP`].
+fn appended(entries: &mut Vec<String>, text: &str) {
+    if !is_recent_duplicate(entries, text) {
+        entries.push(text.to_owned());
     }
-    if entry.len() > CAP {
-        let excess = entry.len() - CAP;
-        entry.drain(..excess);
+    if entries.len() > CAP {
+        let excess = entries.len() - CAP;
+        entries.drain(..excess);
     }
-    let out = entry.clone();
-    write_all(&all);
-    out
 }
 
 /// Whether `text` equals any of `entries`' last [`RECENT_DEDUP_WINDOW`]
@@ -62,10 +68,6 @@ pub fn append(workspace: &str, text: &str) -> Vec<String> {
 fn is_recent_duplicate(entries: &[String], text: &str) -> bool {
     let recent_len = entries.len().saturating_sub(RECENT_DEDUP_WINDOW);
     entries[recent_len..].iter().any(|prompt| prompt == text)
-}
-
-fn write_all(all: &BTreeMap<String, Vec<String>>) {
-    let _ = STORE.write_now(all);
 }
 
 /// Where the composer is in the history it is walking.
@@ -192,21 +194,34 @@ mod tests {
     }
 
     #[test]
-    fn the_file_lives_under_baaz_state_dir() {
+    fn the_history_lives_in_the_state_dirs_database() {
         let dir = std::env::temp_dir().join(format!("baaz-history-{}", std::process::id()));
         let guard = crate::store::test_env_lock();
         let old = std::env::var_os("BAAZ_STATE_DIR");
         std::env::set_var("BAAZ_STATE_DIR", &dir);
-        assert_eq!(STORE.path(), dir.join("history.json"));
         let entries = append("/work/a", "hello");
         assert_eq!(entries, vec!["hello".to_owned()]);
+        assert_eq!(append("/work/a", "hello"), vec!["hello".to_owned()], "a repeat is not appended");
         assert_eq!(read("/work/a"), vec!["hello".to_owned()]);
-        assert!(STORE.path().is_file());
+        assert!(read("/work/b").is_empty(), "each workspace has its own");
+        assert!(crate::db::path_in(&dir).is_file(), "the prompts are in baaz.db");
+        assert!(!dir.join(crate::db::json_import::HISTORY).exists(), "nothing writes the old file");
+        crate::db::close(crate::db::path_in(&dir));
         let _ = std::fs::remove_dir_all(&dir);
         match old {
             Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
             None => std::env::remove_var("BAAZ_STATE_DIR"),
         }
         drop(guard);
+    }
+
+    #[test]
+    fn the_newest_two_hundred_are_kept() {
+        let mut entries = Vec::new();
+        for n in 0..205 {
+            appended(&mut entries, &format!("p{n}"));
+        }
+        assert_eq!(entries.len(), CAP);
+        assert_eq!(entries.first().map(String::as_str), Some("p5"));
     }
 }

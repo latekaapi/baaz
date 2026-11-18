@@ -174,6 +174,7 @@ impl Render for DialogView {
                 | DialogAction::ProviderSignOut
                 | DialogAction::DeleteSpace
                 | DialogAction::ClearHistory
+                | DialogAction::TrashTranscript
         );
         // A dialog whose primary already dismisses it carries no second
         // button: "Dismiss  Dismiss" was what a screenshot showed. The danger
@@ -876,6 +877,13 @@ impl Harness {
             self.clear_history_now(cx);
             return;
         }
+        // The transcript's paths rode the dialog: only this button moves
+        // them, and only to the Trash.
+        if action == DialogAction::TrashTranscript {
+            self.close_dialog(cx);
+            self.trash_transcript(target, cx);
+            return;
+        }
         // Confirmed through its own path, like Archive: the tab id rode
         // the dialog, so closing any other way already dropped it.
         if action == DialogAction::CloseTerminalTab {
@@ -914,6 +922,7 @@ impl Harness {
             | DialogAction::DeleteSpace
             | DialogAction::ClearHistory
             | DialogAction::SpaceSignIns
+            | DialogAction::TrashTranscript
             | DialogAction::HandoffConfirm => {}
         }
     }

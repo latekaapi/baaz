@@ -15,6 +15,7 @@ pub mod browser_prefs;
 pub mod byline;
 pub mod clock;
 pub mod conn;
+pub mod db;
 pub mod details;
 pub mod files;
 pub mod full_output;

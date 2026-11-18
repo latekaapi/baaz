@@ -1,26 +1,22 @@
-//! What Baaz knows about a session that MSP has no room for (spec §3.7).
+//! What Baaz knows about a session that the providers have no room for
+//! (spec §3.7).
 //!
-//! Three facts, and none of them are on the wire:
+//! * **A name.** No provider lets a client name a session, so `/name`
+//!   writes here.
+//! * **Hidden, pinned, archived.** Decisions about *this* window's list,
+//!   kept here and never sent to a provider.
+//! * **Every title** ([`SessionMeta::title`]): the name, the hand-off chain's
+//!   title, the generated title, the provider's own title, the first prompt
+//!   and the title derived from the transcript, one row's columns.
+//! * **The byline, the last error, the right pane's state**: regenerable,
+//!   kept so a restart shows what the window showed.
 //!
-//! * **A name.** MSP has `session_name` in Muse's own index and no command to
-//!   set it, so `/name` writes here.
-//! * **Hidden.** MSP has no archive, no delete and no `hidden` flag. Hiding is
-//!   a decision about *this* window's list, so it lives in *this* window's
-//!   store and never touches Muse's.
-//! * **A derived title.** A session with nothing to be called by reads the
-//!   same as every other one: fourteen rows can read "New session" at once.
-//!   The transcript's first user
-//!   prompt is the honest label — the first `userShell` command only when
-//!   the session has no user text at all — and reading the shell form costs
-//!   a `session/read`, so the answer is cached here.
-//!
-//! The file is `~/Library/Application Support/baaz/sessions.json`, written
-//! atomically through [`crate::store`], and every read is best-effort: a
-//! missing or unparseable file is an empty map, which loses an override and
-//! never a session.
+//! Each session's facts are its `session` row in `baaz.db` ([`crate::db`]);
+//! the window holds them as [`Overrides`], keyed by session id, and writes a
+//! snapshot back ([`save`]): only the rows that changed are written, off the
+//! UI thread, in one transaction.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -159,134 +155,220 @@ pub struct SessionMeta {
     /// Files preview/selection/expansion. `None` shows the pane closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub right: Option<RightState>,
+    /// The provider's own display title from the `OpenSession` /
+    /// `ResumeSession` ack, or a listed row's title, when it supplied one:
+    /// the ladder's rung under the generated title, above the first prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_title: Option<String>,
+    /// The first prompt this app sent (or an import read): the ladder's rung
+    /// under the provider's title, so a rejoin never blanks a row back to
+    /// [`crate::sidebar::UNNAMED`] before the auto-title lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_prompt: Option<String>,
+}
+
+impl SessionMeta {
+    /// The session's title from its own row, best first: the name someone
+    /// gave it, the hand-off chain's title, the generated title, the
+    /// provider's title, the first prompt sent, the title derived from the
+    /// transcript. Blank values are skipped. `None`: nothing to call it by.
+    pub fn title(&self) -> Option<&str> {
+        fn pick(value: &Option<String>) -> Option<&str> {
+            value.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        }
+        pick(&self.name)
+            .or_else(|| pick(&self.handoff_title))
+            .or_else(|| pick(&self.generated_title))
+            .or_else(|| pick(&self.provider_title))
+            .or_else(|| pick(&self.first_prompt))
+            .or_else(|| pick(&self.derived_title))
+    }
 }
 
 /// Every override this window knows, keyed by session id.
 pub type Overrides = HashMap<String, SessionMeta>;
 
-/// The person's own facts about each session — name, hidden, pinned,
-/// archived, project, chain links — in `session-meta.json`; everything
-/// that can be regenerated — titles, byline, last error, pane state — in
-/// `session-cache.json` (docs/82 1.7, docs/81 A F11). Before the split one
-/// `sessions.json` held both and was rewritten whole (about 110 KB) after
-/// every finished turn and every pane navigation, which exposed the part
-/// that cannot be regenerated to every one of those writes.
-const FACT_FIELDS: &[&str] = &[
-    "name",
-    "hidden",
-    "sideSession",
-    "browserChat",
-    "pinned",
-    "archived",
-    "project",
-    "handoffTo",
-    "handoffFrom",
-    "handoffFromProvider",
-    "handoffTitle",
-];
-
-static FACTS: crate::store::JsonStore<Overrides> =
-    crate::store::JsonStore::new("session-meta.json").with_encoding(encode_facts);
-static CACHE: crate::store::JsonStore<Overrides> =
-    crate::store::JsonStore::new("session-cache.json").with_encoding(encode_cache);
-
-/// The file that held both halves before the split: read once when the
-/// split files do not exist yet, and left on disk as it was.
-const LEGACY: &str = "sessions.json";
-
-/// The entries' fields `keep` names, as JSON; entries that say nothing are
-/// dropped.
-fn project(overrides: &Overrides, keep: impl Fn(&str) -> bool) -> Option<Vec<u8>> {
-    let mut out = serde_json::Map::new();
-    for (id, meta) in overrides {
-        let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(meta) else { continue };
-        let kept: serde_json::Map<String, serde_json::Value> =
-            fields.into_iter().filter(|(key, value)| keep(key) && !value.is_null()).collect();
-        if !kept.is_empty() {
-            out.insert(id.clone(), serde_json::Value::Object(kept));
-        }
-    }
-    serde_json::to_vec_pretty(&out).ok()
-}
-
-fn encode_facts(overrides: &Overrides) -> Option<Vec<u8>> {
-    project(overrides, |key| FACT_FIELDS.contains(&key))
-}
-
-fn encode_cache(overrides: &Overrides) -> Option<Vec<u8>> {
-    project(overrides, |key| !FACT_FIELDS.contains(&key))
-}
-
-/// Both halves' paths, facts first.
-pub fn paths() -> [PathBuf; 2] {
-    [FACTS.path(), CACHE.path()]
-}
-
-/// Whether either half is on disk.
+/// Whether this run's database holds any session facts.
 pub fn stored() -> bool {
-    paths().iter().any(|path| path.exists())
+    crate::db::read(crate::db::path(), |db| {
+        db.conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM session WHERE has_meta = 1)", [], |row| row.get::<_, bool>(0))
+            .unwrap_or(false)
+    })
+    .unwrap_or(false)
 }
 
-/// Read the store: both halves merged entry by entry, each entry lenient
-/// ([`crate::store::read_json_map`]). With neither half on disk, the
-/// pre-split `sessions.json` is read instead. Blocking; call it off the UI
-/// thread.
+/// Read every session's facts from the database. Blocking: it waits for
+/// the writer, behind every write queued before it.
 pub fn read() -> Overrides {
-    if !stored() {
-        let legacy = crate::store::support_dir().join(LEGACY);
-        if legacy.exists() {
-            return crate::store::read_json_map(&legacy);
-        }
-        return Overrides::new();
-    }
-    let mut merged: HashMap<String, serde_json::Map<String, serde_json::Value>> = HashMap::new();
-    for path in paths() {
-        let half: HashMap<String, serde_json::Value> = crate::store::read_json_map(&path);
-        for (id, value) in half {
-            if let serde_json::Value::Object(fields) = value {
-                merged.entry(id).or_default().extend(fields);
-            }
-        }
-    }
-    merged
-        .into_iter()
-        .filter_map(|(id, fields)| {
-            match serde_json::from_value::<SessionMeta>(serde_json::Value::Object(fields)) {
-                Ok(meta) => Some((id, meta)),
-                Err(error) => {
-                    crate::baaz_log!("store: session {id:?} does not parse ({error}); dropped");
-                    None
-                }
-            }
-        })
-        .collect()
+    take_soon();
+    crate::db::read(crate::db::path(), |db| {
+        crate::db::sessions::load_front(&db.conn, &mut db.front).map(|(meta, _)| meta)
+    })
+    .and_then(|loaded| {
+        loaded.map_err(|error| crate::baaz_log!("db: sessions do not read ({error})")).ok()
+    })
+    .unwrap_or_default()
 }
 
-/// Write both halves now, in order with every queued save. Blocking; the
-/// quit flush and tests. A failed write is reported by the store and the
-/// file on disk stays the previous one.
+/// Write the facts now: [`save`], then wait for it. Blocking (on the writer,
+/// never on SQLite here): the quit flush and tests.
 pub fn write(overrides: &Overrides) {
-    let _ = FACTS.write_now(overrides);
-    let _ = CACHE.write_now(overrides);
+    save(overrides);
+    crate::db::flush();
 }
 
-/// Queue both halves for the store's writer thread: the snapshot is taken
-/// now, so a later edit always wins (docs/81 A F10).
+/// Queue the facts for the writer: the snapshot is taken now, so a later
+/// edit always wins (docs/81 A F10), and it replaces a [`save_soon`]
+/// snapshot still waiting.
 pub fn save(overrides: &Overrides) {
-    FACTS.save(overrides.clone());
-    CACHE.save(overrides.clone());
+    SOON.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    queue(crate::db::path(), overrides.clone());
 }
 
-/// [`save`] after the store's delay, coalescing a burst of pane changes
-/// into one write. Only the cache half changes in such a burst.
+fn queue(path: std::path::PathBuf, snapshot: Overrides) {
+    crate::db::run(path, move |db| {
+        if let Err(error) = crate::db::sessions::save_meta(&mut db.conn, &mut db.front, snapshot) {
+            crate::baaz_log!("db: session facts not saved ({error})");
+            crate::store::report(crate::store::StoreProblem::WriteFailed { name: "baaz.db".into(), error: error.to_string() });
+        }
+    });
+}
+
+/// The snapshot [`save_soon`] holds until its delay ends.
+static SOON: std::sync::Mutex<Option<(std::path::PathBuf, Overrides)>> = std::sync::Mutex::new(None);
+
+/// How long [`save_soon`] waits for more changes.
+const SOON_DELAY: std::time::Duration = std::time::Duration::from_millis(750);
+
+/// [`save`] after a short delay, coalescing a burst of pane changes into one
+/// write; a change already waiting keeps its earlier due time, so a steady
+/// stream still lands every delay. Nothing is written synchronously.
 pub fn save_soon(overrides: &Overrides) {
-    CACHE.save_soon(overrides.clone());
+    let first = {
+        let mut slot = SOON.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let first = slot.is_none();
+        *slot = Some((crate::db::path(), overrides.clone()));
+        first
+    };
+    if first {
+        let _ = std::thread::Builder::new().name("sessions:soon".into()).spawn(|| {
+            std::thread::sleep(SOON_DELAY);
+            take_soon();
+        });
+    }
+}
+
+/// Queue the waiting [`save_soon`] snapshot now, if any.
+fn take_soon() {
+    let waiting = SOON.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    if let Some((path, snapshot)) = waiting {
+        queue(path, snapshot);
+    }
 }
 
 /// Land every queued write (quit, window close).
 pub fn flush() {
-    FACTS.flush();
-    CACHE.flush();
+    take_soon();
+    crate::db::flush();
+}
+
+/// What forgetting a session clears (D-8): the files Baaz kept for it, and
+/// the provider transcript Baaz's own home holds, which is only ever
+/// offered for the Trash.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Forgotten {
+    /// Removed with the record: the session's sent pictures (and the index
+    /// it had before the database) and its hand-off snapshot.
+    pub removed: Vec<std::path::PathBuf>,
+    /// The transcript (and its companion folder) in `claude-home` /
+    /// `codex-home`. Never removed here: the person is asked, and a yes
+    /// moves it to the Trash.
+    pub transcript: Vec<std::path::PathBuf>,
+}
+
+/// What forgetting `provider`'s session `session_id` would clear under
+/// `state_dir`. Pure reads. An imported session's transcript lives in the
+/// person's own home (docs/72) and is never offered; a Muse session's lives
+/// with Muse.
+pub fn forget_plan(state_dir: &std::path::Path, provider: &str, session_id: &str, imported: bool) -> Forgotten {
+    let mut removed = crate::sent::files_of(state_dir, session_id);
+    let snapshot = state_dir.join("handoff").join(format!("{}.json", crate::sent::file_stem(session_id)));
+    if snapshot.is_file() {
+        removed.push(snapshot);
+    }
+    let transcript = if imported { Vec::new() } else { transcript_in_home(state_dir, provider, session_id) };
+    Forgotten { removed, transcript }
+}
+
+/// The transcript files Baaz's own home for `provider` holds for
+/// `session_id`: real files and folders only (a link out of the home is
+/// never followed), and only under that home.
+fn transcript_in_home(state_dir: &std::path::Path, provider: &str, session_id: &str) -> Vec<std::path::PathBuf> {
+    let safe = !session_id.is_empty() && !session_id.contains(['/', '\\']) && session_id != "." && session_id != "..";
+    if !safe {
+        return Vec::new();
+    }
+    let real = |path: &std::path::Path| std::fs::symlink_metadata(path).ok().filter(|meta| !meta.file_type().is_symlink());
+    let mut out = Vec::new();
+    if provider == crate::import::CLAUDE {
+        let projects = provider_claude_code::home::home_dir(state_dir).join("projects");
+        let Some(true) = real(&projects).map(|meta| meta.is_dir()) else { return out };
+        for slug in std::fs::read_dir(&projects).into_iter().flatten().flatten() {
+            if !real(&slug.path()).is_some_and(|meta| meta.is_dir()) {
+                continue;
+            }
+            let file = slug.path().join(format!("{session_id}.jsonl"));
+            if real(&file).is_some_and(|meta| meta.is_file()) {
+                out.push(file);
+            }
+            let companion = slug.path().join(session_id);
+            if real(&companion).is_some_and(|meta| meta.is_dir()) {
+                out.push(companion);
+            }
+        }
+    } else if provider == crate::import::CODEX {
+        fn walk(dir: &std::path::Path, suffix: &str, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let Ok(kind) = entry.file_type() else { continue };
+                let path = entry.path();
+                if kind.is_dir() && depth > 0 {
+                    walk(&path, suffix, depth - 1, out);
+                } else if kind.is_file() && path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("rollout-") && name.ends_with(suffix)) {
+                    out.push(path);
+                }
+            }
+        }
+        let sessions = provider_codex::home::home_dir(state_dir).join("sessions");
+        if real(&sessions).is_some_and(|meta| meta.is_dir()) {
+            walk(&sessions, &format!("-{session_id}.jsonl"), 3, &mut out);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Forget `provider`'s session `session_id` for good (D-8): its row and
+/// everything hanging off it leave the database, and its sent files and
+/// hand-off snapshot leave the disk. Returns what was cleared; the
+/// transcript in it is for the caller to offer for the Trash. Blocking (the
+/// file walk and the writer): call it off the UI thread.
+pub fn forget(provider: &str, session_id: &str, imported: bool) -> Forgotten {
+    let state_dir = crate::store::support_dir();
+    let (key, id) = (provider.to_owned(), session_id.to_owned());
+    crate::db::read(crate::db::path_in(&state_dir), move |db| {
+        if let Err(error) = crate::db::sessions::forget(&mut db.conn, &mut db.front, &key, &id) {
+            crate::baaz_log!("db: forgetting a session failed ({error})");
+        }
+    });
+    let plan = forget_plan(&state_dir, provider, session_id, imported);
+    for path in &plan.removed {
+        let gone = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+        if let Err(error) = gone {
+            crate::baaz_log!("forget: could not remove {}: {error}", path.display());
+        }
+    }
+    plan
 }
 
 /// A `userShell` command turned into a row's title (finding F10).
@@ -338,29 +420,42 @@ pub fn first_user_title(submissions: &[&str], turns: &[aui_protocol::Turn]) -> O
 mod tests {
     use super::*;
 
-    fn written(encode: fn(&Overrides) -> Option<Vec<u8>>, overrides: &Overrides) -> serde_json::Map<String, serde_json::Value> {
-        serde_json::from_slice(&encode(overrides).expect("encodes")).expect("an object")
+    /// A temp state dir for one test, the env lock held, restored after.
+    struct TempState {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        old: Option<std::ffi::OsString>,
+        dir: std::path::PathBuf,
     }
 
-    #[test]
-    fn an_entry_that_says_nothing_is_not_written() {
-        let mut overrides = Overrides::new();
-        overrides.insert("empty".into(), SessionMeta::default());
-        overrides.insert("named".into(), SessionMeta { name: Some("x".into()), ..SessionMeta::default() });
-        let facts = written(encode_facts, &overrides);
-        assert_eq!(facts.keys().collect::<Vec<_>>(), vec!["named"]);
-        assert!(written(encode_cache, &overrides).is_empty(), "a name is not cache");
+    impl TempState {
+        fn new(tag: &str) -> Self {
+            let guard = crate::store::test_env_lock();
+            let old = std::env::var_os("BAAZ_STATE_DIR");
+            let dir = std::env::temp_dir().join(format!("baaz-sessions-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_var("BAAZ_STATE_DIR", &dir);
+            Self { _guard: guard, old, dir }
+        }
     }
 
-    /// docs/82 1.7: the person's facts and the regenerable cache go to
-    /// different files, and reading them back merges them.
+    impl Drop for TempState {
+        fn drop(&mut self) {
+            crate::db::close(crate::db::path_in(&self.dir));
+            match self.old.take() {
+                Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
+                None => std::env::remove_var("BAAZ_STATE_DIR"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Every fact, the person's and the regenerable, round-trips through
+    /// the session's row; an edit writes only that row, and an entry that
+    /// leaves the snapshot leaves the table.
     #[test]
-    fn facts_and_cache_split_and_merge_back() {
-        let _guard = crate::store::test_env_lock();
-        let old = std::env::var_os("BAAZ_STATE_DIR");
-        let dir = std::env::temp_dir().join(format!("baaz-split-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::env::set_var("BAAZ_STATE_DIR", &dir);
+    fn facts_round_trip_through_the_session_rows() {
+        let state = TempState::new("roundtrip");
         let mut overrides = Overrides::new();
         overrides.insert(
             "a".into(),
@@ -368,47 +463,67 @@ mod tests {
                 name: Some("Kept".into()),
                 pinned: true,
                 last_summary: Some("did a thing".into()),
+                provider_title: Some("Provider title".into()),
+                first_prompt: Some("first".into()),
+                right: Some(RightState { open: true, kind: crate::layout::RightKind::Changes, ..RightState::default() }),
                 ..SessionMeta::default()
             },
         );
         overrides.insert("b".into(), SessionMeta { archived: true, ..SessionMeta::default() });
-        let facts = written(encode_facts, &overrides);
-        let cache = written(encode_cache, &overrides);
-        assert!(facts["a"].get("lastSummary").is_none() && cache["a"].get("name").is_none());
-        assert_eq!(facts["b"]["archived"], serde_json::Value::Bool(true));
-        assert!(cache.get("b").is_none());
         write(&overrides);
-        assert!(paths().iter().all(|path| path.exists()));
+        assert!(stored());
         assert_eq!(read(), overrides);
-        match old {
-            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
-            None => std::env::remove_var("BAAZ_STATE_DIR"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
+        overrides.remove("b");
+        overrides.get_mut("a").unwrap().name = Some("Renamed".into());
+        write(&overrides);
+        assert_eq!(read(), overrides, "the edit landed and the removed entry left");
+        assert!(crate::db::path_in(&state.dir).is_file());
     }
 
-    /// A store from before the split is read once, and left where it was.
+    /// `save_soon` writes nothing at once; a flush lands it.
     #[test]
-    fn a_pre_split_file_is_read_and_kept() {
-        let _guard = crate::store::test_env_lock();
-        let old = std::env::var_os("BAAZ_STATE_DIR");
-        let dir = std::env::temp_dir().join(format!("baaz-presplit-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("BAAZ_STATE_DIR", &dir);
-        let legacy = dir.join("sessions.json");
-        std::fs::write(&legacy, r#"{"a":{"name":"Old","lastSummary":"s"}}"#).unwrap();
-        let back = read();
-        assert_eq!(back["a"].name.as_deref(), Some("Old"));
-        assert_eq!(back["a"].last_summary.as_deref(), Some("s"));
-        write(&back);
-        assert_eq!(read(), back, "the split files read the same");
-        assert!(legacy.exists(), "the old file is never deleted");
-        match old {
-            Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
-            None => std::env::remove_var("BAAZ_STATE_DIR"),
+    fn a_delayed_save_lands_on_flush_and_not_before() {
+        let _state = TempState::new("soon");
+        let overrides = Overrides::from([("s".to_owned(), SessionMeta { pinned: true, ..SessionMeta::default() })]);
+        save_soon(&overrides);
+        crate::db::flush();
+        assert!(!stored(), "nothing is written synchronously");
+        flush();
+        assert_eq!(read(), overrides);
+    }
+
+    /// docs/82 4.12: the title ladder reads one row — name, chain title,
+    /// generated title, the provider's title, the first prompt, the derived
+    /// title — and skips blanks.
+    #[test]
+    fn the_title_ladder_reads_one_row() {
+        let full = SessionMeta {
+            name: Some("Name".into()),
+            handoff_title: Some("Chain".into()),
+            generated_title: Some("Generated".into()),
+            provider_title: Some("Provider".into()),
+            first_prompt: Some("First prompt".into()),
+            derived_title: Some("Derived".into()),
+            ..SessionMeta::default()
+        };
+        assert_eq!(full.title(), Some("Name"));
+        let rungs = ["Chain", "Generated", "Provider", "First prompt", "Derived"];
+        let mut meta = SessionMeta { name: Some("   ".into()), ..full.clone() };
+        for (rung, expected) in rungs.iter().enumerate() {
+            assert_eq!(meta.title(), Some(*expected), "rung {rung}");
+            match rung {
+                0 => meta.handoff_title = None,
+                1 => meta.generated_title = None,
+                2 => meta.provider_title = None,
+                3 => meta.first_prompt = None,
+                _ => meta.derived_title = None,
+            }
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(meta.title(), None);
+        // And the whole ladder survives the row's round trip.
+        let _state = TempState::new("ladder");
+        write(&Overrides::from([("t".to_owned(), full.clone())]));
+        assert_eq!(read()["t"].title(), Some("Name"));
     }
 
     #[test]
@@ -445,7 +560,6 @@ mod tests {
             }),
             ..SessionMeta::default()
         };
-        assert!(written(encode_cache, &Overrides::from([("s".to_owned(), meta.clone())])).contains_key("s"), "a stored pane keeps its entry");
         let text = serde_json::to_string(&meta).unwrap();
         assert!(text.contains("\"right\":{"));
         assert!(text.contains("\"open\":true"));
@@ -461,62 +575,9 @@ mod tests {
         assert!(old.right.is_none());
     }
 
-    /// docs/81 A F8: an entry a newer build wrote with a pane kind this
-    /// build does not know loses only that field; every other entry and the
-    /// rest of that entry load. Before, the whole file read as empty.
-    #[test]
-    fn an_unknown_pane_kind_loses_only_that_field() {
-        let _guard = crate::store::test_env_lock();
-        let dir = std::env::temp_dir().join(format!("baaz-unknown-kind-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("sessions.json");
-        std::fs::write(
-            &path,
-            r#"{"a":{"name":"Kept","pinned":true,"right":{"open":true,"kind":"quantum"}},"b":{"name":"Other"}}"#,
-        )
-        .unwrap();
-        let overrides: Overrides = crate::store::read_json_map(&path);
-        assert_eq!(overrides.len(), 2, "no entry is lost");
-        let a = &overrides["a"];
-        assert_eq!(a.name.as_deref(), Some("Kept"));
-        assert!(a.pinned);
-        let right = a.right.as_ref().expect("the pane state stays");
-        assert!(right.open, "the rest of the pane state stays");
-        assert_eq!(right.kind, crate::layout::RightKind::Files, "the unknown kind falls back to the default");
-        assert_eq!(overrides["b"].name.as_deref(), Some("Other"));
-        assert!(path.exists(), "a file that parses is never set aside");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// An entry that does not parse at all drops only itself, and the file
-    /// is copied aside first so nothing it said is lost.
-    #[test]
-    fn a_broken_entry_drops_only_itself() {
-        let _guard = crate::store::test_env_lock();
-        let dir = std::env::temp_dir().join(format!("baaz-broken-entry-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("sessions.json");
-        std::fs::write(&path, r#"{"a":{"name":"Kept"},"b":{"name":42}}"#).unwrap();
-        let _ = crate::store::take_problems();
-        let overrides: Overrides = crate::store::read_json_map(&path);
-        assert_eq!(overrides.len(), 1);
-        assert_eq!(overrides["a"].name.as_deref(), Some("Kept"));
-        let problems = crate::store::take_problems();
-        assert!(
-            problems.iter().any(|p| matches!(p, crate::store::StoreProblem::EntriesDropped { count: 1, .. })),
-            "{problems:?}"
-        );
-        let copies = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().starts_with("sessions.json.corrupt-")).count();
-        assert_eq!(copies, 1);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     #[test]
     fn legacy_pane_kinds_load_and_resave_as_changes() {
-        // B8b: a sessions.json written with the pre-merge `diff`/`git` kinds
+        // B8b: session facts written with the pre-merge `diff`/`git` kinds
         // loads onto the merged Changes view, and re-saving writes
         // `changes` — the legacy kinds never reach the file again.
         for slug in ["diff", "git"] {

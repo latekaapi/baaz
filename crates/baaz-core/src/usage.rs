@@ -1,11 +1,15 @@
 //! Usage history: one row per finished turn, keyed on the turn (Task D1).
 //!
-//! Baaz records no transcript of its own — Muse stays the system of record —
-//! but beside it Baaz keeps a ledger in its own `baaz.db` under the support
-//! dir, next to `search.db` rather than inside it. A search index is a
-//! rebuildable cache with its own schema churn; a usage ledger is
-//! append-only and must never be dropped by an unrelated migration, so the
-//! two do not share a file (or a lock).
+//! Baaz records no transcript of its own — the providers stay the system of
+//! record — but beside them Baaz keeps a ledger: the `turn` rows of its own
+//! `baaz.db` ([`crate::db::turns`]), next to `search.db` rather than inside
+//! it. A search index is a rebuildable cache with its own schema churn; a
+//! usage ledger must never be dropped by an unrelated migration, so the two
+//! do not share a file (or a lock). Before `baaz.db` had its own schema
+//! (docs/82 4.12) the ledger was a table of its own, `usage_turns`,
+//! versioned in `meta.schema_version` (1–3); [`upgrade_legacy_ledger`]
+//! still brings such a file to version 3 so the database's first step can
+//! copy it into `turn`, and leaves the old table in place.
 //!
 //! One row per finished turn:
 //!
@@ -25,16 +29,17 @@
 //! * `cache_read_tokens` / `cache_write_tokens` are `NULL` when the provider
 //!   never said — not zero. `None` in [`aui_protocol::TurnMeta`] stays `NULL`
 //!   in the row; a later sum may `COALESCE` them, but the write must not.
+//!   The same for the cost: `NULL` with `cost_source = 'unknown'` when the
+//!   provider never reports one (D-7).
 //!
-//! Every write is fire-and-forget: [`record_backfilled`] opens the
-//! database, writes, and swallows every failure
-//! with a one-line log, exactly as `index.rs` reads do. A locked database, a
-//! missing directory and a schema this build has never seen are all ordinary,
-//! and none of them may ever be visible to the person. Usage history is a
-//! ledger, not a feature anything blocks on.
+//! Every write is fire-and-forget: [`record_backfilled`] queues the rows on
+//! `baaz.db`'s writer, which lands them in one transaction and swallows every
+//! failure with a one-line log. A locked database, a missing directory and a
+//! schema this build has never seen are all ordinary, and none of them may
+//! ever be visible to the person. Usage history is a ledger, not a feature
+//! anything blocks on.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use aui_protocol::TurnMeta;
 use rusqlite::{params, Connection};
@@ -42,7 +47,7 @@ use rusqlite::{params, Connection};
 /// `~/Library/Application Support/baaz/baaz.db` — a new file beside
 /// `search.db`, not a table inside it (see the module docs for why).
 pub fn db_path() -> PathBuf {
-    crate::store::support_dir().join("baaz.db")
+    crate::db::path()
 }
 
 /// The ledger schema version, stamped in `meta`.
@@ -70,10 +75,6 @@ pub fn db_path() -> PathBuf {
 /// and every write is skipped (with a log line) until a build that knows
 /// that version arrives.
 const SCHEMA_VERSION: u32 = 3;
-
-/// How long a write waits for another process to let go of the database
-/// before giving up and carrying on without the row.
-const BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// One finished turn, ready to record.
 #[derive(Clone, Debug, PartialEq)]
@@ -168,22 +169,38 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// [`open`] against an explicit path, which is what the tests use
-/// (`:memory:` included).
+/// Open `baaz.db` at `path` on the calling thread, as the writer would
+/// ([`crate::db::open_at`]): what this module's tests read the ledger
+/// through (`:memory:` included).
+#[cfg(any(test, feature = "test-support"))]
 pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            let _ = std::fs::create_dir_all(parent);
-        }
+    crate::db::as_writer(|| crate::db::open_at(path))
+}
+
+/// Bring the ledger that predates `baaz.db`'s own schema (`usage_turns`,
+/// versioned in `meta.schema_version`) to its version 3, so
+/// [`crate::db::schema`] can copy its rows into `turn`. `Ok(false)`: there
+/// is no such ledger (a fresh file). An error leaves the file as found: a
+/// ledger stamped by a build newer than any that wrote one, or of a shape
+/// nothing recognises.
+pub fn upgrade_legacy_ledger(connection: &mut Connection) -> Result<bool, rusqlite::Error> {
+    let meta_exists = table_exists(connection, "meta")?;
+    let stored_raw: Option<String> = if meta_exists {
+        connection
+            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .ok()
+    } else {
+        None
+    };
+    if stored_raw.is_none()
+        && !table_exists(connection, "usage_turns")?
+        && !table_exists(connection, "usage_turns_v1")?
+    {
+        return Ok(false);
     }
-    let mut connection = Connection::open(path)?;
-    let _ = connection.busy_timeout(BUSY_TIMEOUT);
     connection.execute_batch("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);")?;
-    let stored_raw: Option<String> = connection
-        .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| {
-            row.get::<_, String>(0)
-        })
-        .ok();
     let stored: Option<u32> = stored_raw
         .as_deref()
         .and_then(|value| value.parse().ok());
@@ -192,34 +209,31 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
             connection.execute_batch(LEDGER_DDL_V3)?;
             // A backup left beside a stamped v3 is merged back, never left
             // to sit beside the live table unread.
-            drain_backup_table(&mut connection)?;
+            drain_backup_table(connection)?;
         }
         Some(2) => {
-            migrate_v2_to_v3(&mut connection)?;
+            migrate_v2_to_v3(connection)?;
         }
         Some(1) => {
-            migrate_v1_to_v2(&mut connection)?;
-            migrate_v2_to_v3(&mut connection)?;
+            migrate_v1_to_v2(connection)?;
+            migrate_v2_to_v3(connection)?;
         }
         Some(0) | None => {
-            // No readable stamp: a fresh install, or a stamp nobody can
-            // parse. The table's real shape decides — never the assumption
-            // that this is a fresh database.
-            open_unstamped(&mut connection, stored_raw.as_deref())?;
+            // No readable stamp: the table's real shape decides — never
+            // the assumption that this is a fresh ledger.
+            open_unstamped(connection, stored_raw.as_deref())?;
         }
         Some(version) => {
-            // A schema this build has never seen: leave the file alone and
-            // let the caller treat usage history as unavailable, exactly as
-            // `index.rs` treats a foreign session index.
+            // A ledger this build has never seen: leave it alone.
             crate::baaz_log!(
-                "usage database schema version {version} is newer than this build ({SCHEMA_VERSION}); usage history is paused"
+                "usage ledger schema version {version} is newer than this build ({SCHEMA_VERSION}); it is left as it is"
             );
             return Err(rusqlite::Error::InvalidParameterName(format!(
-                "unsupported baaz.db schema version {version}"
+                "unsupported usage ledger schema version {version}"
             )));
         }
     }
-    Ok(connection)
+    Ok(true)
 }
 
 /// Open a database whose `schema_version` is missing or does not parse.
@@ -526,118 +540,58 @@ fn migrate_steps(
     Ok(())
 }
 
-/// Record one finished turn.
+/// Record one finished turn in `baaz.db`'s `turn` table, under its
+/// session's row ([`crate::db::turns::record_ledger_row`]).
 ///
 /// `INSERT … ON CONFLICT DO NOTHING`: writing the same turn twice is a
 /// no-op, not an error and not an update — the live path and the backfill
 /// path may each record a turn under a different cursor, and the second
 /// write changes nothing. Returns whether the row was new.
 pub fn record_turn(connection: &Connection, row: &UsageRow) -> Result<bool, rusqlite::Error> {
-    let changed = connection.execute(
-        "INSERT INTO usage_turns(
-            session_id, view_cursor, turn_id, finished_at_ms, model, duration_ms,
-            tokens_in, tokens_out, reasoning_tokens,
-            cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd, provider
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-         ON CONFLICT(session_id, turn_id) DO NOTHING",
-        params![
-            row.session_id,
-            row.view_cursor,
-            row.turn_id,
-            row.finished_at_ms,
-            row.model,
-            row.duration_ms,
-            row.tokens_in,
-            row.tokens_out,
-            row.reasoning_tokens,
-            row.cache_read_tokens,
-            row.cache_write_tokens,
-            row.cached_tokens,
-            row.cost_usd,
-            row.provider,
-        ],
-    )?;
-    Ok(changed == 1)
+    crate::db::turns::record_ledger_row(connection, row)
 }
 
 /// The row for (`session_id`, `turn_id`), or `None` when it was never
-/// recorded.
-///
-/// Best-effort, like every other read in this app: any failure yields `None`.
-/// This is the query surface the tests (and, later, the usage page) read
-/// through — nothing else needs to ask what a turn cost yet.
-/// Test-only for now: the brief put a query API out of scope, so the
-/// only reader of the ledger today is this crate's own tests.
+/// recorded. Best-effort: any failure yields `None`.
+/// Test-only for now: nothing in the app reads the ledger yet.
 #[cfg(any(test, feature = "test-support"))]
-pub fn find_turn(
-    connection: &Connection,
-    session_id: &str,
-    turn_id: &str,
-) -> Option<UsageRow> {
-    let mut statement = connection
-        .prepare(
-            "SELECT session_id, view_cursor, turn_id, finished_at_ms, model, duration_ms,
-                    tokens_in, tokens_out, reasoning_tokens,
-                    cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd, provider
-             FROM usage_turns WHERE session_id = ?1 AND turn_id = ?2",
-        )
-        .ok()?;
-    statement
-        .query_row(params![session_id, turn_id], |row| {
-            Ok(UsageRow {
-                session_id: row.get(0)?,
-                view_cursor: row.get(1)?,
-                turn_id: row.get(2)?,
-                finished_at_ms: row.get(3)?,
-                model: row.get(4)?,
-                duration_ms: row.get(5)?,
-                tokens_in: row.get(6)?,
-                tokens_out: row.get(7)?,
-                reasoning_tokens: row.get(8)?,
-                cache_read_tokens: row.get(9)?,
-                cache_write_tokens: row.get(10)?,
-                cached_tokens: row.get(11)?,
-                cost_usd: row.get(12)?,
-                provider: row.get(13)?,
-            })
-        })
-        .ok()
+pub fn find_turn(connection: &Connection, session_id: &str, turn_id: &str) -> Option<UsageRow> {
+    crate::db::turns::find_ledger(connection, session_id, turn_id)
 }
 
 /// How many turns `session_id` has recorded, or `0` when the database cannot
 /// say. Best-effort, like [`find_turn`].
-/// Test-only for now: the brief put a query API out of scope, so the
-/// only reader of the ledger today is this crate's own tests.
+/// Test-only for now: nothing in the app reads the ledger yet.
 #[cfg(any(test, feature = "test-support"))]
 pub fn count_for_session(connection: &Connection, session_id: &str) -> usize {
-    connection
-        .query_row(
-            "SELECT COUNT(*) FROM usage_turns WHERE session_id = ?1",
-            params![session_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        .max(0) as usize
+    crate::db::turns::count_ledger(connection, session_id)
 }
 
-/// Record finished turns against an explicit database path, swallowing every
-/// failure with a log line: a locked database, a missing directory and a
-/// schema this build has never seen are all ordinary, and none of them may
-/// reach the person. The public recorders fix the path to [`db_path`]; the
-/// test for the unopenable database calls this directly.
-fn record_at(path: &std::path::Path, rows: &[UsageRow]) {
-    let connection = match open_at(path) {
-        Ok(connection) => connection,
-        Err(error) => {
-            crate::baaz_log!("usage history unavailable ({error}); turn not recorded");
-            return;
+/// [`find_turn`] in this run's `baaz.db`, through its writer: what the
+/// app's tests read the ledger back with.
+#[cfg(any(test, feature = "test-support"))]
+pub fn find_recorded(session_id: &str, turn_id: &str) -> Option<UsageRow> {
+    let (session_id, turn_id) = (session_id.to_owned(), turn_id.to_owned());
+    crate::db::read(crate::db::path(), move |db| find_turn(&db.conn, &session_id, &turn_id)).flatten()
+}
+
+/// [`count_for_session`] in this run's `baaz.db`, through its writer.
+#[cfg(any(test, feature = "test-support"))]
+pub fn count_recorded(session_id: &str) -> usize {
+    let session_id = session_id.to_owned();
+    crate::db::read(crate::db::path(), move |db| count_for_session(&db.conn, &session_id)).unwrap_or(0)
+}
+
+/// Record finished turns into the database at `path`, on its writer,
+/// swallowing every failure with a log line: a locked database, a missing
+/// directory and a schema this build has never seen are all ordinary, and
+/// none of them may reach the person. The rows land in one transaction.
+fn record_at(path: std::path::PathBuf, rows: Vec<UsageRow>) {
+    crate::db::run(path, move |db| {
+        if let Err(error) = crate::db::turns::record_ledger(&mut db.conn, &rows) {
+            crate::baaz_log!("usage history write failed ({error}); turns not recorded");
         }
-    };
-    for row in rows {
-        if let Err(error) = record_turn(&connection, row) {
-            crate::baaz_log!("usage history write failed ({error}); turn not recorded");
-        }
-    }
+    });
 }
 
 /// Record finished turns — the live path and a backfilled page both come
@@ -651,7 +605,7 @@ pub fn record_backfilled(rows: &[UsageRow]) {
     if rows.is_empty() {
         return;
     }
-    record_at(&db_path(), rows);
+    record_at(db_path(), rows.to_vec());
 }
 
 #[cfg(test)]
@@ -1093,7 +1047,8 @@ mod tests {
         assert_eq!(count_for_session(&connection, "s-9"), 3);
         let total: i64 = connection
             .query_row(
-                "SELECT SUM(tokens_in) FROM usage_turns WHERE session_id = 's-9'",
+                "SELECT SUM(t.tokens_in) FROM turn t JOIN session s ON s.id = t.session_id
+                 WHERE s.provider_session_id = 's-9'",
                 [],
                 |row| row.get(0),
             )
@@ -1229,26 +1184,43 @@ mod tests {
         let blocker = dir.join("blocker");
         std::fs::write(&blocker, b"not a directory").expect("blocker file");
         let path = blocker.join("baaz.db");
-        record_at(&path, &[row("v:s:1", "t-1")]);
-        record_at(&path, &[row("v:s:1", "t-1"), row("v:s:2", "t-2")]);
+        record_at(path.clone(), vec![row("v:s:1", "t-1")]);
+        record_at(path.clone(), vec![row("v:s:1", "t-1"), row("v:s:2", "t-2")]);
+        crate::db::flush();
         assert!(!path.exists(), "no database was created where none can live");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A ledger stamped by a build newer than any that kept one is left
+    /// exactly as it is, not copied; the database still opens and records
+    /// into `turn`.
     #[test]
-    fn a_schema_this_build_has_never_seen_stays_unreadable() {
+    fn a_ledger_this_build_has_never_seen_is_left_alone() {
         let dir = std::env::temp_dir().join(format!("baaz-usage-future-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("baaz.db");
-        {
-            let connection = open_at(&path).expect("current schema opens");
+        crate::db::as_writer(|| {
+            let connection = Connection::open(&path).expect("raw open");
             connection
-                .execute("UPDATE meta SET value = '999' WHERE key = 'schema_version'", [])
-                .expect("stamp a future version");
-        }
-        assert!(open_at(&path).is_err(), "an unknown schema refuses to open");
+                .execute_batch(
+                    "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
+                     INSERT INTO meta VALUES ('schema_version', '999');
+                     CREATE TABLE usage_turns(session_id TEXT, turn_id TEXT, future TEXT);
+                     INSERT INTO usage_turns VALUES ('s-1', 't-1', 'x');",
+                )
+                .expect("a future ledger");
+        });
+        let connection = open_at(&path).expect("the database opens");
+        let future: i64 = connection.query_row("SELECT COUNT(*) FROM usage_turns", [], |row| row.get(0)).unwrap();
+        assert_eq!(future, 1, "the unknown ledger is untouched");
+        assert_eq!(count_for_session(&connection, "s-1"), 0, "and not copied");
+        assert!(record_turn(&connection, &row("v:s:1", "t-2")).expect("records"));
+        assert_eq!(count_for_session(&connection, "s-1"), 1);
+        drop(connection);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
 
     /// A version-1 file with the owner's shape: one turn stored twice under
     /// two cursors, plus one single turn.
@@ -1479,6 +1451,43 @@ mod tests {
         assert_eq!(kept.view_cursor, "v:s:2");
     }
 
+    /// A version-3 ledger as builds before `baaz.db`'s own schema left it:
+    /// `usage_turns` stamped 3, holding `rows`. Raw, on the test's thread.
+    fn legacy_v3(path: &std::path::Path, rows: &[UsageRow]) -> Connection {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("temp dir");
+        let mut connection = Connection::open(path).expect("raw open");
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);").expect("meta");
+        stamp_fresh_v3(&mut connection).expect("a v3 ledger");
+        for row in rows {
+            connection
+                .execute(
+                    "INSERT INTO usage_turns(
+                        session_id, view_cursor, turn_id, finished_at_ms, model, duration_ms,
+                        tokens_in, tokens_out, reasoning_tokens,
+                        cache_read_tokens, cache_write_tokens, cached_tokens, cost_usd, provider
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    params![
+                        row.session_id,
+                        row.view_cursor,
+                        row.turn_id,
+                        row.finished_at_ms,
+                        row.model,
+                        row.duration_ms,
+                        row.tokens_in,
+                        row.tokens_out,
+                        row.reasoning_tokens,
+                        row.cache_read_tokens,
+                        row.cache_write_tokens,
+                        row.cached_tokens,
+                        row.cost_usd,
+                        row.provider,
+                    ],
+                )
+                .expect("a legacy row");
+        }
+        connection
+    }
+
     fn schema_version(connection: &Connection) -> Option<String> {
         connection
             .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| {
@@ -1630,8 +1639,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir2);
         let path2 = dir2.join("baaz.db");
         {
-            let connection = open_at(&path2).expect("fresh v3");
-            assert!(record_turn(&connection, &row("v:s:1", "t-1")).expect("t-1 records"));
+            let connection = legacy_v3(&path2, &[row("v:s:1", "t-1")]);
             connection
                 .execute_batch(
                     "CREATE TABLE usage_turns_v1 AS SELECT * FROM usage_turns WHERE 0;",
@@ -1718,8 +1726,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("baaz.db");
         {
-            let connection = open_at(&path).expect("fresh v3");
-            assert!(record_turn(&connection, &row("v:s:1", "t-1")).expect("t-1 records"));
+            let connection = legacy_v3(&path, &[row("v:s:1", "t-1")]);
             connection
                 .execute("UPDATE meta SET value = 'garbage' WHERE key = 'schema_version'", [])
                 .expect("garbage stamp writes");
@@ -1733,8 +1740,9 @@ mod tests {
         assert_eq!(schema_version(&connection).as_deref(), Some("3"));
         let _ = std::fs::remove_dir_all(&dir);
 
-        // A garbage stamp on a table of unknown shape fails loudly, with the
-        // stamp untouched — never a silent v2 over a foreign table.
+        // A garbage stamp on a table of unknown shape is left alone, the
+        // stamp untouched — never a silent v2 over a foreign table — and
+        // nothing of it is copied.
         let dir =
             std::env::temp_dir().join(format!("baaz-usage-d1fix-garbage-odd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1751,16 +1759,15 @@ mod tests {
                 )
                 .expect("odd schema builds");
         }
-        assert!(
-            open_at(&path).is_err(),
-            "an unreadable stamp on an unknown shape fails loudly"
-        );
+        let opened = open_at(&path).expect("the database opens without the foreign ledger");
+        assert_eq!(count_for_session(&opened, "a"), 0, "nothing of it is copied");
+        drop(opened);
         {
             let connection = Connection::open(&path).expect("reopen");
             assert_eq!(
                 schema_version(&connection).as_deref(),
                 Some("garbage"),
-                "the loud failure stamps nothing"
+                "the refusal stamps nothing"
             );
             let count: i64 = connection
                 .query_row("SELECT COUNT(*) FROM usage_turns", [], |row| row.get(0))

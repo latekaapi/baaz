@@ -1,15 +1,16 @@
 //! Baaz's own on-disk state, next to Muse's rather than inside it.
 //!
 //! Muse owns `~/.config/muse` and `~/.local/share/muse`; Baaz never
-//! writes to either. What Baaz has to remember — the billing tier it
-//! last probed, the session names and hidden flags MSP has no
-//! room for — lives under `~/Library/Application Support/baaz`,
-//! which is the macOS answer for an application's own state.
+//! writes to either. What Baaz has to remember lives under
+//! `~/Library/Application Support/baaz`, which is the macOS answer for an
+//! application's own state.
 //!
-//! The per-turn usage ledger lives here too, as its own `baaz.db` (see
-//! `crate::usage`), beside the search index rather than inside it.
+//! The session facts, records, turns, attachments, prompt history and
+//! journals are rows of `baaz.db` ([`crate::db`]), beside the search index
+//! rather than inside it. This module keeps the rest — preferences, caches,
+//! projects — as JSON files, and resolves the directory for both.
 //!
-//! Two rules:
+//! Two rules for the JSON files:
 //!
 //! * **Every write is atomic.** A file is written beside itself and renamed,
 //!   so a crash mid-write leaves the previous state rather than half of the
@@ -235,18 +236,25 @@ pub enum StoreProblem {
     /// A file could not be parsed and was renamed aside. `restored` says
     /// whether its `.bak` was read in its place.
     SetAside { name: String, aside: PathBuf, restored: bool },
-    /// Entries of a map store that did not parse were dropped; the whole
-    /// file was copied to `aside` first.
-    EntriesDropped { name: String, count: usize, aside: PathBuf },
     /// A write failed; the file on disk is the previous one.
     WriteFailed { name: String, error: String },
+    /// A JSON store the database imports did not parse: the file was left
+    /// exactly as it is, and its `.bak` was read in its place when
+    /// `restored` ([`crate::db::json_import`]).
+    Unreadable { name: String, restored: bool },
+    /// Entries of a JSON store the database imports did not parse and were
+    /// skipped; the file was left as it is.
+    EntriesSkipped { name: String, count: usize },
+    /// `baaz.db` would not open (a newer build's schema, a failed import,
+    /// the disk): nothing is read or written this run.
+    DatabaseUnavailable { error: String },
 }
 
 static PROBLEMS: std::sync::Mutex<Vec<StoreProblem>> = std::sync::Mutex::new(Vec::new());
 static PROBLEM_WAKERS: std::sync::Mutex<Vec<futures::channel::mpsc::UnboundedSender<()>>> =
     std::sync::Mutex::new(Vec::new());
 
-fn report(problem: StoreProblem) {
+pub(crate) fn report(problem: StoreProblem) {
     crate::baaz_log!("store: {problem:?}");
     PROBLEMS.lock().unwrap_or_else(|p| p.into_inner()).push(problem);
     PROBLEM_WAKERS.lock().unwrap_or_else(|p| p.into_inner()).retain(|waker| waker.unbounded_send(()).is_ok());
@@ -395,39 +403,6 @@ where
     use serde::Deserialize as _;
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(serde_json::from_value(value).unwrap_or_default())
-}
-
-/// [`read_json`] for a store that is a map of independent entries
-/// (`sessions.json`, `provider-sessions.json`): one entry that does not
-/// parse drops only itself, and the file is copied aside first so nothing
-/// it said is lost.
-pub fn read_json_map<V: serde::de::DeserializeOwned>(path: &std::path::Path) -> std::collections::HashMap<String, V> {
-    let raw: serde_json::Map<String, serde_json::Value> = read_json(path);
-    let mut kept = std::collections::HashMap::with_capacity(raw.len());
-    let mut dropped = 0usize;
-    for (key, value) in raw {
-        match serde_json::from_value(value) {
-            Ok(entry) => {
-                kept.insert(key, entry);
-            }
-            Err(error) => {
-                crate::baaz_log!("store: {} entry {key:?} does not parse ({error}); dropped", path.display());
-                dropped += 1;
-            }
-        }
-    }
-    if dropped > 0 {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_secs())
-            .unwrap_or_default();
-        let mut aside = path.as_os_str().to_owned();
-        aside.push(format!(".corrupt-{stamp}"));
-        let aside = PathBuf::from(aside);
-        let _ = std::fs::copy(path, &aside);
-        report(StoreProblem::EntriesDropped { name: file_name(path), count: dropped, aside });
-    }
-    kept
 }
 
 /// One JSON file in the state directory, and the one way it is written
@@ -866,11 +841,11 @@ mod tests {
         assert_eq!(migrate_support_dir_at(&new, &old), StateMigration::NotNeeded);
         // An old dir with sessions, projects and a nested database moves whole.
         std::fs::create_dir_all(old.join("nested")).expect("seed old");
-        std::fs::write(old.join("sessions.json"), b"{}").expect("seed sessions");
+        std::fs::write(old.join("state.json"), b"{}").expect("seed sessions");
         std::fs::write(old.join("nested").join("search.db"), b"db").expect("seed db");
         assert_eq!(migrate_support_dir_at(&new, &old), StateMigration::Moved);
         assert!(!old.exists(), "the old path is gone after the move");
-        assert_eq!(std::fs::read_to_string(new.join("sessions.json")).unwrap(), "{}");
+        assert_eq!(std::fs::read_to_string(new.join("state.json")).unwrap(), "{}");
         assert_eq!(std::fs::read(new.join("nested").join("search.db")).unwrap(), b"db");
         // A second run is a no-op: the new dir already exists.
         assert_eq!(migrate_support_dir_at(&new, &old), StateMigration::NotNeeded);
@@ -880,7 +855,7 @@ mod tests {
     /// The regression this guards: a tier probe once wrote
     /// `baaz/tier-probe` before any launch could migrate, and the old
     /// `new.exists()` guard then refused forever — 73 sessions stranded in
-    /// `harness/sessions.json` with no warning. A partial new directory must
+    /// `harness/` state with no warning. A partial new directory must
     /// be filled in, not treated as done.
     #[test]
     fn an_early_write_to_the_new_dir_does_not_strand_the_old_state() {
@@ -890,7 +865,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         // The old tree: the user's real state.
         std::fs::create_dir_all(old.join("nested")).expect("seed old");
-        std::fs::write(old.join("sessions.json"), b"OLD-SESSIONS").expect("seed sessions");
+        std::fs::write(old.join("state.json"), b"OLD-SESSIONS").expect("seed sessions");
         std::fs::write(old.join("layout.json"), b"OLD-LAYOUT").expect("seed layout");
         std::fs::write(old.join("nested").join("search.db"), b"OLD-DB").expect("seed db");
         // An early write beat the migration: the new dir exists with one file,
@@ -901,7 +876,7 @@ mod tests {
 
         assert_eq!(migrate_support_dir_at(&new, &old), StateMigration::Merged);
         // What the new tree lacked is filled in, including nested trees.
-        assert_eq!(std::fs::read(new.join("sessions.json")).unwrap(), b"OLD-SESSIONS");
+        assert_eq!(std::fs::read(new.join("state.json")).unwrap(), b"OLD-SESSIONS");
         assert_eq!(std::fs::read(new.join("nested").join("search.db")).unwrap(), b"OLD-DB");
         // What it already had is untouched: the user has been running against it.
         assert_eq!(std::fs::read(new.join("layout.json")).unwrap(), b"NEW-LAYOUT");

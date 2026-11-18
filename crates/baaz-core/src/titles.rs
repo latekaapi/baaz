@@ -15,7 +15,7 @@
 //!   bare-UUIDv7 client id recorded before the start), sends ONE short
 //!   prompt ([`title_prompt`]) for a 3–6 word title, and lands the reply
 //!   (the hub reads it back: `provider_muse::MuseHub::complete`).
-//! * the result lands in `sessions.json` as `generated_title`, ranked under
+//! * the result lands on the session's row as `generated_title`, ranked under
 //!   a user-given name in the label order; the server record is never
 //!   renamed. The side session is marked `hidden` the moment it starts, so
 //!   it never reaches the sidebar, the palette or the counts — and it stays

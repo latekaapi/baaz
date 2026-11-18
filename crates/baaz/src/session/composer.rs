@@ -1208,8 +1208,10 @@ impl SessionRuntime {
     /// D4: remembers what this turn goes out with — pictures (copied into
     /// the session's sent folder), files, quotations, a Browse annotation
     /// batch — so its bubble can show them; the wire carries text only.
-    /// Clears the quotations and the batch; the caller clears the rest.
-    pub(super) fn record_sent(&mut self, text: &str) {
+    /// Kept under `turn_id`, the optimistic bubble's id until the echo
+    /// names the provider's turn. Clears the quotations and the batch; the
+    /// caller clears the rest.
+    pub(super) fn record_sent(&mut self, text: &str, turn_id: &str) {
         use aui_protocol::{Attachment, AttachmentKind, UploadState};
         use base64::Engine as _;
         let mut attachments = Vec::new();
@@ -1263,10 +1265,8 @@ impl SessionRuntime {
         if attachments.is_empty() && annotations.is_none() {
             return;
         }
-        let item = crate::sent::SentItem { text: text.to_owned(), attachments, annotations };
-        if let Err(error) = crate::sent::append(&self.session_id, item.clone()) {
-            crate::baaz_log!("sent: could not record the turn's attachments: {error}");
-        }
+        let item = crate::sent::SentItem { text: text.to_owned(), attachments, annotations, turn_id: Some(turn_id.to_owned()) };
+        crate::sent::append(&self.provider_id, &self.session_id, item.clone());
         self.sent_items.push(item);
     }
 

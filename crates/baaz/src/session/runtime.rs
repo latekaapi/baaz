@@ -293,12 +293,15 @@ pub struct SessionRuntime {
     /// history untouched.
     pub(super) handoff_pack_full: Option<String>,
     pub(super) handoff_pack_display: Option<String>,
-    /// Full provider-submitted text → bubble text for submits that carried
-    /// `display_text`, mirrored from the provider session record on first
-    /// use. `None` until a provider submit records one or a replayed delta
-    /// needs a lookup: the lazy load keeps sessions that never submit with
-    /// a display text off the store entirely.
-    pub(super) display_overrides: Option<HashMap<String, String>>,
+    /// The bubble texts submits that carried `display_text` showed, by the
+    /// user turn and by the echoed text, read from the session's turns in
+    /// `baaz.db` on first use. `None` until a provider submit records one
+    /// or a replayed delta needs a lookup: the lazy load keeps sessions
+    /// that never submit with a display text off the database entirely.
+    pub(super) display_overrides: Option<crate::db::turns::Displays>,
+    /// Submits whose bubble text waits for the provider's echo to name the
+    /// user turn it is kept under: (model-visible text, bubble text).
+    pub(super) pending_displays: Vec<(String, String)>,
     /// Foreground tasks that die with the runtime: the lane's event loop,
     /// command acks, the clocks.
     pub(super) tasks: Vec<Task<()>>,
@@ -361,7 +364,7 @@ impl SessionRuntime {
     /// lane, which [`Self::install_lane`] or an opening lane sets.
     pub(crate) fn new(session_id: String, provider_id: String, workspace: String) -> Self {
         let workspace_key = workspace.clone();
-        let sent_items = crate::sent::load(&session_id);
+        let sent_items = crate::sent::load(&provider_id, &session_id);
         Self {
             store: session_store::SessionStore::new(&session_id, aui_protocol::Provider::Muse, workspace_key.clone()),
             read_only: false,
@@ -445,6 +448,7 @@ impl SessionRuntime {
             handoff_pack_full: None,
             handoff_pack_display: None,
             display_overrides: None,
+            pending_displays: Vec::new(),
             tasks: Vec::new(),
         }
     }

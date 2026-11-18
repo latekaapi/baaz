@@ -906,7 +906,7 @@ mod tests {
     }
 
     #[gpui::test]
-    #[should_panic(expected = "outside the BrowserData worker")]
+    #[should_panic(expected = "ran on the UI thread outside a worker job")]
     fn sqlite_on_the_ui_thread_outside_the_worker_panics(cx: &mut gpui::TestAppContext) {
         let _data = cx.new(BrowserData::new);
         let db = BrowserDb::memory();

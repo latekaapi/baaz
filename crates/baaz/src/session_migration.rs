@@ -1,7 +1,9 @@
 //! The session move's window side (B4M): the prompt dialog, the
-//! Providers-row wiring and the background plan cache on the app's
-//! [`Harness`](crate::app::Harness). The planner, executor, journal and
-//! the cache itself are [`baaz_core::session_migration`], re-exported here
+//! Providers-row wiring and the background plan's refresh on the app's
+//! [`Harness`](crate::app::Harness); the plan cache itself is the session
+//! list's ([`crate::session_list::SessionList::migration`]), since it is
+//! derived from the session records. The planner, executor, journal and
+//! the cache type are [`baaz_core::session_migration`], re-exported here
 //! so `crate::session_migration::…` names both.
 
 use aui::overlay::DialogKind;
@@ -16,8 +18,8 @@ impl BaazHarness {
     /// nothing while the background compute is still running. Never
     /// walks the owner homes — that happens only in
     /// [`Self::refresh_migration_cache`], off the UI thread.
-    pub(crate) fn migration_cached_plan(&self) -> Vec<PlannedMove> {
-        self.migration.cache.as_ref().map(|cache| cache.plan_for_render().to_vec()).unwrap_or_default()
+    pub(crate) fn migration_cached_plan(&self, cx: &gpui::App) -> Vec<PlannedMove> {
+        self.session_list.read(cx).migration.cache.as_ref().map(|cache| cache.plan_for_render().to_vec()).unwrap_or_default()
     }
 
     /// Recompute the plan off the UI thread and cache it with a timestamp:
@@ -26,10 +28,10 @@ impl BaazHarness {
     /// a second call while one is in flight is a no-op. Renders keep
     /// reading the old cache meanwhile — never the walker.
     pub(crate) fn refresh_migration_cache(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.migration.refresh_in_flight {
+        if self.session_list.read(cx).migration.refresh_in_flight {
             return;
         }
-        self.migration.refresh_in_flight = true;
+        self.session_list.update(cx, |list, _| list.migration.refresh_in_flight = true);
         let owner = owner_home();
         let state = crate::store::support_dir();
         let registry = self.session_list.read(cx).provider_sessions.clone();
@@ -39,8 +41,10 @@ impl BaazHarness {
                 .spawn(async move { plan_migration(&owner, &state, &registry) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.migration.refresh_in_flight = false;
-                this.migration.cache = Some(MigrationCache::fresh(plan));
+                this.session_list.update(cx, |list, _| {
+                    list.migration.refresh_in_flight = false;
+                    list.migration.cache = Some(MigrationCache::fresh(plan));
+                });
                 // A startup offer deferred on this compute re-checks now
                 // that the plan is here; a no-op when nothing waits.
                 this.maybe_offer_session_migration(cx);
@@ -54,7 +58,7 @@ impl BaazHarness {
     /// finished confirm or lazy move calls, so the Providers row follows
     /// the move without ever walking on the render path.
     pub(crate) fn invalidate_migration_cache(&mut self, cx: &mut gpui::Context<Self>) {
-        self.migration.cache = None;
+        self.session_list.update(cx, |list, _| list.migration.cache = None);
         self.refresh_migration_cache(cx);
     }
 
@@ -90,14 +94,15 @@ impl BaazHarness {
         if self.overlays.read(cx).dialog().is_some() {
             return;
         }
-        let fresh = self.migration.cache.as_ref().is_some_and(|cache| cache.age_secs() < CACHE_STALE_SECS);
+        let migration = &self.session_list.read(cx).migration;
+        let fresh = migration.cache.as_ref().is_some_and(|cache| cache.age_secs() < CACHE_STALE_SECS);
         if !fresh {
-            if !self.migration.refresh_in_flight {
+            if !self.session_list.read(cx).migration.refresh_in_flight {
                 self.refresh_migration_cache(cx);
             }
             return;
         }
-        let plan = self.migration_cached_plan();
+        let plan = self.migration_cached_plan(cx);
         if plan.is_empty() {
             return;
         }
@@ -120,7 +125,7 @@ impl BaazHarness {
         // owner's home after the move was admitted.
         record_consent(&state);
         clear_all_legacy_resumes();
-        let plan = self.migration_cached_plan();
+        let plan = self.migration_cached_plan(cx);
         // A click that beats the background plan (cold start) plans now, in
         // the same background task, instead of moving nothing.
         let owner = owner_home();

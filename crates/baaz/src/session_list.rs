@@ -165,6 +165,10 @@ pub(crate) struct SessionList {
     pub(crate) show_empty: bool,
     /// Whether archived sessions are listed anyway (the Sessions menu's toggle).
     pub(crate) show_archived: bool,
+    /// The B4M move plan, derived from the session records: the cache
+    /// computed off the UI thread by `Harness::refresh_migration_cache` and
+    /// read by every render, and whether a recompute is running.
+    pub(crate) migration: crate::session_migration::MigrationPlan,
     /// Real session ids with a title generation in flight: their rows read
     /// the pending placeholder until the title lands or the attempt stands
     /// down (auto-titles).
@@ -213,6 +217,7 @@ impl SessionList {
             show_hidden: false,
             show_empty: false,
             show_archived: false,
+            migration: crate::session_migration::MigrationPlan::default(),
             titles_pending: HashSet::new(),
             side_sessions: HashSet::new(),
             byline_live: HashSet::new(),
@@ -264,7 +269,7 @@ impl SessionList {
             || before.project_name != after.project_name
             || before.workspace != after.workspace
             || before.branch != after.branch
-            || sidebar::needs_collapse(&after.id, &self.provider_sessions, &self.overrides);
+            || sidebar::needs_collapse(&after.id, &self.overrides);
         if structural {
             self.invalidate(cx);
             return;
@@ -351,7 +356,6 @@ impl SessionList {
         let collapsed = sidebar::collapse_with_index(
             self.sessions.clone(),
             &index,
-            &self.provider_sessions,
             &self.overrides,
         );
         // One identity for selection: the open (or awaited) session's row
@@ -390,7 +394,7 @@ impl SessionList {
                     || self.show_empty
                     || entry.turns_unknown
                     || !entry.is_empty()
-                    || sidebar::sent_to(&entry.id, &self.provider_sessions, &self.overrides)
+                    || sidebar::sent_to(&entry.id, &self.overrides)
                     || active_head.as_deref() == Some(entry.id.as_str())
                     || pending_head.as_deref() == Some(entry.id.as_str())
             })
@@ -443,7 +447,7 @@ impl SessionList {
                 // A brand-new session has no row yet: resolve its project
                 // past the rows so its group still counts as current.
                 let active_project = active.and_then(|open| {
-                    sidebar::rowless_session_project(open, visible.as_slice(), &self.overrides, &self.provider_sessions)
+                    sidebar::rowless_session_project(open, visible.as_slice(), &self.overrides)
                 });
                 let view = sidebar::GroupView {
                     closed: &closed,
@@ -567,7 +571,7 @@ impl SessionList {
         index
     }
 
-    /// Follow `handoff_to` links across both stores to the chain head
+    /// Follow `handoff_to` links across the session rows to the chain head
     /// (`docs/22-handoff.md` §8): any member id opens the head instead. A
     /// dangling destination resolves to the id itself, so its source stays
     /// listed and openable. Reads the cached per-change index, never a
@@ -735,7 +739,7 @@ impl SessionList {
         // the one-row refresh above rebuilt member facts, and the view
         // model re-sums the chain (title, turns, flags) from them. An
         // unlinked settle stops at the O(1) refresh above (X3d).
-        if sidebar::needs_collapse(session_id, &self.provider_sessions, &self.overrides) {
+        if sidebar::needs_collapse(session_id, &self.overrides) {
             self.collapse_handoff_chains(cx);
         }
     }
@@ -885,7 +889,7 @@ impl SessionList {
             .sessions
             .iter()
             .filter(|entry| wanted(&entry.id))
-            .any(|entry| sidebar::needs_collapse(&entry.id, &self.provider_sessions, &self.overrides));
+            .any(|entry| sidebar::needs_collapse(&entry.id, &self.overrides));
         if touched_link {
             self.collapse_handoff_chains(cx);
         }
@@ -909,7 +913,7 @@ impl SessionList {
         let touched = self
             .sessions
             .iter()
-            .any(|entry| sidebar::needs_collapse(&entry.id, &self.provider_sessions, &self.overrides));
+            .any(|entry| sidebar::needs_collapse(&entry.id, &self.overrides));
         if touched {
             self.invalidate(cx);
         }
@@ -928,7 +932,7 @@ impl SessionList {
         let removed_linked = self.sessions.iter().any(|entry| {
             !entry.provider.lists_sessions()
                 && !self.provider_sessions.contains_key(&entry.id)
-                && sidebar::needs_collapse(&entry.id, &self.provider_sessions, &self.overrides)
+                && sidebar::needs_collapse(&entry.id, &self.overrides)
         });
         let records = &self.provider_sessions;
         self.sessions.retain(|entry| entry.provider.lists_sessions() || records.contains_key(&entry.id));
@@ -947,7 +951,7 @@ impl SessionList {
             .collect();
         records.sort_by(|a, b| a.session_id.cmp(&b.session_id));
         for record in &records {
-            touched_link |= sidebar::needs_collapse(&record.session_id, &self.provider_sessions, &self.overrides);
+            touched_link |= sidebar::needs_collapse(&record.session_id, &self.overrides);
             let mut row = sidebar::SessionEntry::provider_row(
                 record,
                 self.overrides.get(&record.session_id),
@@ -993,7 +997,7 @@ impl SessionList {
                 .filter(|(id, meta)| {
                     meta.handoff_from.as_deref().map(str::trim).is_some_and(|from| !from.is_empty())
                         && !self.sessions.iter().any(|e| e.id == **id)
-                        && sidebar::needs_collapse(id, &self.provider_sessions, &self.overrides)
+                        && sidebar::needs_collapse(id, &self.overrides)
                 })
                 .map(|(id, _)| id.clone())
                 .collect();

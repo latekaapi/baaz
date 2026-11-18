@@ -370,7 +370,6 @@ pub(crate) fn rowless_reveal_stays_armed(
 pub(crate) fn reveal_head_row(
     sessions: &[SessionEntry],
     overrides: &crate::sessions::Overrides,
-    provider_sessions: &crate::provider_sessions::ProviderSessionStore,
     current_project: Option<&str>,
     rows: &[SidebarRow],
     grouping: &Grouping,
@@ -382,7 +381,6 @@ pub(crate) fn reveal_head_row(
                 reveal_id,
                 sessions,
                 overrides,
-                provider_sessions,
             )
             .or_else(|| current_project.map(str::to_owned))?;
             let group = groups.iter().position(|g| g.id.as_ref() == project)?;
@@ -940,7 +938,6 @@ impl SidebarPane {
         reveal_head_row(
             &list.sessions,
             &list.overrides,
-            &list.provider_sessions,
             self.facts.current_project.as_deref(),
             rows,
             grouping,
@@ -1619,61 +1616,33 @@ mod tests {
     }
 
     /// A brand-new session has no row: the reveal falls back to its
-    /// project head — filed by override first, then by provider record,
-    /// then by the current project — and gives up past all three.
+    /// project head — filed by its facts first (a draft's before its first
+    /// send, a provider session's from its open), then by the current
+    /// project — and gives up past both.
     #[test]
     fn new_session_scrolls_to_its_project_head() {
         let (ids, projects) = scroll_projects("new");
         let entries = vec![scroll_entry("s-row", &ids[0])];
         let (grouping, rows) = scroll_rows(&entries, &projects);
-        let records = crate::provider_sessions::ProviderSessionStore::new();
-        // Filed by override: a draft's project before its first send.
+        // Filed by its facts: a draft's project before its first send.
         let mut overrides = crate::sessions::Overrides::new();
         overrides.insert(
             "s-new".to_owned(),
             crate::sessions::SessionMeta { project: Some(ids[1].clone()), ..Default::default() },
         );
         assert_eq!(
-            reveal_head_row(&entries, &overrides, &records, None, &rows, &grouping, "s-new"),
+            reveal_head_row(&entries, &overrides, None, &rows, &grouping, "s-new"),
             Some(project_head_ix(&grouping, &rows, &ids[1])),
-            "the override files the rowless session"
-        );
-        // Filed by provider record.
-        let overrides = crate::sessions::Overrides::new();
-        let mut records = crate::provider_sessions::ProviderSessionStore::new();
-        records.insert(
-            "s-lane".to_owned(),
-            crate::provider_sessions::ProviderSessionRecord {
-                provider: "codex".to_owned(),
-                session_id: "s-lane".to_owned(),
-                workspace: None,
-                project: Some(ids[1].clone()),
-                created_ms: 0,
-                updated_ms: 0,
-                turns: 0,
-                title: None,
-                first_prompt: None,
-                handoff_to: None,
-                handoff_from: None,
-                handoff_from_provider: None,
-                handoff_title: None,
-                display_texts: HashMap::new(),
-                origin: None,
-            },
-        );
-        assert_eq!(
-            reveal_head_row(&entries, &overrides, &records, None, &rows, &grouping, "s-lane"),
-            Some(project_head_ix(&grouping, &rows, &ids[1])),
-            "the provider record files the rowless session"
+            "the facts file the rowless session"
         );
         // Filed by the current project: a new session starts in it.
         assert_eq!(
-            reveal_head_row(&entries, &overrides, &records, Some(ids[0].as_str()), &rows, &grouping, "s-unknown"),
+            reveal_head_row(&entries, &overrides, Some(ids[0].as_str()), &rows, &grouping, "s-unknown"),
             Some(project_head_ix(&grouping, &rows, &ids[0])),
             "the current project files an otherwise unknown session"
         );
-        // Past all three: nowhere to go.
-        assert_eq!(reveal_head_row(&entries, &overrides, &records, None, &rows, &grouping, "s-unknown"), None);
+        // Past both: nowhere to go.
+        assert_eq!(reveal_head_row(&entries, &overrides, None, &rows, &grouping, "s-unknown"), None);
     }
 
     /// An open view on `session_id`, the way a draft opens before its
@@ -2692,7 +2661,7 @@ mod tests {
                     // A provider session admitted once: its record holds the
                     // first prompt, nothing else.
                     crate::provider_sessions::upsert_open(
-                        &mut list.provider_sessions,
+                        &mut list.provider_sessions, &mut list.overrides,
                         "claude-code",
                         "s-admitted",
                         None,
@@ -2700,7 +2669,7 @@ mod tests {
                         None,
                     );
                 });
-                h.session_list.update(cx, |list, _| crate::provider_sessions::note_first_prompt(&mut list.provider_sessions, "s-admitted", "Draw the db"));
+                h.session_list.update(cx, |list, _| crate::provider_sessions::note_first_prompt(&list.provider_sessions, &mut list.overrides, "s-admitted", "Draw the db"));
                 h.merge_provider_rows(cx);
                 // And a true noise row, which still goes.
                 let mut noise = scroll_entry("s-noise", "p");

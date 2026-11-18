@@ -423,6 +423,7 @@ impl Harness {
         self.session_list.update(cx, |list, _| {
             crate::provider_sessions::upsert_open(
                 &mut list.provider_sessions,
+                &mut list.overrides,
                 provider_id.as_str(),
                 session_id,
                 Some(workspace.clone()),
@@ -933,6 +934,12 @@ impl Harness {
         // session its provider lists counts as untouched only when its
         // list row says so: a record written with no row to read (boot
         // `--session` before the list) never drops a real session.
+        // The record's project and title are the session row's own facts.
+        let (stored_project, stored_title) = self
+            .session_list.read(cx).overrides
+            .get(&record.session_id)
+            .map(|meta| (meta.project.clone(), meta.provider_title.clone()))
+            .unwrap_or_default();
         if self.record_holds_no_history(&record, cx) {
             crate::baaz_log!(
                 "provider reopen: {} has no turns, opening fresh",
@@ -942,7 +949,7 @@ impl Harness {
             self.persist_provider_sessions(cx);
             self.merge_provider_rows(cx);
             let workspace = record.workspace.clone().unwrap_or_else(|| self.unfiled_workspace());
-            self.open_on_provider(provider_id, record.project.clone(), workspace, window, cx);
+            self.open_on_provider(provider_id, stored_project, workspace, window, cx);
             return;
         }
         // Q4c: the right pane stays neutral at the click — it describes
@@ -988,7 +995,7 @@ impl Harness {
         // The gate reads the registry off the UI thread: cloned up front
         // for the same reason.
         let registry = self.session_list.read(cx).provider_sessions.clone();
-        let mode = self.provider_open_mode(Some(&workspace), record.project.as_deref(), cx);
+        let mode = self.provider_open_mode(Some(&workspace), stored_project.as_deref(), cx);
         let work = move || -> (Result<ProviderOpen, crate::app::OpenFailed>, usize) {
             // The consent gate, on the background executor: before the
             // person's Move click an old session resumes from its
@@ -1067,9 +1074,9 @@ impl Harness {
                     provider,
                     events,
                     session_id,
-                    project: record.project.clone(),
+                    project: stored_project.clone(),
                     workspace: record.workspace.clone().unwrap_or(workspace),
-                    title: record.title.clone(),
+                    title: stored_title.clone(),
                     epoch,
                     lease_held,
                 })
@@ -1121,7 +1128,17 @@ impl Harness {
     /// shuts the child down — no orphaned `claude` / `codex` process.
     /// muse sessions never reach here: their list is the server's, and
     /// Baaz only ever hides or archives them.
+    ///
+    /// What Baaz kept for it goes too (D-8), off the UI thread: its row in
+    /// `baaz.db` with its turns and attachments, its sent pictures and its
+    /// hand-off snapshot. A transcript the provider wrote in Baaz's own home
+    /// is never removed silently: the person is asked whether to move it to
+    /// the Trash ([`Self::offer_transcript_trash`]).
     pub(crate) fn delete_provider_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let forgotten = self
+            .session_list.read(cx).provider_sessions
+            .get(session_id)
+            .map(|record| (record.provider.clone(), record.is_imported()));
         if self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).session_id == session_id) {
             self.active = None;
         }
@@ -1137,12 +1154,67 @@ impl Harness {
         self.registry.forget_where(|id| id == session_id);
         self.session_list.update(cx, |list, _| list.sessions.retain(|entry| entry.id != session_id));
         self.session_list.update(cx, |list, _| list.overrides.remove(session_id));
-        if self.session_list.update(cx, |list, _| crate::provider_sessions::remove(&mut list.provider_sessions, session_id)) {
-            self.persist_provider_sessions(cx);
+        self.session_list.update(cx, |list, _| crate::provider_sessions::remove(&mut list.provider_sessions, session_id));
+        self.persist_provider_sessions(cx);
+        if let Some((provider, imported)) = forgotten {
+            let id = session_id.to_owned();
+            self.wire_call(cx, move || crate::sessions::forget(&provider, &id, imported), |this, forgotten, cx| {
+                this.offer_transcript_trash(forgotten.transcript, cx);
+            });
         }
-        crate::sessions::write(&self.session_list.read(cx).overrides);
         self.rejoin(cx);
         self.invalidate_list(cx);
+    }
+
+    /// Ask whether a forgotten session's transcript, still in Baaz's own
+    /// home for its provider, should go to the Trash. Nothing moves without
+    /// the person's yes ([`Self::trash_transcript`]); closing the dialog any
+    /// other way keeps the files.
+    pub(crate) fn offer_transcript_trash(&mut self, transcript: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
+        if transcript.is_empty() {
+            return;
+        }
+        let paths: Vec<String> = transcript.iter().map(|path| path.to_string_lossy().into_owned()).collect();
+        self.set_dialog(
+            cx,
+            crate::overlays::Dialog {
+                title: "Move its transcript to the Trash?".into(),
+                detail: "The session is gone from Baaz. Its transcript is still in Baaz's folder. \
+                    You can restore it from the Trash."
+                    .into(),
+                kind: aui::overlay::DialogKind::Warning,
+                primary: "Move to Trash",
+                action: crate::overlays::DialogAction::TrashTranscript,
+                archive_target: Some(paths.join("\n")),
+            },
+        );
+    }
+
+    /// The Trash dialog's yes: each of the transcript's files moves to the
+    /// Trash — never deleted, and only what [`crate::sessions::forget_plan`]
+    /// would still offer for it (a path that left Baaz's home, or was
+    /// replaced by a link, stays).
+    pub(crate) fn trash_transcript(&mut self, target: Option<String>, cx: &mut Context<Self>) {
+        let Some(target) = target else { return };
+        let state_dir = crate::store::support_dir();
+        let homes = [
+            provider_claude_code::home::home_dir(&state_dir),
+            provider_codex::home::home_dir(&state_dir),
+        ];
+        let mut failed = None;
+        for path in target.lines().map(std::path::PathBuf::from) {
+            let inside = homes.iter().any(|home| path.starts_with(home));
+            let real = std::fs::symlink_metadata(&path).is_ok_and(|meta| !meta.file_type().is_symlink());
+            if !inside || !real {
+                continue;
+            }
+            if let Err(error) = crate::skills::move_to_trash_dir(&path, &crate::skills::trash_dir()) {
+                failed = Some(error);
+            }
+        }
+        if let Some(error) = failed {
+            self.overlays.update(cx, |overlays, cx| overlays.toast("Couldn't move the transcript", error, cx));
+        }
     }
 
     /// Open a fork minted by `ForkSession` as a new provider-lane view on

@@ -2,55 +2,50 @@
 
 use super::*;
 
+/// One provider-lane chain member: its record, and its first prompt and
+/// links on its own row's facts.
+fn chain_member(
+    list: &mut crate::session_list::SessionList,
+    id: &str,
+    provider: &str,
+    turns: u64,
+    prompt: Option<&str>,
+    to: Option<&str>,
+    from: Option<(&str, &str)>,
+) {
+    list.provider_sessions.insert(
+        id.into(),
+        crate::provider_sessions::ProviderSessionRecord {
+            provider: provider.to_owned(),
+            session_id: id.to_owned(),
+            workspace: None,
+            created_ms: 1_700_000_000_000,
+            updated_ms: 1_700_000_000_000,
+            turns,
+            origin: None,
+        },
+    );
+    let facts = list.overrides.entry(id.into()).or_default();
+    facts.first_prompt = prompt.map(str::to_owned);
+    facts.handoff_to = to.map(str::to_owned);
+    facts.handoff_from = from.map(|(source, _)| source.to_owned());
+    facts.handoff_from_provider = from.map(|(_, provider)| provider.to_owned());
+}
+
 /// Seeds the 2-hop mixed chain every X3b test drives: claude-code (A) →
 /// codex (B) → muse (C, head). Lane halves in the provider store, the
 /// muse destination's half in the overrides — what activation writes,
 /// including the carried chain title (Y2a).
 fn seed_mixed_chain(harness: &mut Harness, cx: &mut gpui::App) {
-    use std::collections::HashMap;
-    let record = |id: &str,
-                  provider: &str,
-                  turns: u64,
-                  prompt: Option<&str>,
-                  to: Option<&str>,
-                  from: Option<(&str, &str)>| {
-        crate::provider_sessions::ProviderSessionRecord {
-            provider: provider.to_owned(),
-            session_id: id.to_owned(),
-            workspace: None,
-            project: None,
-            created_ms: 1_700_000_000_000,
-            updated_ms: 1_700_000_000_000,
-            turns,
-            title: None,
-            first_prompt: prompt.map(str::to_owned),
-            handoff_to: to.map(str::to_owned),
-            handoff_from: from.map(|(source, _)| source.to_owned()),
-            handoff_from_provider: from.map(|(_, provider)| provider.to_owned()),
-        handoff_title: None,
-            display_texts: HashMap::new(),
-            origin: None,
-        }
-    };
     harness.session_list.update(cx, |list, _| {
-        list.provider_sessions.insert(
-            "chain-a".into(),
-            record("chain-a", "claude-code", 2, Some("Chart the Greyport ferry routes"), Some("chain-b"), None),
-        );
-    });
-    harness.session_list.update(cx, |list, _| {
-        list.provider_sessions.insert(
-            "chain-b".into(),
-            record("chain-b", "codex", 3, Some("Second leg"), Some("chain-c"), Some(("chain-a", "claude-code"))),
-        );
+        chain_member(list, "chain-a", "claude-code", 2, Some("Chart the Greyport ferry routes"), Some("chain-b"), None);
+        chain_member(list, "chain-b", "codex", 3, Some("Second leg"), Some("chain-c"), Some(("chain-a", "claude-code")));
     });
     // Activation carries the source's display title onto every
     // destination down the chain — the head reads it, not its own
     // words ("Later words" below stays the stored label).
     harness.session_list.update(cx, |list, _| {
-        if let Some(record) = list.provider_sessions.get_mut("chain-b") {
-            record.handoff_title = Some("Chart the Greyport ferry routes".into());
-        }
+        list.overrides.entry("chain-b".into()).or_default().handoff_title = Some("Chart the Greyport ferry routes".into());
     });
     harness.session_list.update(cx, |list, _| {
         list.overrides.insert(
@@ -142,7 +137,7 @@ fn open_b3_destination(
         baaz.update(cx, |harness, cx| {
             harness.session_list.update(cx, |list, _| {
                 crate::provider_sessions::upsert_open(
-                    &mut list.provider_sessions,
+                    &mut list.provider_sessions, &mut list.overrides,
                     "claude-code",
                     "b3-src",
                     Some("/tmp/ws".to_owned()),
@@ -186,7 +181,7 @@ fn land_shows_the_prefix_before_the_pack_submits(cx: &mut gpui::TestAppContext) 
                 "the prefix lands before the pack submits"
             );
             assert!(
-                sidebar::is_handoff_dest(&dest, &harness.session_list.read(cx).provider_sessions, &harness.session_list.read(cx).overrides),
+                sidebar::is_handoff_dest(&dest, &harness.session_list.read(cx).overrides),
                 "the links land with the prefix, in the same frame"
             );
         });
@@ -416,7 +411,6 @@ fn a_pack_turn_that_fails_fails_the_handoff(cx: &mut gpui::TestAppContext) {
             assert!(
                 !sidebar::is_handoff_dest(
                     "dest-m",
-                    &harness.session_list.read(cx).provider_sessions,
                     &harness.session_list.read(cx).overrides
                 ),
                 "the links roll back"
@@ -666,7 +660,7 @@ fn a_completed_pack_turn_activates_and_a_later_failure_stays_out(cx: &mut gpui::
                 run.state
             );
             assert!(
-                sidebar::is_handoff_dest("dest-m2", &harness.session_list.read(cx).provider_sessions, &harness.session_list.read(cx).overrides),
+                sidebar::is_handoff_dest("dest-m2", &harness.session_list.read(cx).overrides),
                 "the links survive the ack"
             );
             // A later turn settling failed: the destination owns its
@@ -711,7 +705,7 @@ fn a_completed_pack_turn_activates_and_a_later_failure_stays_out(cx: &mut gpui::
                 run.state
             );
             assert!(
-                sidebar::is_handoff_dest("dest-m2", &harness.session_list.read(cx).provider_sessions, &harness.session_list.read(cx).overrides),
+                sidebar::is_handoff_dest("dest-m2", &harness.session_list.read(cx).overrides),
                 "a later failed turn never unlinks the chain"
             );
         });
@@ -738,7 +732,7 @@ fn a_destination_closed_before_ack_fails_the_handoff(cx: &mut gpui::TestAppConte
             let run = harness.handoff_state.runs.get("b3-src").expect("the run");
             assert!(matches!(run.state, aui_protocol::HandoffState::Prepared));
             assert!(
-                sidebar::is_handoff_dest(&dest, &harness.session_list.read(cx).provider_sessions, &harness.session_list.read(cx).overrides),
+                sidebar::is_handoff_dest(&dest, &harness.session_list.read(cx).overrides),
                 "the links land with the prefix"
             );
         });
@@ -760,7 +754,7 @@ fn a_destination_closed_before_ack_fails_the_handoff(cx: &mut gpui::TestAppConte
                 Some("the destination session closed before it acknowledged the pack")
             );
             assert!(
-                !sidebar::is_handoff_dest(&dest, &harness.session_list.read(cx).provider_sessions, &harness.session_list.read(cx).overrides),
+                !sidebar::is_handoff_dest(&dest, &harness.session_list.read(cx).overrides),
                 "the links roll back"
             );
             // The close itself removes the never-sent destination's
@@ -846,7 +840,6 @@ fn a_destination_error_before_ack_fails_the_handoff(cx: &mut gpui::TestAppContex
             assert!(
                 !sidebar::is_handoff_dest(
                     "dest-me",
-                    &harness.session_list.read(cx).provider_sessions,
                     &harness.session_list.read(cx).overrides
                 ),
                 "the links roll back"
@@ -990,7 +983,7 @@ fn a_destinations_first_real_message_keeps_the_chain_title(cx: &mut gpui::TestAp
             seed_mixed_chain(harness, cx);
             let dest = "chain-c";
             assert!(
-                sidebar::is_handoff_dest(dest, &harness.session_list.read(cx).provider_sessions, &harness.session_list.read(cx).overrides),
+                sidebar::is_handoff_dest(dest, &harness.session_list.read(cx).overrides),
                 "the seeded head is a handoff destination"
             );
             let turns = harness.session_list.update(cx, |list, _| {
@@ -1093,7 +1086,6 @@ fn y2a3_a_non_handoff_pack_shaped_message_keeps_title_and_byline(cx: &mut gpui::
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            use std::collections::HashMap;
             harness.session_list.update(cx, |list, _| {
                 // A provider-lane session with no handoff link anywhere.
                 list.provider_sessions.insert(
@@ -1102,29 +1094,21 @@ fn y2a3_a_non_handoff_pack_shaped_message_keeps_title_and_byline(cx: &mut gpui::
                         provider: "codex".to_owned(),
                         session_id: "plain-1".to_owned(),
                         workspace: None,
-                        project: None,
                         created_ms: 1_700_000_000_000,
                         updated_ms: 1_700_000_000_000,
                         turns: 0,
-                        title: None,
-                        first_prompt: None,
-                        handoff_to: None,
-                        handoff_from: None,
-                        handoff_from_provider: None,
-                        handoff_title: None,
-                        display_texts: HashMap::new(),
                         origin: None,
                     },
                 );
             });
             let prompt = "Handed off from Muse: Fix it (3 recent turns, 0 open todos, 0 files touched)";
             assert!(
-                !sidebar::is_handoff_dest("plain-1", &harness.session_list.read(cx).provider_sessions, &harness.session_list.read(cx).overrides),
+                !sidebar::is_handoff_dest("plain-1", &harness.session_list.read(cx).overrides),
                 "the fixture session is no destination"
             );
-            harness.session_list.update(cx, |list, _| crate::provider_sessions::note_first_prompt(&mut list.provider_sessions, "plain-1", prompt));
+            harness.session_list.update(cx, |list, _| crate::provider_sessions::note_first_prompt(&list.provider_sessions, &mut list.overrides, "plain-1", prompt));
             assert_eq!(
-                harness.session_list.read(cx).provider_sessions["plain-1"].first_prompt.as_deref(),
+                harness.session_list.read(cx).overrides["plain-1"].first_prompt.as_deref(),
                 Some(prompt),
                 "a non-destination keeps pack-shaped words as its first prompt"
             );
@@ -1382,7 +1366,7 @@ fn p3_search_finds_every_providers_sessions_by_their_words(cx: &mut gpui::TestAp
             let root = Some(workspace.to_string_lossy().into_owned());
             harness.session_list.update(cx, |list, _| {
                 crate::provider_sessions::upsert_open(
-                    &mut list.provider_sessions,
+                    &mut list.provider_sessions, &mut list.overrides,
                     "claude-code",
                     "cc-search-1",
                     root.clone(),
@@ -1390,8 +1374,8 @@ fn p3_search_finds_every_providers_sessions_by_their_words(cx: &mut gpui::TestAp
                     Some("Kestrel audit".into()),
                 );
             });
-            harness.session_list.update(cx, |list, _| crate::provider_sessions::upsert_open(&mut list.provider_sessions, "codex", codex_id, root, None, None));
-            harness.session_list.update(cx, |list, _| crate::provider_sessions::note_first_prompt(&mut list.provider_sessions, codex_id, "why is the tamarisk build slow"));
+            harness.session_list.update(cx, |list, _| crate::provider_sessions::upsert_open(&mut list.provider_sessions, &mut list.overrides, "codex", codex_id, root, None, None));
+            harness.session_list.update(cx, |list, _| crate::provider_sessions::note_first_prompt(&list.provider_sessions, &mut list.overrides, codex_id, "why is the tamarisk build slow"));
             harness.session_list.update(cx, |list, _| std::sync::Arc::make_mut(&mut list.index).insert(
                 "muse-search-1".into(),
                 IndexEntry {
@@ -1474,38 +1458,9 @@ fn x3d_chain_counts_match_the_transcript(cx: &mut gpui::TestAppContext) {
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            use std::collections::HashMap;
-            let record =
-                |id: &str, provider: &str, turns: u64, to: Option<&str>, from: Option<(&str, &str)>| {
-                    crate::provider_sessions::ProviderSessionRecord {
-                        provider: provider.to_owned(),
-                        session_id: id.to_owned(),
-                        workspace: None,
-                        project: None,
-                        created_ms: 1_700_000_000_000,
-                        updated_ms: 1_700_000_000_000,
-                        turns,
-                        title: None,
-                        first_prompt: None,
-                        handoff_to: to.map(str::to_owned),
-                        handoff_from: from.map(|(source, _)| source.to_owned()),
-                        handoff_from_provider: from.map(|(_, provider)| provider.to_owned()),
-        handoff_title: None,
-                        display_texts: HashMap::new(),
-                        origin: None,
-                    }
-                };
             harness.session_list.update(cx, |list, _| {
-                list.provider_sessions.insert(
-                    "count-a".into(),
-                    record("count-a", "claude-code", 1, Some("count-b"), None),
-                );
-            });
-            harness.session_list.update(cx, |list, _| {
-                list.provider_sessions.insert(
-                    "count-b".into(),
-                    record("count-b", "codex", 2, Some("count-c"), Some(("count-a", "claude-code"))),
-                );
+                chain_member(list, "count-a", "claude-code", 1, None, Some("count-b"), None);
+                chain_member(list, "count-b", "codex", 2, None, Some("count-c"), Some(("count-a", "claude-code")));
             });
             harness.session_list.update(cx, |list, _| {
                 list.overrides.insert(

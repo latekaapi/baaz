@@ -238,8 +238,8 @@ impl SessionRuntime {
     /// names the pack.
     pub(crate) fn pack_display_fallback(&mut self) -> Option<String> {
         self.ensure_display_overrides();
-        self.display_overrides.as_ref().and_then(|map| {
-            map.iter()
+        self.display_overrides.as_ref().and_then(|displays| {
+            displays.by_text.iter()
                 .find(|(full, _)| full.starts_with(crate::handoff_snapshot::PACK_HEAD_PREFIX))
                 .map(|(_, display)| display.clone())
         })
@@ -264,8 +264,8 @@ impl SessionRuntime {
         let request_id = provider::new_request_id();
         self.remember_command(&request_id, &display);
         // The provider echoes the whole pack; the bubble shows the short
-        // summary, including across a restart (the record mirrors the map
-        // for the replayed history).
+        // summary, including across a restart (kept under the echoed user
+        // turn in `baaz.db` for the replayed history).
         self.remember_display_text(pack.clone(), display.clone());
         let command = ProviderCommand::SubmitInput {
             request_id,

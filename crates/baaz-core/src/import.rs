@@ -23,7 +23,7 @@
 //!   whole file once for its turn count); the search words come later
 //!   through the P3 path ([`crate::provider_search`] reads owner-home
 //!   transcripts for ids not in Baaz's homes);
-//! * the [`Journal`] (`import-journal.json` in the state dir) is what Undo
+//! * the [`Journal`] (`import_job` / `import_item` in `baaz.db`) is what Undo
 //!   reads — exactly the ids a run added — and what the card's tally reads.
 //!
 //! Tests use temp homes and never the real `HOME` ([`owner_home`] is the
@@ -37,13 +37,12 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::provider_sessions::{ProviderSessionRecord, ProviderSessionStore, ORIGIN_IMPORTED};
+use crate::sessions::Overrides;
 
 /// The registry wire id for Claude Code sessions.
 pub const CLAUDE: &str = "claude-code";
 /// The registry wire id for Codex sessions.
 pub const CODEX: &str = "codex";
-/// The journal file's name under the state dir.
-pub const JOURNAL_FILE_NAME: &str = "import-journal.json";
 /// Bytes of a file's head the scan reads at most: the facts it wants sit in
 /// the first few lines, but Codex opens with its whole instructions block.
 const HEAD_BYTES: u64 = 512 * 1024;
@@ -598,36 +597,41 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|window| window == needle)
 }
 
-/// The record one imported session becomes: `origin: imported`, workspace
-/// the folder it ran in, the project it resolves to, the scan's times, the
-/// counted turns (never below one: a session the scan offered has a
-/// prompt), and the first prompt. No title: the label ladder falls back to
-/// the first prompt until the auto-title lands.
-pub fn record_for(found: &Found, project: Option<String>, turns: u64) -> ProviderSessionRecord {
-    ProviderSessionRecord {
-        provider: found.provider.to_owned(),
-        session_id: found.session_id.clone(),
-        workspace: found.cwd.clone(),
+/// One imported session: its record — `origin: imported`, workspace the
+/// folder it ran in, the scan's times, the counted turns (never below one:
+/// a session the scan offered has a prompt) — and the facts that land on
+/// the session's own row: the project it resolves to and the first prompt.
+/// No title: the ladder falls back to the first prompt until the auto-title
+/// lands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Imported {
+    pub record: ProviderSessionRecord,
+    pub project: Option<String>,
+    pub first_prompt: Option<String>,
+}
+
+/// What one found session imports as.
+pub fn record_for(found: &Found, project: Option<String>, turns: u64) -> Imported {
+    Imported {
+        record: ProviderSessionRecord {
+            provider: found.provider.to_owned(),
+            session_id: found.session_id.clone(),
+            workspace: found.cwd.clone(),
+            created_ms: found.created_ms,
+            updated_ms: found.updated_ms,
+            turns: turns.max(1),
+            origin: Some(ORIGIN_IMPORTED.to_owned()),
+        },
         project,
-        created_ms: found.created_ms,
-        updated_ms: found.updated_ms,
-        turns: turns.max(1),
-        title: None,
         first_prompt: found.first_prompt.clone(),
-        handoff_to: None,
-        handoff_from: None,
-        handoff_from_provider: None,
-        handoff_title: None,
-        display_texts: HashMap::new(),
-        origin: Some(ORIGIN_IMPORTED.to_owned()),
     }
 }
 
 /// What one batch produced.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BatchResult {
-    /// The new records, in batch order.
-    pub records: Vec<ProviderSessionRecord>,
+    /// The new sessions, in batch order.
+    pub records: Vec<Imported>,
     /// Files that could not be read now, by path.
     pub unreadable: Vec<PathBuf>,
 }
@@ -649,16 +653,27 @@ pub fn execute_batch(batch: &[(Found, Option<String>)], known: &HashSet<String>)
     out
 }
 
-/// Land a batch in the store: inserts only ids it does not hold (never
-/// overwrites a Baaz session's record). Returns the ids added.
-pub fn land(store: &mut ProviderSessionStore, records: Vec<ProviderSessionRecord>) -> Vec<String> {
+/// Land a batch: inserts only ids the store does not hold (never
+/// overwrites a Baaz session's record), each session's project and first
+/// prompt on its own facts. Returns the ids added.
+pub fn land(store: &mut ProviderSessionStore, overrides: &mut Overrides, records: Vec<Imported>) -> Vec<String> {
     let mut added = Vec::new();
-    for record in records {
-        if store.contains_key(&record.session_id) {
+    for imported in records {
+        let id = imported.record.session_id.clone();
+        if store.contains_key(&id) {
             continue;
         }
-        added.push(record.session_id.clone());
-        store.insert(record.session_id.clone(), record);
+        if imported.project.is_some() || imported.first_prompt.is_some() {
+            let facts = overrides.entry(id.clone()).or_default();
+            if facts.project.is_none() {
+                facts.project = imported.project;
+            }
+            if facts.first_prompt.is_none() {
+                facts.first_prompt = imported.first_prompt;
+            }
+        }
+        added.push(id.clone());
+        store.insert(id, imported.record);
     }
     added
 }
@@ -687,7 +702,7 @@ pub struct JournalRun {
     pub sessions: Vec<JournalSession>,
 }
 
-/// `import-journal.json`: every run not undone.
+/// The import journal: every run not undone.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Journal {
     /// Oldest first.
@@ -738,23 +753,24 @@ impl Journal {
     }
 }
 
-/// The journal's path under the state dir.
-pub fn journal_path(state_dir: &Path) -> PathBuf {
-    state_dir.join(JOURNAL_FILE_NAME)
-}
-
-/// Read the journal; missing or unparseable is empty.
+/// Read the journal from `state_dir`'s database; a database that cannot
+/// answer is an empty journal. Blocks on the database's writer.
 pub fn read_journal(state_dir: &Path) -> Journal {
-    crate::store::read_json(&journal_path(state_dir))
+    crate::db::read(crate::db::path_in(state_dir), |db| crate::db::journals::read_import(&db.conn))
+        .and_then(|read| read.map_err(|error| crate::baaz_log!("db: import journal does not read ({error})")).ok())
+        .unwrap_or_default()
 }
 
-/// Write the journal atomically. Best-effort: an unwritable journal loses
-/// the tally and the Undo, never a session.
+/// Write the journal whole, in one transaction, and wait for it.
+/// Best-effort: an unwritable journal loses the tally and the Undo, never a
+/// session.
 pub fn write_journal(state_dir: &Path, journal: &Journal) {
-    if let Ok(text) = serde_json::to_vec_pretty(journal) {
-        let _ = std::fs::create_dir_all(state_dir);
-        let _ = crate::store::write_atomic(&journal_path(state_dir), &text);
-    }
+    let journal = journal.clone();
+    crate::db::call(crate::db::path_in(state_dir), move |db| {
+        if let Err(error) = crate::db::journals::write_import(&mut db.conn, &journal) {
+            crate::baaz_log!("db: import journal not saved ({error})");
+        }
+    });
 }
 
 /// Undo `run`: remove exactly the records it added — only while they are
@@ -1039,23 +1055,24 @@ mod tests {
             .collect();
         assert_eq!(batch.len(), 2);
         // A Baaz session already in the store.
-        let mut store = ProviderSessionStore::new();
-        crate::provider_sessions::upsert_open(&mut store, CLAUDE, "baaz-own", None, None, None);
+        let (mut store, mut facts) = (ProviderSessionStore::new(), Overrides::new());
+        crate::provider_sessions::upsert_open(&mut store, &mut facts, CLAUDE, "baaz-own", None, None, None);
         let known: HashSet<String> = store.keys().cloned().collect();
         let result = execute_batch(&batch, &known);
         assert!(result.unreadable.is_empty());
-        let real = result.records.iter().find(|r| r.session_id == "c-real").expect("record");
-        assert!(real.is_imported());
-        assert_eq!(real.turns, 2, "two real prompts: not the meta, command, sidechain or tool result lines");
-        assert_eq!(real.workspace.as_deref(), Some("/work/app"));
+        let real = result.records.iter().find(|r| r.record.session_id == "c-real").expect("record");
+        assert!(real.record.is_imported());
+        assert_eq!(real.record.turns, 2, "two real prompts: not the meta, command, sidechain or tool result lines");
+        assert_eq!(real.record.workspace.as_deref(), Some("/work/app"));
         assert_eq!(real.project.as_deref(), Some("p-app"));
         assert_eq!(real.first_prompt.as_deref(), Some("Fix the ledger chart please"));
-        assert_eq!(real.title, None);
-        let codex = result.records.iter().find(|r| r.provider == CODEX).expect("codex record");
-        assert_eq!(codex.turns, 2);
+        let codex = result.records.iter().find(|r| r.record.provider == CODEX).expect("codex record");
+        assert_eq!(codex.record.turns, 2);
         let mut journal = Journal::default();
         let run = journal.begin(1_790_000_000_000);
-        let added = land(&mut store, result.records);
+        let added = land(&mut store, &mut facts, result.records);
+        assert_eq!(facts["c-real"].project.as_deref(), Some("p-app"), "the project lands on the row's facts");
+        assert_eq!(facts["c-real"].title(), Some("Fix the ledger chart please"), "the first prompt titles it");
         journal.note(&run, added.iter().map(|id| JournalSession { provider: store[id].provider.clone(), session_id: id.clone() }));
         write_journal(&state, &journal);
         assert_eq!(read_journal(&state), journal, "the journal round-trips");
@@ -1065,7 +1082,7 @@ mod tests {
         let again = execute_batch(&batch, &known);
         assert!(again.records.is_empty(), "a re-run writes nothing");
         let rerun = journal.begin(1_790_000_000_001);
-        let added_again = land(&mut store, again.records);
+        let added_again = land(&mut store, &mut facts, again.records);
         journal.note(&rerun, added_again.iter().map(|id| JournalSession { provider: CLAUDE.into(), session_id: id.clone() }));
         journal.drop_empty();
         assert_eq!(journal.runs.len(), 1, "an empty run leaves no trace");
@@ -1098,9 +1115,9 @@ mod tests {
             first_prompt: Some("hi".into()),
             scripted: false,
         };
-        let mut record = record_for(&found, None, 3);
-        record.origin = None;
-        store.insert("s1".into(), record);
+        let mut imported = record_for(&found, None, 3);
+        imported.record.origin = None;
+        store.insert("s1".into(), imported.record);
         let mut journal = Journal::default();
         let run = journal.begin(5);
         journal.note(&run, [JournalSession { provider: CLAUDE.into(), session_id: "s1".into() }]);
@@ -1110,8 +1127,8 @@ mod tests {
 
     #[test]
     fn land_never_overwrites_a_record() {
-        let mut store = ProviderSessionStore::new();
-        crate::provider_sessions::upsert_open(&mut store, CLAUDE, "s1", Some("/mine".into()), None, None);
+        let (mut store, mut facts) = (ProviderSessionStore::new(), Overrides::new());
+        crate::provider_sessions::upsert_open(&mut store, &mut facts, CLAUDE, "s1", Some("/mine".into()), None, None);
         let found = Found {
             provider: CLAUDE,
             session_id: "s1".into(),
@@ -1122,7 +1139,8 @@ mod tests {
             first_prompt: Some("hi".into()),
             scripted: false,
         };
-        assert!(land(&mut store, vec![record_for(&found, None, 1)]).is_empty());
+        assert!(land(&mut store, &mut facts, vec![record_for(&found, None, 1)]).is_empty());
+        assert!(facts.get("s1").is_none_or(|meta| meta.first_prompt.is_none()), "nothing of the import lands");
         assert_eq!(store["s1"].workspace.as_deref(), Some("/mine"));
         assert!(!store["s1"].is_imported());
     }

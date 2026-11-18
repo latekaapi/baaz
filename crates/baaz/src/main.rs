@@ -48,6 +48,7 @@ use baaz_core::byline;
 use baaz_core::clock;
 mod connect;
 use baaz_core::conn;
+use baaz_core::db;
 mod default_browser;
 mod details;
 mod dialogs;

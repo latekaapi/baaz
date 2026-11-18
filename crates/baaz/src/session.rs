@@ -1323,51 +1323,61 @@ impl SessionRuntime {
         ProviderId::parse(&self.provider_id)
     }
 
-    /// Load the submit display map once, from the provider session record:
-    /// what a resumed view folds replayed turns against after a restart,
-    /// when the adapter's own map is gone with the old process.
+    /// Load the session's recorded bubble texts once, from its turns in
+    /// `baaz.db`: what a resumed view folds replayed turns against after a
+    /// restart, when the adapter's own map is gone with the old process.
     fn ensure_display_overrides(&mut self) {
         if self.display_overrides.is_none() {
-            let overrides = crate::provider_sessions::read()
-                .get(&self.session_id)
-                .map(|record| record.display_texts.clone())
-                .unwrap_or_default();
-            self.display_overrides = Some(overrides);
+            let (provider, session_id) = (self.provider_id.clone(), self.session_id.clone());
+            let displays = crate::db::read(crate::db::path(), move |db| {
+                crate::db::turns::displays(&db.conn, &provider, &session_id).unwrap_or_default()
+            })
+            .unwrap_or_default();
+            self.display_overrides = Some(displays);
         }
     }
 
     /// Remember the bubble text for a provider submit carrying
-    /// `display_text`, keyed by the full model-visible text the provider
-    /// echoes back. The adapter folds already substitute live; this map
-    /// (mirrored into the provider session record) is what a replayed
-    /// history folds against after a restart.
+    /// `display_text`: it waits for the provider's echo of the submit, which
+    /// names the user turn it is then kept under (D-3, [`Self::display_override_for`]).
+    /// The adapter folds already substitute live; the kept text is what a
+    /// replayed history folds against after a restart.
     pub(crate) fn remember_display_text(&mut self, full_text: String, display: String) {
         if display.trim().is_empty() || display == full_text || full_text.len() > 131_072 {
             return;
         }
         self.ensure_display_overrides();
-        let changed = match self.display_overrides.as_mut() {
-            Some(map) if map.len() < 64 || map.contains_key(&full_text) => {
-                map.insert(full_text.clone(), display.clone()).as_deref() != Some(display.as_str())
-            }
-            _ => false,
-        };
-        if !changed {
-            return;
+        if let Some(displays) = self.display_overrides.as_mut() {
+            displays.by_text.insert(full_text.clone(), display.clone());
         }
-        let mut store = crate::provider_sessions::read();
-        let before = store.get(&self.session_id).map(|record| record.display_texts.clone());
-        crate::provider_sessions::note_display_text(&mut store, &self.session_id, &full_text, &display);
-        if store.get(&self.session_id).map(|record| &record.display_texts) != before.as_ref() {
-            crate::provider_sessions::write(&store);
+        if self.pending_displays.len() < 64 {
+            self.pending_displays.push((full_text, display));
         }
     }
 
-    /// The bubble text for an echoed provider turn, if a submit recorded
-    /// one for its full text.
-    pub(crate) fn display_override_for(&mut self, full_text: &str) -> Option<String> {
+    /// The bubble text for an echoed provider user turn: a submit waiting
+    /// for this echo is kept under the turn now, in the database too; else
+    /// what was kept for this turn, else (a turn recorded before turns were
+    /// keyed, or a provider whose replay renames its turns) what was kept
+    /// for its text.
+    pub(crate) fn display_override_for(&mut self, turn_id: &str, text: &str) -> Option<String> {
         self.ensure_display_overrides();
-        self.display_overrides.as_ref().and_then(|map| map.get(full_text).cloned())
+        if let Some(at) = self.pending_displays.iter().position(|(full, display)| full == text || display == text) {
+            let (full, display) = self.pending_displays.remove(at);
+            if let Some(displays) = self.display_overrides.as_mut() {
+                displays.by_turn.insert(turn_id.to_owned(), display.clone());
+            }
+            let (provider, session_id, turn_id, kept) =
+                (self.provider_id.clone(), self.session_id.clone(), turn_id.to_owned(), display.clone());
+            crate::db::run(crate::db::path(), move |db| {
+                if let Err(error) = crate::db::turns::note_display(&db.conn, &provider, &session_id, &turn_id, &full, &kept) {
+                    crate::baaz_log!("db: bubble text not kept ({error})");
+                }
+            });
+            return Some(display);
+        }
+        let displays = self.display_overrides.as_ref()?;
+        displays.by_turn.get(turn_id).or_else(|| displays.by_text.get(text)).cloned()
     }
 
     /// Whether this session has sent anything yet: folded turns, or a turn
