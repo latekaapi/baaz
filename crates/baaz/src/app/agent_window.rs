@@ -457,7 +457,8 @@ impl Harness {
         }
     }
 
-    /// Per frame, before the floats sync: an inline ask whose turn grew past
+    /// On the browser chat's own changes and every settle, before the floats
+    /// follow (`Harness::watch_browser_chat`): an inline ask whose turn grew past
     /// [`INLINE_MAX_STEPS`] moves to the card; a draft whose turn settled
     /// lands as Drafted.
     pub(crate) fn settle_agent_line(&mut self, cx: &mut Context<Self>) {
@@ -815,7 +816,7 @@ impl Harness {
         }
         // Closing builds the next tab's page, which needs the window: close
         // on the next turn, through the window this root draws in.
-        if let (false, Some(handle)) = (closing.is_empty(), self.main_window) {
+        if let (false, Some(handle)) = (closing.is_empty(), self.window_sync.handle) {
             cx.spawn(async move |this, cx| {
                 let _ = handle.update(cx, |_, window, cx| {
                     let _ = this.update(cx, |this, cx| this.close_tabs(closing, window, cx));

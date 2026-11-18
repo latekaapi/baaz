@@ -7,7 +7,7 @@ use super::*;
 
 /// A bootable [`crate::Args`] pointed at a hermetic state dir, mirroring
 /// the app tests' helper: no store read or write escapes the temp dir.
-pub(super) fn lane_args(dir: &std::path::Path) -> crate::Args {
+pub(in crate::app) fn lane_args(dir: &std::path::Path) -> crate::Args {
     crate::Args {
         workspace: dir.to_path_buf(),
         workspace_explicit: true,
@@ -41,7 +41,7 @@ pub(super) fn lane_args(dir: &std::path::Path) -> crate::Args {
     }
 }
 
-pub(super) fn lane_state(
+pub(in crate::app) fn lane_state(
     name: &str,
 ) -> (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("baaz-w2-{name}-{}", std::process::id()));
@@ -54,7 +54,7 @@ pub(super) fn lane_state(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn lane_restore(
+pub(in crate::app) fn lane_restore(
     state: (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf),
 ) {
     let (guard, old, dir) = state;

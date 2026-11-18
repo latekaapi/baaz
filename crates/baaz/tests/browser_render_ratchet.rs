@@ -74,15 +74,15 @@ fn assert_clean(name: &str, text: &str) {
     assert!(found.is_empty(), "{name} names {found:?}: the browser's reconcile and writes stay out of the frame");
 }
 
-/// `Harness::render` and its per-frame hook name no browser reconcile and
-/// no write; the reconcile function itself is gone.
+/// `Harness::render` and the window's lifecycle (`app/window_sync.rs`) name
+/// no browser reconcile and no write; the reconcile function itself is gone.
 #[test]
 fn render_runs_no_browser_reconcile_and_writes_nothing() {
     let app = source("app.rs");
     let render = body(&app, "impl Render for Harness {\n    fn render(");
     assert!(render.contains("self.occlude_pages(window, cx);"), "render asks the one occlusion owner");
     assert_clean("Harness::render", render);
-    assert_clean("Harness::on_frame", body(&app, "fn on_frame("));
+    assert_clean("app/window_sync.rs", &source("app/window_sync.rs"));
     let browser = browser_source();
     assert!(!browser.contains("fn sync_browser"), "the per-frame sync is gone");
     assert!(!app.contains("sync_browser"), "and nothing calls it");

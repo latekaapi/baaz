@@ -1046,7 +1046,7 @@ impl Harness {
             let session_id = view.read(cx).rt(cx).session_id.clone();
             self.mark_read(&session_id, cx);
         }
-        self.focus_composer = true;
+        self.arm_composer_focus(cx);
         // "Ask Muse to write one" (A5): the fresh session opens with the
         // `/create-skill ` draft and the composer focused. Never sent. The
         // arm survives a non-muse activation untouched — the draft is a muse
@@ -1078,8 +1078,13 @@ impl Harness {
         self.send_scripted(window, cx);
         // No `maybe_run_steps` here: activations fire on every swap,
         // including swaps the script itself causes, and draining the list
-        // from the swap raced the boot it was meant to follow. The frame
-        // gate ([`Harness::on_frame`]) runs the script once it is ready.
+        // from the swap raced the boot it was meant to follow. The settle
+        // this update queues ([`Harness::settle`]) runs the script once it
+        // is ready.
+        // The window wears the session's title, and the first session the
+        // shell shows warms the Browser pane off the frame (once).
+        self.sync_window_title(window, cx);
+        self.maybe_idle_prewarm(cx);
         // Z2: the pane belongs to the session now showing — restore it
         // without animating, so every activation path (click, resume,
         // reopen, provider reopen, launch restore) lands on the session's

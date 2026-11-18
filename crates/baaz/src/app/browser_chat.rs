@@ -96,6 +96,8 @@ impl Harness {
             }
         }
         self.resubscribe_live_views(cx);
+        // Its turn and its asks move the agent line over the page.
+        self.watch_browser_chat(cx);
     }
 
     /// Whether `session` is a browser chat (by its record).

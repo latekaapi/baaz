@@ -564,6 +564,7 @@ mod list;
 mod sidebar_host;
 mod peek_split;
 mod titles;
+mod window_sync;
 /// F2 feedback mode shell (setting, ⌃⌥⌘F, header slot, Done). Included by
 /// path so `feedback/mod.rs` — F1's frozen model/report API — stays
 /// untouched.
@@ -766,10 +767,6 @@ pub struct Harness {
     /// ([`crate::browser::BrowserView`]). It asks the root through
     /// [`crate::browser::BrowserEvent`]s (`Harness::on_browser_event`).
     pub(crate) browser: Entity<crate::browser::BrowserView>,
-    /// A frame-paced transcript-wheel sweep in flight (`transcript-scroll-
-    /// sweep:` step): the transcript's twin of the sidebar pane's own
-    /// sweep. `on_frame` owns it; it never persists.
-    pub(crate) transcript_scroll_sweep: Option<crate::resize::ScrollSweep>,
     /// The two flags a `--screenshot` wait reads out of this window (see
     /// [`crate::shot::CaptureToken`]). Handed to every session view this
     /// window opens and to `capture_and_quit`, so a second window would wait
@@ -785,8 +782,6 @@ pub struct Harness {
     /// would otherwise draw (the Browse modal): its listeners then run on
     /// the main window ([`Harness::main_listener`]).
     pub(crate) hosting_overlay: bool,
-    /// Set when the next frame should move the keyboard to the composer.
-    pub(crate) focus_composer: bool,
     /// What the billing probe said, or `None` while it has not said it yet
     /// (spec §3.2). A probe that failed is
     /// [`Tier::Unavailable`], never `None`.
@@ -810,8 +805,10 @@ pub struct Harness {
     pub(crate) import: crate::import_ui::ImportUi,
     /// The current project: the open session's project, else the last used.
     pub(crate) current_project: Option<String>,
-    /// This window's handle: overlay intents run against it.
-    pub(crate) main_window: Option<gpui::AnyWindowHandle>,
+    /// The window's lifecycle off the frame (task 4.9): its handle, the
+    /// queued settle and floats passes, the composer's one-shot focus and
+    /// the observations that drive them ([`window_sync::WindowSync`]).
+    pub(crate) window_sync: window_sync::WindowSync,
     /// The terminal dock under the composer: its tabs (keyed by project
     /// root, D43), focus, resize drag and bridge providers
     /// ([`terminal::TerminalDock`], task 4.4).
@@ -855,12 +852,6 @@ pub struct Harness {
     /// The open project menu's own rect: the Colour submenu's anchor is
     /// computed off its right edge at the Colour row's height.
     pub(crate) project_menu_bounds: Option<Bounds<Pixels>>,
-    /// The title last given to the window, so it is only set when it changed.
-    window_title: Option<String>,
-    /// The `(list epoch, active session id)` that title was built for, so the
-    /// scan and the `format!` behind it run on a change rather than on every
-    /// frame (finding `performance-9`).
-    window_title_key: Option<(u64, Option<String>)>,
     /// The search card's status line and the three facts it is made of:
     /// whether the query is blank and the two result counts (finding
     /// `performance-9`). Only ever read while the search palette is open.
@@ -1012,12 +1003,10 @@ impl Harness {
             browser,
             peek_pinned: false,
             lights_hidden: false,
-            transcript_scroll_sweep: None,
             capture,
             session_mcp: false,
             focus_root: cx.focus_handle(),
             hosting_overlay: false,
-            focus_composer: true,
             tier: None,
             tier_probing: false,
             tier_retry: Default::default(),
@@ -1037,13 +1026,11 @@ impl Harness {
             skills_page,
             overflow_bounds: None,
             project_menu_bounds: None,
-            window_title: None,
-            window_title_key: None,
             search_status: RefCell::new(None),
             send_anyway: false,
             tasks: Vec::new(),
             field_subscriptions: Vec::new(),
-            main_window: None,
+            window_sync: window_sync::WindowSync::new(),
         };
         // Every window preference lives in the layout global (task 4.1): a
         // change from anywhere — a Settings switch, a menu, a step, the
@@ -1203,12 +1190,7 @@ impl Harness {
         this.field_subscriptions.push(cx.subscribe_in(&sidebar, window, Self::on_sidebar_event));
         // The default-browser cache (B2a-H7b): render reads the cache only,
         // so the LaunchServices lookup runs at launch and on every regained
-        // focus (a switch made in System Settings shows without a restart).
-        this.field_subscriptions.push(cx.observe_window_activation(window, |this: &mut Self, window, cx| {
-            if window.is_window_active() {
-                this.browser.update(cx, |browser, cx| browser.refresh_default_browser_cache(cx));
-            }
-        }));
+        // focus (`Self::on_window_activation`).
         this.browser.update(cx, |browser, cx| browser.refresh_default_browser_cache(cx));
         this.field_subscriptions.push(cx.subscribe(&rename, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -1269,6 +1251,9 @@ impl Harness {
         // it applies to every mode — including `--replay`, which is how the
         // banner is captured for nothing.
         this.tier = this.args.tier.clone();
+        // The window's lifecycle runs from its causes, never from a frame
+        // (task 4.9): the settle, the floats, the title, focus, activation.
+        this.install_window_sync(window, cx);
         if this.args.replay.is_some() {
             // `--replay`: a capture, folded, with no child and no credential.
             // The shell is the point — the transcript is what is being looked
@@ -1279,6 +1264,11 @@ impl Harness {
                 email: String::new(),
             });
             this.wire = Wire::Ready;
+            // The capture opens once the root exists, before the first frame
+            // draws (it used to open from that frame's render): the fold,
+            // the replayed row and the boot script all land in one update,
+            // and the first frame draws them.
+            cx.defer_in(window, |this, window, cx| this.open_replay(window, cx));
             return this;
         }
         if this.args.offline {
@@ -3474,19 +3464,6 @@ impl Harness {
     /// render side effect elsewhere. With no person tab open the centre
     /// names itself and offers a New tab — render never opens one (B2a-H2b).
     fn render_browse_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        // R4: a click into the Split's other half shows it; a fresh Peek
-        // takes the keyboard (so Esc and ⌘↩ reach it).
-        if let Some(id) = self.browser.update(cx, |browser, _| browser.split_focus.take()) {
-            self.select_browse_sidebar_tab(id, window, cx);
-        }
-        if self.browser.update(cx, |browser, _| std::mem::take(&mut browser.peek_focus_pending)) {
-            if let Some(peek) = self.browser.read(cx).peek.as_ref() {
-                let state = peek.state.clone();
-                let focus = state.read(cx).focus_handle().clone();
-                window.focus(&focus, cx);
-                state.update(cx, |state, _| state.focus_page());
-            }
-        }
         let harness = cx.weak_entity();
         let mut blank_page = false;
         let body = match self.browse_centre_page(window, cx) {
@@ -4026,12 +4003,6 @@ impl Harness {
     }
 
     fn render_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        // The one write left in the render tree, and it only ever fires on a
-        // `--replay` window's first frame: `open_replay` starts a stream
-        // cadenced on the wall clock, so where in the frame it runs decides
-        // where in that stream a fixed-delay capture lands. Everything else a
-        // frame changes is in [`Self::on_frame`].
-        self.open_replay(window, cx);
         let banner = self.render_wire_banner(cx);
         let mut provider_banner = self.render_provider_banner(cx);
         // The transcript column has its own cached entity boundary (owner
@@ -4685,219 +4656,6 @@ impl Harness {
 
 }
 
-impl Harness {
-    /// Everything a frame changes before it draws anything: the window title,
-    /// a resize left armed by a release the window never saw, the `--replay`
-    /// kick, and the one-shot composer focus.
-    ///
-    /// These are lifecycle, not composition (findings `app-core-9` and
-    /// `app-core-10`). Keeping them in one pre-pass is what lets `render` and
-    /// every `render_*` below it read state and build elements without ever
-    /// writing, so what a frame shows is decided before the first element is
-    /// made rather than part-way down the tree.
-    ///
-    /// One kick stays out of it: `--replay`'s (see
-    /// [`Self::render_centre`]). It starts a wall-clock-cadenced stream, so
-    /// moving it above the sidebar's composition moves the whole replay
-    /// forward by however long that composition takes, and the reference
-    /// captures are taken at a fixed delay into that stream.
-    fn on_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.apply_find_resync(window, cx);
-        // Deferred, not done here: `on_frame` runs inside render, and the
-        // promotion opens a session.
-        // The overlay window (Browse menus over the native page) follows
-        // what is open and where.
-        self.sync_overlay(window, cx);
-        self.sync_corner(window, cx);
-        self.sync_page_float(window, cx);
-        // The pane's page takes a Shift + sideways swipe as the strip's
-        // (docs/43 §3): what the native wheel router claims by.
-        #[cfg(feature = "cef")]
-        crate::browser::PANE_PAGE_LIVE.with(|live| {
-            live.set(
-                crate::layout::Layout::get(cx).mode == crate::layout::Mode::Sessions
-                    && crate::layout::Layout::get(cx).right_open
-                    && crate::layout::right_kind(crate::layout::Layout::get(cx)) == crate::layout::RightKind::Browser,
-            )
-        });
-        // B7fix2: one idle-time Browser warmup, outside render — the first
-        // signed-in frame builds the webview when a restore left the pane
-        // open on Browser, so even the boot frame never constructs. Once
-        // only; never in tests or deterministic captures (the scripted page
-        // needs no warmup and captures build nothing unasked); never
-        // focused.
-        // Deferred, not built here: `on_frame` runs inside render, and the
-        // point is that no frame constructs a webview. Waits for an active
-        // session so it warms that session's browser, not a home one.
-        if !self.browser.read(cx).browser_idle_warmed && self.shell_up(cx) && self.active.is_some() {
-            self.browser.update(cx, |browser, _| browser.browser_idle_warmed = true);
-            if !self.browser.read(cx).fake && !crate::clock::deterministic() && self.args.screenshot.is_none() {
-                self.defer_browser_prewarm(cx);
-            }
-        }
-        // A regained window focus re-probes the provider statuses (Y4):
-        // edge-triggered inside, so steady active frames do no work of
-        // their own and probes run at most every 15s per provider.
-        crate::provider_status::note_window_active(window.is_window_active());
-        // The window's title is the session's, so a person with three baaz
-        // windows open can tell them apart in Mission Control. It is built
-        // only when the list or the open session changed: the scan and the
-        // `format!` behind it have no business in a steady-state frame
-        // (finding `performance-9`).
-        let stale = {
-            let active = self.active.as_ref().map(|a| a.read(cx).rt(cx).session_id.as_str());
-            self.window_title_key.as_ref().map(|(epoch, id)| (*epoch, id.as_deref()))
-                != Some((self.session_list.read(cx).epoch, active))
-        };
-        if stale {
-            let title = self.window_title(cx);
-            if self.window_title.as_deref() != Some(title.as_str()) {
-                window.set_window_title(&title);
-                self.window_title = Some(title);
-            }
-            self.window_title_key = Some((self.session_list.read(cx).epoch, self.active_id(cx)));
-        }
-        // A release outside the window never reaches the overlay: a drag that
-        // is still armed while the window is inactive is over, settled where
-        // it stands. One write, on the transition; the frame renders clean.
-        // A scripted drag has no pointer to release, so only its own
-        // `resize-end` settles it — otherwise a headless (never active)
-        // window could never hold one across frames.
-        if self.resize.active && !self.resize.scripted && !window.is_window_active() {
-            self.resize.active = false;
-            self.resize.persist(cx);
-        }
-        // A frame-paced width sweep marches the divider one step per
-        // rendered frame (scripting only): each tick logs
-        // its width plus the renders and re-hints it cost, so per-tick
-        // resize cost is readable off a scripted run. Like a real drag it
-        // owns the list (no reveal installs while active); unlike one it
-        // never persists — a measurement, not a choice.
-        if self.resize.sweep.is_some() {
-            let from = self.resize.width;
-            let next = self.resize.sweep.as_mut().map(|sweep| sweep.advance(from)).unwrap_or(from);
-            self.resize.width = next;
-            let ticks = self.resize.sweep.as_ref().map(|sweep| sweep.ticks).unwrap_or(0);
-            let pane = crate::sidebar_view::take_sidebar_pane_renders();
-            let root = crate::sidebar_view::take_baaz_root_renders();
-            let rehint = self
-                .active
-                .clone()
-                .map(|view| view.update(cx, |view, _| view.take_trace_rehint()))
-                .unwrap_or(false);
-            crate::baaz_log!("rssweep w={next:.1} pane={pane} root={root} rehint={}", rehint as u8);
-            // Done at the target, when the clamp stops all progress, or
-            // past any reasonable drag: settle without persisting.
-            if next == from || (self.resize.sweep.as_ref().is_some_and(|sweep| next == sweep.target)) || ticks > 10_000
-            {
-                let done = self.resize.width;
-                self.resize.sweep = None;
-                self.resize.active = false;
-                self.resize.scripted = false;
-                crate::baaz_log!("rssweep done w={done:.1}");
-            } else {
-                cx.notify();
-            }
-        }
-        // A frame-paced transcript-wheel sweep (`transcript-scroll-sweep:`
-        // step): the transcript's twin of the
-        // sidebar pane's own sweep, pushing into the active session's own
-        // accumulator (`SessionView::push_wheel`) instead of the sidebar's.
-        if self.transcript_scroll_sweep.is_some() {
-            let dy = self.transcript_scroll_sweep.as_mut().and_then(|sweep| sweep.advance());
-            match dy {
-                Some(dy) => {
-                    if let Some(view) = self.active.clone() {
-                        view.update(cx, |view, cx| {
-                            view.push_wheel(px(dy));
-                            cx.notify();
-                        });
-                    }
-                    aui_motion::request_frame(window);
-                }
-                None => self.transcript_scroll_sweep = None,
-            }
-        }
-        // The frame trace's per-tick row: written
-        // here, not from `render_transcript`, because this runs once per
-        // `Harness::render` regardless of which subtree actually rebuilt —
-        // the true per-display-tick hook, where the old centre-scoped trace
-        // went silent through a sidebar-only or resize-only gesture (parts
-        // 4/C1/C2 stopped those from touching the cached transcript at
-        // all). Gated up front so a disabled build pays nothing beyond the
-        // one flag check; the pane's list top and `resize.width` are only
-        // read, so nothing about the sidebar needs to render for this tick
-        // to trace.
-        // `take_trace_rehint` is a single flag shared with the
-        // `resize-sweep:` step's own log above: on a tick where both a
-        // sweep and the trace are running, the sweep's earlier drain wins
-        // and this row reads `rehint=0` regardless. Irrelevant to the real
-        // CGEvent-driven measurements this instrument exists for (they
-        // never run a scripted sweep at the same time).
-        if session::frame_trace_enabled() {
-            let top = self.sidebar_list_top(cx);
-            let (transcript, rehint) = self
-                .active
-                .clone()
-                .map(|view| view.update(cx, |view, _| (Some(view.trace_tick()), view.take_trace_rehint())))
-                .unwrap_or((None, false));
-            session::note_root_frame_trace(
-                top.item_ix,
-                f32::from(top.offset_in_item),
-                self.resize.width,
-                self.resize.active,
-                transcript,
-                self.sidebar_gesture_active(cx),
-                rehint,
-            );
-        }
-        // The connect screen owns the whole window while it is up: the
-        // provider model follows the status cache (the screen observes it
-        // and redraws itself) and the session lifecycle below waits behind
-        // it. The login screen owns it the same way, but only for the
-        // offline/replay captures that still boot into it — a live launch
-        // never gates on Muse any more, so a signed-out shell runs the
-        // lifecycle below like a signed-in one.
-        if self.connect_open(cx) {
-            self.sync_provider_state(cx);
-            // Window verbs (the setup sheet, the footer menu) script the
-            // connect screen's captures; nothing else runs here.
-            if crate::steps::all_window_steps(&self.args.steps) {
-                self.maybe_run_steps(window, cx);
-            }
-            return;
-        }
-        if !matches!(self.auth, Auth::SignedIn(_))
-            && (self.args.offline || self.args.replay.is_some())
-        {
-            return;
-        }
-        self.sync_provider_state(cx);
-        // The scripted boot, every frame until it fires: the first session
-        // for `--session`/`--send`/`--steps` opens without waiting for
-        // `session/list`, then the script runs once the session is open.
-        // Both are idempotent (consumed args, drained list), so the
-        // per-frame call is a gate, not a loop.
-        self.ensure_boot_session(window, cx);
-        self.maybe_run_steps(window, cx);
-        // A deterministic capture never takes keyboard focus: a focused
-        // composer paints the textarea's blinking caret, which lands on a
-        // different phase every run.
-        // Q4b: never re-focus the hidden session's composer while its
-        // replacement loads — the click consumed the arm, and this drops
-        // any arm raised mid-switch. The landing view arms its own focus
-        // through `activate`.
-        if std::mem::take(&mut self.focus_composer)
-            && !crate::clock::deterministic()
-            && self.pending_switch_dest(cx).is_none()
-        {
-            if let Some(view) = self.active.clone() {
-                view.update(cx, |view, cx| view.focus_composer(window, cx));
-            }
-        }
-    }
-}
-
 impl Render for Harness {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The whole-frame instrument's start; the trailing marker below
@@ -4906,7 +4664,7 @@ impl Render for Harness {
         crate::log::crumb("render");
         crate::sidebar_view::note_baaz_render();
         crate::log::note_root_render();
-        self.on_frame(window, cx);
+        self.trace_root_frame(cx);
         // The connect screen owns the whole window on a first run; the shell
         // is not built behind it. Any other launch renders the shell at once:
         // a slow or signed-out Muse never gates the window.
@@ -5195,53 +4953,11 @@ impl Render for Harness {
         };
         let (palette, dialog, muse_sheet) = (held(palette), held(dialog), held(muse_sheet));
         let (overflow, back_history, project_menu, right_views) = (held(overflow), held(back_history), held(project_menu), held(right_views));
-        // The palette takes the keyboard the frame it opens, so the arrows and
-        // the return reach it rather than the composer under it: its query
-        // field where it has one (the keys bubble from the field to the
-        // palette's own menu context), else the palette itself. The overlay
-        // window focuses a hosted palette itself.
-        if let (false, Some(view)) = (modal_hosted, self.palette_view(cx)) {
-            let focus = view.focus_handle(cx);
-            if !focus.is_focused(window) {
-                window.focus(&focus, cx);
-            }
-        }
-        // An overlay that closes unmounts the element it had focused, and the
-        // window goes on reporting that handle as focused: `focused()` is
-        // `Some` and `is_focused()` is true, while the element is no longer
-        // in the rendered frame. gpui resolves a keystroke against the
-        // focused node *in that frame* and, finding none, falls back to the
-        // dispatch tree's root — which sits ABOVE this view's div. Every
-        // `on_action` handler mounted here is skipped from then on.
-        //
-        // That is not limited to context-scoped bindings or to the palette's
-        // own shortcut. Measured: one open-and-close of the ⌘K palette left
-        // ⌘B dead too, because both handlers hang off the same div. It is
-        // why "it works once, then it doesn't".
-        //
-        // So the overlay stack hands the keyboard back itself (plan 4.6): an
-        // entry that took the keyboard remembers what held it in the frame it
-        // opened, and closing it — Escape, a picked row, a click outside —
-        // queues that handle for this frame. A modal or a menu always gives
-        // it back (whatever the window reports focused may be unmounted);
-        // the rest only while it is free — still on what the overlay held,
-        // on the root, or nowhere — so a composer menu closed by a click
-        // that focused another field (the sidebar search, a rename, the URL
-        // bar) leaves the keyboard in that field.
-        // Captures park on the root, as they always did, so a capture never
-        // depends on where the keyboard was. The first frame has nothing
-        // focused at all, so it parks on the root too.
-        let restore = self.overlays.update(cx, |overlays, _| overlays.stack.take_restore());
-        let focused = window.focused(cx);
-        if let Some(restore) = restore {
-            let free = focused.is_none() || focused == restore.held || focused.as_ref() == Some(&self.focus_root);
-            if free || restore.force {
-                let to = restore.to.filter(|_| !crate::clock::deterministic()).unwrap_or_else(|| self.focus_root.clone());
-                window.focus(&to, cx);
-            }
-        } else if focused.is_none() {
-            window.focus(&self.focus_root, cx);
-        }
+        // The keyboard moves off the frame (task 4.9): the palette takes it
+        // as it opens and a closed overlay gives it back from the settle
+        // (`Harness::settle`), or at the end of the frame that unmounted the
+        // focused element (`on_focus_lost`). The frame only notes what holds
+        // it — a read.
         // What the next overlay to open gives the keyboard back to.
         let focused = window.focused(cx);
         self.overlays.update(cx, |overlays, _| overlays.stack.note_focus(focused));
@@ -5595,7 +5311,7 @@ impl Harness {
 
     /// Escape's first act (plan 4.6): close the newest overlay on the stack,
     /// tell the view that draws it, and run its own close. The stack queues
-    /// the keyboard's way back for the next frame. `false` when nothing was
+    /// the keyboard's way back for the root's settle. `false` when nothing was
     /// open.
     pub(crate) fn pop_overlay(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.pop_overlay_entry(cx)
@@ -5721,8 +5437,8 @@ impl Harness {
             .map(|view| view.update(cx, |view, cx| view.close_card_field(cx)))
             .unwrap_or(false);
         if field {
-            self.focus_composer = true;
-            cx.notify();
+            // The view redrew itself; the composer's focus rides the settle.
+            self.arm_composer_focus(cx);
             return;
         }
         let empty = self.active.as_ref().is_some_and(|a| a.read(cx).draft_is_empty(cx));
@@ -5805,7 +5521,8 @@ mod tests {
 
     /// K1: a root-context shortcut's precondition survives an overlay
     /// closing. The palette opens and closes over the model, then one draw
-    /// lets the frame's focus logic run: the open palette renders through
+    /// lets the window's focus logic run (the root's settle, and focus lost
+    /// at the end of the draw, task 4.9): the open palette renders through
     /// a deferred layer, and drawing that layer across two test draws
     /// trips gpui's stale-arena panic, so the test draws once, after the
     /// close — which is also the state the assertion is about. Adjusted
@@ -5960,7 +5677,7 @@ mod tests {
         open_test_session(&mut *vc, &baaz, &state.2);
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
-                h.focus_composer = true;
+                h.window_sync.focus_composer = true;
                 h.restore_right_for_session("s-1", cx);
             })
         });
@@ -6032,7 +5749,7 @@ mod tests {
                     cx,
                 );
                 // What `activate` sets before the restore below.
-                h.focus_composer = true;
+                h.window_sync.focus_composer = true;
                 h.restore_right_for_session("s-1", cx);
             })
         });
@@ -7781,9 +7498,9 @@ mod tests {
             // window never drew and the picker assert below would be vacuous.
             let painted = vc.update(|window, _| window.painted_quads().len());
             assert!(painted > 0, "the window painted nothing (no_project={no_project})");
-            // The shell's own frame logic ran against the live state: the
-            // title is only written from `on_frame`, so a matching title
-            // proves a frame settled after the boot above.
+            // The shell's lifecycle ran against the live state: the title is
+            // only written by the window's own sync (`sync_window_title`), so
+            // a matching title proves the boot above settled.
             assert_eq!(
                 vc.window_title().as_deref(),
                 Some(expected_title.as_str()),

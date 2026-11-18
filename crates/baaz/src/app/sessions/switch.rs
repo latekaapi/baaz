@@ -40,7 +40,7 @@ impl Harness {
                 // Q4c: the click consumed the composer's focus arm — re-arm
                 // it for the restored view, like `activate` arms it for a
                 // landing view, so typing resumes where it was.
-                self.focus_composer = true;
+                self.arm_composer_focus(cx);
             } else {
                 self.open_state.pending_id = None;
             }

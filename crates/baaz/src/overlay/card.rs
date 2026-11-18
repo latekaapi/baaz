@@ -116,7 +116,8 @@ impl Harness {
                 if let Some(unwanted) = unwanted {
                     super::remove_window(unwanted, cx);
                 }
-                cx.notify();
+                // What moved while it opened is the next sync's to catch.
+                this.queue_floats(cx);
             });
         })
         .detach();

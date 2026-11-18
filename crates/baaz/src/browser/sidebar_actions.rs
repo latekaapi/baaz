@@ -160,7 +160,7 @@ impl Harness {
         if changed {
             self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         }
-        self.focus_composer = true;
+        self.arm_composer_focus(cx);
         cx.notify();
     }
 

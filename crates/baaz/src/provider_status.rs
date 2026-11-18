@@ -2009,11 +2009,11 @@ pub fn reprobe_provider(id: crate::providers::ProviderId) {
     refresh_in_background(vec![id]);
 }
 
-/// A window-activation edge, called every frame with
-/// `window.is_window_active()`: a regained focus re-probes what is due
-/// (at most every [`FOCUS_THROTTLE`] per provider) off this thread and
-/// re-logs the line. Steady frames do nothing; deterministic runs do
-/// nothing at all.
+/// A window-activation edge, called from the window's activation observer
+/// (and once when the window is built) with `window.is_window_active()`: a
+/// regained focus re-probes what is due (at most every [`FOCUS_THROTTLE`]
+/// per provider) off this thread and re-logs the line. A repeated state does
+/// nothing; deterministic runs do nothing at all.
 pub fn note_window_active(active: bool) {
     if deterministic() {
         return;

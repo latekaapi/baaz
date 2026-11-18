@@ -25,7 +25,7 @@
 //! session's provider, the PR in Browse, the views menu, a page intent. The
 //! root subscribes once in `Harness::new` and maps each to its own method.
 //!
-//! The per-frame reconcile that used to run in `Harness::on_frame`
+//! The per-frame reconcile that used to run in the root's per-frame hook
 //! (`sync_right_cache`) runs in the pane's own render, and a layout observer
 //! drops the watch when the pane closes (a closed pane is not mounted, so it
 //! does not render). The pane is composed uncached: the facts it draws from
@@ -718,14 +718,25 @@ impl Harness {
     /// out instead of the "Opening the page" placeholder (B7).
     pub(crate) fn compose_right_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let mut facts = self.right_facts(cx);
-        let layout = layout::Layout::get(cx);
-        let strip_mode = layout.mode != layout::Mode::Browse && !facts.pending_neutral;
-        let open_on_page = layout.right_open && !facts.settings_open && layout::right_kind(layout) == RightKind::Browser;
-        if strip_mode && open_on_page {
+        if Self::page_strip_open_for(&facts, cx) {
             facts.page = Some(self.ensure_browser_person(window, cx));
         }
         self.right_pane.update(cx, |pane, _| pane.facts = facts);
         self.right_pane.clone().into_any_element()
+    }
+
+    /// Whether the pane stands open on the session's Page in strip mode (not
+    /// Browse, no neutral switch pending, not hidden by Settings): where the
+    /// pane draws the live webview.
+    pub(crate) fn page_strip_open(&self, cx: &App) -> bool {
+        Self::page_strip_open_for(&self.right_facts(cx), cx)
+    }
+
+    fn page_strip_open_for(facts: &crate::right_pane::RightFacts, cx: &App) -> bool {
+        let layout = layout::Layout::get(cx);
+        let strip_mode = layout.mode != layout::Mode::Browse && !facts.pending_neutral;
+        let open_on_page = layout.right_open && !facts.settings_open && layout::right_kind(layout) == RightKind::Browser;
+        strip_mode && open_on_page
     }
 
     /// One event from the pane, mapped to the root's own method.

@@ -32,7 +32,7 @@ impl Harness {
                 let url = call.params.get("url").and_then(Value::as_str).unwrap_or(BLANK).to_owned();
                 if !crate::terminal::service::browser_url_allowed(&url) {
                     Err(format!("refused URL: {url} (tabs open http, https, file, or about:blank)"))
-                } else if let Some(main) = self.main_window {
+                } else if let Some(main) = self.window_sync.handle {
                     let space = self.browser.read(cx).browse_space();
                     let id = self.browser.update(cx, |browser, _| browser.tabs.open(space, owner.clone(), &url, None));
                     self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
@@ -60,7 +60,7 @@ impl Harness {
             "close" => match tab_id.filter(|id| mine(self, *id)) {
                 Some(id) => {
                     self.terminal_service.unregister_tab_page(id.0);
-                    if let Some(main) = self.main_window {
+                    if let Some(main) = self.window_sync.handle {
                         let this = cx.entity();
                         let key = session.clone();
                         cx.defer(move |cx| {

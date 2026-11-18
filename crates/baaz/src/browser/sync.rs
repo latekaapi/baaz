@@ -157,7 +157,13 @@ impl Harness {
                 self.browser.update(cx, |browser, cx| browser.arm_discard(cx));
             }
             BrowserEvent::DoneTasksDue => self.close_done_task_tabs(cx),
+            BrowserEvent::CentreSwitched { left, shown } => self.apply_find_resync(*left, *shown, window, cx),
+            BrowserEvent::SplitFocus(id) => self.select_browse_sidebar_tab(*id, window, cx),
+            BrowserEvent::PageRectMoved => {}
         }
+        // The pages, the find strip and the page's rect are what the floats
+        // over the page show and anchor to.
+        self.queue_floats(cx);
     }
 
     /// The root's half of the page reconcile (see the module doc): what

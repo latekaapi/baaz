@@ -7,16 +7,19 @@
 //! ([`crate::overlay_stack`]): the entries hosted in the panel (Browse's
 //! menu, site information, the bookmark popover, a modal in Browse) and the
 //! footer popovers, plus the Field while the address is edited.
-//! [`Harness::sync_overlay`] runs every frame from `on_frame`: it opens the
-//! window when something wants one, moves it when the anchor moves, and
-//! closes it when nothing does. A `PopUp` does not follow its parent, so the
-//! main window's frame is part of the anchor.
+//! [`Harness::sync_overlay`] runs from what moves it — the overlay stack, the
+//! Browse view, the layout, the window's bounds — never from a frame
+//! ([`Harness::sync_floats`], task 4.9): it opens the window when something
+//! wants one, moves it when the anchor moves, and closes it when nothing
+//! does. A `PopUp` does not follow its parent, so the main window's frame is
+//! part of the anchor.
 //!
 //! The panel takes the keyboard when it opens, so a click anywhere else (the
 //! window, the page, another app) resigns it and closes the menu, and Escape
 //! inside it closes it too. Intents raised inside the overlay are queued and
-//! run on the main window's next frame: focus, pages and the rename editor
-//! all live there, never in the panel.
+//! run against the main window once the event finishes
+//! ([`Harness::run_on_main`]): focus, pages and the rename editor all live
+//! there, never in the panel.
 
 use aui::interact::menu_panel;
 use aui::screens::sidebar::{browse_menu, browse_menu_size, SidebarIntent};
@@ -270,6 +273,12 @@ pub(crate) struct Overlay {
 }
 
 impl Overlay {
+    /// What the slot is for.
+    #[cfg(test)]
+    pub(crate) fn kind(&self) -> OverlayKind {
+        self.kind
+    }
+
     /// A slot whose window is opening for `kind` at `bounds`.
     fn opening(kind: OverlayKind, bounds: Bounds<Pixels>) -> Self {
         Overlay { handle: None, kind, bounds, print: 0 }
@@ -505,12 +514,17 @@ impl Harness {
     }
 
     /// Open, move or close the overlay window to match what is wanted.
-    /// Window changes are deferred past this frame (this runs inside render).
+    /// The window opens from a task and closes deferred, never inside this
+    /// update (the overlay's first draw reads Harness).
     pub(crate) fn sync_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.main_window.get_or_insert_with(|| window.window_handle());
         let wanted = self.wanted_overlay(window, cx);
         let current = self.browser.read(cx).overlay.as_ref().map(|o| (o.kind, o.bounds));
         if wanted == current {
+            // Nothing open, nothing wanted: no print to take (the palette's
+            // rows are not cheap).
+            if current.is_none() {
+                return;
+            }
             // The content reads Harness state: repaint the panel only when what
             // it shows changed (a blind refresh per main frame looped — the
             // panel's render dirtied the main window again). Its own hover and
@@ -590,7 +604,8 @@ impl Harness {
                 if let Some(unwanted) = this.browser.update(cx, |browser, _| land(&mut browser.overlay, kind, bounds, opened, print)) {
                     remove_window(unwanted, cx);
                 }
-                cx.notify();
+                // What moved while it opened is the next sync's to catch.
+                this.queue_floats(cx);
             });
         })
         .detach();
@@ -678,7 +693,7 @@ impl Harness {
                 if let Some(unwanted) = this.browser.update(cx, |browser, _| land(&mut browser.corner, OverlayKind::Corner, bounds, opened, print)) {
                     remove_window(unwanted, cx);
                 }
-                cx.notify();
+                this.queue_floats(cx);
             });
         })
         .detach();
@@ -868,7 +883,6 @@ impl Harness {
 
     /// Open, move or close the Page float window (the corner's dance).
     pub(crate) fn sync_page_float(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settle_agent_line(cx);
         // The line's input lives here, so the float that opens for the ask
         // row can take the keyboard on its first frame.
         if self.browser.read(cx).agent_window.agent_line_input.is_none() {
@@ -937,7 +951,7 @@ impl Harness {
                 if let Some(unwanted) = this.browser.update(cx, |browser, _| land(&mut browser.page_float, OverlayKind::PageFloat, bounds, opened, print)) {
                     remove_window(unwanted, cx);
                 }
-                cx.notify();
+                this.queue_floats(cx);
             });
         })
         .detach();
@@ -985,7 +999,7 @@ impl Harness {
                 .map(|a| aui::workbench::PageNote { index: a.index, selector: a.selector.clone(), note: a.note.clone() })
                 .collect();
             let weak = cx.weak_entity();
-            let main = self.main_window;
+            let main = self.window_sync.handle;
             let act = |action: aui::workbench::AnnotatorAction| -> NotesClick {
                 let state = state.clone();
                 let baaz = weak.clone();
@@ -1487,7 +1501,7 @@ impl Harness {
     /// Run `f` against the main window once the current event has finished:
     /// focus, pages and the address field's owner all live there.
     pub(crate) fn run_on_main(&self, cx: &mut Context<Self>, f: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static) {
-        let Some(main) = self.main_window else {
+        let Some(main) = self.window_sync.handle else {
             return;
         };
         let baaz = cx.entity().downgrade();

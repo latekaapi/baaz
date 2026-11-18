@@ -1,6 +1,6 @@
 //! The sidebar as a real view (task 4.7, audit R6): the ratchet.
 //!
-//! The column used to be re-armed from the root: `on_frame` built a
+//! The column used to be re-armed from the root: a per-frame hook built a
 //! 30-field `SidebarKey` snapshot every frame and compared it
 //! (`Harness::sync_sidebar_pane`), the pane rendered by reaching back into
 //! the root (`baaz.update(|baaz, cx| baaz.render_sidebar(..))`), and the
@@ -93,15 +93,16 @@ fn the_frame_key_and_the_wheel_cell_are_gone() {
     }
 }
 
-/// `on_frame` neither re-arms, notifies, updates nor feeds the column: no
-/// fact push, no sweep, no fade. (The frame trace may read the list's top
-/// for its row: a diagnostic read, through `sidebar_list_top`.)
+/// The window's lifecycle (`app/window_sync.rs`, task 4.9: the settle, the
+/// floats, the sweeps, the frame trace) neither re-arms, notifies, updates
+/// nor feeds the column: no fact push, no sweep, no fade. (The frame trace
+/// may read the list's top for its row: a diagnostic read, through
+/// `sidebar_list_top`.)
 #[test]
-fn on_frame_does_not_touch_the_sidebar() {
-    let app = source("app.rs");
-    let on_frame = body(&app, "fn on_frame(");
+fn the_window_sync_does_not_touch_the_sidebar() {
+    let sync = source("app/window_sync.rs");
     for word in ["self.sidebar_pane", "compose_sidebar", "push_sidebar_facts", "scroll_sweep(", "mode_fade", "SidebarPane"] {
-        assert!(!on_frame.contains(word), "on_frame names `{word}`");
+        assert!(!sync.contains(word), "app/window_sync.rs names `{word}`");
     }
 }
 

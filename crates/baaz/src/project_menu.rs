@@ -137,6 +137,8 @@ impl Harness {
     pub(crate) fn note_project_changed(&mut self, cx: &mut Context<Self>) {
         self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
         self.browser.update(cx, |browser, cx| browser.drop_browse_address(cx));
+        // The window's title names the project.
+        self.queue_title(cx);
         cx.notify();
     }
 
@@ -279,7 +281,7 @@ impl Harness {
         });
         projects::write(&self.session_list.read(cx).projects);
         self.invalidate_list(cx);
-        self.focus_composer = true;
+        self.arm_composer_focus(cx);
         cx.notify();
     }
 

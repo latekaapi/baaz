@@ -485,7 +485,7 @@ impl Harness {
         // update set follow) — with the composer focused and live. The
         // destination has been visible since it opened; only a user who
         // clicked away mid-flight still needs the swap.
-        self.focus_composer = true;
+        self.arm_composer_focus(cx);
         if let Some(view) = self.find_view(&dest, cx) {
             let current = self.active.as_ref().is_some_and(|active| *active == view);
             if !current {

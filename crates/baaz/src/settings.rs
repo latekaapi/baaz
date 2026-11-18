@@ -2150,7 +2150,7 @@ impl Harness {
     /// keyboard to the composer next frame.
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_page.update(cx, |page, _| page.close());
-        self.focus_composer = true;
+        self.arm_composer_focus(cx);
         cx.notify();
     }
 

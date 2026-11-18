@@ -264,6 +264,16 @@ impl Overlays {
         self.stack.close(LayerKind::Menu);
     }
 
+    /// Close the open popover from a view the root does not hear (the
+    /// composer's menus), and say so: the root's settle observes the stack
+    /// and hands the keyboard back where the menu found it.
+    pub(crate) fn close_menu_and_tell(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.menu().is_some() {
+            self.close_menu();
+            cx.notify();
+        }
+    }
+
     /// Open a menu, replacing whatever menu was open.
     pub fn open(&mut self, menu: Menu) {
         self.stack.push(Entry::new(Layer::Menu(menu)));

@@ -194,9 +194,10 @@ impl Harness {
     /// The caller gates on pane-open-on-Browser, so activation, boot and
     /// every other kind never create a webview as a side effect; the
     /// `browse:` step and agent tools create through [`Self::browser_for`]
-    /// directly instead. Focus rides only on the person's own open: render
-    /// consumes one armed `show_right`/`toggle_right` onto a blank page,
-    /// and a restore leaves the composer's keyboard alone.
+    /// directly instead. Focus rides only on the person's own open: the
+    /// root's settle (else the pane's compose) consumes one armed
+    /// `show_right`/`toggle_right` onto a blank page, and a restore leaves
+    /// the composer's keyboard alone.
     /// Open a link's URL in Baaz's Browser pane (B9): the non-toggling
     /// open onto Browser, then the navigation. The scripted backend needs
     /// no window, so it navigates at once; the real webview navigates on

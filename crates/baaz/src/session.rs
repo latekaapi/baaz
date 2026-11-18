@@ -3016,7 +3016,7 @@ impl SessionView {
     /// (v2), which only ever fired when the cached transcript column itself
     /// rebuilt — silent through a sidebar-only or resize-only tick since
     /// those stopped touching the centre at all. Called once per root
-    /// render from `Harness::on_frame`, not
+    /// render from `Harness::trace_root_frame`, not
     /// from `render_transcript`, so it sees every tick regardless of which
     /// subtree actually rebuilt.
     pub(crate) fn trace_tick(&mut self) -> (f32, usize, bool) {
@@ -3047,7 +3047,7 @@ impl SessionView {
 /// micros ([`note_draw_start`]/[`draw_end_marker`], unchanged by this
 /// split).
 ///
-/// Called once from `Harness::on_frame`, which runs first in
+/// Called once from `Harness::trace_root_frame`, which runs first in
 /// `Harness::render` — i.e. once per display tick that renders anything at
 /// all, matching the zero-idle-frames rule: an idle window writes no rows.
 #[allow(clippy::too_many_arguments)]

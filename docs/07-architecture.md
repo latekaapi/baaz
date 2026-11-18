@@ -130,7 +130,7 @@ entities `RightPane` (`right_pane.rs`), `TerminalDock`
 
 ### `Harness` — the window root
 
-`Harness` (`app.rs`) has 56 fields. Its methods are spread over 62
+`Harness` (`app.rs`) has 52 fields. Its methods are spread over 62
 `impl Harness` blocks in 53 files (`app/*.rs` — the sidebar's root half is
 `app/sidebar_host.rs` — the
 `browser/` seam files, `dialogs.rs`, `login.rs` and others). Roughly:
@@ -146,13 +146,27 @@ entities `RightPane` (`right_pane.rs`), `TerminalDock`
 | browser and Browse mode | `browser`: the `BrowserView` region entity (`browser/view.rs`, task 4.5) holding the tabs and webviews, the Field and find inputs, the Browse sidebar's menus and drags, three of the four overlay windows (`overlay`, `corner`, `page_float`: one slot each, holding the window once its open task lands — no `*_pending` twin), `data` (the `browser.db` service), `occlusion` (the one `NativeOcclusion` owner) and `agent_window` (`AgentWindowState`, `app/agent_window.rs`: the agent line and card and the card's float; the handoff picker is a `Picker` view on the overlay stack) |
 | settings, skills, palettes | `settings_page` (a region entity, `settings.rs`, task 4.4, that owns its route, search, focus, the Shortcuts rows and recording), `skills_page` (a region entity, `skills_page.rs`, task 4.4), `import`, the search palette's `TextareaState` query field (the search reads it; the Commands and Projects palettes own theirs since task 4.6b) |
 | terminal | `terminal_dock`: a region entity (`terminal/dock.rs`, task 4.4) that owns the tab host, its focus, the resize drag and the bridge providers; `terminal_service`, the agent's terminal and browser tools socket |
-| focus, capture, plumbing | focus handles, `capture`, scroll sweeps, `args`, `tasks`, `main_window` |
+| focus, capture, plumbing | focus handles, `capture`, `args`, `tasks`; `window_sync` (`WindowSync`, `app/window_sync.rs`, task 4.9: the window's handle, the queued settle and floats passes, the composer's one-shot focus arm and the observations that drive them) |
 
-`Harness::render` is not cached. It first runs `on_frame` (window title,
-overlay windows, provider status, boot session, scripted steps) and later
-asks the one occlusion owner what covers the native pages
+`Harness::render` is not cached, and it composes: it reads state and builds
+elements, and it asks the one occlusion owner what covers the native pages
 (`Harness::occlude_pages`, `browser/occlusion.rs`: decides and applies, in
-memory), then composes the shell. The browser's page reconcile (tabs,
+memory). Its one instrument is the env-gated frame trace row. Nothing it
+reaches in `app.rs` / `app/**` writes a file, opens a window, moves the
+keyboard, touches sqlite or sets the title (`tests/render_ratchet.rs`, task
+4.9). What a per-frame hook used to do runs from its cause
+(`app/window_sync.rs`): the **settle** — the provider statuses, the
+scripted boot and steps, the composer's focus arm, the URL field's owed
+focus, the palette's keyboard and the overlay stack's restore, the agent
+line — runs once at the end of any effect cycle in which the root, the
+overlay stack, the Browse view, the right pane, the connect screen or the
+layout changed, or the window was (de)activated; the **floats** (the
+overlay, corner and Page float windows over the native page) follow on the
+next frame, also queued by the Browse view's events (its pages, a moved page
+rect), the window's bounds and the browser chat's turn; the **title**
+follows the session list's events, the switch path and the project path;
+focus lost hands the keyboard back at the end of the frame that unmounted
+it; a `--replay` capture opens when the root is built. The browser's page reconcile (tabs,
 history, popups, downloads, permissions, the tabs write) does not run from
 render: `BrowserView` observes each page and runs it on the page's change
 (`browser/sync.rs`, `tests/browser_render_ratchet.rs`). The right pane
@@ -167,8 +181,8 @@ while clean (except while assistive tech is on). The sidebar is re-rendered
 by its own inputs only: the session list's events, the layout global, its
 own hover and scroll, and the facts the root pushes as it composes the shell
 (`Harness::compose_sidebar`: the open session, the footer, the open menus,
-Browse's rows — a notify only when they moved). `on_frame` does not touch
-it (`tests/sidebar_view_ratchet.rs`).
+Browse's rows — a notify only when they moved). The window's lifecycle does
+not touch it (`tests/sidebar_view_ratchet.rs`).
 
 ### `SessionRuntime` and `SessionView` — one session (task 4.8)
 
@@ -352,13 +366,14 @@ These are true of the code today.
 - **`Harness` is still the owner of nearly everything.** 241 fields and 52
   `impl` blocks. New features have added fields and files to it rather than
   their own entities.
-- **Render is part of the event loop.** `on_frame` runs inside
-  `Harness::render` and reconciles overlay windows and provider status. Few
-  things are observed, so a change is noticed when a frame happens, and the
-  root is not cached. (The browser's page reconcile left render in task
-  4.5b; its occlusion is still decided per frame. The sidebar left it in
-  task 4.7, but the facts only the root knows are still compared as the
-  root composes the shell.)
+- **Render still decides some things per frame.** The per-frame hook left
+  render in task 4.9, but the root is not cached, the native pages'
+  occlusion is still decided (and applied) as the root composes, the facts
+  only the root knows are still pushed into the sidebar and the right pane
+  during its render, the pane's compose still builds the session's webview
+  on first show, and the frame trace writes its row there. The floats ride
+  the next frame after a change rather than the change itself, so a window
+  that takes no frame (hidden, occluded) holds them where they were.
 - **The app is not fully behind the seam.** About 730 references to a
   specific provider variant remain in `crates/baaz`, and
   `session/lane.rs` matches Claude Code control-card kinds by name.

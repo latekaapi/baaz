@@ -859,7 +859,7 @@ fn q4c_cancel_back_to_the_open_session_rearms_focus(cx: &mut gpui::TestAppContex
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _cx| {
             assert!(harness.open_state.switch_pending, "the provider switch is pending");
-            assert!(!harness.focus_composer, "the click consumed the focus arm");
+            assert!(!harness.window_sync.focus_composer, "the click consumed the focus arm");
         });
     });
     // Clicking the still-active session cancels back to it.
@@ -870,7 +870,7 @@ fn q4c_cancel_back_to_the_open_session_rearms_focus(cx: &mut gpui::TestAppContex
         baaz.update(cx, |harness, cx| {
             assert!(!harness.open_state.switch_pending, "the loading state drops");
             assert!(
-                harness.focus_composer,
+                harness.window_sync.focus_composer,
                 "cancelling back re-arms the restored session's composer focus"
             );
             let view = harness.active.clone().expect("the session stays open");
@@ -930,7 +930,7 @@ fn q4b_actions_target_nothing_while_pending(cx: &mut gpui::TestAppContext) {
         baaz.update(cx, |harness, cx| {
             assert!(harness.open_state.switch_pending, "the provider switch is pending");
             assert!(
-                !harness.focus_composer,
+                !harness.window_sync.focus_composer,
                 "the click blurs the hidden composer: no refocus arm"
             );
             let fired = std::rc::Rc::new(std::cell::Cell::new(false));

@@ -417,11 +417,11 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "resize-begin", run: |this, rest, _, cx| this.step_resize_drag("begin", rest, cx) },
     WindowVerb { verb: "resize-move", run: |this, rest, _, cx| this.step_resize_drag("move", rest, cx) },
     WindowVerb { verb: "resize-end", run: |this, rest, _, cx| this.step_resize_drag("end", rest, cx) },
-    WindowVerb { verb: "resize-sweep", run: |this, rest, _, cx| this.step_resize_sweep(rest, cx) },
+    WindowVerb { verb: "resize-sweep", run: |this, rest, window, cx| this.step_resize_sweep(rest, window, cx) },
     WindowVerb { verb: "sidebar-scroll-sweep", run: |this, rest, _, cx| this.step_sidebar_scroll_sweep(rest, cx) },
     WindowVerb {
         verb: "transcript-scroll-sweep",
-        run: |this, rest, _, cx| this.step_transcript_scroll_sweep(rest, cx),
+        run: |this, rest, window, cx| this.step_transcript_scroll_sweep(rest, window, cx),
     },
     WindowVerb { verb: "sidebar", run: |this, _, _, cx| { this.toggle_sidebar(cx); Ok(()) } },
     // Was `peek`, which the Browse link verb above shadowed, so it never ran.
@@ -606,6 +606,7 @@ impl Harness {
             other => return Err(format!("no failure kind `{other}`")),
         };
         self.active = None;
+        self.queue_title(cx);
         self.open_state.provider_open_error = Some(crate::app::LaunchFailure {
             session_id: None,
             provider,

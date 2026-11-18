@@ -76,7 +76,7 @@ fn calls(code: &str) -> Vec<String> {
 fn escape_has_no_overlay_rung() {
     let app = source("app.rs");
     let cancel = body(&app, "    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {");
-    const ALLOWED: [&str; 26] = [
+    const ALLOWED: [&str; 27] = [
         // The stack.
         "pop_overlay",
         // The Settings page's own Back (recording → search → sub-page → close).
@@ -102,6 +102,7 @@ fn escape_has_no_overlay_rung() {
         "active",
         "clear_selection",
         "close_card_field",
+        "arm_composer_focus",
         "map",
         "unwrap_or",
         "notify",
@@ -203,14 +204,17 @@ fn the_loose_open_flags_are_gone() {
 }
 
 /// The root's focus edge detector is gone: the stack gives back the focus
-/// it took (`OverlayStack::take_restore`, applied in the root's frame).
+/// it took (`OverlayStack::take_restore`, applied by the root's settle and
+/// when a frame loses the focus, task 4.9 — never from render).
 #[test]
 fn the_focus_edge_detector_is_gone() {
     let app = source("app.rs");
     for field in ["overlay_was_open", "composer_menu_was_open", "composer_menu_focus", "overlay_just_closed"] {
         assert!(!app.contains(field), "`{field}` came back");
     }
-    assert!(app.contains("overlays.stack.take_restore()"), "the root applies the stack's restore");
+    let sync = source("app/window_sync.rs");
+    assert!(sync.contains("overlays.stack.take_restore()"), "the root applies the stack's restore");
+    assert!(!app.contains("take_restore"), "render applies no restore");
     assert!(app.contains("overlays.stack.note_focus(focused)"), "the root tells the stack what holds the keyboard");
 }
 

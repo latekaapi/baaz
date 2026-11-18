@@ -14,7 +14,9 @@
 //!   overlay window draws sits above the live page and covers nothing;
 //! * **focus** goes back where it was when the entry opened: the entry
 //!   captures the focus of the frame it opened in, and closing it queues that
-//!   handle for the root's next frame ([`OverlayStack::take_restore`]).
+//!   handle for the root's settle — the end of the effect cycle that closed
+//!   it, or the end of the frame that unmounted what held the keyboard
+//!   ([`OverlayStack::take_restore`]).
 //!
 //! An entry carries its content where the content is small (the menu's
 //! selection, the rename's target, the sheet's stage), so "is it open" and
@@ -352,7 +354,7 @@ impl Entry {
     }
 }
 
-/// What the root's next frame does with the keyboard after an entry closed.
+/// What the root's settle does with the keyboard after an entry closed.
 #[derive(Clone)]
 pub(crate) struct Restore {
     /// Where the keyboard goes: what held it when the entry opened, or the
@@ -377,7 +379,7 @@ pub(crate) struct OverlayStack {
     /// What held the keyboard in the root's last frame (see
     /// [`OverlayStack::note_focus`]).
     focused: Option<FocusHandle>,
-    /// The restore the root's next frame applies.
+    /// The restore the root's settle applies.
     restore: Option<Restore>,
     /// The trigger whose entry the last outside press closed, and when
     /// ([`OverlayStack::note_pressed_shut`]).

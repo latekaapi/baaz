@@ -6,7 +6,7 @@
 //! The column itself — its rows, scroll, hover, reveal, wheel and fade —
 //! is [`SidebarPane`] in [`crate::sidebar_view`], a view of its own over the
 //! [`crate::session_list::SessionList`] model. Nothing here draws the
-//! column, and nothing here is called from `on_frame`.
+//! column; the root pushes its facts while it composes the shell.
 //!
 //! Part of [`Harness`]; see [`crate::app`] for what the entity owns.
 
@@ -528,13 +528,13 @@ impl Harness {
             }
             SidebarIntent::Rename(id, text) => {
                 self.rename_session(id.to_string(), Some(text.to_string()), cx);
-                self.focus_composer = true;
+                self.arm_composer_focus(cx);
             }
             SidebarIntent::RenameCancel => {
                 self.overlays.update(cx, |o, _| {
                     o.stack.close(crate::overlay_stack::LayerKind::RenameSession);
                 });
-                self.focus_composer = true;
+                self.arm_composer_focus(cx);
             }
             SidebarIntent::Account => {
                 if !self.just_dismissed(MenuKind::Account, cx) {

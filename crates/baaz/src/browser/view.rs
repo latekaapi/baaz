@@ -44,6 +44,17 @@ pub(crate) enum BrowserEvent {
     /// The next done task folder came due: the root sweeps them (it knows
     /// which sessions still work).
     DoneTasksDue,
+    /// The occlusion pass saw the centre switch tabs (`left` → `shown`):
+    /// find follows — the left tab stops highlighting and the shared input
+    /// takes the shown tab's query, which needs the root's window.
+    CentreSwitched { left: Option<TabId>, shown: Option<TabId> },
+    /// A click into the Split's other half (it just took the keyboard): the
+    /// root makes it the shown tab.
+    SplitFocus(TabId),
+    /// The centre page's rect, or the pane's shown page's, moved: the
+    /// windows floating over the page (the corner, the agent line, the
+    /// notes panel) follow it.
+    PageRectMoved,
 }
 
 impl EventEmitter<BrowserEvent> for BrowserView {}
@@ -77,6 +88,9 @@ pub(crate) struct BrowserView {
     /// same rect (see `browse_centre_page_rect`), never a second
     /// computation. `None` outside Browse and before the first frame.
     pub centre_page_rect: Option<Bounds<Pixels>>,
+    /// The pane's shown page's rect as the last occlusion pass saw it: the
+    /// Page float anchors to it (a change is [`BrowserEvent::PageRectMoved`]).
+    pub pane_page_rect: Option<Bounds<Pixels>>,
     /// One back/forward stack per tab (B2a-H4): the header toolbar tracks
     /// the URLs the page reconcile reports, since the library exposes no back,
     /// forward or reload calls to drive.
@@ -114,8 +128,6 @@ pub(crate) struct BrowserView {
     /// popovers (they point at the old tab's state) but never the find
     /// strip, which is per tab and restores on return.
     pub last_centre_shown: Option<TabId>,
-    /// A centre switch waiting for find to follow it: (left, shown).
-    pub find_resync: Option<(Option<TabId>, Option<TabId>)>,
     /// R4 `browser.db` as a service (task 4.5): history, page words and
     /// bookmarks, run on the background executor behind an in-memory front
     /// the UI reads ([`super::data::BrowserData`]).
@@ -147,10 +159,6 @@ pub(crate) struct BrowserView {
     pub split_ratio: f32,
     /// The Split divider is being dragged.
     pub split_dragging: bool,
-    /// A fresh Peek's page takes the keyboard on the next render.
-    pub peek_focus_pending: bool,
-    /// The Split half the person clicked into: shown on the next render.
-    pub split_focus: Option<TabId>,
     /// Whether the Split partner held the keyboard last frame.
     pub partner_held: bool,
     /// Done closes tabs (docs/27 §4.3): sessions this run saw working, and
@@ -166,14 +174,16 @@ pub(crate) struct BrowserView {
     /// reused — so one open action plus any number of frames stays one.
     pub(crate) browser_builds: u64,
     /// Whether the one idle-time Browser warmup already ran (B7fix2): set
-    /// the first signed-in frame, so the boot frame never constructs even
-    /// when a restore left the pane open on Browser.
+    /// the first time the shell is up with a session open
+    /// (`Harness::maybe_idle_prewarm`), so no frame constructs even when a
+    /// restore left the pane open on Browser.
     pub(crate) browser_idle_warmed: bool,
     /// The person's own Browser open still owes the URL field its focus
     /// (Z7a2). Armed by `show_right`/`toggle_right` when they land open on
-    /// Browser, consumed once by the next frame's webview ensure — and only
-    /// there, so activation, restore and boot never steal the keyboard into
-    /// the URL field. Never persists.
+    /// Browser, consumed once by the webview ensure that follows — the
+    /// root's settle (`Harness::settle`), else the pane's next compose — and
+    /// only there, so activation, restore and boot never steal the keyboard
+    /// into the URL field. Never persists.
     pub(crate) browser_url_focus_armed: bool,
     /// A link's URL waiting for the Browser pane's next render (B9): set
     /// by [`Harness::open_url_in_browser`](crate::browser) beside the
@@ -340,6 +350,7 @@ impl BrowserView {
             tabs_loaded: false,
             agent_tabs: HashMap::new(),
             centre_page_rect: None,
+            pane_page_rect: None,
             histories: HashMap::new(),
             find_strips: chrome::FindStrips::default(),
             visit_allows: chrome::VisitAllows::default(),
@@ -350,7 +361,6 @@ impl BrowserView {
             fake_scripts: Vec::new(),
             download_started: HashMap::new(),
             last_centre_shown: None,
-            find_resync: None,
             data,
             recorder: history::Recorder::default(),
             text_reads: HashMap::new(),
@@ -365,8 +375,6 @@ impl BrowserView {
             split: None,
             split_ratio: 0.5,
             split_dragging: false,
-            peek_focus_pending: false,
-            split_focus: None,
             partner_held: false,
             task_seen_working: std::collections::HashSet::new(),
             task_done_at: std::collections::HashMap::new(),

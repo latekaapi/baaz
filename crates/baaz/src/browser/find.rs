@@ -60,11 +60,11 @@ impl Harness {
     /// Clear the tab's find highlight as it is left behind (a switch or a
     /// crash): the strip itself stays as it stood, so returning restores
     /// the query — only the page's highlight drops.
-    /// Apply a pending centre switch to find (from `on_frame`): stop the
-    /// left tab's highlight, point the shared input at the shown tab's
-    /// query and search it again so its count and highlight come back.
-    pub(crate) fn apply_find_resync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((left, shown)) = self.browser.update(cx, |browser, _| browser.find_resync.take()) else { return };
+    /// Find follows a centre switch the occlusion pass saw
+    /// ([`BrowserEvent::CentreSwitched`]): stop the left tab's highlight,
+    /// point the shared input at the shown tab's query and search it again
+    /// so its count and highlight come back.
+    pub(crate) fn apply_find_resync(&mut self, left: Option<TabId>, shown: Option<TabId>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(left) = left {
             self.browser.update(cx, |browser, cx| browser.stop_find_on_tab(left, cx));
         }

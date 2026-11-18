@@ -1001,6 +1001,8 @@ impl Harness {
         }
         // Links from other apps that waited behind the screen open now.
         self.drain_external_soon(cx);
+        // The shell is up: a session it restored warms its Browser pane.
+        self.maybe_idle_prewarm(cx);
     }
 
     /// Reopen the connect screen over the shell (Settings → Providers →
@@ -1067,8 +1069,9 @@ impl Harness {
         }
     }
 
-    /// Follow the status cache ([`ProviderStatusModel::sync`]): each frame
-    /// and on every probe the service publishes. What follows a visible
+    /// Follow the status cache ([`ProviderStatusModel::sync`]): on every
+    /// settle of the window (`Harness::settle`) and every probe the service
+    /// publishes. What follows a visible
     /// change on the root's side lands in [`Self::on_provider_model_event`].
     pub(crate) fn sync_provider_state(&mut self, cx: &mut Context<Self>) {
         self.provider_model.update(cx, |model, cx| model.sync(cx));

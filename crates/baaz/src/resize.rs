@@ -45,13 +45,15 @@ pub(crate) struct ResizeDrag {
     /// When the last drag ended, for the double-click reset above.
     last_release: Option<std::time::Instant>,
     /// A scripted drag (`resize-begin/move/end` steps) has no pointer, so a
-    /// release outside the window can never end it: `on_frame` leaves it
-    /// alone and only `end_resize` settles it. Never set by the strip.
+    /// release outside the window can never end it: the deactivation rule
+    /// (`Harness::on_window_activation`) leaves it alone and only
+    /// `end_resize` settles it. Never set by the strip.
     pub(crate) scripted: bool,
     /// A frame-paced width sweep (`resize-sweep` step, scripting only): the
     /// divider marches toward the target width one step per rendered frame —
     /// the display link's pace on a real display — so per-tick resize cost
-    /// is measurable headlessly. `on_frame` owns it; it never persists.
+    /// is measurable headlessly. Its ticks run one per frame from the step
+    /// (`Harness::resize_sweep_tick`); it never persists.
     pub(crate) sweep: Option<ResizeSweep>,
 }
 

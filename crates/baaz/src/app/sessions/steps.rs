@@ -249,9 +249,11 @@ impl Harness {
     /// call — a later frame, a later activation — finds nothing to do.
     /// The verbs, and the loop that runs them, are [`crate::steps`].
     ///
-    /// Called every frame ([`Harness::on_frame`]) and after the replay fold
-    /// ([`Harness::open_replay`]): those are the two transitions that can
-    /// make the predicate true, and the take makes the double call harmless.
+    /// Called from every settle ([`Harness::settle`]: the root, the overlay
+    /// stack, the layout or the window changed — a landed open, a wire, a
+    /// list) and after the replay fold ([`Harness::open_replay`]): those are
+    /// the transitions that can make the predicate true, and the take makes
+    /// the repeated call harmless.
     /// Session activations deliberately do not call this: `activate` fires
     /// on every swap, including swaps the script itself causes, so draining
     /// there raced the boot it was meant to follow.
@@ -473,7 +475,7 @@ impl Harness {
     /// tick. Like a press it disarms the reveal and owns the list while it
     /// runs; it never persists. An unparseable width or step fails the
     /// step; `step_px` defaults to 4 when absent.
-    pub(crate) fn step_resize_sweep(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+    pub(crate) fn step_resize_sweep(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let (to, step) = rest.split_once(',').unwrap_or((rest, "4"));
         let to: f32 = to.trim().parse().map_err(|_| format!("`{to}` is not a width"))?;
         let step: f32 = step.trim().parse().map_err(|_| format!("`{step}` is not a step in px"))?;
@@ -481,6 +483,9 @@ impl Harness {
         self.resize.sweep = Some(crate::resize::ResizeSweep::new(to, step));
         self.resize.active = true;
         self.resize.scripted = true;
+        // One tick per frame, from the frame this step draws
+        // ([`Harness::resize_sweep_tick`]).
+        cx.on_next_frame(window, |this, window, cx| this.resize_sweep_tick(window, cx));
         cx.notify();
         Ok(())
     }
@@ -513,10 +518,13 @@ impl Harness {
     /// (`SessionView::push_wheel`) once per rendered frame. Same shape,
     /// same fallback reason, same defaults and failures, same
     /// free/no-turn/no-wire guarantee.
-    pub(crate) fn step_transcript_scroll_sweep(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+    pub(crate) fn step_transcript_scroll_sweep(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let (dy, finger, tail) = parse_scroll_sweep(rest)?;
-        self.transcript_scroll_sweep = Some(crate::resize::ScrollSweep::new(dy, finger, tail));
-        cx.notify();
+        let sweep = crate::resize::ScrollSweep::new(dy, finger, tail);
+        // One push per frame, from the frame this step draws
+        // ([`Harness::transcript_sweep_tick`]).
+        // The tick asks for its own frame; nothing the root draws moved.
+        cx.on_next_frame(window, move |this, window, cx| this.transcript_sweep_tick(sweep, window, cx));
         Ok(())
     }
 
@@ -531,9 +539,10 @@ impl Harness {
         match phase {
             "begin" => {
                 self.begin_resize(x, cx);
-                // No pointer behind a scripted drag, so `on_frame`'s
-                // release-outside-the-window rule must not end it between
-                // steps (a headless window is never active).
+                // No pointer behind a scripted drag, so the deactivation
+                // rule (`Harness::on_window_activation`: a release outside
+                // the window) must not end it between steps (a headless
+                // window is never active).
                 self.resize.scripted = true;
             }
             "move" => self.drag_resize(x, cx),

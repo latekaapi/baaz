@@ -27,4 +27,4 @@ pub(crate) use open::evict_parked;
 pub(crate) use steps::drain_steps;
 
 #[cfg(test)]
-mod tests;
+pub(in crate::app) mod tests;

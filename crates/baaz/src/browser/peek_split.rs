@@ -190,7 +190,19 @@ impl Harness {
         state.update(cx, |state, _| state.set_corner_radius(12.0));
         self.browser.update(cx, |browser, cx| browser.adopt_peek(Peek { url: url.to_owned(), state, opener }, cx));
         PEEK_OPEN.store(true, Ordering::Relaxed);
-        self.browser.update(cx, |browser, _| browser.peek_focus_pending = true);
+        // A fresh Peek takes the keyboard (so Esc and ⌘↩ reach it), once its
+        // page is laid out: after the frame that mounts it.
+        let this = cx.weak_entity();
+        window.on_next_frame(move |window, cx| {
+            let _ = this.update(cx, |this, cx| {
+                if let Some(peek) = this.browser.read(cx).peek.as_ref() {
+                    let state = peek.state.clone();
+                    let focus = state.read(cx).focus_handle().clone();
+                    window.focus(&focus, cx);
+                    state.update(cx, |state, _| state.focus_page());
+                }
+            });
+        });
         cx.notify();
     }
 

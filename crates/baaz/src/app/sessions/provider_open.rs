@@ -965,9 +965,9 @@ impl Harness {
         let epoch = self.open_state.begin_open();
         // Q4b: the old view's composer keeps no keystrokes while hidden —
         // consume the focus arm at the click (the landing view arms its own
-        // through `activate`, and `on_frame` drops any arm raised
+        // through `activate`, and the settle drops any arm raised
         // mid-switch), so typing lands nowhere until the destination opens.
-        self.focus_composer = false;
+        self.window_sync.focus_composer = false;
         // A record naming no provider this build knows is refused — never
         // reopened on `ProviderId::parse`'s Muse fallback.
         let Some(provider_id) = ProviderId::parse_known(&record.provider) else {

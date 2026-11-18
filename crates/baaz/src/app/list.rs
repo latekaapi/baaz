@@ -190,7 +190,7 @@ impl Harness {
     /// An inline rename on the overlay stack: Escape drops it and hands
     /// the keyboard to the composer.
     pub(crate) fn rename_entry(layer: crate::overlay_stack::Layer) -> crate::overlay_stack::Entry {
-        crate::overlay_stack::Entry::new(layer).on_close(|_, baaz, _| baaz.focus_composer = true)
+        crate::overlay_stack::Entry::new(layer).on_close(|_, baaz, cx| baaz.arm_composer_focus(cx))
     }
 
     /// Open the inline field on a row, seeded with what the row says now.
@@ -219,7 +219,7 @@ impl Harness {
         let Some(session_id) = self.renaming(cx) else { return };
         let text = self.rename.read(cx).value().to_string();
         self.rename_session(session_id, Some(text), cx);
-        self.focus_composer = true;
+        self.arm_composer_focus(cx);
         let _ = window;
     }
 

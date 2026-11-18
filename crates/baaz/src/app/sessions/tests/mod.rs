@@ -5,7 +5,7 @@ use super::*;
 use super::{list::*, open::*, steps::*};
 use support::*;
 
-mod support;
+pub(in crate::app) mod support;
 mod list;
 mod open;
 mod provider_open;

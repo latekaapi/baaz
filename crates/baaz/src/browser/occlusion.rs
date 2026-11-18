@@ -33,7 +33,7 @@ use gpui::{Bounds, Context, Entity, Pixels, WeakEntity};
 
 use super::peek_split::{self, CLOSE, CLOSE_INSET};
 use crate::overlay_stack::LayerKind;
-use super::{chrome, tabs, BrowserView, TabId, BLANK};
+use super::{chrome, tabs, BrowserEvent, BrowserView, TabId, BLANK};
 
 /// Everything that decides whether one session's native view may show.
 ///
@@ -254,6 +254,13 @@ impl BrowserView {
         // nor paint behind the mode. The render path shows the Changes
         // fallback instead, and every pane page hides here.
         let (shown, frame_live) = if in_browse { (None, false) } else { (covers.pane_tab, frame_live) };
+        // The Page float anchors to the pane's page: when its rect moved, the
+        // float follows after this frame (`BrowserEvent::PageRectMoved`).
+        let pane_page_rect = shown.and_then(|id| self.states.get(&id)).and_then(|state| state.read(cx).page_rect());
+        if self.pane_page_rect != pane_page_rect {
+            self.pane_page_rect = pane_page_rect;
+            cx.emit(BrowserEvent::PageRectMoved);
+        }
         // B2a-H2: in Browse the centre shows its tab's page under what the
         // main window draws over it (see `centre_visibility`); the Skills
         // page and a pending provider switch hide it too.
@@ -270,9 +277,10 @@ impl BrowserView {
             // Every route to a new centre tab (close, ⌘T, popup, omnibox,
             // task folder) — not only a sidebar click — moves find: the
             // tab left stops highlighting, and the shared input picks up
-            // the new tab's query on the next frame (`on_frame` holds the
-            // mutable window that `set_value` needs).
-            self.find_resync = Some((self.last_centre_shown, centre_shown));
+            // the new tab's query from the root, which holds the mutable
+            // window that `set_value` needs (`BrowserEvent::CentreSwitched`,
+            // delivered after this frame).
+            cx.emit(BrowserEvent::CentreSwitched { left: self.last_centre_shown, shown: centre_shown });
         }
         if switched || !in_browse {
             self.overlays.update(cx, |o, _| o.stack.close_all(&[LayerKind::Downloads, LayerKind::Extensions, LayerKind::More]));
@@ -337,7 +345,13 @@ impl BrowserView {
             centre_page.origin.y += gpui::px(stack);
             centre_page.size.height = (centre_page.size.height - gpui::px(stack)).max(gpui::px(0.0));
         }
-        self.centre_page_rect = in_browse.then_some(centre_page);
+        // The floats over the page anchor to this rect: when it moved, they
+        // follow after this frame (`BrowserEvent::PageRectMoved`).
+        let centre_page_rect = in_browse.then_some(centre_page);
+        if self.centre_page_rect != centre_page_rect {
+            self.centre_page_rect = centre_page_rect;
+            cx.emit(BrowserEvent::PageRectMoved);
+        }
         let centre_live = browser_visible(centre_visibility(
             base,
             centre_shown.is_some(),
@@ -384,7 +398,9 @@ impl BrowserView {
             let rising = partner_holds && !self.partner_held;
             if centre_live && !peeking && (partner_clicked && !centre_clicked || rising) {
                 crate::baaz_log!("browse: split focus → tab {}", partner.0);
-                self.split_focus = Some(partner);
+                // The root shows it, after this frame (it selects with the
+                // window in hand).
+                cx.emit(BrowserEvent::SplitFocus(partner));
             }
         }
         self.partner_held = partner_holds;
