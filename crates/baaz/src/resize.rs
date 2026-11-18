@@ -22,6 +22,7 @@ use gpui::Context;
 
 use crate::app::Harness;
 use crate::layout;
+use crate::layout::LayoutGlobal as _;
 
 /// Two taps with no travel count as a double-click: the handle reports
 /// positions only, never the click count, so recency is the reset signal.

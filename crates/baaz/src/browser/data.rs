@@ -28,7 +28,7 @@
 //! call asserts it runs inside a worker job whenever the UI thread is
 //! known ([`check_off_ui`]).
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -41,23 +41,7 @@ use super::chrome_import::{self, Imported};
 use super::history::{self, BrowserDb, HistorySink, Visit};
 use super::toolbar::{BookmarkHit, HistoryHit, OmniRow};
 
-thread_local! {
-    /// Set on the thread that built a [`BrowserData`]: the UI thread.
-    static UI_THREAD: Cell<bool> = const { Cell::new(false) };
-    /// Set while the worker runs a job, on whatever thread runs it.
-    static IN_JOB: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Every `BrowserDb` call asserts this: SQLite never runs on the UI thread
-/// outside a worker job. In production the worker runs on the background
-/// executor's threads; under gpui's test executor it runs on the test
-/// thread, inside a job. Checked in tests and debug builds.
-pub(crate) fn check_off_ui(what: &str) {
-    if cfg!(any(test, debug_assertions)) {
-        let on_ui = UI_THREAD.with(Cell::get) && !IN_JOB.with(Cell::get);
-        assert!(!on_ui, "browser.db: `{what}` ran on the UI thread outside the BrowserData worker");
-    }
-}
+use baaz_browser_core::history::{UI_THREAD, IN_JOB};
 
 /// One write or read for the worker, in the order the UI issued them.
 pub(crate) enum Op {
@@ -109,21 +93,7 @@ impl HistorySink for Writer {
     }
 }
 
-/// A bookmark as the front holds it: the row plus its place in its folder.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Mark {
-    pub mark: Bookmark,
-    pub position: i64,
-}
-
-/// A folder as the front holds it (its count is derived, never stored).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FolderRow {
-    pub id: i64,
-    pub name: String,
-    pub parent: Option<i64>,
-    pub position: i64,
-}
+pub(crate) use baaz_browser_core::bookmarks::{FolderRow, Mark};
 
 /// What the UI reads synchronously.
 #[derive(Clone, Debug, Default)]
@@ -883,7 +853,7 @@ mod tests {
     fn history_search_lands_later_and_notifies(cx: &mut gpui::TestAppContext) {
         let path = temp_db("history");
         let data = cx.new(|cx| BrowserData::at(path.clone(), cx));
-        let notified = std::rc::Rc::new(Cell::new(0));
+        let notified = std::rc::Rc::new(std::cell::Cell::new(0));
         let seen = notified.clone();
         let _sub = cx.update(|cx| cx.observe(&data, move |_, _| seen.set(seen.get() + 1)));
         data.update(cx, |data, _| {

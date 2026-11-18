@@ -33,7 +33,7 @@ cef = ["dep:aui-cef"]
 # `test-support`. The release bundle turns this on (and nothing else of the
 # probe) so a note taken in the shipped app keeps its window picture.
 window-capture = ["gpui/test-support"]
-probe = ["window-capture", "dep:gpui_platform", "gpui_platform/test-support"]
+probe = ["window-capture", "dep:gpui_platform", "gpui_platform/test-support", "baaz-core/probe"]
 
 [dependencies]
 gpui.workspace = true
@@ -48,6 +48,11 @@ aui-terminal.workspace = true
 aui-webview.workspace = true
 aui-cef = { workspace = true, optional = true }
 session-store.workspace = true
+# The window-free engine (docs/82 4.11): stores, models and pure logic; no gpui.
+baaz-core.workspace = true
+# The browser's window-free half (docs/82 4.11): tabs, history, bookmarks,
+# ad blocking, the agent page tools and their policy.
+baaz-browser-core.workspace = true
 # Every provider, Muse included, through the seam (P4): `provider-muse` is
 # the only crate that names Muse's wire; the ratchet in tests/seam_ratchet.rs
 # keeps `muse-client` out of this crate.
@@ -68,16 +73,9 @@ chrono.workspace = true
 image.workspace = true
 base64.workspace = true
 ignore.workspace = true
-# FSEvents for the right pane's watch (already in the tree through gpui-component).
-notify = "7.0"
-pdf-extract.workspace = true
-calamine.workspace = true
-zip.workspace = true
-# The billing-tier probe drives the muse TUI under a pseudo-terminal
-# (`crates/baaz/src/tier.rs`); `openpty` and `TIOCSCTTY` are the whole use.
+# Signals, pids and sockets: quit signals, the single-instance check, the
+# stall watchdog and the terminal service.
 libc.workspace = true
-adblock = { version = "0.13.5", default-features = false, features = ["full-regex-handling", "embedded-domain-resolver"] }
-flate2 = "1"
 
 # Feedback mode's element probe hit-tests the window through macOS
 # accessibility, in-process (`crates/baaz/src/feedback/probe.rs`).
@@ -96,6 +94,10 @@ criterion = { version = "0.5.1", default-features = false }
 # The test platform (`TestAppContext`, `VisualTestContext`): unit tests get it
 # whether or not `probe` is on.
 gpui = { workspace = true, features = ["test-support"] }
+# The core's test seams (temp state dirs, synchronous bridges) for this
+# crate's tests, exactly as they had them while the modules lived here.
+baaz-core = { workspace = true, features = ["test-support"] }
+baaz-browser-core = { workspace = true, features = ["test-support"] }
 
 [package.metadata.cargo-machete]
 # `gpui_platform` has no direct `use` in this crate's source, so cargo-machete

@@ -3,6 +3,7 @@
 //! pin, reopen, the ⌘1–9 / ⌘W / ⌘⇧T shortcuts) and the session tabs.
 
 use super::*;
+use crate::layout::LayoutGlobal as _;
 
 impl Harness {
     /// Open a tab on `url` — a person tab in Browse mode, otherwise a tab

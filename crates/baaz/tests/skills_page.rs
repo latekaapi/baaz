@@ -5,7 +5,7 @@
 //! sections draw, the activation spellings the meter sums, and the
 //! `skill-shadowed` diagnostic shape the dimmed rows are built from. The
 //! parsing and grouping logic itself is pinned by unit tests beside the
-//! model (`crates/baaz/src/skills.rs`) and the page
+//! model (`crates/baaz-core/src/skills.rs`) and the page
 //! (`crates/baaz/src/skills_page.rs`); this suite pins the ground they
 //! stand on, straight from real `muse skills list --json` output captured
 //! under scratch XDG homes (descriptions trimmed).

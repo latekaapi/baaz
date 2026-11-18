@@ -13,9 +13,30 @@ use std::path::{Path, PathBuf};
 fn manifest() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
+/// `name` under `src/`; a module the core crates took over (docs/82 4.11)
+/// is read where it lives now: `browser/x.rs` in `baaz-browser-core`,
+/// anything else in `baaz-core`.
+fn resolve(name: &str) -> PathBuf {
+    let app = manifest().join("src").join(name);
+    if app.exists() {
+        return app;
+    }
+    match name.strip_prefix("browser/") {
+        Some(rest) => manifest().join("../baaz-browser-core/src").join(rest),
+        None => manifest().join("../baaz-core/src").join(name),
+    }
+}
+
 
 fn source(name: &str) -> String {
-    let path = manifest().join("src").join(name);
+    let path = resolve(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("source reads: {}", path.display()))
+}
+
+/// A file of the window-free core crate (`crates/baaz-core/src`, docs/82
+/// 4.11), where the model halves of these modules moved.
+fn core_source(name: &str) -> String {
+    let path = manifest().join("../baaz-core/src").join(name);
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("source reads: {}", path.display()))
 }
 
@@ -41,7 +62,7 @@ fn activation_and_reopen_wiring_stays_app_side() {
         handoff.contains("attach_handoff_prefix") && handoff.contains("read_snapshot"),
         "reopening must reattach the prefix from the snapshot"
     );
-    let module = source("handoff_snapshot.rs");
+    let module = core_source("handoff_snapshot.rs");
     assert!(
         module.contains("pub fn write_snapshot")
             && module.contains("support_dir()")
@@ -194,7 +215,7 @@ fn sidebar_half_wiring_one_row_per_chain() {
         events.contains("HandoffOpenSource"),
         "the bypass needs its own event, not the card's open-session one"
     );
-    let sidebar = source("sidebar.rs");
+    let sidebar = core_source("sidebar.rs");
     assert!(
         sidebar.contains("pub fn collapse_handoff_chains")
             && sidebar.contains("pub fn chain_head")

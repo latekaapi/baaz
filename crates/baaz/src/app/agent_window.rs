@@ -19,6 +19,7 @@ use gpui::AppContext as _;
 use gpui::{Context, Window};
 
 use super::Harness;
+use crate::layout::LayoutGlobal as _;
 
 /// What the line shows when no agent is driving the tab on screen.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

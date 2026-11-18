@@ -4,7 +4,8 @@
 //! feature, and what a capture changes about a run is one injected value,
 //! `crate::runtime::Runtime`, not a check scattered through the code:
 //!
-//! * no `deterministic()` call anywhere outside `runtime.rs`, and no
+//! * no `deterministic()` call anywhere outside `runtime.rs` (in the core
+//!   crate since docs/82 4.11; the core crates' sources are read too), and no
 //!   `scripted_chrome()` at all — a scripted run opens its lanes through
 //!   the same open path as a real one, with a scripted factory in it;
 //! * `steps`, `shot`, `bench`, `perf_budget`, `perf_turn` and the three
@@ -33,8 +34,19 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
-/// Every `.rs` file under `src/`, as `(path relative to src, text)`.
+/// Every `.rs` file under `src/` and under the two core crates'
+/// (`crates/baaz-core/src`, `crates/baaz-browser-core/src`, docs/82 4.11),
+/// as `(path relative to src, text)`; a core file's path starts with its
+/// crate's name.
 fn sources() -> Vec<(String, String)> {
+    let mut all = sources_under(&crate_root().join("src"), "");
+    all.extend(sources_under(&crate_root().join("../baaz-core/src"), "baaz-core/"));
+    all.extend(sources_under(&crate_root().join("../baaz-browser-core/src"), "baaz-browser-core/"));
+    all
+}
+
+/// Every `.rs` file under `src`, as `(prefix + path relative to src, text)`.
+fn sources_under(src: &Path, prefix: &str) -> Vec<(String, String)> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).expect("src reads").flatten() {
             let path = entry.path();
@@ -45,15 +57,14 @@ fn sources() -> Vec<(String, String)> {
             }
         }
     }
-    let src = crate_root().join("src");
     let mut files = Vec::new();
-    walk(&src, &mut files);
+    walk(src, &mut files);
     files.sort();
     files
         .into_iter()
         .map(|path| {
-            let rel = path.strip_prefix(&src).expect("under src").to_string_lossy().replace('\\', "/");
-            (rel, read(&path))
+            let rel = path.strip_prefix(src).expect("under src").to_string_lossy().replace('\\', "/");
+            (format!("{prefix}{rel}"), read(&path))
         })
         .collect()
 }
@@ -119,7 +130,7 @@ fn non_test_lines(text: &str) -> Vec<&str> {
 fn no_deterministic_check_lives_outside_the_runtime() {
     let mut hits = Vec::new();
     for (rel, text) in sources() {
-        if rel == "runtime.rs" {
+        if rel == "baaz-core/runtime.rs" {
             continue;
         }
         for (n, line) in text.lines().enumerate() {
@@ -129,7 +140,7 @@ fn no_deterministic_check_lives_outside_the_runtime() {
         }
     }
     assert!(hits.is_empty(), "a capture is a property of the runtime, not a check:\n{}", hits.join("\n"));
-    let runtime = read(&crate_root().join("src/runtime.rs"));
+    let runtime = read(&crate_root().join("../baaz-core/src/runtime.rs"));
     assert!(!runtime.contains("scripted_chrome()"), "no scripted-chrome check, even in the runtime");
 }
 
@@ -190,6 +201,16 @@ fn test_support_comes_only_through_the_probe() {
     // feature carries exactly gpui's, nothing of the probe.
     let capture = features.lines().find(|line| line.starts_with("window-capture = ")).expect("a window-capture feature");
     assert_eq!(capture.trim(), "window-capture = [\"gpui/test-support\"]", "window-capture is gpui's test-support alone");
+    // The core crate's own probe (on by default for its tests) reaches the
+    // app only through this crate's `probe`: the workspace pins it with no
+    // default features (docs/82 4.11).
+    assert!(probe.contains("baaz-core/probe"), "`probe` turns on the core's probe");
+    let workspace = read(&repo_root().join("Cargo.toml"));
+    let core_entry = workspace
+        .lines()
+        .find(|line| line.starts_with("baaz-core = "))
+        .expect("the workspace names baaz-core");
+    assert!(core_entry.contains("default-features = false"), "baaz-core comes in without its default probe: `{core_entry}`");
     let dependencies = section("dependencies");
     assert!(
         !dependencies.contains("test-support"),

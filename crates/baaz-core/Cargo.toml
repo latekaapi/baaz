@@ -1,0 +1,51 @@
+[package]
+name = "baaz-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Baaz's engine with no window: the session list and its stores, providers, usage, projects, search, import and git, as plain data and functions. No gpui (tests/core_ratchet.rs in baaz)."
+publish = false
+
+[features]
+# On by default so `cargo test -p baaz-core` runs every module's tests, the
+# probe-only helpers' included. `baaz` depends on this crate with
+# `default-features = false` and forwards its own `probe` feature, so the
+# release bundle (`--no-default-features`) carries none of it.
+default = ["probe"]
+# The capture and scripting surface (docs/82 4.10): the fixtures and
+# probe-only helpers in these modules.
+probe = []
+# Test seams `baaz`'s own tests need: the `cfg(test)` paths of these modules
+# (temp state dirs, synchronous bridges, fixture helpers). `baaz` turns it on
+# from its dev-dependencies only, so no shipped build carries it.
+test-support = []
+
+[dependencies]
+aui-protocol.workspace = true
+provider.workspace = true
+provider-muse.workspace = true
+provider-codex = { path = "../provider-codex" }
+provider-claude-code = { path = "../provider-claude-code" }
+futures.workspace = true
+crossbeam-channel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+rusqlite.workspace = true
+# The tier probe drives the muse TUI under a pseudo-terminal (`tier.rs`):
+# `openpty` and `TIOCSCTTY` are the whole use.
+libc.workspace = true
+# The `log` crate's lines from the libraries under the app into Baaz's own
+# log file (`log.rs`, `init_forward`).
+log = "0.4"
+# Attachments: spreadsheets, PDFs and archives read as text (`attachments.rs`).
+calamine.workspace = true
+pdf-extract.workspace = true
+zip.workspace = true
+ignore.workspace = true
+# FSEvents for the right pane's watch (`right_watch.rs`).
+notify = "7.0"

@@ -2,6 +2,7 @@
 //! input, kept per tab, and its steps.
 
 use super::*;
+use crate::layout::LayoutGlobal as _;
 
 impl Harness {
 

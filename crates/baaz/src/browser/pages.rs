@@ -3,6 +3,7 @@
 //! pages, popups and the page intents (screenshot, annotate, draft).
 
 use super::*;
+use crate::layout::LayoutGlobal as _;
 
 impl Harness {
 

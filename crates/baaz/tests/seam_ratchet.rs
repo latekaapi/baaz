@@ -20,6 +20,35 @@ fn source_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
+/// The app's sources and the two window-free crates it is built on
+/// (docs/82 4.11), with the prefix a hit's path carries: the seam binds the
+/// code that moved out of the app as much as what stayed.
+fn source_roots() -> [(PathBuf, &'static str); 3] {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    [
+        (source_root(), ""),
+        (crates.join("baaz-core/src"), "baaz-core/"),
+        (crates.join("baaz-browser-core/src"), "baaz-browser-core/"),
+    ]
+}
+
+/// Every `.rs` file under [`source_roots`] whose text satisfies `hit`, as
+/// prefixed paths, sorted.
+fn matching_files(hit: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut hits = Vec::new();
+    for (root, prefix) in source_roots() {
+        let mut files = Vec::new();
+        rust_files(&root, &mut files);
+        for path in files {
+            if fs::read_to_string(&path).is_ok_and(|text| hit(&text)) {
+                hits.push(format!("{prefix}{}", path.strip_prefix(&root).unwrap_or(&path).display()));
+            }
+        }
+    }
+    hits.sort();
+    hits
+}
+
 fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -33,20 +62,7 @@ fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
 }
 
 fn files_mentioning_muse_client() -> Vec<String> {
-    let root = source_root();
-    let mut files = Vec::new();
-    rust_files(&root, &mut files);
-    let mut hits: Vec<String> = files
-        .into_iter()
-        .filter(|path| {
-            fs::read_to_string(path).is_ok_and(|text| text.contains("muse_client"))
-        })
-        .map(|path| {
-            path.strip_prefix(&root).unwrap_or(&path).display().to_string()
-        })
-        .collect();
-    hits.sort();
-    hits
+    matching_files(|text| text.contains("muse_client"))
 }
 
 #[test]
@@ -54,7 +70,7 @@ fn no_file_names_muse_client() {
     let hits = files_mentioning_muse_client();
     assert!(
         hits.is_empty(),
-        "{} files under crates/baaz/src mention `muse_client`.\n\
+        "{} files under crates/baaz/src and the core crates mention `muse_client`.\n\
          New code must reach the wire through `provider` / `provider-muse`, not directly.\nFiles:\n  {}",
         hits.len(),
         hits.join("\n  "),
@@ -72,23 +88,15 @@ fn the_rewired_files_stay_off_the_wire() {
     // `conn.rs` neither: the transitional bundle went with P4 step 6c, and
     // the connection is the hub alone.
     assert!(
-        !hits.iter().any(|f| f == "conn.rs"),
+        !hits.iter().any(|f| f == "baaz-core/conn.rs"),
         "conn.rs mentions `muse_client` again; the connection is the hub alone",
     );
 }
 
-/// Every `.rs` file under `crates/baaz/src` that contains `needle`.
+/// Every `.rs` file under `crates/baaz/src` and the core crates that
+/// contains `needle`.
 fn files_mentioning(needle: &str) -> Vec<String> {
-    let root = source_root();
-    let mut files = Vec::new();
-    rust_files(&root, &mut files);
-    let mut hits: Vec<String> = files
-        .into_iter()
-        .filter(|path| fs::read_to_string(path).is_ok_and(|text| text.contains(needle)))
-        .map(|path| path.strip_prefix(&root).unwrap_or(&path).display().to_string())
-        .collect();
-    hits.sort();
-    hits
+    matching_files(|text| text.contains(needle))
 }
 
 #[test]
@@ -99,13 +107,16 @@ fn no_file_names_the_muse_adapter_either() {
 
 #[test]
 fn the_manifest_lists_no_wire_crate() {
-    let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).expect("manifest");
-    for wire in ["muse-client", "muse-adapter"] {
-        let listed = manifest.lines().any(|line| {
-            let line = line.trim_start();
-            !line.starts_with('#') && (line.starts_with(&format!("{wire}.")) || line.starts_with(&format!("{wire} ")))
-        });
-        assert!(!listed, "crates/baaz depends on `{wire}` again; reach Muse through `provider-muse`");
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    for krate in ["baaz", "baaz-core", "baaz-browser-core"] {
+        let manifest = fs::read_to_string(crates.join(krate).join("Cargo.toml")).expect("manifest");
+        for wire in ["muse-client", "muse-adapter"] {
+            let listed = manifest.lines().any(|line| {
+                let line = line.trim_start();
+                !line.starts_with('#') && (line.starts_with(&format!("{wire}.")) || line.starts_with(&format!("{wire} ")))
+            });
+            assert!(!listed, "crates/{krate} depends on `{wire}` again; reach Muse through `provider-muse`");
+        }
     }
 }
 
@@ -135,7 +146,8 @@ const OPEN_ROW_PATHS: [&str; 13] = [
     "app/sessions/events.rs",
     "app/sessions/handoff.rs",
     "app/sessions/steps.rs",
-    "app/sessions/state.rs",
+    // The open/switch state machine, in the core crate since docs/82 4.11.
+    "../../baaz-core/src/lifecycle.rs",
     "app.rs",
     "app/titles.rs",
     "right_changes.rs",

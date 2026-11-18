@@ -232,6 +232,7 @@ use crate::session::{SessionEvent, SessionView};
 use crate::wire::WireCall;
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use crate::layout::LayoutGlobal as _;
 
 /// Scripted-step accounting: a flow script that names a renamed verb used to
 /// pass silently (a stderr line, exit 0), so the script rotted into a no-op
@@ -1346,6 +1347,7 @@ pub(crate) fn run_login_steps(this: &mut Harness, cx: &mut Context<Harness>) {
 #[cfg(test)]
 mod tests {
     use super::{all_window_steps, LOGIN_VERBS, SESSION_VERBS, WINDOW_VERBS};
+    use crate::layout::LayoutGlobal as _;
     use std::collections::BTreeSet;
 
     /// This very file, so the documented tables and the verb tables can be

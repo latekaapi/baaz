@@ -26,6 +26,7 @@ use crate::overlays::{Menu, MenuKind};
 use crate::projects;
 #[cfg(feature = "probe")]
 use crate::steps::StepResult;
+use crate::layout::LayoutGlobal as _;
 
 /// The eight label-ramp slots as the Colour submenu names them, in token
 /// order (`label-1` … `label-8`, red through pink).

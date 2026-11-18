@@ -35,6 +35,7 @@ use crate::layout::{self, RightKind};
 use crate::overlays::{Command, Dialog, DialogAction, Menu, MenuKind, PaletteKind};
 use crate::wire::WireCall;
 use crate::{files, skills};
+use crate::layout::LayoutGlobal as _;
 
 /// Actions of the header's overflow menu, in row order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1107,6 +1108,7 @@ impl Harness {
 #[cfg(test)]
 mod tests {
     use aui::nav::MenuRow;
+    use crate::layout::LayoutGlobal as _;
 
     /// The header ⋯ menu's "Feedback mode" row (docs/83 §5, task 2.6):
     /// absent while the setting is off, last and checked while the mode is

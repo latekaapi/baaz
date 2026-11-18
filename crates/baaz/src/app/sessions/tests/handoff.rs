@@ -453,7 +453,7 @@ fn a_late_summary_after_ack_leaves_the_extractive_pack(cx: &mut gpui::TestAppCon
                 );
                 assert!(
                     matches!(
-                        run.steps()[1].state,
+                        crate::handoff::run_steps(&run)[1].state,
                         aui::transcript::HandoffStepState::Current
                     ),
                     "the summary step reads Current while waiting"

@@ -14,6 +14,7 @@ use gpui_kit::base::input::{Input, InputEvent, InputState};
 use crate::app::Harness;
 use crate::right_pane::RightPane;
 use crate::right::BrowserPane;
+use crate::layout::LayoutGlobal as _;
 
 /// A page with nothing in it yet.
 pub(crate) fn is_blank(url: &str) -> bool {

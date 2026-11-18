@@ -20,6 +20,7 @@ use gpui_kit::base::v_flex;
 
 use crate::right_pane::RightPane;
 use crate::right::{FilePreview, PreviewContent, RightCache};
+use crate::layout::LayoutGlobal as _;
 
 /// A text preview's split lines: (path, text length, lines).
 type LinesMemo = (String, usize, Arc<Vec<String>>);

@@ -53,14 +53,6 @@ pub(crate) const PREVIEW_MAX_BYTES: u64 = 1024 * 1024;
 /// 1 MB note must not turn into ten thousand elements.
 const PREVIEW_MD_BLOCKS_CAP: usize = 300;
 
-/// Render-path I/O probe: incremented by [`run_git`] and by every real
-/// `read_dir` in the file walk, and by nothing else. [`render`] must never
-/// move it; the purity test renders every kind twice and asserts it stays
-/// put. A directory served from [`DirListCache`] moves [`cache_hit_count`]
-/// instead, so the two apart prove a refresh skipped the filesystem.
-#[cfg(test)]
-static RENDER_IO_COUNT: AtomicUsize = AtomicUsize::new(0);
-
 /// Directory listings served from [`DirListCache`] without a `read_dir`.
 #[cfg(test)]
 static DIR_CACHE_HITS: AtomicUsize = AtomicUsize::new(0);
@@ -74,7 +66,7 @@ static WALK_COLLECTED: AtomicUsize = AtomicUsize::new(0);
 /// process start (or the last [`reset_io_count`]).
 #[cfg(test)]
 pub(crate) fn io_count() -> usize {
-    RENDER_IO_COUNT.load(Ordering::Relaxed)
+    crate::render_io::io_count()
 }
 
 /// How many directory listings came from [`DirListCache`] since process
@@ -95,17 +87,13 @@ pub(crate) fn walk_collected_count() -> usize {
 /// purity test drives [`render`] between the reset and the assert.
 #[cfg(test)]
 pub(crate) fn reset_io_count() {
-    RENDER_IO_COUNT.store(0, Ordering::Relaxed);
+    crate::render_io::reset_io_count();
     DIR_CACHE_HITS.store(0, Ordering::Relaxed);
     WALK_COLLECTED.store(0, Ordering::Relaxed);
 }
 
-/// Count one blocking read toward [`io_count`] in test builds; nothing in
-/// production, where the counter does not exist.
-pub(crate) fn note_io() {
-    #[cfg(test)]
-    RENDER_IO_COUNT.fetch_add(1, Ordering::Relaxed);
-}
+pub(crate) use crate::render_io::note_io;
+use crate::layout::LayoutGlobal as _;
 
 /// Count one cache-served directory toward [`cache_hit_count`] in test
 /// builds; nothing in production.

@@ -16,6 +16,7 @@
 //! decided per frame by the one occlusion owner (`occlusion.rs`).
 
 use super::*;
+use crate::layout::LayoutGlobal as _;
 
 impl Harness {
 

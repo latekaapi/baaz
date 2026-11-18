@@ -23,28 +23,8 @@ use gpui::{App, Context, Global, SharedString, SystemNotification};
 
 use crate::app::Harness;
 use crate::sidebar::{NeedKind, SessionEntry, SessionState};
-
-/// What the person asked to hear about (Settings › Notifications, task
-/// 3.5). Every event on, the badge on, the sound off by default.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct NotifyPrefs {
-    /// A session moved to needing the person (approval or question).
-    pub needs_you: bool,
-    /// A turn finished while nobody was reading it.
-    pub done: bool,
-    /// A turn ended in an error.
-    pub failed: bool,
-    /// Play the system sound with each notification.
-    pub sound: bool,
-    /// Show the needs-you count on the Dock icon.
-    pub badge: bool,
-}
-
-impl Default for NotifyPrefs {
-    fn default() -> Self {
-        Self { needs_you: true, done: true, failed: true, sound: false, badge: true }
-    }
-}
+pub(crate) use crate::layout::NotifyPrefs;
+use crate::layout::LayoutGlobal as _;
 
 /// One notification to post.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -20,6 +20,7 @@
 use gpui::{AsyncApp, Context, Window};
 
 use crate::app::Harness;
+use crate::layout::LayoutGlobal as _;
 
 /// What an incoming URL means for the shell. Pure, so unit tests pin
 /// it without a window.

@@ -108,6 +108,16 @@ const CHECKS_POLL: Duration = Duration::from_secs(15);
 /// Otherwise the PR is read at most this often.
 const PR_POLL: Duration = Duration::from_secs(60);
 
+/// The PR card's state for a pull request's ([`git_ops::PrState`]).
+fn pr_state(state: git_ops::PrState) -> aui::workbench::PrState {
+    match state {
+        git_ops::PrState::Open => aui::workbench::PrState::Open,
+        git_ops::PrState::Draft => aui::workbench::PrState::Draft,
+        git_ops::PrState::Merged => aui::workbench::PrState::Merged,
+        git_ops::PrState::Closed => aui::workbench::PrState::Closed,
+    }
+}
+
 /// A stable hash of the change set (paths and counts): one draft per set.
 fn change_set_key(files: &[FileChange]) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -1069,7 +1079,7 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
         Foot::Pr(pr) => {
             let url = pr.url.clone();
             let view = text_action("right-pr-view", "View", Some(IconName::External), 24.0, cx).on_click(cx.listener(move |_, _, _, cx| cx.emit(RightPaneEvent::ViewPullRequest(url.clone()))));
-            pr_card("right-pr", pr.title.clone(), pr.number, pr.state, pr.checks, view, cx).into_any_element()
+            pr_card("right-pr", pr.title.clone(), pr.number, pr_state(pr.state), pr.checks, view, cx).into_any_element()
         }
     }
 }
@@ -1190,7 +1200,7 @@ mod tests {
         assert_eq!(foot_for(&tree(vec![], "f", Some("origin/f"), 2), &ui), Foot::Push { ahead: 2 });
         assert_eq!(foot_for(&tree(vec![], "f", Some("origin/f"), 0), &ui), Foot::CreatePr);
         assert_eq!(foot_for(&tree(vec![], "main", Some("origin/main"), 0), &ui), Foot::Level);
-        ui.pr = Some(Some(PullRequest { number: 7, title: "t".into(), url: "u".into(), state: aui::workbench::PrState::Open, checks: None }));
+        ui.pr = Some(Some(PullRequest { number: 7, title: "t".into(), url: "u".into(), state: git_ops::PrState::Open, checks: None }));
         assert!(matches!(foot_for(&tree(vec![], "f", Some("origin/f"), 0), &ui), Foot::Pr(_)));
         // A branch never pushed: Push, counted against the default branch.
         let fresh = ChangesUi { default_branch: Some("main".into()), unpushed_without_upstream: Some(3), ..ChangesUi::default() };

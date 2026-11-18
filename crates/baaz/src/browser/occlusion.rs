@@ -34,6 +34,7 @@ use gpui::{Bounds, Context, Entity, Pixels, WeakEntity};
 use super::peek_split::{self, CLOSE, CLOSE_INSET};
 use crate::overlay_stack::LayerKind;
 use super::{chrome, tabs, BrowserEvent, BrowserView, TabId, BLANK};
+use crate::layout::LayoutGlobal as _;
 
 /// Everything that decides whether one session's native view may show.
 ///

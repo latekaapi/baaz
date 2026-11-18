@@ -40,13 +40,10 @@ use aui_icons::Provider as AuiProvider;
 use crate::providers::ProviderId;
 use crate::provider_status::{Auth, ProviderStatus};
 
-/// Serialize the tests that touch the scrubbed env names: the test
-/// runner shares one environment across threads in this binary. Every
-/// test module that sets a `CLAUDE_*` / `ANTHROPIC_*` name holds this
-/// while it does — including the PTY tests in
-/// [`crate::terminal::host`].
+/// The scrub-env lock ([`crate::skills::SCRUB_ENV_LOCK`]), where this
+/// module's tests and the PTY tests in [`crate::terminal::host`] take it.
 #[cfg(test)]
-pub(crate) static SCRUB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) use crate::skills::SCRUB_ENV_LOCK;
 
 // ------------------------------------------------------------ launch
 
@@ -121,14 +118,7 @@ pub fn account_words(status: &ProviderStatus) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
-/// Whether the login in force is an API key (Claude Code's
-/// `authMethod: "api_key"`, Codex's `account.type == "apiKey"`): every turn
-/// bills that key, which the status line says (owner 2026-10-23: say it,
-/// don't block).
-pub fn api_key_login(status: &ProviderStatus) -> bool {
-    matches!(&status.auth, Auth::SignedIn { method: Some(method), .. }
-        if matches!(method.to_ascii_lowercase().replace('_', "").as_str(), "apikey"))
-}
+pub use crate::details::api_key_login;
 
 /// The installed version, when the CLI is below Baaz's floor: the status
 /// line then reads "<version> is older than Baaz supports (<floor>)".
@@ -810,7 +800,7 @@ impl ConnectScreen {
             }
             ConnectIntent::SetDefault(provider) => {
                 self.set_menu(false, cx);
-                cx.emit(ConnectEvent::SetDefault(ProviderId::from_icon(provider)));
+                cx.emit(ConnectEvent::SetDefault(crate::providers::provider_from_icon(provider)));
             }
             ConnectIntent::Assist(key) if key.as_ref() == crate::import_ui::IMPORT_ASSIST_KEY => {
                 cx.emit(ConnectEvent::OpenImportSheet);

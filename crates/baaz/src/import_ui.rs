@@ -34,6 +34,7 @@ use gpui::{div, prelude::*, px, AnyElement, Context, SharedString};
 use crate::app::Harness;
 use crate::import::{self, Choice, Found, Plan, CLAUDE, CODEX};
 use crate::providers::ProviderId;
+use crate::providers::ProviderMark as _;
 
 /// Sessions per background batch: a batch lands as one store write and one
 /// sidebar merge, so the rows appear as the import goes.

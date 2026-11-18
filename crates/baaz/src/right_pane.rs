@@ -46,6 +46,7 @@ use crate::region::Region;
 use crate::resize::RightResizeDrag;
 use crate::right::{self, RightCache};
 use crate::session::SessionView;
+use crate::layout::LayoutGlobal as _;
 
 #[cfg(test)]
 thread_local! {

@@ -1970,6 +1970,7 @@ fn key_bytes_for(key: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::LayoutGlobal as _;
     use std::sync::atomic::{AtomicU32, AtomicU64};
     use std::time::Duration;
 

@@ -227,6 +227,7 @@ mod shell;
 pub(crate) mod spans;
 
 pub use runtime::{RuntimeEvent, SessionRuntime};
+use crate::layout::LayoutGlobal as _;
 
 /// What every session view is handed by the window that opens it.
 ///

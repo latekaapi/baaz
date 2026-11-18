@@ -11,6 +11,7 @@ use gpui::{div, prelude::*, Context, Window};
 
 use super::Harness;
 use crate::browser::Owner;
+use crate::providers::ProviderMark as _;
 
 /// The hand-off picker: one [`crate::picker::Picker`] over the card.
 pub(crate) type HandoffPicker = crate::picker::Picker<HandoffDelegate>;

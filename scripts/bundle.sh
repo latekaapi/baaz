@@ -18,7 +18,7 @@
 # `mcp-bridge` rides beside the baaz binary: it is the terminal relay every
 # provider route spawns (`config.mcpServers`, `--mcp-config`, `-c
 # mcp_servers.baaz…` all name the sibling — see
-# `crates/baaz/src/terminal/relay.rs`).
+# `crates/baaz-core/src/terminal_relay.rs`).
 #
 # The bundle is ad-hoc signed so it launches on this machine with `open`.
 # Re-running the script assembles the new app beside the old one and swaps

@@ -45,6 +45,7 @@ use gpui::{AnyView, Context, EntityId, FocusHandle, Subscription};
 use crate::app::Harness;
 
 use crate::overlays::{Dialog, Menu, MenuKind, Palette};
+use crate::layout::LayoutGlobal as _;
 
 /// Where an entry draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

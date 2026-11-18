@@ -2,6 +2,7 @@
 //! `browser/mod.rs`).
 
 use super::*;
+use crate::layout::LayoutGlobal as _;
 
 impl Harness {
 

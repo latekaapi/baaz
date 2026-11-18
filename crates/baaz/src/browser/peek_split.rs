@@ -22,6 +22,7 @@ use gpui::{prelude::*, Bounds, Context, Entity, Pixels, Window};
 use super::tabs::{Owner, TabId};
 use crate::app::Harness;
 use super::BrowserView;
+use crate::layout::LayoutGlobal as _;
 
 /// Whether a Peek stands open: the CEF key router reads it from its
 /// callback (no Harness there) to claim Esc and ⌘↩ for the Peek.

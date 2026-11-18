@@ -112,6 +112,7 @@ pub(crate) enum OverlayKind {
 mod bookmark;
 mod card;
 pub(crate) use bookmark::BookmarkView;
+use crate::layout::LayoutGlobal as _;
 
 /// A notes-panel click, run on the main window.
 type NotesClick = std::rc::Rc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;

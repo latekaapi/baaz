@@ -18,10 +18,12 @@ mod events;
 mod handoff;
 #[cfg(feature = "probe")]
 mod steps;
-mod state;
 
 use provider_open::*;
-pub(crate) use state::{HandoffState, OpenState};
+pub(crate) use baaz_core::lifecycle::HandoffState;
+/// The open/switch/replace state machine ([`baaz_core::lifecycle`]) over
+/// this app's drafts.
+pub(crate) type OpenState = baaz_core::lifecycle::OpenState<crate::session::Draft>;
 
 /// Named from outside the app module: the parked-MRU rule the registry
 /// applies and the step drain the login script shares.

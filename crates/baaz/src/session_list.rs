@@ -31,6 +31,7 @@ use crate::providers::ProviderId;
 use crate::index::IndexEntry;
 use crate::projects::Projects;
 use crate::sidebar::{self, SessionEntry};
+use crate::layout::LayoutGlobal as _;
 
 /// What a list read needs from outside the list: the open session, the
 /// awaited click, whether either is an unsent draft (an unsent session has

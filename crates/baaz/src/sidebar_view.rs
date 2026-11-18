@@ -50,6 +50,7 @@ use gpui_kit::base::input::TextareaState;
 use crate::session_list::{ListFacts, SessionList, SessionListEvent};
 use crate::sidebar::{Grouping, SessionEntry};
 use crate::tier::Tier;
+use crate::layout::LayoutGlobal as _;
 
 /// How long the sidebar's new rows take to arrive after a mode switch.
 pub(crate) const MODE_FADE: std::time::Duration = std::time::Duration::from_millis(80);

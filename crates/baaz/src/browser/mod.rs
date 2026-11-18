@@ -49,16 +49,16 @@ use crate::app::Harness;
 use crate::layout::RightKind;
 
 pub(crate) mod adblock;
-pub(crate) mod agents;
+pub(crate) use baaz_core::browser_prefs::agents;
 pub(crate) mod assistant;
 pub(crate) mod chrome;
-pub(crate) mod bookmarks;
-pub(crate) mod chrome_import;
-pub(crate) mod favicons;
-pub(crate) mod history;
+pub(crate) use baaz_browser_core::bookmarks;
+pub(crate) use baaz_browser_core::chrome_import;
+pub(crate) use baaz_browser_core::favicons;
+pub(crate) use baaz_browser_core::history;
 pub(crate) mod peek_split;
-pub(crate) mod automation;
-pub mod clone_sweep;
+pub(crate) use baaz_browser_core::automation;
+pub use baaz_browser_core::clone_sweep;
 mod sidebar_actions;
 mod view;
 mod occlusion;
@@ -75,7 +75,7 @@ mod permissions;
 mod steps;
 mod sync;
 mod tabs_actions;
-pub(crate) mod tabs;
+pub(crate) use baaz_browser_core::tabs;
 pub(crate) mod toolbar;
 
 pub(crate) use view::{BrowserEvent, BrowserView};
@@ -259,14 +259,7 @@ pub(crate) fn annotations_draft_block(annotations: &[Annotation], url: &str) -> 
     out
 }
 
-/// Whether `current` is a real navigation worth persisting: non-empty, not
-/// the blank default, and different from what is already stored. The poll
-/// drains many times a second; only a change writes `sessions.json`. Merely
-/// showing the pane must leave the stored state untouched — `about:blank`
-/// is where a fresh webview starts, not somewhere the person went.
-pub(crate) fn should_remember(current: &str, stored: Option<&str>) -> bool {
-    !current.is_empty() && current != BLANK && stored != Some(current)
-}
+pub(crate) use baaz_browser_core::tabs::should_remember;
 
 /// The URL a fresh webview for a session opens on: its last URL, else blank.
 pub(crate) fn initial_url(stored: Option<&str>) -> &str {
@@ -476,6 +469,7 @@ pub(crate) fn face_types(label: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::layout::LayoutGlobal as _;
     use super::{
         annotations_draft_block, browser_centre_bounds, browser_page_bounds, browser_pane_showing,
         browser_session_active, browser_visible, initial_url,

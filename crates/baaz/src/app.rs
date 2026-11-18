@@ -101,6 +101,7 @@ use crate::search::{FileHit, SessionHit};
 use crate::terminal::{self, TerminalHost, TerminalService};
 use crate::wire::WireCall;
 use crate::{layout, Args};
+use crate::layout::LayoutGlobal as _;
 
 actions!(
     baaz,
@@ -602,44 +603,7 @@ pub(crate) enum UndoBatch {
 /// scope it was queried in — a narrowed palette names its project.
 type SearchStatusKey = (bool, usize, usize, bool, String);
 
-/// How to re-run a failed provider open from the inline failure state (Z4).
-#[derive(Clone)]
-pub(crate) enum ProviderOpenRetry {
-    /// Reopen the stored session: a failed sidebar-click reopen.
-    Reopen(Box<crate::provider_sessions::ProviderSessionRecord>),
-    /// Start a fresh session on the provider: a failed new-session open.
-    /// `draft` is what the failed draft's composer held (its sends that
-    /// waited on the open included): Retry puts it back in the new draft,
-    /// so a child that dies on its first breath loses no words.
-    OpenNew { project: Option<String>, workspace: String, draft: String },
-}
-
-/// A provider that could not start, typed (docs/71 §3): a failed open —
-/// a session that never opened, so there is no transcript to keep. The
-/// window lands on the failed session with this inline (Z4) instead of a
-/// modal dialog over another session's transcript. (A lane whose child
-/// died twice keeps its transcript: its own banner grows into the failure,
-/// [`crate::session::ChildFailure`].) Grew out of the old
-/// `ProviderOpenError`: the same inline error, now with its kind, the
-/// child's own stderr and the actions the kind implies.
-#[derive(Clone)]
-pub(crate) struct LaunchFailure {
-    /// The session the window sits on: the clicked session for a reopen or
-    /// a dead lane, `None` for a fresh open that never earned an id.
-    pub session_id: Option<String>,
-    /// Whose open failed: names the title, the buttons and the composer.
-    pub provider: ProviderId,
-    /// What went wrong, typed: the sentence and the actions follow it.
-    pub kind: crate::provider_status::FailureKind,
-    /// The failure, verbatim.
-    pub message: String,
-    /// The child's last stderr lines (at most
-    /// [`provider::STDERR_TAIL_LINES`]), oldest first; empty when it said
-    /// nothing there.
-    pub stderr_excerpt: Vec<String>,
-    /// What Retry re-runs.
-    pub retry: ProviderOpenRetry,
-}
+pub(crate) use baaz_core::lifecycle::{LaunchFailure, ProviderOpenRetry};
 
 /// A provider open that failed on the background turn, with what the
 /// child said on stderr before it went: the adapter is gone by the time the
@@ -796,14 +760,10 @@ pub struct Harness {
     pub(crate) tier_retry: crate::tier::ProbeRetry,
     /// Its timer. Replacing or clearing this cancels it.
     pub(crate) tier_retry_timer: Option<gpui::Task<()>>,
-    /// The B4M plan cache: computed once off the UI thread by
-    /// [`crate::session_migration::Harness::refresh_migration_cache`],
-    /// read by every render. `None` until the first background compute
-    /// lands (or after an invalidate, while the recompute runs).
-    pub(crate) migration_cache: Option<crate::session_migration::MigrationCache>,
-    /// A plan recompute is in flight: renders keep the old cache (or
-    /// nothing) instead of kicking another.
-    pub(crate) migration_refresh_in_flight: bool,
+    /// The B4M plan: the cache computed once off the UI thread by
+    /// [`Harness::refresh_migration_cache`] and read by every render, and
+    /// whether a recompute is running.
+    pub(crate) migration: crate::session_migration::MigrationPlan,
     /// P7 import (docs/72): the cached scan plan, the open sheet, the run in
     /// flight and the journal Undo reads ([`crate::import_ui`]).
     pub(crate) import: crate::import_ui::ImportUi,
@@ -969,7 +929,7 @@ impl Harness {
         let muse_slot = crate::providers::MuseSlot::default();
         // The runtime's provider source, made concrete for this window.
         let provider_factory = crate::providers::ProviderFactory::for_window(
-            crate::runtime::lanes_for(&args),
+            crate::runtime::lanes_for(crate::runtime::Lanes::scripted_if(args.offline || args.replay.is_some())),
             terminal_service.socket_path().to_path_buf(),
             muse_slot.clone(),
         );
@@ -1015,8 +975,7 @@ impl Harness {
             tier_probing: false,
             tier_retry: Default::default(),
             tier_retry_timer: None,
-            migration_cache: None,
-            migration_refresh_in_flight: false,
+            migration: crate::session_migration::MigrationPlan::default(),
             import: crate::import_ui::ImportUi::boot(),
             current_project: None,
             terminal_dock,
@@ -5412,6 +5371,8 @@ impl Harness {
 #[cfg(test)]
 mod tests {
     use super::find_docs_dir;
+    use crate::layout::LayoutGlobal as _;
+    use crate::sidebar::SessionRow as _;
     use super::Harness;
     // `cx.new` is `AppContext`'s, and the trait has to be in scope for it.
     use gpui::AppContext as _;

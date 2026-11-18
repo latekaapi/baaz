@@ -7,33 +7,17 @@
 //! its record is hidden from the Sessions sidebar (docs/27 §9.1 Q2), and it
 //! is reached from the line, the card and its task folder.
 
-use serde::{Deserialize, Serialize};
 
 use crate::providers::ProviderId;
 
-/// The folder browser chats start in, under Baaz's state dir. Not
-/// `side-sessions`: a session there is taken for a throwaway side session.
-pub const BROWSER_CHATS_DIR: &str = "browser-chats";
+pub use baaz_core::browser_prefs::{AssistantPrefs, BROWSER_CHATS_DIR};
+use crate::layout::LayoutGlobal as _;
 
 /// The workspace a browser chat starts in, created on the way in.
 pub fn browser_workspace_dir() -> std::path::PathBuf {
     let dir = crate::store::support_dir().join(BROWSER_CHATS_DIR);
     let _ = std::fs::create_dir_all(&dir);
     dir
-}
-
-/// Settings › Browser › Assistant: the provider and model a new browser
-/// chat starts with. `None` is "the default": the first connected
-/// provider's cheapest model, the auto-titles rule (docs/27 §6).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AssistantPrefs {
-    /// The provider's wire id (`claude-code`, `codex`, `meta`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    /// The model id as the provider takes it (`haiku`, `muse-spark-1.3`);
-    /// empty is the provider's own default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
 }
 
 /// One model the Assistant menu offers.

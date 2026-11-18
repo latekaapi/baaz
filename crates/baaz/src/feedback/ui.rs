@@ -39,6 +39,7 @@ use crate::feedback::{
     crop_with_outline, human_role, render_window, Draft, ElementHit, ElementProbe, MacProbe, Rect, ScreenContext,
     Target,
 };
+use crate::layout::LayoutGlobal as _;
 
 /// The key context the capture layer carries while Active, so Escape
 /// reaches [`crate::app::FeedbackEscape`] instead of the composer and

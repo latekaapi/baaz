@@ -10,6 +10,8 @@ use std::path::Path;
 use aui::data::button;
 use aui_tokens::{ActiveAui, AuiStyled as _};
 use crate::providers::{ApprovalChoice, ExternalApproval};
+use crate::layout::LayoutGlobal as _;
+use crate::providers::ProviderMark as _;
 
 /// How often a running terminal card's mirror re-reads its tab: 10 Hz is
 /// live to the eye and a twelfth of a 120 Hz display's frames.

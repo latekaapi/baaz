@@ -19,6 +19,13 @@ fn read(name: &str) -> String {
     fs::read_to_string(src().join(name)).expect("baaz source is readable")
 }
 
+/// A file of the window-free core crate, where `tier.rs` lives since
+/// docs/82 4.11.
+fn read_core(name: &str) -> String {
+    fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../baaz-core/src").join(name))
+        .expect("baaz-core source is readable")
+}
+
 /// The byte range of `needle`'s enclosing brace block: from `needle` to the
 /// first following line that is exactly `}`.
 fn block_from(text: &str, needle: &str) -> String {
@@ -33,7 +40,7 @@ fn block_from(text: &str, needle: &str) -> String {
 /// blocking `Child::wait`, which deadlocked parent against child.
 #[test]
 fn pty_drop_closes_master_first_and_never_blocks() {
-    let tier = read("tier.rs");
+    let tier = read_core("tier.rs");
     let drop = block_from(&tier, "impl Drop for Pty");
     assert!(drop.contains("libc::close(self.master)"), "the drop closes the master fd");
     assert!(drop.contains("WNOHANG"), "the drop reaps with waitpid(WNOHANG)");
@@ -46,7 +53,7 @@ fn pty_drop_closes_master_first_and_never_blocks() {
 /// The window-close cleanup signals only: no wait, no sleep anywhere in it.
 #[test]
 fn window_close_cleanup_never_waits() {
-    let tier = read("tier.rs");
+    let tier = read_core("tier.rs");
     assert!(tier.contains("pub fn cleanup_probes_for_close"), "the close-path cleanup exists");
     let close = block_from(&tier, "pub fn cleanup_probes_for_close");
     assert!(close.contains("kill_live_probes()"), "closing still signals live probes");
@@ -62,7 +69,7 @@ fn window_close_cleanup_never_waits() {
 /// skips it entirely when no probe is live.
 #[test]
 fn quit_cleanup_keeps_a_short_bounded_wait() {
-    let tier = read("tier.rs");
+    let tier = read_core("tier.rs");
     let quit = block_from(&tier, "pub fn cleanup_probes()");
     assert!(quit.contains("wait_for_probes_gone"), "quitting still waits boundedly");
     assert!(!tier.contains("from_secs(3)"), "the old 3 s close wait is gone");

@@ -82,6 +82,11 @@ use crate::region::Region;
 use crate::browser::toolbar::SearchEngine;
 use crate::layout::{browser_download_dir, tilde_path, Layout};
 use crate::providers::ProviderId;
+use crate::layout::DensityToken as _;
+use crate::layout::ThemeToken as _;
+use crate::layout::LayoutGlobal as _;
+use crate::layout::TextSizeToken as _;
+use crate::providers::ProviderMark as _;
 
 /// Flip one Sidebar switch in `layout` by row id. `false` is an unknown id,
 /// ignored by every caller. Pure, so tests drive it without a window;
@@ -804,7 +809,7 @@ impl SettingsPage {
             ConnectIntent::CloseDefaultMenu => self.set_default_menu(false, cx),
             ConnectIntent::SetDefault(provider) => {
                 self.set_default_menu(false, cx);
-                cx.emit(SettingsEvent::SetDefaultProvider(ProviderId::from_icon(provider)));
+                cx.emit(SettingsEvent::SetDefaultProvider(crate::providers::provider_from_icon(provider)));
             }
             _ => {}
         }
@@ -2444,7 +2449,7 @@ impl Harness {
             }
             "providers" => {
                 let empty: &[crate::session_migration::PlannedMove] = &[];
-                let plan = self.migration_cache.as_ref().map(|cache| cache.plan_for_render()).unwrap_or(empty);
+                let plan = self.migration.cache.as_ref().map(|cache| cache.plan_for_render()).unwrap_or(empty);
                 if !plan.is_empty() {
                     let (n_claude, n_codex) = crate::session_migration::session_counts(plan);
                     facts.migration = Some(MigrationRow {

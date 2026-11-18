@@ -1413,6 +1413,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::layout::LayoutGlobal as _;
     use gpui::Entity;
 
     /// A provider-lane view over a connected scripted provider, with the

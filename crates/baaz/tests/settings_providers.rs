@@ -72,7 +72,7 @@ fn enabled_switch_gates_menu_probes_and_child_start() {
     let module = read_repo("crates/baaz/src/settings_providers.rs");
     pin(&module, "visible_provider_ids", "menu filter");
     pin(&module, "is disabled in Settings", "quiet banner");
-    let status = read_repo("crates/baaz/src/provider_status.rs");
+    let status = read_repo("crates/baaz-core/src/provider_status.rs");
     pin(&status, "fn set_enabled", "persisted switch");
     pin(&status, "filter(|id| self.status(*id).enabled)", "probes skip disabled");
     let composer = read_repo("crates/baaz/src/session/composer.rs");
@@ -156,10 +156,10 @@ fn own_mcp_switch_rides_under_both_cards_and_reaches_argv() {
     pin(&module, "Applies to sessions started after this change", "row says when it applies");
     pin(&module, "~/.codex/config.toml servers and plugins load too", "codex detail");
     pin(&module, "Claude Code MCP servers and connectors load too", "claude detail");
-    let layout = read_repo("crates/baaz/src/layout.rs");
+    let layout = read_repo("crates/baaz-core/src/layout.rs");
     pin(&layout, "use_own_mcp", "layout switch state");
     pin(&layout, "struct UseOwnMcp", "per-provider switch");
-    let providers = read_repo("crates/baaz/src/providers.rs");
+    let providers = read_repo("crates/baaz-core/src/providers.rs");
     pin(&providers, "set_use_own_mcp", "argv wiring reads the switch");
     let codex = read_repo("crates/provider-codex/src/lib.rs");
     pin(&codex, "set_use_own_mcp", "codex opt-in");

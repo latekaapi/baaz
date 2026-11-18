@@ -8,7 +8,7 @@
 //! module proves it by using nothing but `provider` and `aui-protocol`.
 //!
 //! This lives in the library (not in a test file) so seam consumers —
-//! `crates/baaz/src/conn.rs`'s connection-path test today — can drive the
+//! `crates/baaz-core/src/conn.rs`'s connection-path test today — can drive the
 //! same double instead of each inventing their own.
 
 use std::sync::{Arc, Mutex};

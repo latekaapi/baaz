@@ -13,6 +13,7 @@ use gpui::{div, prelude::*, AnyElement, ClipboardItem, Context, IntoElement, Sha
 
 use crate::app::Harness;
 use crate::right_pane::RightPane;
+use crate::layout::LayoutGlobal as _;
 
 /// Where a full output's lines come from.
 #[derive(Clone, Debug)]

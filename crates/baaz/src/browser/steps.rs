@@ -3,6 +3,7 @@
 //! downloads, history and bookmarks. Capture-only (audit F20).
 
 use super::*;
+use crate::layout::LayoutGlobal as _;
 
 impl Harness {
 

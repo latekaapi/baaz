@@ -11,6 +11,7 @@ use gpui::{Context, Window};
 
 use super::dock::TerminalDock;
 use super::{Pick, TabOwner};
+use crate::layout::LayoutGlobal as _;
 
 impl TerminalDock {
     /// The shared tail of every dock run: the block rerun for its

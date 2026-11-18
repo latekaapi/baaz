@@ -12,9 +12,23 @@ use std::path::{Path, PathBuf};
 fn manifest() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
+/// `name` under `src/`; a module the core crates took over (docs/82 4.11)
+/// is read where it lives now: `browser/x.rs` in `baaz-browser-core`,
+/// anything else in `baaz-core`.
+fn resolve(name: &str) -> PathBuf {
+    let app = manifest().join("src").join(name);
+    if app.exists() {
+        return app;
+    }
+    match name.strip_prefix("browser/") {
+        Some(rest) => manifest().join("../baaz-browser-core/src").join(rest),
+        None => manifest().join("../baaz-core/src").join(name),
+    }
+}
+
 
 fn source(name: &str) -> String {
-    let path = manifest().join("src").join(name);
+    let path = resolve(name);
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("source reads: {}", path.display()))
 }
 

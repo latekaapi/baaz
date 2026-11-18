@@ -25,6 +25,7 @@ use crate::app::Harness;
 use crate::provider_model::{ProviderModelEvent, ProviderStatusModel};
 use crate::provider_status::{Headline, Installed, ProviderStatus};
 use crate::providers::ProviderId;
+use crate::providers::ProviderMark as _;
 
 /// What the sheet is for: it decides the command, the title, the waiting
 /// line, the footnote and when the sheet counts as done.

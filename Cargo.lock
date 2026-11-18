@@ -820,7 +820,6 @@ dependencies = [
 name = "baaz"
 version = "0.1.0"
 dependencies = [
- "adblock",
  "anyhow",
  "aui",
  "aui-cef",
@@ -830,13 +829,13 @@ dependencies = [
  "aui-terminal",
  "aui-tokens",
  "aui-webview",
+ "baaz-browser-core",
+ "baaz-core",
  "base64 0.22.1",
  "block2 0.6.2",
- "calamine",
  "chrono",
  "criterion",
  "crossbeam-channel",
- "flate2",
  "futures",
  "gpui-kit",
  "gpui-pre",
@@ -845,10 +844,8 @@ dependencies = [
  "image",
  "libc",
  "log",
- "notify",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
- "pdf-extract",
  "provider",
  "provider-claude-code",
  "provider-codex",
@@ -858,6 +855,46 @@ dependencies = [
  "serde",
  "serde_json",
  "session-store",
+ "uuid",
+]
+
+[[package]]
+name = "baaz-browser-core"
+version = "0.1.0"
+dependencies = [
+ "adblock",
+ "baaz-core",
+ "base64 0.22.1",
+ "flate2",
+ "futures",
+ "image",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "baaz-core"
+version = "0.1.0"
+dependencies = [
+ "aui-protocol",
+ "calamine",
+ "chrono",
+ "crossbeam-channel",
+ "futures",
+ "ignore",
+ "libc",
+ "log",
+ "notify 7.0.0",
+ "pdf-extract",
+ "provider",
+ "provider-claude-code",
+ "provider-codex",
+ "provider-muse",
+ "rusqlite",
+ "serde",
+ "serde_json",
  "uuid",
  "zip",
 ]

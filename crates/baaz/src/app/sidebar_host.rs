@@ -29,6 +29,7 @@ use crate::sidebar_view::{
     browse_tab_id, browse_tab_key, footer_identity, muse_plan_label, task_face_for, SidebarEvent, SidebarFacts,
     SidebarFrame, SidebarPane, NAV_NEEDS_YOU, NAV_PROJECTS, NAV_SKILLS,
 };
+use crate::sidebar::SessionRow as _;
 
 /// One person tab the Browse sidebar draws, with the live page facts
 /// behind its row state.

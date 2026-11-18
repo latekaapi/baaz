@@ -13,9 +13,30 @@ use std::path::{Path, PathBuf};
 fn manifest() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
+/// `name` under `src/`; a module the core crates took over (docs/82 4.11)
+/// is read where it lives now: `browser/x.rs` in `baaz-browser-core`,
+/// anything else in `baaz-core`.
+fn resolve(name: &str) -> PathBuf {
+    let app = manifest().join("src").join(name);
+    if app.exists() {
+        return app;
+    }
+    match name.strip_prefix("browser/") {
+        Some(rest) => manifest().join("../baaz-browser-core/src").join(rest),
+        None => manifest().join("../baaz-core/src").join(name),
+    }
+}
+
 
 fn source(name: &str) -> String {
-    let path = manifest().join("src").join(name);
+    let path = resolve(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("source reads: {}", path.display()))
+}
+
+/// A file of the window-free core crate (`crates/baaz-core/src`, docs/82
+/// 4.11), where the model halves of these modules moved.
+fn core_source(name: &str) -> String {
+    let path = manifest().join("../baaz-core/src").join(name);
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("source reads: {}", path.display()))
 }
 
@@ -29,9 +50,23 @@ fn browser_source() -> String {
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .filter(|name| name.ends_with(".rs") && name != "mod.rs")
+        .chain(core_browser_files())
         .collect();
     names.sort();
     std::iter::once("mod.rs".to_owned()).chain(names).map(|name| source(&format!("browser/{name}"))).collect::<Vec<_>>().join("\n")
+}
+
+/// The browser module's files that live in `baaz-browser-core` (docs/82
+/// 4.11), as paths from `src/browser/` (a name both crates use, like
+/// `adblock.rs`, is read from each).
+fn core_browser_files() -> Vec<String> {
+    std::fs::read_dir(manifest().join("../baaz-browser-core/src"))
+        .expect("baaz-browser-core/src reads")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".rs") && name != "lib.rs")
+        .map(|name| format!("../../../baaz-browser-core/src/{name}"))
+        .collect()
 }
 
 fn workspace_source(name: &str) -> String {
@@ -110,9 +145,9 @@ fn per_session_state_and_verbs_are_wired() {
     assert!(state.contains("states: HashMap<TabId"), "live pages are keyed by tab");
     assert!(browser.contains("register_tab_page"), "agent tools follow the active tab");
     let tabs = source("browser/tabs.rs");
-    assert!(tabs.contains("pub(crate) struct Tabs"), "the tab model owns tabs per session and per project");
+    assert!(tabs.contains("pub struct Tabs"), "the tab model owns tabs per session and per project");
     assert!(tabs.contains("should_discard"), "hidden pages are discarded by the pure decision");
-    let sessions = source("sessions.rs");
+    let sessions = core_source("sessions.rs");
     assert!(sessions.contains("pub browser_url: Option<String>"), "RightState remembers the URL");
     let steps = source("steps.rs");
     assert!(steps.contains("verb: \"browse\""), "`browse:<url>` is a window verb");

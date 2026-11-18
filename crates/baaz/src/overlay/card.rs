@@ -12,6 +12,7 @@ use super::{drop_native_chrome, Overlay, OverlayKind, OverlayView, SHADOW_PAD};
 use crate::app::agent_window::{CardUi, COLUMN_W};
 use crate::app::Harness;
 use aui_tokens::ActiveAui;
+use crate::layout::LayoutGlobal as _;
 
 /// The library card's measure (aui `agent_window::CARD_W`/`CARD_H`).
 const CARD_W: f32 = 400.0;

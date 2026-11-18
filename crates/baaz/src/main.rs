@@ -38,37 +38,37 @@
 mod account_usage;
 mod app;
 mod attention;
-mod attachments;
-mod auth;
+use baaz_core::attachments;
+use baaz_core::auth;
 #[cfg(feature = "probe")]
 mod bench;
 mod billing;
 mod browser;
-mod byline;
-mod clock;
+use baaz_core::byline;
+use baaz_core::clock;
 mod connect;
-mod conn;
+use baaz_core::conn;
 mod default_browser;
 mod details;
 mod dialogs;
 mod external_urls;
 mod feedback;
-mod files;
-mod git_ops;
-mod full_output;
+use baaz_core::files;
+use baaz_core::git_ops;
+use baaz_core::full_output;
 mod handoff;
-mod handoff_snapshot;
-mod history;
-mod import;
+use baaz_core::handoff_snapshot;
+use baaz_core::history;
+use baaz_core::import;
 mod import_ui;
 mod chrome_import_ui;
 mod images;
-mod index;
-mod system_open;
+use baaz_core::index;
+use baaz_core::system_open;
 mod instance;
 mod keymap;
 mod layout;
-mod list_cache;
+use baaz_core::list_cache;
 mod log;
 mod login;
 mod mascot;
@@ -83,13 +83,13 @@ mod picker;
 #[cfg(feature = "probe")]
 mod perf_turn;
 mod palette;
-mod plan;
+use baaz_core::plan;
 mod project_menu;
-mod projects;
-mod provider_search;
+use baaz_core::projects;
+use baaz_core::provider_search;
 mod provider_model;
-mod provider_sessions;
-mod provider_status;
+use baaz_core::provider_sessions;
+use baaz_core::provider_status;
 mod providers;
 mod quit_signals;
 mod region;
@@ -100,14 +100,14 @@ mod right_files;
 mod right_page;
 mod right_pane;
 mod right_views;
-mod right_watch;
-mod runtime;
-mod utility;
-mod search;
-mod sent;
+use baaz_core::right_watch;
+use baaz_core::runtime;
+use baaz_core::utility;
+use baaz_core::search;
+use baaz_core::sent;
 mod session;
 mod session_migration;
-mod sessions;
+use baaz_core::sessions;
 mod settings;
 mod settings_providers;
 mod setup;
@@ -116,18 +116,22 @@ mod shot;
 mod sidebar;
 mod sidebar_view;
 mod session_list;
-mod skills;
+use baaz_core::skills;
 mod skills_page;
 #[cfg(feature = "probe")]
 mod steps;
-mod store;
+use baaz_core::store;
 mod terminal;
-mod tier;
-mod titles;
+use baaz_core::tier;
+use baaz_core::titles;
 mod transcript;
-mod usage;
+use baaz_core::usage;
 mod watchdog;
 mod wire;
+use baaz_core::render_io;
+// The core's logging macros, under the paths every call site already names
+// (`crate::baaz_log!`, `crate::hover_trace!`).
+use baaz_core::{baaz_log, hover_trace};
 
 use std::path::PathBuf;
 #[cfg(feature = "probe")]
@@ -136,6 +140,7 @@ use std::time::Duration;
 use aui_tokens::ThemeKind;
 use gpui::{px, size, App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowHandle, WindowOptions};
 use gpui_kit::component::{Root, TitleBar};
+use crate::layout::LayoutGlobal as _;
 
 /// The window the spec asks for.
 const WINDOW_W: f32 = 1440.0;
@@ -907,7 +912,7 @@ fn main() {
     // The runtime this process runs against (state dir, clock, provider
     // source, browser backend, capture hooks), decided once before anything
     // reads state.
-    crate::runtime::install(crate::runtime::Runtime::new(&args));
+    crate::runtime::install(crate::runtime::Runtime::new(crate::runtime::Lanes::scripted_if(args.offline || args.replay.is_some())));
     // The product renamed (harness → Baaz) with its state directory: move the
     // old default aside once, before anything reads state.
     crate::store::migrate_legacy_support_dir();

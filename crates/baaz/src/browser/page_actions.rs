@@ -3,6 +3,7 @@
 //! (forget this site, clear history).
 
 use super::*;
+use crate::layout::LayoutGlobal as _;
 
 impl Harness {
 

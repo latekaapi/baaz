@@ -17,6 +17,7 @@ use aui_icons::Provider as AuiProvider;
 use crate::providers::ProviderId;
 use crate::provider_status::{Auth, Headline, ProviderStatus};
 use crate::tier::{ResetClause, Tier, resolve_plan_name};
+use crate::providers::ProviderMark as _;
 
 /// The app's live muse connection and tier for the Muse row: present
 /// exactly when the app is signed in to Muse. The row then reports the

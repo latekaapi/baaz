@@ -41,6 +41,7 @@ use gpui::{
 use super::{Pick, TabOwner, TerminalHost};
 use crate::overlays::Overlays;
 use crate::region::Region;
+use crate::layout::LayoutGlobal as _;
 
 /// The dock's shortest height, in window pixels.
 pub const DOCK_MIN_HEIGHT: f32 = 120.0;

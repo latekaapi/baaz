@@ -1,6 +1,7 @@
 //! Tests for the session-event sink: lane loss, outcomes, unread and needs-you, parked finishes, browser chats.
 
 use super::*;
+use crate::sidebar::SessionRow as _;
 
 /// docs/71 §2–§3 (owner 2026-10-30): a lane whose child dies twice in
 /// a row keeps its session on screen — transcript and composer — and

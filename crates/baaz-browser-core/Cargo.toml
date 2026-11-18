@@ -1,0 +1,34 @@
+[package]
+name = "baaz-browser-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Baaz's browser with no window: tabs and Spaces, history, bookmarks, the Chrome import, ad blocking and the agent page tools with their approval policy. No gpui (tests/core_ratchet.rs in baaz)."
+publish = false
+
+[features]
+# Test seams `baaz`'s own tests need (and the core's beneath them); `baaz`
+# turns it on from its dev-dependencies only.
+test-support = ["baaz-core/test-support"]
+
+[dependencies]
+baaz-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+futures.workspace = true
+base64.workspace = true
+image.workspace = true
+# The clone sweep signals stray Chromium helpers (`clone_sweep.rs`).
+libc.workspace = true
+# Brave's engine and the bundled lists' gzip (`adblock.rs`).
+adblock = { version = "0.13.5", default-features = false, features = ["full-regex-handling", "embedded-domain-resolver"] }
+flate2 = "1"
+
+[dev-dependencies]
+# The tests run as the app's did: with the core's probe (a capture's
+# `BAAZ_DETERMINISTIC` is honoured) and its test seams.
+baaz-core = { workspace = true, features = ["test-support", "probe"] }

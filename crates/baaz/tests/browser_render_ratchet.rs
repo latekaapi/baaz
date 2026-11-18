@@ -18,9 +18,23 @@ use std::path::PathBuf;
 fn manifest() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
+/// `name` under `src/`; a module the core crates took over (docs/82 4.11)
+/// is read where it lives now: `browser/x.rs` in `baaz-browser-core`,
+/// anything else in `baaz-core`.
+fn resolve(name: &str) -> PathBuf {
+    let app = manifest().join("src").join(name);
+    if app.exists() {
+        return app;
+    }
+    match name.strip_prefix("browser/") {
+        Some(rest) => manifest().join("../baaz-browser-core/src").join(rest),
+        None => manifest().join("../baaz-core/src").join(name),
+    }
+}
+
 
 fn source(rel: &str) -> String {
-    std::fs::read_to_string(manifest().join("src").join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
+    std::fs::read_to_string(resolve(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
 /// Every `browser/*.rs` file's text (the module is split by seam).
@@ -31,9 +45,23 @@ fn browser_source() -> String {
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .filter(|name| name.ends_with(".rs") && name != "mod.rs")
+        .chain(core_browser_files())
         .collect();
     names.sort();
     std::iter::once("mod.rs".to_owned()).chain(names).map(|name| source(&format!("browser/{name}"))).collect::<Vec<_>>().join("\n")
+}
+
+/// The browser module's files that live in `baaz-browser-core` (docs/82
+/// 4.11), as paths from `src/browser/` (a name both crates use, like
+/// `adblock.rs`, is read from each).
+fn core_browser_files() -> Vec<String> {
+    std::fs::read_dir(manifest().join("../baaz-browser-core/src"))
+        .expect("baaz-browser-core/src reads")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".rs") && name != "lib.rs")
+        .map(|name| format!("../../../baaz-browser-core/src/{name}"))
+        .collect()
 }
 
 /// The body of the first `marker` in `text`: from it to the next closing

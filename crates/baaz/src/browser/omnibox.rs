@@ -3,6 +3,7 @@
 //! commands), the Ask row and the new tab's Pick up list.
 
 use super::*;
+use crate::layout::LayoutGlobal as _;
 
 impl Harness {
 

@@ -32,6 +32,8 @@ use crate::settings::SettingsPage;
 use crate::overlays::{Dialog, DialogAction};
 use crate::provider_status::{Headline, ProviderStatus};
 use crate::providers::ProviderId;
+use crate::layout::LayoutGlobal as _;
+use crate::providers::ProviderMark as _;
 
 /// The Settings rail section id. `settings:providers` opens it.
 pub(crate) const PROVIDERS_SECTION_ID: &str = "providers";

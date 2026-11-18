@@ -6,7 +6,9 @@
 //! opened, written and FTS-searched synchronously inside `render`. The checks
 //! below keep SQLite out of every other file:
 //!
-//! - inside `src/browser/`, only the worker side names SQLite: `data.rs`,
+//! - inside `src/browser/` (and `crates/baaz-browser-core`, where its
+//!   window-free files moved in docs/82 4.11), only the worker side names
+//!   SQLite: `data.rs`,
 //!   `history.rs` (`BrowserDb`), `bookmarks.rs` (its tables) and
 //!   `chrome_import.rs` (a read-only copy of Chrome's own History, and the
 //!   import the worker runs);
@@ -40,14 +42,28 @@ fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
 }
 
 /// Every code line (comments dropped) of every file under `src/`, as
-/// `(path relative to src, line number, text)`.
+/// `(path relative to src, line number, text)`. The browser's window-free
+/// half (`crates/baaz-browser-core`, docs/82 4.11) reads as the
+/// `browser/` files it was, and the core crate's files as `baaz-core/…`,
+/// so the rules below bind the moved code as before.
 fn code_lines() -> Vec<(String, usize, String)> {
-    let root = source_root();
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut out = code_lines_under(&source_root(), "");
+    out.extend(code_lines_under(&crates.join("baaz-browser-core/src"), "browser/"));
+    out.extend(code_lines_under(&crates.join("baaz-core/src"), "baaz-core/"));
+    out
+}
+
+/// [`code_lines`] for the files under `root`, their paths prefixed.
+fn code_lines_under(root: &Path, prefix: &str) -> Vec<(String, usize, String)> {
     let mut files = Vec::new();
-    rust_files(&root, &mut files);
+    rust_files(root, &mut files);
     let mut out = Vec::new();
     for path in files {
-        let rel = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
+        let rel = format!("{prefix}{}", path.strip_prefix(root).unwrap_or(&path).display());
+        if rel == "browser/lib.rs" {
+            continue;
+        }
         let text = fs::read_to_string(&path).unwrap_or_default();
         for (n, line) in text.lines().enumerate() {
             let code = line.split("//").next().unwrap_or("");

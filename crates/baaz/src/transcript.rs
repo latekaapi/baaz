@@ -34,12 +34,27 @@ use aui_icons::IconName;
 use aui_motion::stream_reveal;
 use gpui::{div, prelude::*, px, AnyElement, App, ElementId, SharedString, Window};
 use gpui_kit::base::v_flex;
+use crate::providers::ProviderMark as _;
 
 /// The title the pending approval card asks its question with.
 ///
 /// Deliberately names Muse: the library's default is provider-free, because the
 /// library does not know whose command it is and this app does.
 pub const APPROVAL_TITLE: &str = "Allow Muse to run this command?";
+
+/// The library's batch for a sent turn's annotations.
+fn annotation_batch(sent: &crate::sent::SentAnnotations) -> aui::transcript::AnnotationBatch {
+    aui::transcript::AnnotationBatch {
+        screenshot: sent.screenshot.clone(),
+        size: sent.size,
+        address: sent.address.clone(),
+        notes: sent
+            .notes
+            .iter()
+            .map(|n| aui::transcript::AnnotationNote { index: n.index, at: n.at, selector: n.selector.clone(), note: n.note.clone() })
+            .collect(),
+    }
+}
 
 /// The verb a provider approval title asks with, per tool: the card asks
 /// what the tool would do, not what the last tool did.
@@ -1603,7 +1618,7 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
             let shown: Vec<aui_protocol::Attachment> = sent.map(|item| item.attachments.clone()).unwrap_or_else(|| attachments.clone());
             let mut turn = user_turn(SharedString::from(id.clone()), text.clone())
                 .attachments(shown.clone())
-                .annotations(sent.and_then(|item| item.annotations.as_ref()).map(|batch| batch.batch()));
+                .annotations(sent.and_then(|item| item.annotations.as_ref()).map(annotation_batch));
             if let Some(open) = &folds.open_attachment {
                 let open = open.clone();
                 turn = turn.on_attachment(move |index, window, cx| {
