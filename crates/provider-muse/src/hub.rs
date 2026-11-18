@@ -20,11 +20,19 @@
 //! settled is resolved in the fold, a mode pick moves the sandbox profile
 //! with it, a resumed session's profile is matched to its mode, transcript
 //! pages fold in order with the live stream, and a dead child is respawned
-//! with every followed session resumed from its cursor.
+//! with every followed session resumed from its cursor — paced by a
+//! [`RespawnBackoff`], so a child that keeps dying reports the connection
+//! down instead of crash-looping (docs/81 B PM-7).
+//!
+//! A replaced or hung-up child is shut down through its shared handle
+//! ([`MuseClient::shutdown`] takes `&self`), outside the `link` lock: the
+//! old child is always killed, and its teardown never holds the lock every
+//! command takes (docs/81 B PM-5, PM-12).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use muse_adapter::MuseFold;
@@ -34,6 +42,7 @@ use muse_client::schema::{
 };
 use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
 use provider::facts::SessionSide;
+use provider::runtime::{Respawn, RespawnBackoff};
 use provider::{
     Ack, CapabilitySet, Command, ConnectInfo, Handshake, PendingApproval, PendingQuestion,
     ProviderAdapter, ProviderError, ProviderEvent, ProviderId,
@@ -98,6 +107,12 @@ struct Core {
     /// The last usage reading seen (a `usage/changed`, a `usage/read`):
     /// what [`MuseLane::read_usage`] peeks at.
     usage: Mutex<Option<provider::UsageReport>>,
+    /// The crash count that paces [`MuseHub::reconnect`].
+    respawns: Mutex<RespawnBackoff>,
+    /// Set by [`MuseHub::shutdown`]: the hub is hung up for good, and a
+    /// reconnect (the app hears the hang-up as a lost connection) refuses
+    /// instead of spawning a child nobody will stop.
+    shut: AtomicBool,
 }
 
 impl FoldAccess for Core {
@@ -134,6 +149,8 @@ impl MuseHub {
                 catalog: Mutex::new(HashMap::new()),
                 picks: Mutex::new(HashMap::new()),
                 usage: Mutex::new(None),
+                respawns: Mutex::new(RespawnBackoff::default()),
+                shut: AtomicBool::new(false),
             }),
         }
     }
@@ -201,7 +218,14 @@ impl MuseHub {
             warning: warning.map(|warning| format!("{warning:?}")),
         };
         *self.core.info.lock().expect("info mutex") = Some(info.clone());
-        *self.core.link.lock().expect("link mutex") = Some(link);
+        let replaced = self.core.link.lock().expect("link mutex").replace(link);
+        // The child this one replaces is hung up outside the lock: its
+        // teardown (a group kill, bounded) never holds up a command.
+        if let Some(old) = replaced {
+            if !Arc::ptr_eq(&old.client, &client) {
+                old.client.shutdown();
+            }
+        }
         let generation = self.core.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let core = Arc::clone(&self.core);
         let events = client.events();
@@ -305,10 +329,30 @@ impl MuseHub {
     /// cursor (`session/resume` serving only the suffix). Returns each
     /// session whose resume was refused, with the refusal, for the caller to
     /// show; the rest stream on as before. Blocking.
+    ///
+    /// Each call counts as a crash of the child: the first respawns at once,
+    /// later ones wait longer ([`RespawnBackoff`]), and once too many fall
+    /// inside the window this refuses — the caller reports the wire down,
+    /// and a person's Reconnect calls [`Self::forgive_crashes`] first.
     pub fn reconnect(&self) -> Result<Vec<(String, ProviderError)>, ProviderError> {
+        if self.core.shut.load(Ordering::SeqCst) {
+            return Err(ProviderError::Unavailable { reason: "the Muse connection was shut down".into() });
+        }
         let Some(program) = self.core.program.clone() else {
             return Err(ProviderError::Unavailable { reason: "this connection cannot respawn".into() });
         };
+        let decision = self.core.respawns.lock().unwrap_or_else(|p| p.into_inner()).on_crash(Instant::now());
+        match decision {
+            Respawn::GiveUp { crashes, window } => {
+                return Err(ProviderError::Unavailable {
+                    reason: format!(
+                        "Muse stopped {crashes} times in {} seconds; Baaz stopped restarting it",
+                        window.as_secs()
+                    ),
+                });
+            }
+            Respawn::After(wait) => std::thread::sleep(wait),
+        }
         let info = self.core.info.lock().expect("info mutex").clone().unwrap_or_else(|| ConnectInfo::new("baaz", "0"));
         self.attach(crate::spawn(&program)?, &info)?;
         let mut refused = Vec::new();
@@ -325,20 +369,41 @@ impl MuseHub {
         Ok(refused)
     }
 
-    /// Hang up the child. Every lane hears it once, now: the reader of the
-    /// child is retired first, so its own exit notice never follows.
+    /// Start the crash count afresh: a person asked to reconnect, so the
+    /// next [`Self::reconnect`] respawns at once even after the hub gave up.
+    pub fn forgive_crashes(&self) {
+        self.core.respawns.lock().unwrap_or_else(|p| p.into_inner()).forgive();
+    }
+
+    /// Pace respawns by `backoff` instead of the default (tests use short
+    /// bounds).
+    pub fn set_respawn_backoff(&self, backoff: RespawnBackoff) {
+        *self.core.respawns.lock().unwrap_or_else(|p| p.into_inner()) = backoff;
+    }
+
+    /// Hang up the child, for good: the quit path. Every lane hears it
+    /// once, now: the reader of the child is retired first, so its own exit
+    /// notice never follows. The connection stream does not: the host hung
+    /// up itself, and that stream's loss is what drives a respawn. The
+    /// child is killed through its shared handle even while a command still
+    /// holds a clone of it — no `Arc::try_unwrap` that silently does
+    /// nothing (docs/81 B PM-12) — and outside the `link` lock.
     pub fn shutdown(&self) {
+        self.core.shut.store(true, Ordering::SeqCst);
         self.core.generation.fetch_add(1, Ordering::SeqCst);
         // Poison-tolerant: quit must hang the child up even after a reader
         // panicked holding a lock (docs/81 B PM-3).
         self.core.recover_from_panic();
-        if self.core.link.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
-            self.core.broadcast(ProviderEvent::ConnectionLost { reason: "the agent process exited".into() });
+        let link = self.core.link.lock().unwrap_or_else(|p| p.into_inner()).take();
+        let pending = self.core.pending.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if link.is_some() {
+            self.core.tell_lanes(&ProviderEvent::ConnectionLost { reason: "the agent process exited".into() });
         }
-        if let Some(link) = self.core.link.lock().unwrap_or_else(|p| p.into_inner()).take() {
-            if let Ok(mut client) = Arc::try_unwrap(link.client) {
-                client.shutdown();
-            }
+        if let Some(link) = link {
+            link.client.shutdown();
+        }
+        if let Some(client) = pending {
+            client.shutdown();
         }
     }
 }
@@ -380,7 +445,6 @@ impl Core {
             .ok_or_else(|| ProviderError::Unavailable { reason: "Muse is not running".into() })
     }
 
-    /// Send `event` to every lane and the connection stream.
     /// A fold step panicked on the reader: clear the poison it may have
     /// left on every lock the core shares.
     fn recover_from_panic(&self) {
@@ -392,14 +456,21 @@ impl Core {
         self.catalog.clear_poison();
         self.picks.clear_poison();
         self.usage.clear_poison();
+        self.respawns.clear_poison();
     }
 
+    /// Send `event` to every lane and the connection stream.
     fn broadcast(&self, event: ProviderEvent) {
+        self.tell_lanes(&event);
+        let _ = self.connection.0.send(event);
+    }
+
+    /// Send `event` to every lane, but not the connection stream.
+    fn tell_lanes(&self, event: &ProviderEvent) {
         let routed = self.routed.lock().expect("routed mutex");
         for tx in routed.routes.values().chain(routed.watchers.iter()) {
             let _ = tx.send(event.clone());
         }
-        let _ = self.connection.0.send(event);
     }
 
     /// Fold one transport event and route what it produced. `false` once
@@ -1064,4 +1135,38 @@ impl Drop for MuseLane {
 pub fn side_of(hub: &MuseHub, session_id: &str) -> Option<SessionSide> {
     let routed = hub.core.routed.lock().expect("routed mutex");
     routed.fold.side(session_id).map(muse_adapter::neutral_side)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// THE QUIT KILL (docs/81 B PM-12). A command still holds the client
+    /// (a clone of the link's `Arc`) when the hub hangs up: the child is
+    /// killed anyway — `Arc::try_unwrap` used to fail silently here and
+    /// leave it running — and the hub never respawns after.
+    #[test]
+    fn shutdown_kills_the_child_while_a_command_still_holds_it() {
+        let puppet = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model_list_puppet.py");
+        let client = MuseClient::spawn(&muse_client::MuseConfig {
+            program: puppet,
+            trust_workspace: false,
+            no_session_log: false,
+            extra_args: Vec::new(),
+        })
+        .expect("the puppet spawns — is python3 on PATH?");
+        let child = provider::runtime::Identity::of(client.pid() as i32).expect("the puppet runs");
+        let hub = MuseHub::from_client(client);
+        let mut lane = hub.lane();
+        lane.connect(&ConnectInfo::new("baaz", "0.1.0")).expect("handshake");
+        let held = hub.client().expect("the link");
+        hub.shutdown();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while child.is_alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!child.is_alive(), "the child went although a command held the client");
+        assert!(hub.reconnect().is_err(), "a hung-up hub never respawns");
+        drop(held);
+    }
 }

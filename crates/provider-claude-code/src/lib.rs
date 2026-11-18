@@ -4085,7 +4085,7 @@ mod tests {
         let stdin = child::testing::ScriptedStdin::new(hook);
         let handles = (Arc::clone(&stdin.lines), Arc::clone(&stdin.fail));
         let epoch = adapter.hub.child_epoch.load(std::sync::atomic::Ordering::SeqCst);
-        let writer = child::StdinWriter::spawn(stdin, &adapter.hub, epoch).expect("writer");
+        let writer = child::stdin_writer(stdin, &adapter.hub, epoch).expect("writer");
         adapter.hub.attach_stdin(epoch, writer);
         handles
     }
@@ -4798,6 +4798,57 @@ mod tests {
             };
             assert_eq!(lost, expected, "{script}");
         }
+    }
+
+    /// THE KILLED CHILD (docs/82 5.1). A stand-in child SIGKILLed under a
+    /// live session: the adapter reports the connection lost, and nothing
+    /// it holds stays locked — a send right after is answered at once, and
+    /// the hang-up returns promptly.
+    #[test]
+    fn a_killed_child_is_reported_lost_and_holds_no_lock() {
+        let mut adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        let launch = SessionLaunch {
+            argv: vec!["-c".into(), "echo $$ >&2; exec cat".into()],
+            cwd: None,
+            session_id: "sess-1".into(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+        };
+        let child = crate::child::RunningChild::spawn_legacy("/bin/sh", &launch, &adapter.hub).expect("sh runs");
+        *adapter.child.lock().expect("child mutex") = Some(child);
+        let pid = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(pid) = adapter.hub.stderr.lines().first().and_then(|line| line.trim().parse::<i32>().ok()) {
+                    break pid;
+                }
+                assert!(std::time::Instant::now() < deadline, "the stand-in never said its pid");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let events = adapter.events();
+        // SAFETY: SIGKILL to the stand-in this test just spawned.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        loop {
+            match events.recv_timeout(std::time::Duration::from_secs(5)).expect("the loss is reported") {
+                ProviderEvent::ConnectionLost { .. } => break,
+                _ => continue,
+            }
+        }
+        let started = std::time::Instant::now();
+        let _ = adapter.dispatch(Command::SubmitInput {
+            request_id: "t-1".into(),
+            session_id: "sess-1".into(),
+            parts: vec![provider::SubmissionPart::Text("still there?".into())],
+            display_text: None,
+            effort: None,
+        });
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "the send was answered, not stuck");
+        let started = std::time::Instant::now();
+        adapter.shutdown();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "the hang-up returned");
     }
 
     /// The person's message is on screen from the submit, not from the

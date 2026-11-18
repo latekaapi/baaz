@@ -1,0 +1,14 @@
+[package]
+name = "provider-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The process runtime under every provider adapter: spawn in a new session, group kill, pid ledger, line reader, stdin writer, request map."
+
+[dependencies]
+crossbeam-channel = { workspace = true }
+libc = { workspace = true }
+serde_json = { workspace = true }

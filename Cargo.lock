@@ -5451,7 +5451,9 @@ version = "0.1.0"
 dependencies = [
  "aui-protocol",
  "crossbeam-channel",
+ "libc",
  "muse-adapter",
+ "provider-runtime",
  "serde",
  "serde_json",
  "uuid",
@@ -6790,6 +6792,7 @@ dependencies = [
  "aui-protocol",
  "crossbeam-channel",
  "libc",
+ "provider-runtime",
  "uuid",
 ]
 
@@ -6799,6 +6802,7 @@ version = "0.1.0"
 dependencies = [
  "aui-protocol",
  "crossbeam-channel",
+ "libc",
  "provider",
  "serde",
  "serde_json",
@@ -6810,6 +6814,7 @@ version = "0.1.0"
 dependencies = [
  "aui-protocol",
  "crossbeam-channel",
+ "libc",
  "provider",
  "serde",
  "serde_json",
@@ -6822,9 +6827,19 @@ dependencies = [
  "aui-protocol",
  "base64 0.22.1",
  "crossbeam-channel",
+ "libc",
  "muse-adapter",
  "muse-client",
  "provider",
+ "serde_json",
+]
+
+[[package]]
+name = "provider-runtime"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "libc",
  "serde_json",
 ]
 

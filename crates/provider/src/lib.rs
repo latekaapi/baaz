@@ -9,8 +9,10 @@
 //!
 //! The crate depends on `aui-protocol` for the render model and identity,
 //! plus `crossbeam-channel` for the event stream (the same competing-
-//! consumer receiver the transports already use). Anything else — in
-//! particular any wire crate — fails the dependency test in `tests/`.
+//! consumer receiver the transports already use), and on
+//! `provider-runtime` for the process layer every adapter shares
+//! (re-exported as [`runtime`]). Anything else — in particular any wire
+//! crate — fails the dependency test in `tests/`.
 //!
 //! # Blocking, not async
 //!
@@ -46,11 +48,7 @@ pub mod env_path;
 mod error;
 mod event;
 pub mod facts;
-pub mod guard;
 pub mod scripted;
-#[cfg(target_os = "macos")]
-pub mod session_spawn;
-pub mod stderr_tail;
 mod traits;
 pub mod usage;
 pub mod version;
@@ -63,7 +61,16 @@ pub use crossbeam_channel::Receiver;
 pub use error::{ProviderError, Refusal, RefusalHint, Severity};
 pub use event::ProviderEvent;
 pub use traits::{ConnectInfo, Handshake, Provider, ProviderAdapter, STDERR_TAIL_LINES};
-pub use stderr_tail::StderrTail;
+pub use provider_runtime::StderrTail;
+/// The process runtime every adapter stands on: spawn, group kill, the pid
+/// ledger, the line reader, the stdin writer, the request map, the pump.
+pub use provider_runtime as runtime;
+/// Spawning in a new session without forking (see
+/// [`runtime::session_spawn`]).
+#[cfg(target_os = "macos")]
+pub use provider_runtime::session_spawn;
+/// One line folded without taking the pump down (see [`runtime::guard`]).
+pub use provider_runtime::guard;
 pub use usage::{window_label, UsageReport, UsageWindow};
 pub use version::{compare_versions, parse_version, version_at_least};
 

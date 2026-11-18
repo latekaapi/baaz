@@ -38,13 +38,25 @@ pub enum FileAction {
         /// Where it lands.
         to: libc::c_int,
     },
+    /// Change the child's working directory (`posix_spawn_file_actions_addchdir_np`,
+    /// macOS 10.15+). Actions run in order: an `Open` after this resolves a
+    /// relative path against the new directory.
+    Chdir(OsString),
+}
+
+extern "C" {
+    // <spawn.h>, macOS 10.15+; `libc` does not export it.
+    fn posix_spawn_file_actions_addchdir_np(
+        actions: *mut libc::posix_spawn_file_actions_t,
+        path: *const libc::c_char,
+    ) -> libc::c_int;
 }
 
 // <spawn.h>, Apple extensions (macOS 10.15+); `libc` does not export them.
 const POSIX_SPAWN_SETSID: libc::c_short = 0x0400;
 const POSIX_SPAWN_CLOEXEC_DEFAULT: libc::c_short = 0x4000;
 
-/// `posix_spawnp` `program` with `args` (not including argv[0]) and exactly
+/// `posix_spawnp` `program` with `args` (not including `argv[0]`) and exactly
 /// `env`, in a new session, its fds set up by `files`. Returns the pid, which
 /// is also the session and process-group id. The caller reaps it.
 pub fn spawn_in_new_session(
@@ -72,7 +84,7 @@ pub fn spawn_in_new_session(
     envp.push(std::ptr::null_mut());
     let mut paths = Vec::new();
     for action in files {
-        if let FileAction::Open { path, .. } = action {
+        if let FileAction::Open { path, .. } | FileAction::Chdir(path) = action {
             paths.push(CString::new(path.as_bytes()).map_err(|_| invalid())?);
         }
     }
@@ -80,7 +92,7 @@ pub fn spawn_in_new_session(
     let mut pid: libc::pid_t = 0;
     // SAFETY: the attr and file-action objects are initialised before use and
     // destroyed after; every pointer handed over (program, argv, envp, open
-    // paths) outlives the call; argv and envp are NULL-terminated.
+    // and chdir paths) outlives the call; argv and envp are NULL-terminated.
     let rc = unsafe {
         let mut actions: libc::posix_spawn_file_actions_t = std::mem::zeroed();
         let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
@@ -90,11 +102,15 @@ pub fn spawn_in_new_session(
         for action in files {
             match action {
                 FileAction::Open { fd, flags, .. } => {
-                    let path = next_path.next().expect("one CString per Open");
+                    let path = next_path.next().expect("one CString per Open or Chdir");
                     libc::posix_spawn_file_actions_addopen(&mut actions, *fd, path.as_ptr(), *flags, 0o644);
                 }
                 FileAction::Dup2 { from, to } => {
                     libc::posix_spawn_file_actions_adddup2(&mut actions, *from, *to);
+                }
+                FileAction::Chdir(_) => {
+                    let path = next_path.next().expect("one CString per Open or Chdir");
+                    posix_spawn_file_actions_addchdir_np(&mut actions, path.as_ptr());
                 }
             }
         }
@@ -110,19 +126,7 @@ pub fn spawn_in_new_session(
     Ok(pid)
 }
 
-/// The environment a `Command` would give its child: this process's, with
-/// the command's own `env`/`env_remove` applied (`env_clear` is not used by
-/// any caller and is not honoured).
-pub fn command_env(command: &std::process::Command) -> Vec<(OsString, OsString)> {
-    let mut env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
-    for (key, value) in command.get_envs() {
-        env.retain(|(existing, _)| existing.as_os_str() != key);
-        if let Some(value) = value {
-            env.push((key.to_owned(), value.to_owned()));
-        }
-    }
-    env
-}
+pub use crate::process::command_env;
 
 #[cfg(test)]
 mod tests {

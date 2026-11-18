@@ -60,17 +60,24 @@ Threads in the `baaz` process, by job:
 | `muse-reader`, `muse-writer`, `muse-stderr`, `muse-gapfill` | `crates/muse-client/src/client.rs` | NDJSON in/out of `muse serve`; transcript gap fill |
 | `muse-hub-reader` | `crates/provider-muse/src/hub.rs` | fold Muse events and route them to per-session lanes |
 | `provider-claude-code-pump`, `-stdin`, stderr | `crates/provider-claude-code/src/child.rs` | one set per `claude` child; stdin has one writer thread |
-| `provider-codex-pump`, stderr, `codex-rate-limits`, `codex-effort` | `crates/provider-codex/src/child.rs`, `lib.rs` | one set per Codex child; writes go through a `Mutex<ChildStdin>`, no writer thread |
+| `provider-codex-pump`, `-stdin`, stderr, `codex-rate-limits`, `codex-effort` | `crates/provider-codex/src/child.rs`, `lib.rs` | one set per Codex child; stdin has one writer thread, so the pump never waits on a write |
+| `pid-ledger-sweep` | `crates/provider-runtime/src/ledger.rs` | once at launch: ends the children a Baaz that died left running (only children proven its own) |
 | `muse-bridge-N` | `crates/baaz/src/conn.rs` | one per lane: forwards a crossbeam receiver onto a futures channel the UI task awaits (the name is historical; every provider uses it) |
 | `store:<file>` | `crates/baaz/src/store.rs` | one writer per `JsonStore` file, started on first save |
 | terminal service | `crates/baaz/src/terminal/service.rs` | one listener plus one thread per socket connection; requests are queued and run on the UI thread by `TerminalService::drain` (a 15 ms pump while busy) |
 | others | various | provider status probes (`provider_status.rs`), git (`git_ops.rs`), `utility.rs`, the stall watchdog, the log writer, quit signals, adblock load, the CEF clone sweep, the Muse billing-tier pty probe (`tier.rs`) |
 
-Every provider event channel is an unbounded crossbeam channel. Each pump
-folds one stdout line at a time inside `provider::guard::guard_line`
-(`crates/provider/src/guard.rs`): a panic in a fold is caught, the poisoned
-lock is cleared and the session ends as `ConnectionLost`, so the next send
-revives it instead of the row reading Working forever.
+Every provider event channel is an unbounded crossbeam channel. Every
+provider child runs on one process runtime, `crates/provider-runtime`
+(re-exported as `provider::runtime`): spawned in a new session and process
+group, recorded in the pid ledger `<state>/run/children.json` (swept at
+launch), hung up as a group (SIGTERM, SIGKILL after 250 ms), its stdout read
+lossily with an 8 MB line cap, its stdin owned by one writer thread, its
+requests held with per-request deadlines. Each pump folds one stdout line at
+a time inside `provider::guard::guard_line`
+(`crates/provider-runtime/src/guard.rs`): a panic in a fold is caught, the
+poisoned lock is cleared and the session ends as `ConnectionLost`, so the
+next send revives it instead of the row reading Working forever.
 
 Only one Baaz runs per state directory. `crates/baaz/src/instance.rs` takes
 an exclusive `flock` on `<state>/lock` at startup; a second launch on the

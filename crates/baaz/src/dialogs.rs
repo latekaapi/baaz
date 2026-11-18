@@ -906,6 +906,11 @@ impl Harness {
         match action {
             DialogAction::Dismiss => {}
             DialogAction::Reconnect => {
+                // A person asked: the crash count starts afresh, so a hub
+                // that gave up respawns again (docs/81 B PM-7).
+                if let Some(hub) = &self.muse_hub {
+                    hub.forgive_crashes();
+                }
                 self.wire = Wire::Reconnecting;
                 self.reconnect(cx);
             }

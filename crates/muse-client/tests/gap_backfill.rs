@@ -26,7 +26,7 @@ fn a_server_request_parks_during_a_gap_backfill_and_releases_after_the_page() {
     let script = server_script();
     assert!(script.exists(), "fake server script missing: {}", script.display());
 
-    let mut client = MuseClient::spawn(&MuseConfig {
+    let client = MuseClient::spawn(&MuseConfig {
         program: script,
         trust_workspace: false,
         no_session_log: false,

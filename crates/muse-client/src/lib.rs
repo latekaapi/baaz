@@ -3,7 +3,8 @@
 //! One `muse serve` child, spoken to over **JSON-RPC 2.0 as newline-delimited
 //! JSON on stdio**. This crate frames, routes and surfaces; it holds no policy
 //! and no opinion about what the events mean. Interpretation is
-//! `muse-adapter`'s job, and nothing here depends on `gpui` or `aui`.
+//! `muse-adapter`'s job, and nothing here depends on `gpui` or `aui` (the
+//! process runtime it spawns through is OS and channels only).
 //!
 //! # Shape
 //!
@@ -12,9 +13,11 @@
 //! - [`schema`] is the typed surface: a Rust type for every params, result and
 //!   notification payload in `msp.d.ts`, with camelCase serde and open enums
 //!   that tolerate strings this build has never heard of.
-//! - [`MuseClient`] owns the child and two I/O threads, so the UI thread never
+//! - [`MuseClient`] owns the child and its I/O threads, so the UI thread never
 //!   blocks on a pipe. Requests go out on the writer thread and settle on the
-//!   reader thread; everything else arrives as a [`MuseEvent`].
+//!   reader thread; everything else arrives as a [`MuseEvent`]. The child runs
+//!   on the shared process runtime (`provider-runtime`): its own process
+//!   group, the pid ledger, a group kill on hang-up.
 //!
 //! # The five rules the probes taught us
 //!

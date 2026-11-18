@@ -4245,8 +4245,9 @@ impl Harness {
     /// Hang up every provider lane's child this window holds — the open
     /// session's, every parked one's (with a view or without) and the
     /// browser chat's (docs/81 A F6): quit shuts runtimes down, not views
-    /// (docs/82 4.8). What app quit calls so no `claude` or `codex` child
-    /// outlives the app; dropping the runtimes would do the same through
+    /// (docs/82 4.8), then the shared `muse serve` child, which no lane owns
+    /// (docs/81 B PM-12). What app quit calls so no `claude`, `codex` or
+    /// `muse` child outlives the app; dropping the runtimes would do the same through
     /// [`Drop`](crate::session::SessionRuntime), but quit should not rely on
     /// teardown order. Quitting with a switch pending cancels it too, so an
     /// open that lands after teardown is discarded instead of activating.
@@ -4258,6 +4259,9 @@ impl Harness {
         self.open_state.provider_opens_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
         self.cancel_pending_switch(cx);
         self.registry.shutdown_all(self.active.as_ref(), cx);
+        if let Some(hub) = &self.muse_hub {
+            hub.shutdown();
+        }
     }
 
     /// The inline state for a provider that could not start (Z4, typed in

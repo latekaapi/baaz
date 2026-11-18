@@ -132,7 +132,7 @@ pub trait ProviderAdapter: Send {
 
 /// How many stderr lines [`ProviderAdapter::stderr_tail`] keeps: the
 /// failure view's mono well shows at most this many.
-pub const STDERR_TAIL_LINES: usize = 12;
+pub use provider_runtime::STDERR_TAIL_LINES;
 
 /// The one way to talk to a provider: an adapter behind the enforced gate.
 ///

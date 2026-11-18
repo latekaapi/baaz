@@ -7,13 +7,22 @@
 //! One ring per adapter, shared by every child it spawns: a child that
 //! dies before the adapter keeps it (a failed open) still leaves its words
 //! here, and a respawn starts the ring afresh ([`StderrTail::reset`]).
+//!
+//! The drain reads through [`LineReader`]: invalid UTF-8 or an endless line
+//! never ends it early, so the read end stays open for as long as the child
+//! writes and the child never meets `EPIPE` on its own stderr (docs/81 B
+//! PM-6).
 
 use std::collections::VecDeque;
-use std::io::{BufRead as _, BufReader, Read};
+use std::io::Read;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use crate::STDERR_TAIL_LINES;
+use crate::lines::LineReader;
+
+/// How many stderr lines a [`StderrTail`] keeps: the failure view's mono
+/// well shows at most this many.
+pub const STDERR_TAIL_LINES: usize = 12;
 
 /// The last [`STDERR_TAIL_LINES`] non-blank stderr lines of the current
 /// child. Cheap to clone: clones share the ring.
@@ -62,12 +71,15 @@ impl StderrTail {
         std::thread::Builder::new()
             .name(name.to_owned())
             .spawn(move || {
-                for line in BufReader::new(stderr).lines() {
-                    let Ok(line) = line else { break };
+                for line in LineReader::new(stderr) {
                     if let Some(label) = echo.filter(|_| trace_enabled()) {
-                        eprintln!("baaz: {label} stderr: {line}");
+                        eprintln!("baaz: {label} stderr: {}", line.text);
                     }
-                    if !sink.push_for(generation, &line) {
+                    let kept = match line.note() {
+                        Some(note) => sink.push_for(generation, &note),
+                        None => sink.push_for(generation, &line.text),
+                    };
+                    if !kept {
                         return;
                     }
                 }
@@ -149,6 +161,23 @@ mod tests {
         assert_eq!(lines.first().map(String::as_str), Some("line 3"));
         tail.reset();
         assert!(tail.lines().is_empty());
+    }
+
+    /// Invalid UTF-8 and an over-long line neither end the drain nor
+    /// reach the ring raw: the lines after them still land.
+    #[test]
+    fn garbage_on_stderr_does_not_end_the_drain() {
+        let mut bytes = b"before\n\xff\xfebad\n".to_vec();
+        bytes.extend(std::iter::repeat_n(b'x', crate::lines::LINE_CAP + 10));
+        bytes.extend_from_slice(b"\nafter\n");
+        let tail = StderrTail::new();
+        tail.drain(std::io::Cursor::new(bytes), "test-stderr", None).expect("drains");
+        let lines = tail.settled(Duration::from_secs(5));
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert_eq!(lines[0], "before");
+        assert_eq!(lines[1], "\u{fffd}\u{fffd}bad");
+        assert!(lines[2].contains("dropped"), "{lines:?}");
+        assert_eq!(lines[3], "after");
     }
 
     #[test]

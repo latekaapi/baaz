@@ -932,7 +932,20 @@ fn main() {
             None
         } else {
             match crate::instance::acquire(&crate::store::support_dir()) {
-                Ok(crate::instance::Acquire::Owned(lock)) => Some(lock),
+                Ok(crate::instance::Acquire::Owned(lock)) => {
+                    // The pid ledger (docs/81 B PM-2): every provider child
+                    // from here on is recorded in `<state>/run/`, and what a
+                    // Baaz that died left there is ended — only children
+                    // proven its own (pid and start time), only of an owner
+                    // that is gone. Before any child spawns; the sweep runs
+                    // on its own thread.
+                    provider::runtime::ledger::launch(&crate::store::support_dir().join("run"), |swept| match swept {
+                        Ok(swept) if swept.ended.is_empty() => {}
+                        Ok(swept) => crate::baaz_log!("ended {} child(ren) a previous Baaz left running: {:?}", swept.ended.len(), swept.ended),
+                        Err(error) => crate::baaz_log!("the pid ledger sweep failed: {error}"),
+                    });
+                    Some(lock)
+                }
                 Ok(crate::instance::Acquire::HeldBy(pid)) => {
                     let shown = pid.is_some_and(crate::instance::bring_forward);
                     crate::baaz_log!(

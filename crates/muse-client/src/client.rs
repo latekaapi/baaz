@@ -1,15 +1,23 @@
-//! The `muse serve` child, its two I/O threads, and the request plane.
+//! The `muse serve` child, its I/O threads, and the request plane.
+//!
+//! The child runs on the shared process runtime ([`provider_runtime`]):
+//! spawned in a new session and process group, recorded in the pid
+//! ledger, hung up as a group (SIGTERM, then SIGKILL), its stdout read
+//! lossily with a line cap, its stdin owned by one writer thread, its
+//! requests held in a [`RequestMap`] whose close no insert can slip past.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{BufRead, BufReader, Write};
+use std::collections::{HashMap, HashSet};
+use std::io::Write as _;
 use std::path::PathBuf;
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::process::Command;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
+use crossbeam_channel::{unbounded, Receiver, Sender};
+use provider_runtime::pump::{spawn_pump, Flow, PumpEnd};
+use provider_runtime::{ChildProcess, RequestMap, Spawned, StderrTail, StdinWriter, Unanswered, TERM_GRACE};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
@@ -301,10 +309,6 @@ pub enum SchemaWarning {
     },
 }
 
-struct Pending {
-    tx: Sender<Result<Value>>,
-}
-
 struct GapState {
     /// Sessions currently backfilling, with the events buffered meanwhile.
     buffering: HashMap<String, Vec<MuseEvent>>,
@@ -321,73 +325,52 @@ struct Inner {
     next_id: AtomicI64,
     /// The wire capture, when `MUSE_CAPTURE` named a file.
     capture: Option<Arc<Capture>>,
-    pending: Mutex<HashMap<i64, Pending>>,
-    /// The writer thread's inbox. It is an `Option` so [`MuseClient::shutdown`]
-    /// can *drop* it: the writer parks in `recv()`, and dropping the last sender
-    /// is the only thing that wakes it, so without this the drop glue would
-    /// join a thread that never returns.
-    writes: Mutex<Option<Sender<String>>>,
+    /// Requests in flight by id. Closed when the child's stdout ends or the
+    /// client shuts down: every open request fails then, and a request made
+    /// after fails at once instead of waiting [`REQUEST_TIMEOUT`] on a dead
+    /// child (docs/81 B PM-9).
+    requests: RequestMap<i64, Result<Value>>,
+    /// The child's stdin writer. An `Option` so [`MuseClient::shutdown`] can
+    /// drop it: the writer thread ends once its last handle is gone.
+    writes: Mutex<Option<StdinWriter>>,
     events: Sender<MuseEvent>,
     gap: Mutex<GapState>,
-    closed: AtomicBool,
-    /// The child's last stderr lines, oldest first, capped at
-    /// [`STDERR_TAIL_LINES`]. Drained by the `muse-stderr` thread so the
+    /// The child's last stderr lines, drained on their own thread so the
     /// child can never block on a full pipe.
-    stderr_tail: Mutex<VecDeque<String>>,
-}
-
-/// How many stderr lines the tail keeps: enough for the crash and its
-/// context, too few to matter.
-const STDERR_TAIL_LINES: usize = 20;
-
-/// Drain the child's stderr into [`Inner::stderr_tail`], oldest first,
-/// capped. Ends at EOF, which is when the child is gone.
-fn drain_stderr(inner: Arc<Inner>, stderr: ChildStderr) {
-    for line in BufReader::new(stderr).lines() {
-        let Ok(line) = line else { break };
-        let mut tail = inner.stderr_tail.lock().expect("stderr mutex");
-        tail.push_back(line);
-        while tail.len() > STDERR_TAIL_LINES {
-            tail.pop_front();
-        }
-    }
+    stderr: StderrTail,
 }
 
 impl Inner {
-    /// Hand one framed line to the writer thread.
-    fn write_line(&self, line: String) -> Result<()> {
+    /// Hand one framed line to the writer thread. `id` tags a request's
+    /// line, so a failed write fails that request at once.
+    fn write_line(&self, line: String, id: Option<i64>) -> Result<()> {
         if let Some(capture) = &self.capture {
             capture.write("-->", &line);
         }
         let writes = self.writes.lock().expect("writes mutex");
         let Some(writes) = writes.as_ref() else { return Err(MuseError::Closed) };
-        writes.send(line).map_err(|_| MuseError::Closed)
+        // The writer adds the newline the framed line already ends with.
+        let line = line.strip_suffix('\n').map(str::to_owned).unwrap_or(line);
+        writes.enqueue(line, id.map(|id| id.to_string())).map_err(|_| MuseError::Closed)
     }
 
     fn request_value(&self, method: &str, params: Option<Value>) -> Result<Value> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(MuseError::Closed);
-        }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = bounded(1);
-        self.pending.lock().expect("pending mutex").insert(id, Pending { tx });
+        let waiter = self.requests.insert(id, REQUEST_TIMEOUT).map_err(|_| MuseError::Closed)?;
         let line = request_line(id, method, params.as_ref());
-        if self.write_line(line).is_err() {
-            self.pending.lock().expect("pending mutex").remove(&id);
+        if self.write_line(line, Some(id)).is_err() {
+            self.requests.forget(&id);
             return Err(MuseError::Closed);
         }
-        match rx.recv_timeout(REQUEST_TIMEOUT) {
+        match self.requests.wait(waiter) {
             Ok(result) => result,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                self.pending.lock().expect("pending mutex").remove(&id);
-                Err(MuseError::Timeout(method.to_owned()))
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Err(MuseError::Closed),
+            Err(Unanswered::Expired) => Err(MuseError::Timeout(method.to_owned())),
+            Err(Unanswered::Forgotten) => Err(MuseError::Closed),
         }
     }
 
     fn notify(&self, method: &str, params: Option<Value>) -> Result<()> {
-        self.write_line(notification_line(method, params.as_ref()))
+        self.write_line(notification_line(method, params.as_ref()), None)
     }
 
     /// Emit an event, or park it if its session is mid-backfill.
@@ -455,8 +438,10 @@ impl Inner {
 pub struct MuseClient {
     inner: Arc<Inner>,
     events: Receiver<MuseEvent>,
-    child: Arc<Mutex<Child>>,
-    threads: Vec<JoinHandle<()>>,
+    /// The child, shared with the reader (which reads its exit code). A
+    /// hang-up needs no lock: [`MuseClient::shutdown`] takes `&self`, so a
+    /// client shared behind an `Arc` is still killed (docs/81 B PM-12).
+    child: Arc<ChildProcess>,
 }
 
 impl MuseClient {
@@ -485,13 +470,16 @@ impl MuseClient {
         env_remove: &[String],
         env_set: &[(String, String)],
     ) -> Result<Self> {
-        let mut command = Self::serve_command(config, env_remove, env_set)?;
-        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command.spawn()?;
-        let stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
-        Ok(Self::from_pipes(child, stdin, stdout, stderr))
+        Self::spawn_command(&Self::serve_command(config, env_remove, env_set)?)
+    }
+
+    /// Spawn a prepared `muse serve` command ([`Self::serve_command`], plus
+    /// whatever the host sets on it — its `PATH`, its working directory)
+    /// through the shared runtime: a new session and process group, in the
+    /// pid ledger while it runs, stdio piped.
+    pub fn spawn_command(command: &Command) -> Result<Self> {
+        let Spawned { process, stdin, stdout, stderr } = ChildProcess::spawn(command)?;
+        Self::from_parts(process, stdin, stdout, stderr)
     }
 
     /// The `muse serve` [`Command`] for `config`, before the stdio pipes:
@@ -532,55 +520,64 @@ impl MuseClient {
         Ok(command)
     }
 
-    fn from_pipes(child: Child, stdin: ChildStdin, stdout: ChildStdout, stderr: ChildStderr) -> Self {
-        let (writes_tx, writes_rx) = unbounded::<String>();
+    fn from_parts(
+        child: ChildProcess,
+        stdin: std::fs::File,
+        stdout: std::fs::File,
+        stderr: std::fs::File,
+    ) -> Result<Self> {
         let (events_tx, events_rx) = unbounded::<MuseEvent>();
         let inner = Arc::new(Inner {
             next_id: AtomicI64::new(1),
             capture: Capture::from_env(),
-            pending: Mutex::new(HashMap::new()),
-            writes: Mutex::new(Some(writes_tx)),
+            requests: RequestMap::new(),
+            writes: Mutex::new(None),
             events: events_tx,
             gap: Mutex::new(GapState {
                 buffering: HashMap::new(),
                 abandoned: HashSet::new(),
                 fills: Vec::new(),
             }),
-            closed: AtomicBool::new(false),
-            stderr_tail: Mutex::new(VecDeque::new()),
+            stderr: StderrTail::new(),
         });
-        let child = Arc::new(Mutex::new(child));
+        let child = Arc::new(child);
 
-        let writer = std::thread::Builder::new()
-            .name("muse-writer".into())
-            .spawn(move || {
-                let mut stdin = stdin;
-                while let Ok(line) = writes_rx.recv() {
-                    if stdin.write_all(line.as_bytes()).is_err() || stdin.flush().is_err() {
-                        break;
-                    }
-                }
-            })
-            .expect("spawn muse-writer");
-
-        let reader_inner = Arc::clone(&inner);
-        let reader_child = Arc::clone(&child);
-        let reader = std::thread::Builder::new()
-            .name("muse-reader".into())
-            .spawn(move || read_loop(reader_inner, reader_child, stdout))
-            .expect("spawn muse-reader");
+        // A request whose line could not be written fails now, not at its
+        // deadline. Weak: the writer must not keep the client alive.
+        let failed = Arc::downgrade(&inner);
+        let writer = StdinWriter::spawn(stdin, "muse-writer", move |id, _| {
+            if let (Some(inner), Ok(id)) = (failed.upgrade(), id.parse::<i64>()) {
+                inner.requests.complete(&id, Err(MuseError::Closed));
+            }
+        })?;
+        *inner.writes.lock().expect("writes mutex") = Some(writer);
 
         // The child's stderr is diagnostics, never protocol — but when the
-        // child dies unexpectedly it is the only record of why. Drain it into
-        // a bounded tail so a chatty child cannot grow the client without
-        // bound and a dead one cannot block on a full pipe.
-        let stderr_inner = Arc::clone(&inner);
-        let stderr = std::thread::Builder::new()
-            .name("muse-stderr".into())
-            .spawn(move || drain_stderr(stderr_inner, stderr))
-            .expect("spawn muse-stderr");
+        // child dies unexpectedly it is the only record of why. Drained
+        // into a bounded tail so a chatty child cannot grow the client
+        // without bound and a dead one cannot block on a full pipe.
+        inner.stderr.drain(stderr, "muse-stderr", None)?;
 
-        Self { inner, events: events_rx, child, threads: vec![reader, writer, stderr] }
+        // The reader is detached, never joined: it ends when stdout closes,
+        // and a grandchild still holding the pipe must not hang a teardown
+        // (docs/81 B PM-5).
+        let (reader_inner, end_inner, end_child) = (Arc::clone(&inner), Arc::clone(&inner), Arc::clone(&child));
+        spawn_pump(
+            "muse-reader",
+            stdout,
+            move |line| {
+                read_line(&reader_inner, line);
+                Flow::Continue
+            },
+            move |end| reader_ended(&end_inner, &end_child, end),
+        )?;
+
+        Ok(Self { inner, events: events_rx, child })
+    }
+
+    /// The child's pid (its session and process group too), for the log.
+    pub fn pid(&self) -> u32 {
+        self.child.pid()
     }
 
     /// The child's stderr, line-capped at the tail: what the child was saying
@@ -588,14 +585,7 @@ impl MuseClient {
     /// `muse serve` carries no device-code flow on stderr, and the tail is
     /// bounded either way.
     pub fn stderr_tail(&self) -> String {
-        self.inner
-            .stderr_tail
-            .lock()
-            .expect("stderr mutex")
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n")
+        self.inner.stderr.lines().join("\n")
     }
 
     /// The event stream, in wire order.
@@ -632,25 +622,22 @@ impl MuseClient {
         serde_json::from_value(result).map_err(MuseError::Json)
     }
 
-    /// Kill the child and stop the I/O threads.
-    ///
-    /// Dropping the writer's inbox is what stops the writer; killing the child
-    /// closes its stdout, which is what stops the reader. Both are idempotent,
-    /// so `Drop` can call this after an explicit `shutdown`.
-    pub fn shutdown(&mut self) {
-        self.inner.closed.store(true, Ordering::SeqCst);
-        drop(self.inner.writes.lock().expect("writes mutex").take());
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        // A gap fill parks in `request_value`, which fails the moment
-        // `closed` is set and the child's death drains `pending`, so these
-        // return rather than outliving the client (finding
-        // `client-adapter-7`). Taken under the lock, joined outside it: the
-        // thread takes the same lock on its way out.
+    /// Hang up: fail every request in flight, stop the writer, and end
+    /// the child's whole process group (SIGTERM, then SIGKILL after
+    /// [`TERM_GRACE`]). `&self`, so a client shared behind an `Arc` is
+    /// killed too. Idempotent, so `Drop` can call this after an explicit
+    /// `shutdown`. The reader and stderr threads are never joined: they end
+    /// when their pipes close (docs/81 B PM-5).
+    pub fn shutdown(&self) {
+        self.inner.requests.close("the client shut down", |_| Err(MuseError::Closed));
+        drop(self.inner.writes.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take());
+        self.child.terminate(TERM_GRACE);
+        // A gap fill parks in `request_value`, which fails the moment the
+        // request map closes, so these return rather than outliving the
+        // client (finding `client-adapter-7`). Taken under the lock, joined
+        // outside it: the thread takes the same lock on its way out.
         let fills: Vec<JoinHandle<()>> =
-            std::mem::take(&mut self.inner.gap.lock().expect("gap mutex").fills);
+            std::mem::take(&mut self.inner.gap.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).fills);
         for handle in fills {
             let _ = handle.join();
         }
@@ -933,86 +920,87 @@ impl MuseClient {
 impl Drop for MuseClient {
     fn drop(&mut self) {
         self.shutdown();
-        for handle in self.threads.drain(..) {
-            let _ = handle.join();
-        }
     }
 }
 
-fn read_loop(inner: Arc<Inner>, child: Arc<Mutex<Child>>, stdout: ChildStdout) {
-    let reader = BufReader::new(stdout);
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        if let Some(capture) = &inner.capture {
-            capture.write("<--", &line);
-        }
-        match parse_line(&line) {
-            Ok(None) => {}
-            Ok(Some(frame)) => handle_frame(&inner, frame),
-            Err(err) => {
-                // A line we cannot frame is a protocol fault, not a reason to
-                // drop the connection silently: surface it and keep reading.
-                let _ = inner.events.send(MuseEvent::Notification {
-                    method: PROTOCOL_ERROR.into(),
-                    params: serde_json::json!({ "message": err.to_string() }),
-                    cursor: None,
-                    session_id: None,
-                });
-            }
-        }
+/// A line we cannot frame (or one dropped for its length) is a protocol
+/// fault, not a reason to drop the connection silently: surface it and keep
+/// reading.
+fn protocol_fault(inner: &Inner, message: String) {
+    let _ = inner.events.send(MuseEvent::Notification {
+        method: PROTOCOL_ERROR.into(),
+        params: serde_json::json!({ "message": message }),
+        cursor: None,
+        session_id: None,
+    });
+}
+
+/// One line of the child's stdout, through the shared pump.
+fn read_line(inner: &Arc<Inner>, line: provider_runtime::Line) {
+    if let Some(note) = line.note() {
+        protocol_fault(inner, note);
+        return;
     }
-    inner.closed.store(true, Ordering::SeqCst);
-    let code = child.lock().ok().and_then(|mut c| c.wait().ok()).and_then(|s| s.code());
-    // Fail every in-flight request so no caller waits on a dead child.
-    let pending: Vec<_> = inner.pending.lock().expect("pending mutex").drain().collect();
-    for (_, waiter) in pending {
-        let _ = waiter.tx.send(Err(MuseError::Closed));
+    if let Some(capture) = &inner.capture {
+        capture.write("<--", &line.text);
     }
+    match parse_line(&line.text) {
+        Ok(None) => {}
+        Ok(Some(frame)) => handle_frame(inner, frame),
+        Err(err) => protocol_fault(inner, err.to_string()),
+    }
+}
+
+/// The child's stdout ended (or the reader failed): fail every request in
+/// flight — and every one made after — so no caller waits on a dead child,
+/// then say the child is gone, with its exit code when it has one. The
+/// wait for that code is bounded and takes no lock: a child that closed
+/// its stdout but lives on never wedges the reader (docs/81 B PM-6).
+fn reader_ended(inner: &Inner, child: &ChildProcess, end: PumpEnd) {
+    if let PumpEnd::Panicked(message) = end {
+        protocol_fault(inner, format!("the reader failed and stopped: {message}"));
+    }
+    inner.requests.close("the child exited", |_| Err(MuseError::Closed));
+    let code = child.wait_exit(Duration::from_millis(500)).and_then(provider_runtime::Exit::code);
     let _ = inner.events.send(MuseEvent::Closed(code));
 }
 
 fn handle_frame(inner: &Arc<Inner>, frame: Frame) {
     match frame {
         Frame::Response { id, result } => {
-            match inner.pending.lock().expect("pending mutex").remove(&id) {
-                Some(waiter) => {
-                    let _ = waiter.tx.send(Ok(result));
-                }
-                // No waiter means either the id is unknown (a protocol
-                // fault) or `request_value` already gave up after
-                // `REQUEST_TIMEOUT` — a response that arrives after that is
-                // otherwise silently dropped, leaving no trace to
-                // distinguish "the server never answered" from "the server
-                // answered late" (finding `client-adapter-5`).
-                None => {
-                    let _ = inner.events.send(MuseEvent::Notification {
-                        method: PROTOCOL_ERROR.into(),
-                        params: serde_json::json!({
-                            "message": format!("response for unknown or timed-out request id {id}"),
-                            "id": id,
-                        }),
-                        cursor: None,
-                        session_id: None,
-                    });
-                }
+            // No waiter means either the id is unknown (a protocol fault) or
+            // `request_value` already gave up after `REQUEST_TIMEOUT` — a
+            // response that arrives after that is otherwise silently
+            // dropped, leaving no trace to distinguish "the server never
+            // answered" from "the server answered late" (finding
+            // `client-adapter-5`).
+            if !inner.requests.complete(&id, Ok(result)) {
+                let _ = inner.events.send(MuseEvent::Notification {
+                    method: PROTOCOL_ERROR.into(),
+                    params: serde_json::json!({
+                        "message": format!("response for unknown or timed-out request id {id}"),
+                        "id": id,
+                    }),
+                    cursor: None,
+                    session_id: None,
+                });
             }
         }
         Frame::ErrorResponse { id, error } => {
-            let waiter = id.and_then(|id| inner.pending.lock().expect("pending mutex").remove(&id));
-            match waiter {
-                Some(waiter) => {
-                    let _ = waiter.tx.send(Err(MuseError::Rpc(error)));
-                }
-                // A `null` id means an unrecoverable parse error: no request
-                // owns it, so it goes to the app as an event.
-                None => {
-                    let _ = inner.events.send(MuseEvent::Notification {
-                        method: PROTOCOL_ERROR.into(),
-                        params: serde_json::to_value(&*error).unwrap_or(Value::Null),
-                        cursor: None,
-                        session_id: None,
-                    });
-                }
+            let unowned = match id {
+                Some(id) => inner.requests.deliver(&id, Err(MuseError::Rpc(error))).err(),
+                None => Some(Err(MuseError::Rpc(error))),
+            };
+            // A `null` id means an unrecoverable parse error: no request
+            // owns it, so it goes to the app as an event (as does an error
+            // for a request nobody waits on any more).
+            if let Some(Err(MuseError::Rpc(error))) = unowned {
+                let _ = inner.events.send(MuseEvent::Notification {
+                    method: PROTOCOL_ERROR.into(),
+                    params: serde_json::to_value(&*error).unwrap_or(Value::Null),
+                    cursor: None,
+                    session_id: None,
+                });
             }
         }
         Frame::ServerRequest { id, method, params } => {

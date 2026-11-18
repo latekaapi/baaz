@@ -10,9 +10,10 @@
 //! from [`crate::fold`] — the same function the fixture tests use, so the
 //! live path and the tested path cannot drift apart.
 //!
-//! Nothing here runs in tests: spawning `codex` spends the owner's money, so
-//! every test in this module stays offline against the checked-in fixtures
-//! and the pure request builders below.
+//! `codex` never runs in tests: spawning it spends the owner's money, so
+//! every test in this module stays offline — the checked-in fixtures, the
+//! pure request builders below, and a stand-in shell script for the process
+//! faults (a killed child, a child that never reads its stdin).
 //!
 //! The opening sequence, exactly as captured in
 //! `fixtures/codex/basic.jsonl`, is built by [`initialize_request`],
@@ -23,13 +24,14 @@
 //! response — note the key is `data`, not `models`.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aui_protocol::PermissionMode;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender};
+use provider::runtime::pump::{spawn_pump, Flow, PumpEnd};
+use provider::runtime::{ChildProcess, RequestMap, Spawned, StdinWriter, TERM_GRACE};
 use provider::ProviderEvent;
 use serde_json::{json, Value};
 
@@ -245,14 +247,17 @@ pub struct PendingQuestionView {
 }
 
 /// The answer lane for one in-flight request: the `result`, or the wire
-/// error message.
+/// error message (or why no answer can come: the child exited, the write
+/// failed).
 pub type Answer = Result<Value, String>;
+
+/// Requests in flight by request id (`id.to_string()`), each with its own
+/// deadline; closed when the child's stdout ends.
+type Requests = RequestMap<String, Answer>;
 
 /// What the pump and the request lane share.
 #[derive(Debug, Default)]
 struct Shared {
-    /// Response waiters by request id (`id.to_string()`).
-    waiters: HashMap<String, Sender<Answer>>,
     /// Approval requests waiting for a decision, by wire item id.
     approvals: HashMap<String, PendingApproval>,
     /// Question requests already refused with "cannot serve", by prompt id.
@@ -262,19 +267,10 @@ struct Shared {
     modes: WireModes,
 }
 
-/// Fail every in-flight request waiter: the child's stdout ended, so no
-/// answer is coming. Without this a caller blocked in `recv_timeout` waits
-/// the whole 120s and then reports a misleading timeout for a process that
-/// already exited.
-fn fail_waiters(shared: &Arc<Mutex<Shared>>, reason: &str) {
-    let waiters: Vec<Sender<Answer>> = shared
-        .lock()
-        .map(|mut shared| shared.waiters.drain().map(|(_, waiter)| waiter).collect())
-        .unwrap_or_default();
-    for waiter in waiters {
-        let _ = waiter.send(Err(reason.to_owned()));
-    }
-}
+/// Why every request still in flight fails when the child's stdout ends:
+/// no answer is coming, and a caller must not sit out the whole 120 s and
+/// then report a misleading timeout for a process that already exited.
+const EXITED_BEFORE_ANSWERING: &str = "the agent process exited before answering";
 
 /// The child died under the session (docs/71 §2): every approval and
 /// question it raised is settled as cancelled here, in the adapter — the
@@ -1057,25 +1053,24 @@ impl PermissionsApprovalParams {
     }
 }
 
-fn write_value(stdin: &Arc<Mutex<ChildStdin>>, value: &Value) -> std::io::Result<()> {
-    let line = serde_json::to_string(value)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let mut stdin = stdin.lock().map_err(|_| {
-        std::io::Error::other("the session child's stdin lock is poisoned")
-    })?;
-    stdin.write_all(line.as_bytes())?;
-    stdin.write_all(b"\n")?;
-    stdin.flush()
+/// Queue `value` as one line on the child's stdin, tagged with `tag` (a
+/// request id) so a failed write fails that request at once. Never blocks:
+/// the writer thread owns the pipe, so a child that stops reading stalls
+/// neither the pump nor a dispatch (docs/81 B PM-8).
+fn write_value(stdin: &StdinWriter, value: &Value, tag: Option<String>) -> std::io::Result<()> {
+    let line = serde_json::to_string(value).map_err(|error| std::io::Error::other(error.to_string()))?;
+    stdin.enqueue(line, tag)
 }
 
 /// A running session child: request/response calls in, a pump thread for
-/// everything the server sends unprompted.
+/// everything the server sends unprompted. The child leads its own process
+/// group ([`ChildProcess`]).
 pub struct RunningChild {
-    child: Child,
-    stdin: Arc<Mutex<ChildStdin>>,
+    child: ChildProcess,
+    stdin: StdinWriter,
     next_id: Mutex<u64>,
     shared: Arc<Mutex<Shared>>,
-    pump: Option<std::thread::JoinHandle<()>>,
+    requests: Arc<Requests>,
     /// Set by [`Self::shutdown`] before the child is stopped: the pump's
     /// end of stream that follows is a hang-up, not a loss — it settles
     /// nothing and reports nothing.
@@ -1150,148 +1145,122 @@ impl RunningChild {
         command
             .arg("app-server")
             .args(extra_args)
-            .env("PATH", provider::env_path::child_path_for(std::path::Path::new(program)))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .env("PATH", provider::env_path::child_path_for(std::path::Path::new(program)));
         provider::child_env::scrub_command(&mut command);
         for (key, value) in env {
             command.env(key, value);
         }
-        let mut child = command.spawn()?;
-        stderr.drain(child.stderr.take().expect("stderr piped"), "provider-codex-stderr", Some("codex"))?;
-        let stdout = child.stdout.take().expect("stdout piped");
+        // A new session and process group, in the pid ledger while it runs.
+        let Spawned { process: child, stdin, stdout, stderr: stderr_pipe } = ChildProcess::spawn(&command)?;
+        stderr.drain(stderr_pipe, "provider-codex-stderr", Some("codex"))?;
         let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let pump_retired = Arc::clone(&retired);
-        let pump_lost = Arc::clone(&lost);
-        let stdin_raw = child.stdin.take().expect("stdin piped");
-        let stdin = Arc::new(Mutex::new(stdin_raw));
         let shared = Arc::new(Mutex::new(Shared::default()));
-        let pump_stdin = Arc::clone(&stdin);
-        let pump_shared = Arc::clone(&shared);
-        let pump = std::thread::Builder::new()
-            .name("provider-codex-pump".into())
-            .spawn(move || {
-                let mut failed: Option<String> = None;
-                for line in BufReader::new(stdout).lines() {
-                    let Ok(line) = line else { break };
-                    if line.trim().is_empty() {
-                        continue;
+        let requests = Arc::new(Requests::new());
+        // A request whose line never reached the child fails now, not at
+        // its deadline.
+        let failed_requests = Arc::clone(&requests);
+        let stdin = StdinWriter::spawn(stdin, "provider-codex-stdin", move |id, reason| {
+            failed_requests.complete(&id.to_owned(), Err(format!("the session child is unreachable: {reason}")));
+        })?;
+        let (pump_stdin, pump_shared, pump_requests) = (stdin.clone(), Arc::clone(&shared), Arc::clone(&requests));
+        let (pump_fold, pump_events) = (Arc::clone(&fold), events.clone());
+        let step = move |line: provider::runtime::Line| {
+            if let Some(note) = line.note() {
+                eprintln!("[Codex] {note}");
+                return Flow::Continue;
+            }
+            let line = line.text;
+            if line.trim().is_empty() {
+                return Flow::Continue;
+            }
+            let Ok(frame) = decode_line(&line) else { return Flow::Continue };
+            match frame {
+                Frame::Response { id, result } => {
+                    pump_requests.complete(&id.to_string(), Ok(result));
+                }
+                Frame::ResponseError { id, message, .. } => {
+                    pump_requests.complete(&id.to_string(), Err(message));
+                }
+                Frame::Request { id, method, params } => {
+                    // Read-only refuses an MCP tool call outright:
+                    // declined here, never carded as askable. Judged by the
+                    // mode the running turn is under, not only the chip's.
+                    let chip = pump_fold.lock().ok().and_then(|fold| fold.permission_mode());
+                    let wire = pump_shared.lock().map(|shared| shared.modes).unwrap_or_default();
+                    let mode = mcp_gate_mode(chip, wire);
+                    if let Some(answer) = read_only_mcp_answer(&id, &method, &params, mode) {
+                        let _ = write_value(&pump_stdin, &answer, None);
+                        return Flow::Continue;
                     }
-                    let Ok(frame) = decode_line(&line) else { continue };
-                    // A step that panics ends the session like a lost
-                    // child, with the poison it left cleared (docs/81 B
-                    // PM-3); `stop` says the loop should end on its own.
-                    let mut stop = false;
-                    let stepped = provider::guard::guard_line(|| match frame {
-                        Frame::Response { id, result } => {
-                            let waiter = pump_shared
-                                .lock()
-                                .ok()
-                                .and_then(|mut shared| {
-                                    shared.waiters.remove(&id.to_string())
-                                });
-                            if let Some(waiter) = waiter {
-                                let _ = waiter.send(Ok(result));
-                            }
-                        }
-                        Frame::ResponseError { id, message, .. } => {
-                            let waiter = pump_shared
-                                .lock()
-                                .ok()
-                                .and_then(|mut shared| {
-                                    shared.waiters.remove(&id.to_string())
-                                });
-                            if let Some(waiter) = waiter {
-                                let _ = waiter.send(Err(message));
-                            }
-                        }
-                        Frame::Request { id, method, params } => {
-                            // Read-only refuses an MCP tool call outright:
-                            // declined here, never carded as askable.
-                            // Judged by the mode the running turn is
-                            // under, not only the chip's.
-                            let chip = fold.lock().ok().and_then(|fold| fold.permission_mode());
-                            let wire = pump_shared.lock().map(|shared| shared.modes).unwrap_or_default();
-                            let mode = mcp_gate_mode(chip, wire);
-                            if let Some(answer) = read_only_mcp_answer(&id, &method, &params, mode) {
-                                let _ = write_value(&pump_stdin, &answer);
-                                return;
-                            }
-                            // Approval requests card their pending approval
-                            // on the transcript first, through the same
-                            // decode-and-fold the fixture tests exercise —
-                            // then the request itself is routed below (the
-                            // answerable record and the tap), never answered
-                            // here. An `mcp_tool_call` elicitation cards
-                            // the same way; any other elicitation stays a
-                            // question and cards nothing.
-                            if ApprovalKind::from_method(&method).is_some()
-                                || (method == "mcpServer/elicitation/request"
-                                    && elicitation_is_tool_approval(&params))
-                            {
-                                if let Ok(mut fold) = fold.lock() {
-                                    crate::fold::step_line(&mut fold, &line, &mut |event| {
-                                        let _ = events.send(event);
-                                    });
-                                }
-                            }
-                            let write = |value: Value| {
-                                let _ = write_value(&pump_stdin, &value);
-                            };
-                            Self::serve_server_request(
-                                &write,
-                                &pump_shared,
-                                &events,
-                                &id,
-                                &method,
-                                &params,
-                            );
-                        }
-                        Frame::Notification(_) => {
-                            let Ok(mut fold) = fold.lock() else {
-                                stop = true;
-                                return;
-                            };
-                            step_line(&mut fold, &line, &mut |event| {
-                                let _ = events.send(event);
+                    // Approval requests card their pending approval on the
+                    // transcript first, through the same decode-and-fold
+                    // the fixture tests exercise — then the request itself
+                    // is routed below (the answerable record and the tap),
+                    // never answered here. An `mcp_tool_call` elicitation
+                    // cards the same way; any other elicitation stays a
+                    // question and cards nothing.
+                    if ApprovalKind::from_method(&method).is_some()
+                        || (method == "mcpServer/elicitation/request" && elicitation_is_tool_approval(&params))
+                    {
+                        if let Ok(mut fold) = pump_fold.lock() {
+                            crate::fold::step_line(&mut fold, &line, &mut |event| {
+                                let _ = pump_events.send(event);
                             });
                         }
+                    }
+                    // Queued, never written here: the pump never waits on
+                    // the child's stdin.
+                    let write = |value: Value| {
+                        let _ = write_value(&pump_stdin, &value, None);
+                    };
+                    Self::serve_server_request(&write, &pump_shared, &pump_events, &id, &method, &params);
+                }
+                Frame::Notification(_) => {
+                    let Ok(mut fold) = pump_fold.lock() else { return Flow::Stop };
+                    step_line(&mut fold, &line, &mut |event| {
+                        let _ = pump_events.send(event);
                     });
-                    if let Err(message) = stepped {
-                        fold.clear_poison();
-                        pump_shared.clear_poison();
-                        failed = Some(provider::guard::panic_reason("Codex", &message));
-                        break;
-                    }
-                    if stop {
-                        break;
-                    }
                 }
-                // The child's stdout ended: wake every in-flight caller with an
-                // error naming the exit, then report the loss. Waiters left
-                // alone would sit out the full 120s `recv_timeout` and fail
-                // with a misleading "{method} timed out".
-                fail_waiters(&pump_shared, "the agent process exited before answering");
-                // A hang-up (shutdown, a revive replacing this child) is
-                // not a loss: nothing to settle, nothing to report.
-                if pump_retired.load(std::sync::atomic::Ordering::SeqCst) {
-                    return;
+            }
+            Flow::Continue
+        };
+        let (end_shared, end_requests, end_retired, end_lost) =
+            (Arc::clone(&shared), Arc::clone(&requests), Arc::clone(&retired), Arc::clone(&lost));
+        let end = move |end: PumpEnd| {
+            // A step that panicked ends the session like a lost child, with
+            // the poison it left cleared (docs/81 B PM-3).
+            let failed = match end {
+                PumpEnd::Panicked(message) => {
+                    fold.clear_poison();
+                    end_shared.clear_poison();
+                    Some(provider::guard::panic_reason("Codex", &message))
                 }
-                let reason = failed.unwrap_or_else(|| {
-                    let said = stderr.settled(STDERR_SETTLE);
-                    match said.last() {
-                        Some(line) => format!("{CHILD_EXITED_REASON}: {}", line.trim()),
-                        None => CHILD_EXITED_REASON.to_owned(),
-                    }
-                });
-                settle_lost_child(&pump_shared, &fold, &events, &reason);
-                pump_lost.store(true, std::sync::atomic::Ordering::SeqCst);
-                let _ = events.send(ProviderEvent::ConnectionLost { reason });
-            })
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        Ok(Self { child, stdin, next_id: Mutex::new(1), shared, pump: Some(pump), retired, lost })
+                PumpEnd::Closed => None,
+            };
+            // The child's stdout ended: every in-flight caller is woken
+            // with an error naming the exit, and a request made after this
+            // fails at once — then the loss is reported.
+            end_requests.close(EXITED_BEFORE_ANSWERING, |reason| Err(reason.to_owned()));
+            // A hang-up (shutdown, a revive replacing this child) is not a
+            // loss: nothing to settle, nothing to report.
+            if end_retired.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let reason = failed.unwrap_or_else(|| {
+                let said = stderr.settled(STDERR_SETTLE);
+                match said.last() {
+                    Some(line) => format!("{CHILD_EXITED_REASON}: {}", line.trim()),
+                    None => CHILD_EXITED_REASON.to_owned(),
+                }
+            });
+            settle_lost_child(&end_shared, &fold, &events, &reason);
+            end_lost.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = events.send(ProviderEvent::ConnectionLost { reason });
+        };
+        // Detached, never joined: the pump ends when stdout closes.
+        spawn_pump("provider-codex-pump", stdout, step, end)?;
+        Ok(Self { child, stdin, next_id: Mutex::new(1), shared, requests, retired, lost })
     }
 
     /// Whether this child's stdout ended on its own: it died, and the
@@ -1489,29 +1458,27 @@ impl RunningChild {
         wire: Value,
         timeout: Duration,
     ) -> Result<Value, RequestError> {
-        let (tx, rx): (Sender<Answer>, Receiver<Answer>) = unbounded();
         let sets_mode = frame_mode(&wire);
         let thread_frame = matches!(method, "thread/start" | "thread/resume");
-        {
-            let mut shared = self.shared.lock().map_err(|_| RequestError {
-                reason: "the session state lock is poisoned".into(),
-            })?;
-            shared.waiters.insert(key.clone(), tx);
-            // Before the write: a request the turn raises can arrive
-            // before this answer does.
-            if sets_mode.is_some() {
-                shared.modes.attempted = sets_mode;
+        let unreachable = |reason: String| RequestError { reason: format!("the session child is unreachable: {reason}") };
+        // A closed map (the child already exited) refuses at once.
+        let waiter = self.requests.insert(key.clone(), timeout).map_err(unreachable)?;
+        // Before the write: a request the turn raises can arrive before
+        // this answer does.
+        if sets_mode.is_some() {
+            match self.shared.lock() {
+                Ok(mut shared) => shared.modes.attempted = sets_mode,
+                Err(_) => {
+                    self.requests.forget(&key);
+                    return Err(RequestError { reason: "the session state lock is poisoned".into() });
+                }
             }
         }
-        if let Err(error) = write_value(&self.stdin, &wire) {
-            let _ = self
-                .shared
-                .lock()
-                .ok()
-                .and_then(|mut shared| shared.waiters.remove(&key));
-            return Err(RequestError { reason: format!("the session child is unreachable: {error}") });
+        if let Err(error) = write_value(&self.stdin, &wire, Some(key.clone())) {
+            self.requests.forget(&key);
+            return Err(unreachable(error.to_string()));
         }
-        match rx.recv_timeout(timeout) {
+        match self.requests.wait(waiter) {
             Ok(Ok(result)) => {
                 let took = if thread_frame { reported_mode(&result).or(sets_mode) } else { sets_mode };
                 if let (Some(took), Ok(mut shared)) = (took, self.shared.lock()) {
@@ -1519,17 +1486,8 @@ impl RunningChild {
                 }
                 Ok(result)
             }
-            Ok(Err(message)) => {
-                Err(RequestError { reason: format!("{method} errored: {message}") })
-            }
-            Err(_) => {
-                let _ = self
-                    .shared
-                    .lock()
-                    .ok()
-                    .and_then(|mut shared| shared.waiters.remove(&key));
-                Err(RequestError { reason: format!("{method} timed out") })
-            }
+            Ok(Err(message)) => Err(RequestError { reason: format!("{method} errored: {message}") }),
+            Err(_) => Err(RequestError { reason: format!("{method} timed out") }),
         }
     }
 
@@ -1542,22 +1500,21 @@ impl RunningChild {
     pub fn request_detached(&self, method: &str, params: Value) -> Result<Receiver<Answer>, RequestError> {
         let id = self.next_request_id();
         let key = id.to_string();
-        let (tx, rx): (Sender<Answer>, Receiver<Answer>) = unbounded();
-        self.shared
-            .lock()
-            .map_err(|_| RequestError { reason: "the session state lock is poisoned".into() })?
-            .waiters
-            .insert(key.clone(), tx);
-        if let Err(error) = write_value(&self.stdin, &json!({"id": id, "method": method, "params": params})) {
-            let _ = self.shared.lock().ok().and_then(|mut shared| shared.waiters.remove(&key));
-            return Err(RequestError { reason: format!("the session child is unreachable: {error}") });
+        let unreachable = |reason: String| RequestError { reason: format!("the session child is unreachable: {reason}") };
+        // The caller keeps its own deadline; the map's only forgets a
+        // waiter nobody collected.
+        let waiter = self.requests.insert(key.clone(), REQUEST_TIMEOUT).map_err(unreachable)?;
+        if let Err(error) = write_value(&self.stdin, &json!({"id": id, "method": method, "params": params}), Some(key.clone())) {
+            self.requests.forget(&key);
+            return Err(unreachable(error.to_string()));
         }
-        Ok(rx)
+        Ok(waiter.into_receiver())
     }
 
-    /// Send one client→server notification (no id, no answer).
+    /// Send one client→server notification (no id, no answer). Queued:
+    /// never waits on the child reading its stdin.
     pub fn send_notification(&self, method: &str, params: Value) -> std::io::Result<()> {
-        write_value(&self.stdin, &json!({"method": method, "params": params}))
+        write_value(&self.stdin, &json!({"method": method, "params": params}), None)
     }
 
     /// Answer a pending command-execution approval. True when the approval
@@ -1616,7 +1573,7 @@ impl RunningChild {
             .approvals
             .remove(item_id);
         let Some(pending) = pending else { return Ok(false) };
-        write_value(&self.stdin, &json!({"id": pending.request_id, "result": result}))?;
+        write_value(&self.stdin, &json!({"id": pending.request_id, "result": result}), None)?;
         Ok(true)
     }
 
@@ -1696,16 +1653,19 @@ impl RunningChild {
             .unwrap_or_default()
     }
 
-    /// Hang up. Idempotent; also runs on drop.
+    /// The child's pid (its process group too).
+    pub fn pid(&self) -> u32 {
+        self.child.pid()
+    }
+
+    /// Hang up: the whole process group, SIGTERM then SIGKILL after
+    /// [`TERM_GRACE`]. Idempotent; also runs on drop.
     pub fn shutdown(&mut self) {
         // Deliberate: the pump's end of stream that follows is expected.
         self.retired.store(true, std::sync::atomic::Ordering::SeqCst);
-        // Detach, never join: the pump ends when stdout closes, which is
-        // when the child exits after stdin closes.
-        self.pump.take();
         // SIGTERM first: a SIGKILLed app-server keeps its thread's writer
         // lease, and the next resume of that thread waits ~5 s and fails.
-        provider::child_env::terminate(&mut self.child, std::time::Duration::from_millis(250));
+        self.child.terminate(TERM_GRACE);
     }
 }
 
@@ -1731,6 +1691,7 @@ mod tests {
 
     use super::*;
     use crate::frame::{decode_envelope, Direction};
+    use crossbeam_channel::unbounded;
 
     fn envelopes(name: &str) -> Vec<(Direction, Value)> {
         let path = format!("{}/../../fixtures/codex/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -2620,25 +2581,86 @@ mod tests {
         assert_eq!(hidden_rows[0].efforts.len(), 1);
     }
 
+    /// A stand-in `codex` (never the real one): a script that ignores its
+    /// `app-server` argument and does what `BAAZ_STAND_IN` says — `mute`
+    /// reads stdin and never answers, `deaf` never reads stdin at all.
+    fn stand_in(mode: &str) -> (RunningChild, Receiver<ProviderEvent>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("baaz-codex-stand-in-{mode}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let program = dir.join("codex-stand-in");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\ncase \"$BAAZ_STAND_IN\" in\n  mute) exec cat >/dev/null ;;\n  deaf) exec sleep 60 ;;\nesac\n",
+        )
+        .expect("script");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let (events, events_rx) = unbounded();
+        let child = RunningChild::spawn_with_env(
+            program.to_str().expect("utf-8 path"),
+            &[],
+            &[("BAAZ_STAND_IN".into(), mode.into())],
+            Arc::new(Mutex::new(CodexFold::new())),
+            events,
+        )
+        .expect("the stand-in spawns");
+        (child, events_rx, dir)
+    }
+
+    /// THE KILLED CHILD (docs/82 5.1). A request is in flight when the
+    /// child is SIGKILLed: it fails at once naming the exit (not after its
+    /// two minutes), the loss is reported, a later request fails at once,
+    /// and the hang-up returns promptly.
     #[test]
-    fn exited_child_fails_waiters_with_the_exit_not_a_timeout() {
-        // No process is spawned: a waiter is registered directly, then the
-        // exit path fails it — the same call the pump makes when stdout ends.
-        let shared = Arc::new(Mutex::new(Shared::default()));
-        let (tx, rx) = unbounded();
-        shared.lock().expect("mutex").waiters.insert("3".into(), tx);
-        fail_waiters(&shared, "the agent process exited before answering");
-        match rx.try_recv() {
-            Ok(Err(message)) => assert!(
-                message.contains("exited"),
-                "the error names the exit, not a timeout: {message}"
-            ),
-            other => panic!("expected an exit error for the waiter, got {other:?}"),
-        }
-        assert!(
-            shared.lock().expect("mutex").waiters.is_empty(),
-            "failed waiters are forgotten, never re-failed"
-        );
+    fn a_killed_child_fails_its_request_with_the_exit_and_holds_nothing() {
+        let (child, events, dir) = stand_in("mute");
+        let child = Arc::new(Mutex::new(Some(child)));
+        let pid = child.lock().expect("child").as_ref().expect("child").pid() as i32;
+        let asking = Arc::clone(&child);
+        let request = std::thread::spawn(move || {
+            let child = asking.lock().expect("child");
+            child.as_ref().expect("child").send_request("model/list", json!({}))
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        let started = std::time::Instant::now();
+        // SAFETY: SIGKILL to the stand-in this test spawned.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let error = request.join().expect("the request returns").expect_err("no answer came");
+        assert!(error.reason.contains("exited"), "names the exit, not a timeout: {error}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        let lost = events.recv_timeout(Duration::from_secs(5)).expect("the loss is reported");
+        assert!(matches!(lost, ProviderEvent::ConnectionLost { .. }), "{lost:?}");
+        let mut child = child.lock().expect("child").take().expect("child");
+        assert!(child.is_lost());
+        let started = std::time::Instant::now();
+        assert!(child.send_request("model/list", json!({})).is_err());
+        assert!(child.pending_approvals().is_empty());
+        child.shutdown();
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE FULL PIPE (docs/82 5.1). A child that never reads its stdin and
+    /// a request too big for the pipe: the request gives up at its own
+    /// deadline, the shared state stays free for the pump and the UI, a
+    /// notification queues at once, and the hang-up returns promptly.
+    #[test]
+    fn a_child_that_never_reads_stdin_stalls_no_dispatch() {
+        let (mut child, _events, dir) = stand_in("deaf");
+        let started = std::time::Instant::now();
+        let error = child
+            .send_request_with_timeout("thread/start", json!({"blob": "x".repeat(2 << 20)}), Duration::from_millis(300))
+            .expect_err("never answered");
+        assert_eq!(error.reason, "thread/start timed out");
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        let started = std::time::Instant::now();
+        child.send_notification("initialized", json!({})).expect("queued");
+        assert!(child.pending_approvals().is_empty());
+        assert!(started.elapsed() < Duration::from_millis(500), "nothing waited on the pipe");
+        let started = std::time::Instant::now();
+        child.shutdown();
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

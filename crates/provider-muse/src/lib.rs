@@ -160,28 +160,28 @@ pub(crate) fn tap_for(
 /// view events at all (`docs/01-transport.md` §4), so an app that wants a
 /// transcript may never set it.
 ///
-/// The child spawns with the shared scrubbed env
-/// ([`provider::child_env`]): that crate's `Command` lives inside
-/// `muse-client`, out of reach of a direct [`provider::child_env::scrub_command`],
-/// so the scrub rides as per-child `env_remove`s through
-/// `muse-client`'s `spawn_with_env` — the process env is never touched.
-/// Title and summary side sessions ride this same child over the wire —
-/// no new process — so they are covered by this one scrub.
+/// The child spawns like Claude Code's and Codex's (docs/81 B PM-12): with
+/// the shared scrubbed env ([`provider::child_env`], as per-child
+/// `env_remove`s on `muse-client`'s serve command — the process env is
+/// never touched), the login-shell `PATH` with the program's own directory
+/// first ([`provider::env_path::child_path_for`]), the person's home as
+/// its working directory (a Dock launch's is `/`; the child must not depend
+/// on where Baaz was started), and through the shared runtime: its own
+/// session and process group, the pid ledger, a group kill on hang-up.
+/// Title and summary side sessions ride this same child over the wire — no
+/// new process — so they are covered by this one spawn.
 ///
 /// Blocking: run it on the background executor.
 pub fn spawn(program: &str) -> Result<MuseClient, ProviderError> {
     let removals = provider::child_env::scrubbed_removals();
-    MuseClient::spawn_with_env(
-        &MuseConfig {
-            program: program.into(),
-            trust_workspace: true,
-            no_session_log: false,
-            extra_args: Vec::new(),
-        },
-        &removals,
-        &[],
-    )
-    .map_err(translate::transport_error)
+    let config = MuseConfig { program: program.into(), trust_workspace: true, no_session_log: false, extra_args: Vec::new() };
+    let mut command = MuseClient::serve_command(&config, &removals, &[]).map_err(translate::transport_error)?;
+    let path = provider::env_path::child_path_for(std::path::Path::new(command.get_program()));
+    command.env("PATH", path);
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from).filter(|home| home.is_dir()) {
+        command.current_dir(home);
+    }
+    MuseClient::spawn_command(&command).map_err(translate::transport_error)
 }
 
 /// What spawning and shaking hands produced: the hub, the transitional

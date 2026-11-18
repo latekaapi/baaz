@@ -16,3 +16,7 @@ muse-adapter = { workspace = true }
 aui-protocol = { workspace = true }
 crossbeam-channel = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# Fault tests SIGKILL their own stand-in children.
+libc = { workspace = true }

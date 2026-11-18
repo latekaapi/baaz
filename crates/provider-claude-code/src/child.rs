@@ -8,103 +8,28 @@
 //! Nothing here runs in tests: spawning `claude` spends the owner's money
 //! and every test stays offline against the checked-in fixtures.
 
-use std::io::{BufRead as _, BufReader, Read, Write};
-use std::process::{Child, Command, Stdio};
+use std::io::{Read, Write};
+use std::process::Command;
 use std::sync::Arc;
 
-use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
+use provider::runtime::pump::{spawn_pump as spawn_line_pump, Flow, PumpEnd};
+use provider::runtime::{ChildProcess, Spawned, StdinWriter, TERM_GRACE};
 
 use crate::argv::SessionLaunch;
 use crate::controls::ControlHub;
 
-/// One line for the child's stdin: the writer thread writes it whole, then
-/// answers `reply` (when the sender waits) or, for a hub-initiated control
-/// line that failed, tells the hub which `request_id` can never be
-/// answered.
-struct WriteJob {
-    line: String,
-    reply: Option<Sender<std::io::Result<()>>>,
-    request_id: Option<String>,
-}
-
-/// The child's stdin, owned by ONE writer thread fed by a channel. Nobody
-/// else touches the pipe: the pump and the UI only enqueue, so a large
-/// prompt blocked in `write_all` (the child not reading stdin until its
-/// stdout drains) can never stall the pump that drains that stdout.
-/// Lines go out whole and in enqueue order.
-#[derive(Clone)]
-pub(crate) struct StdinWriter {
-    tx: Sender<WriteJob>,
-}
-
-impl StdinWriter {
-    /// Hand `stdin` to a fresh writer thread. A failed write fails that
-    /// line (its reply, or the hub's [`ControlHub::hub_write_failed`] for
-    /// the child of `epoch`) and every line after it: a pipe that broke
-    /// once stays broken.
-    pub(crate) fn spawn(
-        mut stdin: impl Write + Send + 'static,
-        hub: &Arc<ControlHub>,
-        epoch: u64,
-    ) -> std::io::Result<Self> {
-        let (tx, rx) = unbounded::<WriteJob>();
-        let hub = Arc::clone(hub);
-        std::thread::Builder::new()
-            .name("provider-claude-code-stdin".into())
-            .spawn(move || {
-                let mut broken: Option<String> = None;
-                for job in rx {
-                    let written = match &broken {
-                        Some(reason) => Err(std::io::Error::other(reason.clone())),
-                        None => stdin
-                            .write_all(job.line.as_bytes())
-                            .and_then(|()| stdin.write_all(b"\n"))
-                            .and_then(|()| stdin.flush()),
-                    };
-                    if let Err(error) = &written {
-                        broken.get_or_insert_with(|| error.to_string());
-                        if let Some(request_id) = &job.request_id {
-                            hub.hub_write_failed(epoch, request_id, &error.to_string());
-                        }
-                    }
-                    if let Some(reply) = job.reply {
-                        let _ = reply.send(written);
-                    }
-                }
-            })
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        Ok(Self { tx })
-    }
-
-    /// Queue one line and return at once: the writer thread delivers it.
-    /// `request_id` names the hub control request it carries, so a failed
-    /// write refuses that request instead of leaving it to its timeout.
-    pub(crate) fn enqueue(&self, line: String, request_id: Option<String>) -> std::io::Result<()> {
-        self.tx
-            .send(WriteJob { line, reply: None, request_id })
-            .map_err(|_| std::io::Error::other("the child's stdin writer has stopped"))
-    }
-
-    /// Queue one line and hand back where its write result lands, without
-    /// waiting for it: a caller holding a lock the pump needs waits only
-    /// after releasing it.
-    pub(crate) fn enqueue_with_reply(&self, line: String) -> Receiver<std::io::Result<()>> {
-        let (reply, result) = bounded(1);
-        if let Err(error) = self.tx.send(WriteJob { line, reply: Some(reply), request_id: None }) {
-            if let Some(reply) = error.into_inner().reply {
-                let _ = reply.send(Err(std::io::Error::other("the child's stdin writer has stopped")));
-            }
-        }
-        result
-    }
-
-    /// Queue one line and wait for its write: the UI side, which may block
-    /// (never the pump, which never waits on a write).
-    pub(crate) fn write_line(&self, line: &str) -> std::io::Result<()> {
-        self.enqueue_with_reply(line.to_owned())
-            .recv()
-            .unwrap_or_else(|_| Err(std::io::Error::other("the child's stdin writer has stopped")))
-    }
+/// The child's stdin writer ([`StdinWriter`], shared by every adapter) for
+/// the child of `epoch`: a hub control line whose write fails is refused
+/// through [`ControlHub::hub_write_failed`] at once, not at its timeout.
+pub(crate) fn stdin_writer(
+    stdin: impl Write + Send + 'static,
+    hub: &Arc<ControlHub>,
+    epoch: u64,
+) -> std::io::Result<StdinWriter> {
+    let hub = Arc::clone(hub);
+    StdinWriter::spawn(stdin, "provider-claude-code-stdin", move |request_id, reason| {
+        hub.hub_write_failed(epoch, request_id, reason);
+    })
 }
 
 /// Whether `BAAZ_TRACE=1` is set: the child's argv and stderr are echoed
@@ -141,49 +66,57 @@ pub(crate) fn exit_reason(stderr: Option<&str>) -> String {
 const STDERR_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Pump one child's stdout into the hub, gated to its epoch, until the
-/// stream ends: the same per-line ingest the scripted-frame tests drive.
-/// The end-of-stream card quotes `stderr`'s tail when the child left one.
+/// stream ends: the same per-line ingest the scripted-frame tests drive,
+/// through the shared pump ([`provider::runtime::pump`]): lines read
+/// lossily with a cap, each one guarded. The end-of-stream card quotes
+/// `stderr`'s tail when the child left one.
 pub(crate) fn spawn_pump(
     stdout: impl Read + Send + 'static,
     hub: &Arc<ControlHub>,
     epoch: u64,
     stderr: Option<provider::StderrTail>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    let pump_hub = Arc::clone(hub);
-    std::thread::Builder::new()
-        .name("provider-claude-code-pump".into())
-        .spawn(move || {
-            let mut failed = None;
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                // A fold that panics ends the session like a lost child,
-                // with the poison it left cleared (docs/81 B PM-3).
-                if let Err(message) = provider::guard::guard_line(|| pump_hub.ingest_line_of(epoch, &line)) {
-                    pump_hub.recover_from_panic();
-                    failed = Some(provider::guard::panic_reason("Claude Code", &message));
-                    break;
-                }
+    let (pump_hub, end_hub) = (Arc::clone(hub), Arc::clone(hub));
+    spawn_line_pump(
+        "provider-claude-code-pump",
+        stdout,
+        move |line| {
+            match line.note() {
+                Some(note) => eprintln!("[Claude Code] {note}"),
+                None => pump_hub.ingest_line_of(epoch, &line.text),
             }
-            // A turn the child never finished ends here, carded, and
-            // the lane learns the connection is gone — unless Baaz
-            // hung up on purpose (`shutdown` retired the epoch).
-            let reason = failed.unwrap_or_else(|| {
-                let said = stderr.and_then(|tail| exit_card_text(&tail.settled(STDERR_SETTLE)));
-                exit_reason(said.as_deref())
-            });
-            pump_hub.ingest_end_of_stream(epoch, &reason);
-        })
-        .map_err(|error| std::io::Error::other(error.to_string()))
+            Flow::Continue
+        },
+        move |end| {
+            // A turn the child never finished ends here, carded, and the
+            // lane learns the connection is gone — unless Baaz hung up on
+            // purpose (`shutdown` retired the epoch). A fold that panicked
+            // ends the session like a lost child, with the poison it left
+            // cleared (docs/81 B PM-3).
+            let reason = match end {
+                PumpEnd::Panicked(message) => {
+                    end_hub.recover_from_panic();
+                    provider::guard::panic_reason("Claude Code", &message)
+                }
+                PumpEnd::Closed => {
+                    let said = stderr.and_then(|tail| exit_card_text(&tail.settled(STDERR_SETTLE)));
+                    exit_reason(said.as_deref())
+                }
+            };
+            end_hub.ingest_end_of_stream(epoch, &reason);
+        },
+    )
 }
 
 /// A running session child: stdin for turns, a pump thread for stdout.
+/// The child leads its own process group ([`ChildProcess`]), so a hang-up
+/// ends the tools and MCP servers it started too.
 pub struct RunningChild {
-    child: Child,
+    child: ChildProcess,
     /// The single writer of the child's stdin, shared with the hub
     /// ([`ControlHub::attach_stdin`]), which queues the Read-only MCP
     /// refresh from the pump.
     stdin: StdinWriter,
-    pump: Option<std::thread::JoinHandle<()>>,
     /// The hub and this child's epoch on it: a deliberate hang-up retires
     /// the epoch so the pump's end of stream reads as expected, not lost.
     hub: std::sync::Arc<ControlHub>,
@@ -252,10 +185,7 @@ impl RunningChild {
         let mut command = Command::new(program);
         command
             .args(&launch.argv)
-            .env("PATH", provider::env_path::child_path_for(std::path::Path::new(program)))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .env("PATH", provider::env_path::child_path_for(std::path::Path::new(program)));
         provider::child_env::scrub_command(&mut command);
         if let Some(home) = claude_home {
             for (key, value) in crate::home::child_env(home) {
@@ -273,18 +203,19 @@ impl RunningChild {
                 claude_home.map_or_else(|| "inherited".to_owned(), |home| home.display().to_string())
             );
         }
-        let mut child = command.spawn()?;
-        let stdout = child.stdout.take().expect("stdout piped");
+        // A new session and process group, in the pid ledger while it runs.
+        let Spawned { process: child, stdin, stdout, stderr } = ChildProcess::spawn(&command)?;
         // The adapter's one ring (on the hub): it outlives this child, so
         // a child that dies on its first breath still leaves its words for
         // the failure view.
-        hub.stderr.drain(child.stderr.take().expect("stderr piped"), "provider-claude-code-stderr", Some("claude"))?;
+        hub.stderr.drain(stderr, "provider-claude-code-stderr", Some("claude"))?;
         let stderr = hub.stderr.clone();
         let epoch = hub.begin_child();
-        let stdin = StdinWriter::spawn(child.stdin.take().expect("stdin piped"), hub, epoch)?;
+        let stdin = stdin_writer(stdin, hub, epoch)?;
         hub.attach_stdin(epoch, stdin.clone());
-        let pump = spawn_pump(stdout, hub, epoch, Some(stderr))?;
-        Ok(Self { child, stdin, pump: Some(pump), hub: std::sync::Arc::clone(hub), epoch })
+        // Detached, never joined: the pump ends when stdout closes.
+        spawn_pump(stdout, hub, epoch, Some(stderr))?;
+        Ok(Self { child, stdin, hub: std::sync::Arc::clone(hub), epoch })
     }
 
     /// Write one NDJSON turn to the child's stdin, through its writer
@@ -293,23 +224,21 @@ impl RunningChild {
         self.stdin.write_line(line)
     }
 
-    /// Whether the child process has exited (reaped here when it has).
+    /// Whether the child process has exited (observed without reaping:
+    /// its pid stays reserved for the hang-up's group signal).
     pub fn has_exited(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(Some(_)))
+        self.child.has_exited()
     }
 
-    /// Hang up. Idempotent; also runs on drop.
+    /// Hang up: the whole process group, SIGTERM then SIGKILL after
+    /// [`TERM_GRACE`]. Idempotent; also runs on drop.
     pub fn shutdown(&mut self) {
         // Deliberate: the pump's end of stream that follows is expected.
         self.hub.retire_child(self.epoch);
         // The hub's handle keeps the writer thread (and the pipe) alive:
         // drop it, so the writer ends once its queue drains.
         self.hub.detach_stdin(self.epoch);
-        // Detach, never join: the pump ends when stdout closes, which is
-        // when the child exits after stdin closes.
-        self.pump.take();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.child.terminate(TERM_GRACE);
     }
 }
 
@@ -438,7 +367,7 @@ mod tests {
         let stdin = ScriptedStdin::new(None);
         let (lines, open) = (Arc::clone(&stdin.lines), Arc::clone(&stdin.open));
         open.store(false, Ordering::SeqCst);
-        let writer = StdinWriter::spawn(stdin, &hub, epoch).expect("writer");
+        let writer = stdin_writer(stdin, &hub, epoch).expect("writer");
         hub.attach_stdin(epoch, writer.clone());
         hub.query_mcp_status();
         let query: serde_json::Value =

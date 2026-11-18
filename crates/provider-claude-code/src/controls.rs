@@ -27,7 +27,7 @@ use crossbeam_channel::Sender;
 use provider::ProviderEvent;
 
 use crate::argv::{argv_for_resume, SessionLaunch};
-use crate::child::StdinWriter;
+use provider::runtime::StdinWriter;
 use crate::fold::{step_line, ClaudeFold};
 
 /// Tests: the line [`ControlHub::ingest_line`] panics on.
