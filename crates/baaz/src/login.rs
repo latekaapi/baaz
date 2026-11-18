@@ -60,8 +60,12 @@ pub(crate) enum Auth {
     Probing,
     /// `loggedOut`: the login screen.
     SignedOut,
-    /// Any other lane, with the wire's identity.
-    SignedIn(Identity),
+    /// Any other lane, with the wire's identity. Nothing reads the identity
+    /// since the sidebar footer moved to provider statuses: its last reader
+    /// was the sidebar's frame key, deleted in task 4.7. Kept rather than
+    /// unpicked here — dropping it ripples through the login and auth
+    /// reads — and named as a follow-up.
+    SignedIn(#[allow(dead_code)] Identity),
 }
 
 /// The login screen's own state. The screen itself is stateless (it is the
@@ -456,8 +460,8 @@ impl Harness {
         if self.active.as_ref().is_some_and(|view| view.read(cx).provider_kind() == crate::providers::ProviderId::Muse) {
             self.active = None;
         }
-        self.sessions.retain(|entry| entry.provider != crate::providers::ProviderId::Muse);
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| list.sessions.retain(|entry| entry.provider != crate::providers::ProviderId::Muse));
+        self.invalidate_list(cx);
     }
 
     pub(crate) fn logout(&mut self, cx: &mut Context<Self>) {

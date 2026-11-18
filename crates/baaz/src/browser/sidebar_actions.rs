@@ -296,7 +296,7 @@ impl Harness {
         match action {
             // A browser chat opens in its card, over the page (R3); a
             // project session opens in Sessions.
-            TaskFolderAction::OpenChat if self.is_browser_chat(session) && self.show_browser_chat(session, cx) => {
+            TaskFolderAction::OpenChat if self.is_browser_chat(session, cx) && self.show_browser_chat(session, cx) => {
                 if self.browser.read(cx).agent_window.card_ui == crate::app::agent_window::CardUi::Closed {
                     self.browser.update(cx, |browser, _| browser.agent_window.card_ui = crate::app::agent_window::CardUi::Card);
                 }

@@ -8,33 +8,58 @@
 //! Part of [`Harness`]; see [`crate::app`] for what the entity owns.
 
 use super::*;
-
-/// What the sidebar and the palette read out of the session list, held from
-/// one change to the next instead of rebuilt per caller per frame
-/// (findings `performance-5`, `support-2`, `performance-7`).
-///
-/// What `visible` was built for: the list epoch plus the open session's id
-/// (the empty filter never hides the open session, so a switch changes the
-/// rows) plus the click's target (the grouping rescues it past the fold, so
-/// a click must rebuild) plus the grouping mode, the closed set and the
-/// expanded set (a toggle regroups the same rows) plus the busy-terminal
-/// counts per session (a block starting or ending restamps the hint).
-type ListKey =
-    (u64, Option<String>, Option<String>, crate::layout::GroupBy, Vec<String>, Vec<String>, Vec<(String, u32)>);
-
-/// Validity is seven keys, not a timestamp (see [`ListKey`]), and the grouping
-/// carries the minute it labelled its rows against.
-#[derive(Default)]
-pub(crate) struct ListCache {
-    /// The [`ListKey`] `visible` was built for.
-    key: Option<ListKey>,
-    /// The sorted visible rows for that key.
-    visible: Rc<Vec<SessionEntry>>,
-    /// The grouping of those rows, and the minute its elapsed tags read.
-    grouping: Option<(i64, Rc<sidebar::Grouping>, Rc<Vec<aui::nav::SessionSummary>>)>,
-}
+use crate::session_list::{ListFacts, SessionList};
 
 impl Harness {
+    /// Which grouping the sidebar draws ([`SessionList::effective_group_by`]).
+    pub(crate) fn effective_group_by(&self, cx: &gpui::App) -> crate::layout::GroupBy {
+        SessionList::effective_group_by(cx)
+    }
+
+    /// What a list read needs from the root: the open session, the awaited
+    /// click, whether either is an unsent draft, and whose terminal tabs run
+    /// a block ([`ListFacts`]). Read live on every call, so a read right
+    /// after a switch sees the switch.
+    pub(crate) fn list_facts(&self, cx: &gpui::App) -> ListFacts {
+        let active = self.active_id(cx);
+        let pending = self.open_state.pending_id.clone();
+        ListFacts {
+            active_unsent: active.as_deref().is_some_and(|id| self.open_state.is_unsent(id)),
+            pending_unsent: pending.as_deref().is_some_and(|id| self.open_state.is_unsent(id)),
+            active,
+            pending,
+            terminals: self.terminal_dock.read(cx).host().read(cx).busy_counts(cx),
+        }
+    }
+
+    /// The rows the sidebar should draw ([`SessionList::visible`]) for this
+    /// window's facts.
+    pub(crate) fn visible_sessions(&self, cx: &gpui::App) -> Rc<Vec<SessionEntry>> {
+        self.session_list.read(cx).visible(&self.list_facts(cx), cx)
+    }
+
+    /// The sidebar's grouping ([`SessionList::grouping`]) for this window's facts.
+    pub(crate) fn sidebar_grouping(&self, cx: &gpui::App) -> Rc<sidebar::Grouping> {
+        self.session_list.read(cx).grouping(&self.list_facts(cx), cx)
+    }
+
+
+    /// Something the list is derived from changed: the list says so
+    /// ([`SessionList::invalidate`]) and its observers redraw.
+    ///
+    /// Called from the places that can change it — the `session/list`
+    /// reply, [`Self::rejoin`] (which every override edit and the index read
+    /// go through), the three view toggles, and the replay's single row.
+    pub(crate) fn invalidate_list(&mut self, cx: &mut gpui::App) {
+        self.session_list.update(cx, |list, cx| list.invalidate(cx));
+    }
+
+
+    /// One row changed from `before` ([`SessionList::invalidate_row`]).
+    pub(crate) fn invalidate_row(&mut self, before: &SessionEntry, cx: &mut gpui::App) {
+        self.session_list.update(cx, |list, cx| list.invalidate_row(before, cx));
+    }
+
     // ---------------------------------------------- session operations (A2)
 
     /// Change one session's override and write the store.
@@ -44,14 +69,14 @@ impl Harness {
     /// can lose a rename to a window that closed a moment later — which is the
     /// one outcome a store exists to prevent.
     pub(crate) fn set_override(&mut self, session_id: &str, edit: impl FnOnce(&mut SessionMeta), cx: &mut Context<Self>) {
-        let before = self.overrides.get(session_id).cloned();
-        edit(self.overrides.entry(session_id.to_owned()).or_default());
+        let before = self.session_list.read(cx).overrides.get(session_id).cloned();
+        self.session_list.update(cx, |list, _| edit(list.overrides.entry(session_id.to_owned()).or_default()));
         // An edit that changed nothing — a reopen re-stating the project the
         // session already has — settles nothing: the rejoin and search
         // rebuild it used to run were 75 ms of UI thread on every provider
         // reopen (perf P1, 2026-10-18), for a list and index that could not
         // differ.
-        if before.as_ref() == self.overrides.get(session_id) {
+        if before.as_ref() == self.session_list.read(cx).overrides.get(session_id) {
             return;
         }
         // A session with no row, no index entry and no chain link is
@@ -59,11 +84,11 @@ impl Harness {
         // project lands here before either exists, and the full rejoin and
         // search rebuild cost 0.7–1.2 s of UI thread over ~2,600 rows for
         // a change neither could see. The store is still written.
-        let inert = !self.sessions.iter().any(|entry| entry.id == session_id)
-            && !self.index.contains_key(session_id)
-            && !crate::sidebar::needs_collapse(session_id, &self.provider_sessions, &self.overrides);
+        let inert = !self.session_list.read(cx).sessions.iter().any(|entry| entry.id == session_id)
+            && !self.session_list.read(cx).index.contains_key(session_id)
+            && !crate::sidebar::needs_collapse(session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides);
         if inert {
-            crate::sessions::save(&self.overrides);
+            crate::sessions::save(&self.session_list.read(cx).overrides);
             cx.notify();
             return;
         }
@@ -91,7 +116,7 @@ impl Harness {
             return;
         }
         for session_id in ids {
-            edit(self.overrides.entry(session_id.clone()).or_default());
+            self.session_list.update(cx, |list, _| edit(list.overrides.entry(session_id.clone()).or_default()));
         }
         self.settle_overrides(cx);
     }
@@ -109,8 +134,8 @@ impl Harness {
     /// [`Self::settle_overrides`] for the sessions `only` names (`None`:
     /// every row): the rejoin and the search sync are scoped alike.
     fn settle_overrides_scoped(&mut self, only: Option<&std::collections::HashSet<String>>, cx: &mut Context<Self>) {
-        self.rejoin_scoped(only);
-        crate::sessions::save(&self.overrides);
+        self.rejoin_scoped(only, cx);
+        crate::sessions::save(&self.session_list.read(cx).overrides);
         match only {
             Some(ids) => self.rebuild_search_index_for(ids, cx),
             None => self.rebuild_search_index(cx),
@@ -123,8 +148,8 @@ impl Harness {
     /// so a later snapshot always wins and the store can grow (a record per
     /// opened Muse session, docs/70) without costing a frame. The quit
     /// flush waits for it ([`Self::flush_stores`]).
-    pub(crate) fn persist_provider_sessions(&mut self, _cx: &mut Context<Self>) {
-        crate::provider_sessions::save(&self.provider_sessions);
+    pub(crate) fn persist_provider_sessions(&mut self, cx: &mut Context<Self>) {
+        crate::provider_sessions::save(&self.session_list.read(cx).provider_sessions);
     }
 
     /// Forget `project_id` on every session that carries it, settled once:
@@ -132,7 +157,7 @@ impl Harness {
     /// them again.
     pub(crate) fn clear_session_projects(&mut self, project_id: &str, cx: &mut Context<Self>) {
         let ids: Vec<String> = self
-            .sessions
+            .session_list.read(cx).sessions
             .iter()
             .filter(|entry| entry.project.as_deref() == Some(project_id))
             .map(|entry| entry.id.clone())
@@ -171,10 +196,10 @@ impl Harness {
     /// Open the inline field on a row, seeded with what the row says now.
     pub(crate) fn start_rename(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
         let current = self
-            .overrides
+            .session_list.read(cx).overrides
             .get(&session_id)
             .and_then(|m| m.name.clone())
-            .or_else(|| self.sessions.iter().find(|e| e.id == session_id).map(|e| e.label.clone()))
+            .or_else(|| self.session_list.read(cx).sessions.iter().find(|e| e.id == session_id).map(|e| e.label.clone()))
             .unwrap_or_default();
         self.rename.update(cx, |state, cx| state.set_value(current, window, cx));
         let entry = Self::rename_entry(crate::overlay_stack::Layer::RenameSession(session_id));
@@ -242,18 +267,18 @@ impl Harness {
             cx.background_executor().timer(UNDO_WINDOW).await;
             let _ = this.update(cx, |this, cx| {
                 this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&toast));
-                this.undo_stack.retain(|batch| *batch != undo);
+                this.session_list.update(cx, |list, _| list.undo_stack.retain(|batch| *batch != undo));
                 cx.notify();
             });
         }));
-        self.undo_stack.push(batch);
+        self.session_list.update(cx, |list, _| list.undo_stack.push(batch));
         cx.notify();
     }
 
     /// The toast's Undo: put the newest batch back — one hidden row, one
     /// "Clear empty" whole, or one archived session.
     pub(crate) fn undo_newest(&mut self, cx: &mut Context<Self>) {
-        let Some(batch) = self.undo_stack.pop() else { return };
+        let Some(batch) = self.session_list.update(cx, |list, _| list.undo_stack.pop()) else { return };
         match batch {
             UndoBatch::Hidden(ids) => self.set_overrides(&ids, |meta| meta.hidden = false, cx),
             UndoBatch::Archived(ids) => self.set_overrides(&ids, |meta| meta.archived = false, cx),
@@ -271,7 +296,7 @@ impl Harness {
     /// own Archive button can confirm it.
     pub(crate) fn open_archive_dialog(&mut self, session_id: String, cx: &mut Context<Self>) {
         let label = self
-            .sessions
+            .session_list.read(cx).sessions
             .iter()
             .find(|e| e.id == session_id)
             .map(|e| e.label.clone())
@@ -308,7 +333,7 @@ impl Harness {
     pub(super) fn archive_session(&mut self, session_id: String, window: Option<&mut Window>, cx: &mut Context<Self>) {
         // The whole chain, head included: archiving names the head, the
         // expansion covers the members.
-        let members = self.chain_members(&session_id);
+        let members = self.chain_members(&session_id, cx);
         let was_active = self.active.as_ref().is_some_and(|a| a.read(cx).session_id == session_id);
         // Archived sessions are never cached: a parked view of one is
         // dropped, and reopening (after Undo) pages it afresh.
@@ -343,7 +368,7 @@ impl Harness {
     /// row, or the toast's Undo through [`Self::undo_newest`]). A chain
     /// unarchives as one, symmetric with [`Self::archive_session`].
     pub(crate) fn unarchive_session(&mut self, session_id: String, cx: &mut Context<Self>) {
-        let members = self.chain_members(&session_id);
+        let members = self.chain_members(&session_id, cx);
         self.set_overrides(&members, |meta| meta.archived = false, cx);
     }
 
@@ -369,13 +394,13 @@ impl Harness {
         // summary is its acknowledgement, so neither lands (Y2a). The
         // skip is gated on the destination: any other session's words
         // land untouched, even pack-shaped ones (Y2a3).
-        let dest = crate::sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides);
+        let dest = crate::sidebar::is_handoff_dest(&session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides);
         let newest_ask_is_pack = dest && ask.as_deref().is_some_and(crate::sidebar::is_pack_text);
         let (summary, ask) = crate::sidebar::byline_landable(summary, ask, newest_ask_is_pack);
         if summary.is_none() && ask.is_none() {
             return;
         }
-        let current = self.overrides.get(&session_id);
+        let current = self.session_list.read(cx).overrides.get(&session_id);
         if current.and_then(|m| m.last_summary.as_deref()) == summary.as_deref()
             && current.and_then(|m| m.last_ask.as_deref()) == ask.as_deref()
         {
@@ -405,14 +430,12 @@ impl Harness {
     /// workers, not sidebar state. Call after the event reached the view,
     /// so the fold already holds the event's world.
     pub(crate) fn sync_row_live(&mut self, session_id: &str, started: bool, cx: &mut Context<Self>) {
-        if self.is_side_session(session_id) {
+        if self.is_side_session(session_id, cx) {
             return;
         }
-        let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) else {
+        let Some(before) = self.session_list.read(cx).sessions.iter().find(|entry| entry.id == session_id).cloned() else {
             return;
         };
-        let before = entry.clone();
-        let mut changed = false;
         // The open view applies its lane's events before the row syncs:
         // when it declined a re-delivered start for a turn it
         // already saw complete, the row declines it too instead of
@@ -426,48 +449,56 @@ impl Harness {
                 }
             }
         }
-        if started_running {
-            let now = crate::clock::now_local();
-            if !entry.running {
-                entry.running = true;
-            }
-            entry.turn_started = Some(now);
-            entry.updated = now;
-            changed = true;
-            if entry.last_error.is_some() {
-                entry.last_error = None;
-                changed = true;
-            }
-        }
         // The live view applies its lane's events before the row syncs: a
         // parked provider lane's fold is as current as the
         // open view's, so its row re-reads it the same way (B3b).
-        if let Some(view) = self.registry.find(self.active.as_ref(), session_id, cx) {
-            let (approval, question) = view.read(cx).row_pending();
-            if entry.approval_command != approval {
-                entry.approval_command = approval;
+        let view_truth = self.registry.find(self.active.as_ref(), session_id, cx).map(|view| {
+            let view = view.read(cx);
+            let (approval, question) = view.row_pending();
+            (approval, question, view.working())
+        });
+        let changed = self.session_list.update(cx, |list, _| {
+            let Some(entry) = list.sessions.iter_mut().find(|entry| entry.id == session_id) else {
+                return false;
+            };
+            let mut changed = false;
+            if started_running {
+                let now = crate::clock::now_local();
+                if !entry.running {
+                    entry.running = true;
+                }
+                entry.turn_started = Some(now);
+                entry.updated = now;
                 changed = true;
-            }
-            if entry.pending_question != question {
-                entry.pending_question = question;
-                changed = true;
-            }
-            if !started {
-                let running = view.read(cx).working();
-                if entry.running != running {
-                    entry.running = running;
+                if entry.last_error.is_some() {
+                    entry.last_error = None;
                     changed = true;
                 }
             }
-            // The view just spoke: no pending words means no pending
-            // attention, whatever the last listing said.
-            if entry.approval_command.is_none() && entry.pending_question.is_none() && !entry.attention.is_empty() {
-                entry.attention.clear();
-                changed = true;
+            if let Some((approval, question, running)) = view_truth {
+                if entry.approval_command != approval {
+                    entry.approval_command = approval;
+                    changed = true;
+                }
+                if entry.pending_question != question {
+                    entry.pending_question = question;
+                    changed = true;
+                }
+                if !started && entry.running != running {
+                    entry.running = running;
+                    changed = true;
+                }
+                // The view just spoke: no pending words means no pending
+                // attention, whatever the last listing said.
+                if entry.approval_command.is_none() && entry.pending_question.is_none() && !entry.attention.is_empty() {
+                    entry.attention.clear();
+                    changed = true;
+                }
             }
-        }
+            changed
+        });
         if changed {
-            self.invalidate_row(&before);
+            self.invalidate_row(&before, cx);
         }
     }
 
@@ -479,7 +510,7 @@ impl Harness {
     /// with `started: false`, so no row manufactures `Working` — a view
     /// that already stood down stays stood down.
     pub(crate) fn sync_all_live_rows(&mut self, cx: &mut Context<Self>) {
-        let ids: Vec<String> = self.sessions.iter().map(|entry| entry.id.clone()).collect();
+        let ids: Vec<String> = self.session_list.read(cx).sessions.iter().map(|entry| entry.id.clone()).collect();
         for id in ids {
             if self.find_view(&id, cx).is_some() {
                 self.sync_row_live(&id, false, cx);
@@ -501,24 +532,22 @@ impl Harness {
         error: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        if self.is_side_session(session_id) {
+        if self.is_side_session(session_id, cx) {
             return;
         }
         let message = error.map(str::trim).filter(|s| !s.is_empty());
         let next = if failed { message.map(str::to_owned) } else { None };
-        let changed_entry = self
-            .sessions
-            .iter_mut()
-            .find(|entry| entry.id == session_id)
-            .is_some_and(|entry| {
+        let changed_entry = self.session_list.update(cx, |list, _| {
+            list.sessions.iter_mut().find(|entry| entry.id == session_id).is_some_and(|entry| {
                 let before = entry.last_error.clone();
                 entry.apply_turn_outcome(failed, error);
                 entry.last_error != before
-            });
+            })
+        });
         // The turn's end is unread unless the person is reading this
         // session at its end right now (task 3.1).
         let unread = !self.reading_at_end(session_id, cx);
-        let current = self.overrides.get(session_id);
+        let current = self.session_list.read(cx).overrides.get(session_id);
         let current_error = current.and_then(|m| m.last_error.clone());
         let current_unread = current.is_some_and(|m| m.unread);
         if current_error != next || current_unread != unread {
@@ -531,7 +560,7 @@ impl Harness {
                 cx,
             );
         } else if changed_entry {
-            self.invalidate_list();
+            self.invalidate_list(cx);
         }
     }
 
@@ -548,7 +577,7 @@ impl Harness {
     /// (task 3.1). A no-op for a row that is not unread, so the store is
     /// not rewritten on every arrival at the end.
     pub(crate) fn mark_read(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        if self.overrides.get(session_id).is_some_and(|m| m.unread) {
+        if self.session_list.read(cx).overrides.get(session_id).is_some_and(|m| m.unread) {
             self.set_override(session_id, |meta| meta.unread = false, cx);
         }
     }
@@ -560,23 +589,6 @@ impl Harness {
         self.active.as_ref().map(|a| a.read(cx).session_id.clone())
     }
 
-    /// The rows the sidebar should draw: hidden ones out unless asked for,
-    /// archived ones out unless asked for, sessions with no turns out unless
-    /// asked for. Text search lives in the search palette (⌘⇧F), never in a
-    /// sidebar field, so no needle applies here. A still-empty open session
-    /// is out too — its row arrives with its first send — unless it heads a
-    /// real handoff chain.
-    /// Cached: the clone and the sort run once per change, not once per
-    /// caller per frame (finding `performance-5`). `render_sidebar`, the
-    /// sidebar's empty states, the Resume palette and the search rows all read
-    /// the same `Rc`; [`Self::invalidate_list`] is what drops it.
-    /// Which grouping the sidebar draws: the person's explicit choice, else
-    /// Project (docs/83 §4, task 2.5: group by project by default). An
-    /// install that never chose reads Project now even with one adopted
-    /// project, where it used to read Date; a stored choice of Date stands.
-    pub(crate) fn effective_group_by(&self, cx: &gpui::App) -> crate::layout::GroupBy {
-        crate::layout::Layout::get(cx).group_by.unwrap_or(crate::layout::GroupBy::Project)
-    }
 
     /// The Sessions view menu's "Group by project": persist the other mode
     /// and regroup. The first toggle is what persists the choice at all —
@@ -587,7 +599,7 @@ impl Harness {
             crate::layout::GroupBy::Date => crate::layout::GroupBy::Project,
         };
         crate::layout::Layout::update(cx, |layout| layout.group_by = Some(next));
-        self.invalidate_list();
+        self.invalidate_list(cx);
     }
 
     /// The view menu's Group by submenu: persist `group` and regroup (a
@@ -604,7 +616,7 @@ impl Harness {
             return;
         }
         crate::layout::Layout::update(cx, |layout| layout.sort_by = order);
-        self.invalidate_list();
+        self.invalidate_list(cx);
     }
 
     /// The view menu's "Clear empty sessions": hide every session with no
@@ -618,7 +630,7 @@ impl Harness {
     pub(crate) fn clear_empty(&mut self, cx: &mut Context<Self>) {
         let active = self.active_id(cx);
         let cleared: Vec<String> = self
-            .sessions
+            .session_list.read(cx).sessions
             .iter()
             .filter(|entry| {
                 !entry.hidden
@@ -643,10 +655,6 @@ impl Harness {
         );
     }
 
-    /// How many listed sessions are hidden: the view menu's Show hidden count.
-    pub(crate) fn hidden_count(&self) -> usize {
-        self.sessions.iter().filter(|entry| entry.hidden && !entry.side_marker && !entry.archived).count()
-    }
 
     /// Flip a group's disclosure: its id moves in or out of
     /// `closed_groups` and the layout is written. Every group, the unfiled
@@ -659,7 +667,7 @@ impl Harness {
                 layout.closed_groups.push(id);
             }
         });
-        self.invalidate_list();
+        self.invalidate_list(cx);
     }
 
     /// Flip a project group's "Show N more": its id moves in or out of
@@ -674,258 +682,13 @@ impl Harness {
                 layout.expanded_groups.push(id);
             }
         });
-        self.invalidate_list();
+        self.invalidate_list(cx);
     }
 
-    pub(crate) fn visible_sessions(&self, cx: &gpui::App) -> Rc<Vec<SessionEntry>> {
-        let active = self.active_id(cx);
-        let group_by = self.effective_group_by(cx);
-        let closed = crate::layout::Layout::get(cx).closed_groups.clone();
-        let expanded = crate::layout::Layout::get(cx).expanded_groups.clone();
-        // The click's target rides the key: the grouping rescues it past the
-        // fold, so a click (or an `open:` step) that names a held-back row
-        // must rebuild the grouping on its own frame.
-        let pending = self.open_state.pending_id.clone();
-        // Whose tabs hold a running block (D52): what stamps the sidebar
-        // hint below. Part of the key, so a block starting or ending
-        // rebuilds the rows without waiting for a list invalidation.
-        let terminals = self.terminal_dock.read(cx).host().read(cx).busy_counts(cx);
-        let mut cache = self.list_cache.borrow_mut();
-        if cache.key.as_ref().is_some_and(
-            |(epoch, id, awaited, cached_group, cached_closed, cached_expanded, cached_terminals)| {
-                *epoch == self.list_epoch
-                    && *id == active
-                    && *awaited == pending
-                    && *cached_group == group_by
-                    && *cached_closed == closed
-                    && *cached_expanded == expanded
-                    && *cached_terminals == terminals
-            },
-        ) {
-            return Rc::clone(&cache.visible);
-        }
-        // Y2a: the chain collapses at view time. Storage keeps every
-        // member row; the collapsed head (one title, summed turns,
-        // derived flags) is what the list filters, sorts and draws, so
-        // the collapse is idempotent and order-independent. One index
-        // build serves the collapse and both head lookups below (Y2a3).
-        let index = self.chain_index();
-        let collapsed = sidebar::collapse_with_index(
-            self.sessions.clone(),
-            &index,
-            &self.provider_sessions,
-            &self.overrides,
-        );
-        // One identity for selection: the open (or awaited) session's row
-        // is never filtered as empty, so the selection always has a row
-        // to stand on — a real handoff head (a chain with at least two
-        // members) keeps the destination highlighted while the pack runs,
-        // and a plain session keeps its row while a turn that never
-        // settled leaves it at zero turns (live, 2026-10-16: the row
-        // vanished mid-session when `running` read false). The one
-        // exception is an unsent new session, whatever its project, which
-        // has no row until its first send reveals it
-        // (`SessionEntry::is_empty`): `drafts` names a project's, `unsent`
-        // one with no project, and both forget the id the moment a turn
-        // starts.
-        let exempt = |id: &str| {
-            let head = index.head(id);
-            let unsent = self.open_state.is_unsent(id);
-            (index.members(&head).len() >= 2 || !unsent).then_some(head)
-        };
-        let active_head = active.as_deref().and_then(exempt);
-        let pending_head = pending.as_deref().and_then(exempt);
-        let mut rows: Vec<SessionEntry> = collapsed
-            .into_iter()
-            // Show hidden reveals what the person hid, never a side session
-            // or one another client made (`side_marker`): those are not
-            // theirs, and there are thousands.
-            .filter(|entry| (self.show_hidden && !entry.side_marker) || !entry.hidden)
-            .filter(|entry| self.show_archived || !entry.archived)
-            .filter(|entry| {
-                // An archived row shown on request is explicitly asked for;
-                // the empty filter must not swallow it back. An index-only
-                // boot row's emptiness is unknown (the index knows no turn
-                // count), so the empty filter leaves it alone — hidden and archived
-                // still apply above, from the same overrides the real rows
-                // get. Only labelled index entries ever become provisional,
-                // which is what keeps the index's own zero-turn rows out.
-                (self.show_archived && entry.archived)
-                    || self.show_empty
-                    || entry.turns_unknown
-                    || !entry.is_empty()
-                    || sidebar::sent_to(&entry.id, &self.provider_sessions, &self.overrides)
-                    || active_head.as_deref() == Some(entry.id.as_str())
-                    || pending_head.as_deref() == Some(entry.id.as_str())
-            })
-            .collect();
-        // Newest first. The sidebar's grouping sorts for itself; the palette
-        // takes the head of this list, so the order has to be right here.
-        rows.sort_by_key(|entry| std::cmp::Reverse(entry.updated));
-        // The terminal hint's counts, stamped onto copies: the stored rows
-        // stay clean of frame-rate liveness.
-        if !terminals.is_empty() {
-            for row in &mut rows {
-                if let Some((_, count)) = terminals.iter().find(|(id, _)| *id == row.id) {
-                    row.terminals_running = *count;
-                }
-            }
-        }
-        cache.key = Some((self.list_epoch, active, pending, group_by, closed, expanded, terminals));
-        cache.visible = Rc::new(rows);
-        cache.grouping = None;
-        Rc::clone(&cache.visible)
-    }
 
-    /// The sidebar's grouping for this frame, built once per change and once
-    /// per minute (findings `performance-5`, `performance-6`, `support-2`).
-    ///
-    /// Per minute because that is the finest thing a row's elapsed tag says —
-    /// `now`, `14m`, `2h`, `3d` — so a cached grouping can only go stale when
-    /// the minute turns. Under `BAAZ_DETERMINISTIC=1` "now" comes from the
-    /// data rather than the clock, so the key is constant and a capture is
-    /// identical run to run.
-    pub(crate) fn sidebar_grouping(&self, cx: &gpui::App) -> Rc<sidebar::Grouping> {
-        let visible = self.visible_sessions(cx);
-        // The "Needs you" filter (task 3.4) narrows what the sidebar draws,
-        // never what the palettes list. Toggling it invalidates the list, so
-        // the cached grouping below rebuilds.
-        let visible = if crate::attention::Notifier::filter_on(cx) {
-            Rc::new(crate::attention::waiting(visible.iter()).into_iter().cloned().collect::<Vec<_>>())
-        } else {
-            visible
-        };
-        let now = sidebar::grouping_now(&visible);
-        let minute = now.timestamp().div_euclid(60);
-        let mut cache = self.list_cache.borrow_mut();
-        if let Some((cached, grouping, _)) = cache.grouping.as_ref() {
-            if *cached == minute {
-                return Rc::clone(grouping);
-            }
-        }
-        let at = std::time::Instant::now();
-        let was_boot = !self.sessions_loaded || !self.index_loaded;
-        let grouping = match self.effective_group_by(cx) {
-            crate::layout::GroupBy::Date => sidebar::grouping_at(&visible, now),
-            crate::layout::GroupBy::Project if self.index_loaded => {
-                let closed: std::collections::HashSet<String> =
-                    crate::layout::Layout::get(cx).closed_groups.iter().cloned().collect();
-                let expanded: std::collections::HashSet<String> =
-                    crate::layout::Layout::get(cx).expanded_groups.iter().cloned().collect();
-                let active = self.active_id(cx);
-                // A brand-new session has no row yet: resolve its project
-                // past the rows so its group still counts as current.
-                let active_project = active.as_deref().and_then(|open| {
-                    sidebar::rowless_session_project(
-                        open,
-                        visible.as_slice(),
-                        &self.overrides,
-                        &self.provider_sessions,
-                    )
-                });
-                let view = sidebar::GroupView {
-                    closed: &closed,
-                    expanded: &expanded,
-                    active: active.as_deref(),
-                    active_project: active_project.as_deref(),
-                    pending: self.open_state.pending_id.as_deref(),
-                };
-                sidebar::grouping_by_project(&visible, &self.projects, &self.branches, &view, crate::layout::Layout::get(cx), now)
-            }
-            // The index hasn't landed yet: a flat date view, exactly what
-            // the window showed while loading before projects existed.
-            // Once the index lands the rows are provisional but real, so
-            // project groups debut with them — the collapse measures
-            // content on its first frame instead of opening from an empty
-            // box it never re-measures, and the grouping already has its
-            // final shape when the wire rows replace them.
-            crate::layout::GroupBy::Project => sidebar::grouping_at(&visible, now),
-        };
-        // The v2 sidebar lists pinned rows in their own section (D3).
-        let (grouping, pinned) = sidebar::lift_pinned(grouping);
-        let grouping = Rc::new(grouping);
-        crate::log::boot_mark(&format!(
-            "grouping-built rows={} boot={} in={}ms",
-            visible.len(),
-            was_boot as u8,
-            at.elapsed().as_millis()
-        ));
-        cache.grouping = Some((minute, Rc::clone(&grouping), Rc::new(pinned)));
-        grouping
-    }
 
-    /// The pinned sessions lifted out of [`Self::sidebar_grouping`], from
-    /// the same cache entry: the v2 sidebar's Pinned section.
-    pub(crate) fn sidebar_pinned(&self, cx: &gpui::App) -> Rc<Vec<aui::nav::SessionSummary>> {
-        let _ = self.sidebar_grouping(cx);
-        self.list_cache.borrow().grouping.as_ref().map(|(_, _, pinned)| Rc::clone(pinned)).unwrap_or_default()
-    }
 
-    /// Drop the cached visible list and grouping: something they are derived
-    /// from changed.
-    ///
-    /// Called from the four places that can change it — the `session/list`
-    /// reply, [`Self::rejoin`] (which every override edit and the index read
-    /// go through), the three view toggles, and the replay's single row.
-    pub(crate) fn invalidate_list(&mut self) {
-        self.list_epoch = self.list_epoch.wrapping_add(1);
-    }
 
-    /// One row changed from `before` (speed S4): when nothing the list
-    /// filters, groups or collapses on moved — only its words, live state
-    /// or time — the cached visible list is patched in place (the row
-    /// replaced, or moved to its new place when its time moved) and only
-    /// the grouping is rebuilt. Anything else invalidates the whole list,
-    /// as before. A finished turn used to rebuild 2,600 rows here.
-    pub(crate) fn invalidate_row(&mut self, before: &SessionEntry) {
-        let Some(after) = self.sessions.iter().find(|entry| entry.id == before.id).cloned() else {
-            self.invalidate_list();
-            return;
-        };
-        if after == *before {
-            return;
-        }
-        let structural = before.hidden != after.hidden
-            || before.archived != after.archived
-            || before.pinned != after.pinned
-            || before.is_empty()
-            || after.is_empty()
-            || before.turns_unknown != after.turns_unknown
-            || before.provisional != after.provisional
-            || before.side_marker != after.side_marker
-            || before.project != after.project
-            || before.project_name != after.project_name
-            || before.workspace != after.workspace
-            || before.branch != after.branch
-            || sidebar::needs_collapse(&after.id, &self.provider_sessions, &self.overrides);
-        if structural {
-            self.invalidate_list();
-            return;
-        }
-        let mut cache = self.list_cache.borrow_mut();
-        // A stale cache rebuilds on its next read anyway.
-        if !cache.key.as_ref().is_some_and(|key| key.0 == self.list_epoch) {
-            return;
-        }
-        let visible = Rc::make_mut(&mut cache.visible);
-        let Some(at) = visible.iter().position(|entry| entry.id == after.id) else {
-            drop(cache);
-            self.invalidate_list();
-            return;
-        };
-        let mut row = after;
-        row.terminals_running = visible[at].terminals_running;
-        if row.updated == visible[at].updated {
-            visible[at] = row;
-        } else {
-            // Newest first, after any row with the same time — the place
-            // the stable sort gives a row that was already there.
-            visible.remove(at);
-            let to = visible.partition_point(|entry| entry.updated >= row.updated);
-            visible.insert(to, row);
-        }
-        cache.grouping = None;
-    }
 
     /// F10. A session with no title anywhere: read its head and take the first
     /// `userShell` command as the row's name.
@@ -945,10 +708,10 @@ impl Harness {
         }
         let slot = self.muse_slot.clone();
         let wanted: Vec<String> = self
-            .sessions
+            .session_list.read(cx).sessions
             .iter()
             .filter(|entry| {
-                entry.needs_title && !self.titled.contains(&entry.id) && !self.is_side_session(&entry.id)
+                entry.needs_title && !self.session_list.read(cx).titled.contains(&entry.id) && !self.is_side_session(&entry.id, cx)
             })
             .map(|entry| entry.id.clone())
             .take(MAX_TITLE_READS)
@@ -956,7 +719,7 @@ impl Harness {
         if wanted.is_empty() {
             return;
         }
-        self.titled.extend(wanted.iter().cloned());
+        self.session_list.update(cx, |list, _| list.titled.extend(wanted.iter().cloned()));
         let work = move || {
             let Ok(lane) = slot.control() else { return Vec::new() };
             wanted
@@ -985,7 +748,7 @@ impl Harness {
         self.wire_call(cx, work, |this, derived, cx| {
             for (session_id, title, stale) in derived {
                 if stale {
-                    this.titled.remove(&session_id);
+                    this.session_list.update(cx, |list, _| list.titled.remove(&session_id));
                     continue;
                 }
                 let Some(title) = title else { continue };
@@ -1011,14 +774,14 @@ impl Harness {
         let session_id = view.read(cx).session_id.clone();
         // A handoff destination keeps the chain title: no rename from the
         // pack or anything after it (Y2a).
-        if crate::sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides) {
+        if crate::sidebar::is_handoff_dest(&session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides) {
             return;
         }
         // The row may not be in the list yet — `session/list` is a round-trip
         // and the transcript is already here — so the question is not "does the
         // row need a title" but "does this session have one".
-        let has_title = self.overrides.get(&session_id).is_some_and(|m| m.name.is_some() || m.derived_title.is_some())
-            || self.index.get(&session_id).and_then(IndexEntry::label).is_some();
+        let has_title = self.session_list.read(cx).overrides.get(&session_id).is_some_and(|m| m.name.is_some() || m.derived_title.is_some())
+            || self.session_list.read(cx).index.get(&session_id).and_then(IndexEntry::label).is_some();
         if has_title {
             return;
         }

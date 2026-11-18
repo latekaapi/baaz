@@ -119,7 +119,8 @@ pinned, then `connect`. `crates/baaz/tests/seam_ratchet.rs` keeps
 ## 4. Entities and ownership
 
 Production `Render` impls: `Harness` (`app.rs`), `SessionView`
-(`session/render.rs`), `SidebarPane` (`sidebar_view.rs`), the region
+(`session/render.rs`), `SidebarPane` (`sidebar_view.rs`, a view of its own
+since task 4.7), the region
 entities `RightPane` (`right_pane.rs`), `TerminalDock`
 (`terminal/dock.rs`), `SkillsPage` (`skills_page.rs`), `SettingsPage`
 (`settings.rs`), `ConnectScreen` (`connect.rs`) and `BrowserView`
@@ -129,17 +130,18 @@ entities `RightPane` (`right_pane.rs`), `TerminalDock`
 
 ### `Harness` — the window root
 
-`Harness` (`app.rs`) has 105 fields. Its methods are spread over 62
-`impl Harness` blocks in 53 files (`app/*.rs`, `sidebar_view.rs`, the
+`Harness` (`app.rs`) has 57 fields. Its methods are spread over 62
+`impl Harness` blocks in 53 files (`app/*.rs` — the sidebar's root half is
+`app/sidebar_host.rs` — the
 `browser/` seam files, `dialogs.rs`, `login.rs` and others). Roughly:
 
 | group | examples |
 |---|---|
 | providers, sign-in, onboarding | `muse_hub`, `muse_slot`, `provider_factory`, `wire`, `login`, `tier`; `provider_model` (`ProviderStatusModel`, `provider_model.rs`, task 4.4: the statuses, the sign-out banners, the cards waiting on a press and the Codex sign-in, read and observed by every surface that shows them); `connect_screen` (a region entity, `connect.rs`) and `setup` (the setup sheet's entity, `setup.rs`) |
-| session list and its caches | `sessions`, `list_cache`, `chain_index`, `index`, `overrides`, `provider_sessions`, `projects`, `saved_list`, `branches` |
+| session list | `session_list`: the `SessionList` model entity (`session_list.rs`, task 4.7) holding the rows, the stores they are joined from (`index`, `overrides`, `provider_sessions`, `projects`, `branches`), the list filters, the fetch state, the title bookkeeping and the caches (visible rows, grouping, chain index); a change emits `SessionListEvent` and notifies the list, never the root. `Harness` drives the fetch and the joins and reads through `session_list.read(cx)` |
 | live session views | `active`, `registry`, `pending_id`, `drafts`, `unsent`, `starts_in_flight`, the switch/replace epochs and claims |
 | handoff | `handoffs`, `handoff_epoch`, `pending_handoff`, `handoff_confirm` |
-| sidebar view state | `sidebar_pane`, `sidebar_key`, `sidebar_list`, hover/reveal fields, the `rename` field, `sidebar_wheel` |
+| sidebar | `sidebar_pane`: the `SidebarPane` view (task 4.7), which owns its scroll, hover and hover card, reveal, wheel, fade and Pinned disclosure; the `rename` field it shares with the header |
 | right pane | `right_pane`: a region entity (`right_pane.rs`, task 4.3) that owns its cache, divider, refresh, watch, focus and menus |
 | browser and Browse mode | `browser`: the `BrowserView` region entity (`browser/view.rs`, task 4.5) holding the tabs and webviews, the Field and find inputs, the Browse sidebar's menus and drags, three of the four overlay windows (`overlay`, `corner`, `page_float`: one slot each, holding the window once its open task lands — no `*_pending` twin), `data` (the `browser.db` service), `occlusion` (the one `NativeOcclusion` owner) and `agent_window` (`AgentWindowState`, `app/agent_window.rs`: the agent line and card and the card's float; the handoff picker is a `Picker` view on the overlay stack) |
 | settings, skills, palettes | `settings_page` (a region entity, `settings.rs`, task 4.4, that owns its route, search, focus, the Shortcuts rows and recording), `skills_page` (a region entity, `skills_page.rs`, task 4.4), `import`, the search palette's `TextareaState` query field (the search reads it; the Commands and Projects palettes own theirs since task 4.6b) |
@@ -161,7 +163,12 @@ Settings page (its section list in the sidebar column, its crumbs and close
 in the bar, its surface in the centre) and the connect screen are composed
 the same way.
 The sidebar and the transcript are `.cached()` subtrees, so they skip work
-while clean (except while assistive tech is on).
+while clean (except while assistive tech is on). The sidebar is re-rendered
+by its own inputs only: the session list's events, the layout global, its
+own hover and scroll, and the facts the root pushes as it composes the shell
+(`Harness::compose_sidebar`: the open session, the footer, the open menus,
+Browse's rows — a notify only when they moved). `on_frame` does not touch
+it (`tests/sidebar_view_ratchet.rs`).
 
 ### `SessionView` — one session
 
@@ -195,7 +202,8 @@ running or starting, a pending approval or question) is never evicted.
 
 | owner | file | owns |
 |---|---|---|
-| `SidebarPane` | `sidebar_view.rs` | nothing: its render calls `Harness::render_sidebar`. It is invalidated by comparing a hand-built `SidebarKey` each frame |
+| `SidebarPane` | `sidebar_view.rs` | the sidebar column (task 4.7): the virtual list's state and its sync, hover and the hover card's arm, the one-shot reveal, the wheel accumulator and scripted sweep, the mode-switch fade, the Pinned disclosure, the group menus' seats. It subscribes to `SessionList`, observes the layout global, takes `SidebarFacts` from the root and emits `SidebarEvent`s the root maps (`app/sidebar_host.rs`); it holds no handle to the root |
+| `SessionList` | `session_list.rs` | the session list as a model (task 4.7): rows, stores, filters, fetch state, title bookkeeping, the visible/grouping/chain caches keyed on the root's `ListFacts`, and the joins (`rejoin_scoped`, `merge_provider_rows`, `install_provisional_rows`) |
 | `Overlays` | `overlays.rs`, `overlay_stack.rs` | state only: the overlay stack (task 4.6a) — every dialog, palette, menu, popover, sheet and inline rename is one typed entry carrying `covers_page`, `takes_keyboard`, `host` (the main window, an overlay panel, or — the dialog and the palette — wherever the mode puts them), its owner and its close hook; Escape pops it (`Harness::pop_overlay`), `Covers` reads its `covers_page`, and closing an entry gives back the focus it took (applied in the root's frame) — plus toasts and the `@`-picker walks. Since task 4.6b an entry may hold the view that draws it: the dialog (`DialogView`, `dialogs.rs`), the Muse sheet (`MuseSheetView`, `login.rs`), the setup sheet (`SetupHost`), the import and Chrome-import sheets (`ImportSheetView`, `ChromeImportView`), the bookmark popover (`BookmarkView`, `overlay/bookmark.rs`) and the pickers; each emits `DismissEvent`, which pops the stack newest-first (`Harness::dismiss_overlay_view`). The root pushes their facts in each frame and maps their typed events. The rest are drawn by `Harness`, the composer, the right pane, the Settings and Skills pages and the connect screen, each reading its own entry |
 | `Picker<D>` | `picker.rs` | the one list picker (task 4.6b, Zed's `picker` read for the shape): query (its own field, a borrowed one, or typed elsewhere), selection, ↑ ↓ ↩ Escape, hover; a `PickerDelegate` gives the rows, the narrowing, the pick and the look (the library's own component). Delegates: the palette (`palette.rs`: ⌘K, `/resume`, `/fork`, search, Projects), the model picker and the `@` mention (`session/pickers.rs`), the hand-off picker (`app/browser_handoff.rs`) |
 | `OverlayView` | `overlay.rs` | the borderless panel windows that float above the native page (the page draws above all gpui content); what they show follows the overlay stack's panel-hosted entries |
@@ -286,9 +294,9 @@ sessions with no project default to `~/baaz-sessions`
 
 **How a sidebar row learns.** The registry's subscription delivers each
 `SessionEvent` to `Harness::on_session_event`, which updates the row in
-`Harness::sessions` (`sync_row_live` in `app/list.rs`, `record_turn_outcome`)
-and the overrides. The changed row changes `SidebarKey`, so the cached
-`SidebarPane` re-renders. For Muse, the hub's connection stream
+the `SessionList` (`sync_row_live` in `app/list.rs`, `record_turn_outcome`)
+and the overrides. The list says so (`SessionListEvent::RowChanged` or
+`Changed`), and the cached `SidebarPane`, subscribed to it, re-renders. For Muse, the hub's connection stream
 (`Harness::on_hub_event`) also moves rows for sessions with no view in this
 window.
 
@@ -314,12 +322,12 @@ These are true of the code today.
   `impl` blocks. New features have added fields and files to it rather than
   their own entities.
 - **Render is part of the event loop.** `on_frame` runs inside
-  `Harness::render` and reconciles overlay windows, provider status and
-  the sidebar key. Few things are observed, so a change is noticed when a
-  frame happens, and the root is not cached. (The browser's page reconcile
-  left render in task 4.5b; its occlusion is still decided per frame.)
-- **`SidebarKey` is maintained by hand.** A field the sidebar reads but the
-  key does not compare leaves the pane stale.
+  `Harness::render` and reconciles overlay windows and provider status. Few
+  things are observed, so a change is noticed when a frame happens, and the
+  root is not cached. (The browser's page reconcile left render in task
+  4.5b; its occlusion is still decided per frame. The sidebar left it in
+  task 4.7, but the facts only the root knows are still compared as the
+  root composes the shell.)
 - **The app is not fully behind the seam.** About 730 references to a
   specific provider variant remain in `crates/baaz`, and
   `session/lane.rs` matches Claude Code control-card kinds by name.

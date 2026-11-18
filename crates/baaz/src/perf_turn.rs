@@ -139,7 +139,7 @@ pub(crate) fn sidebar_fixture() -> (Vec<SessionEntry>, HashMap<String, IndexEntr
 pub(crate) fn time_settles(harness: &mut Harness, n: usize, cx: &mut Context<Harness>) -> serde_json::Value {
     let (mut snapshot, mut apply, mut visible, mut total) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for k in 0..n {
-        let mut next = (*harness.index).clone();
+        let mut next = (*harness.session_list.read(cx).index).clone();
         let id = format!("s-{:05}", (k * 37) % crate::perf_budget::SESSIONS);
         if let Some(entry) = next.get_mut(&id) {
             entry.updated_at_us = Some(1_800_000_000_000_000 + k as i64);
@@ -148,7 +148,7 @@ pub(crate) fn time_settles(harness: &mut Harness, n: usize, cx: &mut Context<Har
         let next = std::sync::Arc::new(next);
         let at = Instant::now();
         // `load_index` snapshots the index on the UI thread before the read.
-        let previous = std::sync::Arc::clone(&harness.index);
+        let previous = std::sync::Arc::clone(&harness.session_list.read(cx).index);
         let t_snapshot = at.elapsed();
         // What the background read hands back with the map (off the clock:
         // it runs on the background executor).
@@ -159,11 +159,11 @@ pub(crate) fn time_settles(harness: &mut Harness, n: usize, cx: &mut Context<Har
         // The settled turn's own row: one more turn, at a newer time (what
         // `rejoin_provider_row` moves for a listed row) — it rises to the
         // top of the list.
-        if let Some(ix) = harness.sessions.iter().position(|entry| entry.id == id) {
-            let before = harness.sessions[ix].clone();
-            harness.sessions[ix].turns += 1;
-            harness.sessions[ix].updated = crate::clock::now_local() + chrono::Duration::seconds(k as i64 + 1);
-            harness.invalidate_row(&before);
+        if let Some(ix) = harness.session_list.read(cx).sessions.iter().position(|entry| entry.id == id) {
+            let before = harness.session_list.read(cx).sessions[ix].clone();
+            harness.session_list.update(cx, |list, _| list.sessions[ix].turns += 1);
+            harness.session_list.update(cx, |list, _| list.sessions[ix].updated = crate::clock::now_local() + chrono::Duration::seconds(k as i64 + 1));
+            harness.invalidate_row(&before, cx);
         }
         let t_apply = at_apply.elapsed();
         // The next frame: the visible list and the sidebar's grouping.
@@ -182,12 +182,12 @@ pub(crate) fn time_settles(harness: &mut Harness, n: usize, cx: &mut Context<Har
     let (mut rejoin, mut rows, mut list) = (Vec::new(), Vec::new(), Vec::new());
     for _ in 0..10 {
         let at = Instant::now();
-        harness.rejoin();
+        harness.rejoin(cx);
         rejoin.push(ms(at.elapsed()));
         let at = Instant::now();
-        let _ = harness.search_sync_rows().len();
+        let _ = harness.search_sync_rows(cx).len();
         rows.push(ms(at.elapsed()));
-        harness.invalidate_list();
+        harness.invalidate_list(cx);
         let at = Instant::now();
         let _ = harness.visible_sessions(cx).len();
         let _ = harness.sidebar_grouping(cx);
@@ -368,13 +368,13 @@ pub fn run() -> serde_json::Value {
         let harness = cx.new(|cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
         harness.update(cx, |harness, cx| {
             let (sessions, index) = sidebar_fixture();
-            harness.sessions = sessions;
-            harness.index = std::sync::Arc::new(index);
-            harness.sessions_loaded = true;
-            harness.index_loaded = true;
+            harness.session_list.update(cx, |list, _| list.sessions = sessions);
+            harness.session_list.update(cx, |list, _| list.index = std::sync::Arc::new(index));
+            harness.session_list.update(cx, |list, _| list.sessions_loaded = true);
+            harness.session_list.update(cx, |list, _| list.index_loaded = true);
             // The rows as a joined list holds them, so a settle compares
             // against real rows, not the fixture's raw ones.
-            harness.rejoin();
+            harness.rejoin(cx);
             let _ = harness.visible_sessions(cx).len();
             let _ = harness.sidebar_grouping(cx);
             if let serde_json::Value::Object(settle) = time_settles(harness, 40, cx) {

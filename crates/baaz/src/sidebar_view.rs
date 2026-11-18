@@ -1,89 +1,268 @@
-//! The sidebar column: what it draws, and the two menus that hang off it.
+//! The sidebar column as its own view: what it draws, what it owns, and
+//! what it asks the root for.
 //!
-//! Everything here is composition over state [`Harness`] already holds — the
-//! joined session rows, the filter toggles, the open rename, and the
-//! signed-in identity. It is the shell's left half plus the
-//! session-list policy that decides which rows are shown and what the column
-//! says when it shows none; it never touches login, the wire, or the session
-//! lifecycle, and the only thing it writes is a filter toggle.
+//! [`SidebarPane`] owns the column's own state — the virtual list's scroll
+//! position, what the pointer is over, the hover card's arm, the wheel's
+//! accumulator, the one-shot reveal, the mode-switch fade, the Pinned
+//! section's disclosure — and renders itself from three sources:
+//!
+//! - the [`SessionList`] model entity, which it subscribes to: a list
+//!   change (a row born, a title landing, a pin) re-renders the column from
+//!   the list's own event, with no root notify and no frame-time comparison;
+//! - the layout global (grouping, sort, summary line, mode, collapse), which
+//!   it observes;
+//! - [`SidebarFacts`]: what only the root knows (the open session, the
+//!   footer's account, the menus standing open, Browse mode's tabs), pushed
+//!   by `Harness::compose_sidebar` without notifying the root. The pane
+//!   re-renders when they differ from the last ones, never otherwise.
+//!
+//! It holds no handle to the root. What a person does in the column goes
+//! out as a [`SidebarEvent`] the root maps (`Harness::on_sidebar_event`):
+//! open, new, rename, pin, archive, project actions, mode switch and every
+//! Browse action are the screen's own typed intents
+//! ([`SidebarEvent::Intent`]).
 //!
 //! [`crate::sidebar`] next door is the pure half: rows in, a [`Grouping`] out.
-//! This file is the half that needs a `Window`.
-//!
-//! Two popovers belong to the column rather than to the overlay stack, because
-//! each is anchored to the affordance that opens it (the design rule in
-//! [`crate::overlays`]): the Sessions caption's view menu, where list
-//! management lives, and the footer's account menu, where Sign out lives.
+//! The root's half — the facts, the intents' handlers, the hover card it
+//! seats beside the column — is `app/sidebar_host.rs`.
 //!
 //! [`Grouping`]: aui::nav::Grouping
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
-use aui::browse::split_address;
-use aui::composer::provider_display_name;
-use aui::data::{icon_button, ButtonSize};
 use aui::nav::{
-    SESSION_DETAIL_GAP, anchored_session_detail_at_sidebar, dense_field, ensure_row_visible, flatten_sidebar,
-    row_index_for_session, GroupAction, RowAction, SidebarRow,
+    SESSION_DETAIL_GAP, ensure_row_visible, flatten_sidebar, row_index_for_session, sidebar_list_state, GroupAction,
+    SidebarRow,
 };
-use aui::screens::UsageRowState;
 use aui::screens::sidebar::{
-    screen_item_count, sidebar_screen, Account, AccountAction, AccountStatus,
-    BrowseEditing, BrowseFolder, BrowseIntent, BrowseModel, BrowseNaming, BrowsePin, BrowseSpace, BrowseTab, Bylines,
-    EditingState, FolderKind, GroupKey, Mode, NavItem, ProviderUsage, SidebarIntent, SidebarModel, SortKey,
-    TaskFolderAction, UsageLine, ViewOption, ViewOptions,
+    screen_item_count, sidebar_screen, Account, AccountStatus, BrowseIntent, BrowseMenu, BrowseMenuTarget, BrowseModel, Bylines,
+    EditingState, GroupKey, Mode, NavItem, SidebarIntent, SidebarModel, SortKey, ViewOptions,
 };
-use aui_tokens::AgentState;
 use aui_icons::IconName;
-use aui_tokens::{scale, ActiveAui, Palette};
+use aui_tokens::AgentState;
 use gpui::{
-    div, prelude::*, px, AnyElement, Bounds, Context, ElementId, Entity, Focusable, ListOffset, Pixels, Render,
-    SharedString, WeakEntity, Window,
+    div, prelude::*, px, Bounds, Context, Entity, EventEmitter, ListOffset, ListState, Pixels, Render, SharedString,
+    Subscription, Task, Window,
 };
 use gpui_kit::base::input::TextareaState;
 
-use crate::app::{ConfirmRename, Harness, RENAME_CONTEXT};
-use crate::login::Auth;
-use crate::overlays::MenuKind;
+use crate::session_list::{ListFacts, SessionList, SessionListEvent};
 use crate::sidebar::{Grouping, SessionEntry};
 use crate::tier::Tier;
 
-/// The sidebar column as its own view.
-///
-/// `Harness::render` used to rebuild the sidebar element on every frame —
-/// including every wheel notify, whose transcript centre is the only thing
-/// that moved. Embedded with gpui's `.cached(size_full)`, a clean pane
-/// reuses its retained subtree, so a transcript notify re-renders `Harness`
-/// (composition only) and the `SessionView` centre, not the column. The pane
-/// reads Baaz live through a weak handle and renders exactly what
-/// `Harness::render_sidebar` renders — that method keeps its shape and its
-/// listeners, so what the column draws cannot drift. [`SidebarKey`] is what
-/// re-arms it: [`Harness::sync_sidebar_pane`] notifies it from `on_frame`
-/// whenever its inputs change, and notifies from inside its own subtree
-/// (hover, its scroll container, the rename editor, and — since the reveal
-/// steers through `ListState` rather than prepaint intents — the reveal's
-/// own outside-the-draw pane-notify task in [`Harness::reveal_sidebar_row`])
-/// dirty it directly through the view tree. The window preferences it draws
-/// (grouping, sort, summary line, mode, collapse) re-arm it on their own:
-/// the pane observes the layout global ([`crate::layout::LayoutStore`]).
 /// How long the sidebar's new rows take to arrive after a mode switch.
 pub(crate) const MODE_FADE: std::time::Duration = std::time::Duration::from_millis(80);
 
-pub(crate) struct SidebarPane {
-    baaz: WeakEntity<Harness>,
-    /// The column reads the window preferences (grouping, sort, summary
-    /// line, mode, collapse) from the layout global: a change re-renders
-    /// the cached pane in the same frame, with no key and no notify at the
-    /// write.
-    _layout: gpui::Subscription,
+/// What only the root knows and the column draws, pushed by
+/// `Harness::compose_sidebar` on every root render. The pane re-renders when
+/// these differ from the last ones it drew, and only then: a root notify
+/// that changed none of them leaves the cached column alone.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SidebarFacts {
+    /// The open session, the awaited click, the drafts and the busy
+    /// terminals — what the list's visible rows are keyed on.
+    pub(crate) list: ListFacts,
+    /// The selected row: the chain head of the awaited click, else of the
+    /// open session (one identity per chain, Y2a).
+    pub(crate) selected: Option<String>,
+    /// The current project: a rowless session's reveal falls back to its head.
+    pub(crate) current_project: Option<String>,
+    /// The footer and its menu (its usage cards only while it is open).
+    pub(crate) account: Account,
+    /// How many skills are on: the Skills row's count (D54).
+    pub(crate) skills_on: usize,
+    /// The Sessions caption's view menu stands open.
+    pub(crate) view_menu_open: bool,
+    /// The session whose `⋯` menu stands open.
+    pub(crate) row_menu: Option<String>,
+    /// The open Browse right-click menu: its row stays lit.
+    pub(crate) browse_menu: Option<BrowseMenu>,
+    /// The session row being renamed in place.
+    pub(crate) renaming: Option<String>,
+    /// Browse mode's rows, in Browse only (its naming draft left empty: the
+    /// field draws itself, so typing never re-renders the column).
+    pub(crate) browse: Option<BrowseModel>,
+    /// The minute the grouping's elapsed tags read against: its rollover
+    /// regroups.
+    pub(crate) minute: i64,
 }
 
-impl SidebarPane {
-    pub(crate) fn new(baaz: WeakEntity<Harness>, cx: &mut Context<Self>) -> Self {
-        let layout = cx.observe_global::<crate::layout::LayoutStore>(|_, cx| cx.notify());
-        Self { baaz, _layout: layout }
+impl Default for SidebarFacts {
+    /// Nothing known yet: the root pushes its facts before the pane's first
+    /// render (the root composes the shell before its children draw).
+    fn default() -> Self {
+        Self {
+            list: ListFacts::default(),
+            selected: None,
+            current_project: None,
+            account: Account {
+                name: SharedString::default(),
+                email: SharedString::default(),
+                plan: SharedString::default(),
+                initial: SharedString::default(),
+                status: AccountStatus::Checking,
+                menu_open: false,
+                usage: Vec::new(),
+            },
+            skills_on: 0,
+            view_menu_open: false,
+            row_menu: None,
+            browse_menu: None,
+            renaming: None,
+            browse: None,
+            minute: 0,
+        }
     }
 }
+
+/// The column's geometry this frame: read at render, pushed without a
+/// notify — a width change re-renders the cached pane through its bounds.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct SidebarFrame {
+    /// The column's width.
+    pub(crate) width: f32,
+    /// A divider drag is in flight: no reveal moves the list meanwhile.
+    pub(crate) resizing: bool,
+}
+
+/// What the column asks the root for.
+#[derive(Clone, Debug)]
+pub(crate) enum SidebarEvent {
+    /// One of the screen's intents the root acts on: open, new, rename,
+    /// pin, archive, project actions, menus, and every Browse action.
+    Intent(SidebarIntent),
+    /// The person scrolled the column: a group row's menu would mis-seat.
+    Scrolled,
+    /// The hover card opened or closed: the root seats it beside the column.
+    DetailChanged,
+    /// A scripted wheel sweep advanced one tick: the root's frame trace
+    /// takes its row.
+    SweepTick,
+}
+
+/// The hover card's state: which row armed it, since when, whether it is
+/// past its delay, and the seat. The root draws the card beside the column
+/// (`Harness::render_row_detail`); the pane owns the arm.
+#[derive(Debug, Default)]
+pub(crate) struct RowDetail {
+    /// The sidebar row under the pointer, if any: the hover detail's owner.
+    /// Written only by the rows' own hover reports
+    /// ([`SidebarPane::note_row_hover`]); pane renders never touch it.
+    pub(crate) hovered_row: Option<String>,
+    /// When the current hover started: the detail opens past
+    /// [`aui::nav::SESSION_DETAIL_DELAY`], so a pointer travelling past
+    /// rows never flashes the card.
+    pub(crate) hover_since: Option<std::time::Instant>,
+    /// The hover card is past its delay and showing.
+    pub(crate) shown: bool,
+    /// Where the showing card seats: the hovered row's own window bounds,
+    /// carried by the row's hover report and frozen so the card never chases
+    /// the mouse. The seat itself hangs off [`Self::pane_bounds`].
+    pub(crate) trigger: Option<Bounds<Pixels>>,
+    /// The laid-out pane's window bounds, from its own prepaint: what the
+    /// hover card's side seat hangs off (the pane's right edge plus the
+    /// card gap).
+    pub(crate) pane_bounds: Option<Bounds<Pixels>>,
+    /// Capture aid (`row-detail:<id>`): pins the hover card open for one
+    /// row, seated at the selected row's bounds — free, no pointer.
+    pub(crate) forced: Option<String>,
+    /// The selected row's window bounds: what the pinned card seats at.
+    pub(crate) selected_row_bounds: Option<(String, Bounds<Pixels>)>,
+    /// Hover-trace state (`BAAZ_HOVER_TRACE=1`, diagnosis only): the last
+    /// card result the root drew, so the trace logs only on change.
+    pub(crate) trace_last_shown: Option<bool>,
+}
+
+/// The sidebar column's view.
+pub(crate) struct SidebarPane {
+    /// The rows: subscribed, so a list change re-renders the column.
+    list: Entity<SessionList>,
+    /// The inline rename field (shared with the header's project rename).
+    rename: Entity<TextareaState>,
+    /// What the root last pushed ([`SidebarFacts`]).
+    facts: SidebarFacts,
+    /// The column's width and drag ([`SidebarFrame`]).
+    frame: SidebarFrame,
+    /// The sessions list's scroll state: the caller-owned `ListState` the
+    /// virtualised sidebar lays out through. Kept in sync with the
+    /// flattened rows on every render by [`Self::sync_list`]: `reset` after
+    /// a regroup or filter change, `splice` after a local insert or remove,
+    /// `remeasure_items` after a text-only height change — `item_count`
+    /// always equals the flattened length.
+    pub(crate) list_state: ListState,
+    /// What the pointer is over, as the screen reports it: a session id, a
+    /// Browse tab key, or a reserved chrome key. The row's trailing slot
+    /// swaps to its actions on it.
+    pub(crate) hovered: Option<String>,
+    /// The project head the pointer is over: it shows its actions.
+    hovered_group: Option<String>,
+    /// Whether the Projects header shows its actions (hovered).
+    hovered_projects_header: bool,
+    /// Whether Browse's Today header shows its actions (hovered).
+    hovered_today_header: bool,
+    /// Whether the Pinned section is open.
+    pinned_open: bool,
+    /// The flattened rows the list state was last synced to: the pane
+    /// re-flattens per render (an index walk, no summaries cloned) and
+    /// splices the difference, so a regroup is the only sync that drops
+    /// the offset.
+    pub(crate) prev_rows: Vec<SidebarRow>,
+    /// The grouping those rows were flattened from, behind its cached
+    /// `Rc`: a new pointer with equal rows means text changed under stable
+    /// rows, which is what asks for `remeasure_items`.
+    prev_grouping: Option<Rc<Grouping>>,
+    /// The regroup key the list was last reset for.
+    prev_regroup: Option<SidebarRegroupKey>,
+    /// The wheel's input side: what a scripted sweep pushes and the render
+    /// drains, once per frame.
+    wheel: SidebarWheelState,
+    /// Whether the user has scrolled the sidebar since the reveal was last
+    /// armed. A reveal never moves a user-scrolled list: a wheel sets this,
+    /// arming clears it, and no reveal installs while it holds.
+    pub(crate) user_scrolled: bool,
+    /// The pending "ensure visible" row id (`scrollIntoView({ block:
+    /// "nearest" })` semantics). Armed only by outside-the-sidebar
+    /// activations — the palette, New session / `+`, fork, boot
+    /// `--session`, the `open:` step ([`Self::set_reveal`]) — and consumed
+    /// once the row reports visible. A sidebar click never arms it (the
+    /// clicked row is under the cursor, hence visible), and neither does a
+    /// list refresh, a regroup, a user scroll or a resize drag.
+    pub(crate) reveal: Option<String>,
+    /// An id [`Self::reveal`] named that has no row yet, and how many
+    /// consecutive reveal attempts it has missed on (owner round 6, part C4
+    /// review #1): a draft before its first send, a fork before
+    /// `load_sessions`'s reply lands. Distinct from "nowhere to go" (a
+    /// known session whose landing row genuinely cannot be found), which
+    /// still gives up on the first miss — this one waits up to
+    /// [`REVEAL_UNKNOWN_FRAMES`] attempts for the row to be born.
+    pub(crate) reveal_unknown: Option<(String, u32)>,
+    /// When the last mode switch happened: the new rows fade in over 80 ms
+    /// from it (FF's swap arrival).
+    mode_fade_since: Option<std::time::Instant>,
+    /// A frame-paced wheel sweep in flight (`sidebar-scroll-sweep:` step):
+    /// the in-process fallback for a real `CGEvent` gesture the
+    /// environment cannot deliver. Advanced once per pane render.
+    scroll_sweep: Option<crate::resize::ScrollSweep>,
+    /// The hover card's arm and seat ([`RowDetail`]).
+    pub(crate) detail: RowDetail,
+    /// Every project group row's `…` seat, keyed by group id: where the
+    /// pointer stood when it opened the row's project menu. Entries are
+    /// kept, so a menu opened for a since-scrolled group still seats.
+    pub(crate) group_menu_bounds: HashMap<String, Bounds<Pixels>>,
+    /// The hover card's delay timer; replacing it cancels the last one.
+    hover_timer: Option<Task<()>>,
+    /// The reveal's wake-up outside the draw (see [`Self::reveal_row`]).
+    reveal_poke: Option<Task<()>>,
+    /// The list subscription and the layout observer.
+    _subscriptions: Vec<Subscription>,
+    /// This pane's own renders, for the tests that prove what re-renders it
+    /// (the process-wide counters above are shared across parallel tests).
+    #[cfg(test)]
+    pub(crate) renders: u64,
+}
+
+impl EventEmitter<SidebarEvent> for SidebarPane {}
 
 /// Sidebar-pane renders since process start: the
 /// sidebar analogue of `WHEEL_SCROLL_BYS`. Relaxed atomics, drained per
@@ -120,12 +299,12 @@ pub(crate) fn take_baaz_root_renders() -> u64 {
 /// reveal may move the list.
 const SIDEBAR_GESTURE_HORIZON: std::time::Duration = std::time::Duration::from_millis(150);
 
-/// How many consecutive `reveal_sidebar_row` misses an id with no row yet
+/// How many consecutive reveal misses an id with no row yet
 /// gets before the reveal gives up: a
 /// bound, not a real deadline — the row-birth sites (the `turn/started`
-/// local-row insert, a `load_sessions` reply) already notify, so a normal
-/// wait is one or two attempts; this only guards against an id that never
-/// arrives at all (a failed fork, a send that never lands).
+/// local-row insert, a `load_sessions` reply) already invalidate the list,
+/// so a normal wait is one or two attempts; this only guards against an id
+/// that never arrives at all (a failed fork, a send that never lands).
 pub(crate) const REVEAL_UNKNOWN_FRAMES: u32 = 120;
 
 /// Steer the sidebar list toward row `ix`; returns whether it jumped.
@@ -152,7 +331,7 @@ fn steer_to_row(list: &gpui::ListState, ix: usize) -> bool {
     false
 }
 
-/// The bookkeeping [`Harness::reveal_sidebar_row`] does for an unknown
+/// The bookkeeping [`SidebarPane::reveal_row`] does for an unknown
 /// reveal id, pulled out pure so it is unit-testable without a window
 ///: a miss for the *same* id the
 /// previous call saw extends its streak; a miss for a *different* id (a
@@ -167,7 +346,7 @@ fn next_reveal_unknown_streak(current: Option<(String, u32)>, reveal_id: &str) -
 /// Whether a missed reveal stays armed: only while its id is the open
 /// session's and the window holds no row for it yet (a brand-new session
 /// before its first send). Pure, so tests pin the boundary without a
-/// window; [`Harness::reveal_sidebar_row`] reads it on every miss.
+/// window; [`SidebarPane::reveal_row`] reads it on every miss.
 pub(crate) fn rowless_reveal_stays_armed(
     active_id: Option<&str>,
     reveal_id: &str,
@@ -178,8 +357,8 @@ pub(crate) fn rowless_reveal_stays_armed(
 
 /// The group head (or header) row for a session with no session row: a
 /// closed group holds its sessions out of the flattened model. Pure — the
-/// [`Harness`] method below passes its own stores — so tests drive each
-/// trigger's scroll target without a window.
+/// pane passes the list's stores — so tests drive each trigger's scroll
+/// target without a window.
 ///
 /// A rowless session still names its project: the override Baaz files for
 /// a draft before its first send, then the provider-lane record, then the
@@ -236,15 +415,13 @@ pub(crate) fn take_sidebar_wheel_drains() -> u64 {
     SIDEBAR_WHEEL_DRAINS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The sidebar wheel's input-side state: what the
-/// capture handler writes and `render_sidebar` applies. Shared behind
-/// `RefCell` (see `Harness::sidebar_wheel`) so the push never borrows the
-/// entity — a wheel event can arrive inside a `Harness` update, where an
-/// entity update panics.
+/// The sidebar wheel's input-side state: what a scripted sweep pushes and
+/// the pane's render applies. Plain state on the pane: the push is a pane
+/// update, which never re-enters the root.
 #[derive(Debug, Default)]
 pub(crate) struct SidebarWheelState {
     /// Wheel travel accumulated since the last sidebar frame, in pixels.
-    /// The capture handler only adds; the drain takes it whole.
+    /// The push only adds; the drain takes it whole.
     pending: Pixels,
     /// How long the current gesture stays open after its last event.
     gesture_until: Option<std::time::Instant>,
@@ -259,282 +436,9 @@ pub(crate) fn note_baaz_render() {
     BAAZ_ROOT_RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
-impl Render for SidebarPane {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        SIDEBAR_PANE_RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if crate::session::frame_trace_enabled() {
-            TRACE_PANE_TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        match self.baaz.upgrade() {
-            Some(baaz) => baaz.update(cx, |baaz, cx| baaz.render_sidebar(window, cx)),
-            None => div().into_any_element(),
-        }
-    }
-}
-
-/// One task folder as the cached sidebar keys it: the session and
-/// its tabs' `(id, session-active)`. Labels never enter the key: a retitle
-/// moves the tabs-model generation (and the visible-rows pointer on a
-/// session rename), which is what the key compares.
-pub(crate) type BrowseGroupPrint = (String, Vec<(u64, bool)>);
-
-/// What the sidebar pane shows, as an equality key.
-///
-/// Every input `render_sidebar` reads: the cached rows and grouping behind
-/// their `Rc` pointers (this comparison calls both getters every frame, so
-/// an `invalidate_list` rebuild — or the minute rollover regrouping — shows
-/// up as a new pointer here), the selection, the rename, the one-shot
-/// reveal, the footer's identity, and the current project. Compared
-/// in `on_frame`, before anything draws; a few small clones per frame, no
-/// rebuild. Nested entities inside the column (the rename editor, hover and
-/// scroll state) notify through the view tree on their own and need no key,
-/// and so do the window preferences (mode, collapse, summary line, grouping,
-/// sort, search scope): the pane observes the layout global itself.
-/// The tier is deliberately not an input: the footer shows the person,
-/// never the plan or the meter, so a usage tick must not dirty the column.
-#[derive(PartialEq)]
-pub(crate) struct SidebarKey {
-    visible: usize,
-    grouping: usize,
-    selected: Option<String>,
-    renaming: Option<String>,
-    reveal: Option<String>,
-    auth: (u8, String, String, String, bool),
-    current_project: Option<String>,
-    browse_tabs: Vec<(u64, bool, bool, bool)>,
-    tabs_generation: u64,
-    browse_flags: Vec<(u64, bool, bool, bool, bool, bool)>,
-    browse_groups: Vec<BrowseGroupPrint>,
-    browse_session_tab: Option<u64>,
-    /// Bumped as favicons land, so the column repaints with them.
-    favicons: u64,
-    /// Bumped as bookmarks change or land from `browser.db` (task 4.5:
-    /// the first load lands after boot), so the address row's ★ follows.
-    bookmarks: u64,
-    /// The v2 screen's own inputs: the lifted pinned rows, what the
-    /// pointer is over (the screen swaps trailing slots on it), the
-    /// sections' and menus' open state, the view options, the loading
-    /// and collapsed flags, the Skills count, and the plan label.
-    pinned: usize,
-    hovered: Option<String>,
-    hovered_group: Option<String>,
-    hovered_projects_header: bool,
-    hovered_today_header: bool,
-    pinned_open: bool,
-    view_menu_open: bool,
-    account_menu_open: bool,
-    view_options: (bool, bool, bool, usize),
-    browse_menu: Option<aui::screens::sidebar::BrowseMenu>,
-    browse_naming: Option<aui::screens::sidebar::BrowseNaming>,
-    current_space: String,
-    loading: bool,
-    skills_on: usize,
-    plan: Option<String>,
-    /// The session whose `⋯` menu stands open.
-    row_menu: Option<String>,
-    /// The usage cards tick while the account menu is open: the minute.
-    usage_minute: i64,
-    /// What agents are doing on pages: a task folder's word and dot follow it.
-    agent_work: u64,
-}
-
-/// One person tab the Browse sidebar draws, with the live page facts
-/// behind its row state.
-pub(crate) struct BrowseTabSnap {
-    pub(crate) id: crate::browser::TabId,
-    pub(crate) title: String,
-    pub(crate) initial: String,
-    pub(crate) active: bool,
-    pub(crate) pinned: bool,
-    pub(crate) loading: bool,
-    /// The favicon's local file, once fetched ([`crate::browser::favicons`]).
-    pub(crate) favicon: Option<String>,
-}
-
-/// One session tab under its task folder, still owned by its session.
-pub(crate) struct BrowseSessionTabSnap {
-    favicon: Option<String>,
-    id: crate::browser::TabId,
-    title: String,
-    initial: String,
-    active: bool,
-}
-
-impl SidebarKey {
-    /// The Browse sidebar's fingerprint: the current project's person
-    /// tabs as `(id, active, pinned, attention)` quadruples, beside the
-    /// tabs-model generation. A select, a retitle, a (un)pin, an
-    /// open/close or a background permission ask moves the key — retitles
-    /// through the generation, never through a label string built per
-    /// frame — so the cached pane repaints.
-    pub(crate) fn browse_tabs_fingerprint(baaz: &Harness, cx: &gpui::App) -> Vec<(u64, bool, bool, bool)> {
-        if !baaz.browser.read(cx).tabs_loaded {
-            return Vec::new();
-        }
-        let space = baaz.browser.read(cx).browse_space();
-        let active =
-            baaz.browser.read(cx).tabs.active_of(&crate::browser::Owner::Person, space.as_deref());
-        baaz.browser
-            .read(cx)
-            .tabs
-            .person_tabs(space.as_deref())
-            .iter()
-            .map(|tab| (tab.id.0, Some(tab.id) == active, tab.pinned, tab.needs_attention))
-            .collect()
-    }
-
-    /// The live page facts behind each person tab's row state, as
-    /// `(id, loading, audible, crashed, discarded, attention)` — read off
-    /// the registered webviews (attention off the tab), so a load
-    /// finishing, a crash landing or a background permission ask repaints
-    /// the cached pane. A tab with no live page reads discarded (asleep);
-    /// a blank tab with no progress yet reads neither loading nor
-    /// discarded.
-    pub(crate) fn browse_flags_fingerprint(
-        baaz: &Harness,
-        cx: &gpui::App,
-    ) -> Vec<(u64, bool, bool, bool, bool, bool)> {
-        if !baaz.browser.read(cx).tabs_loaded {
-            return Vec::new();
-        }
-        let space = baaz.browser.read(cx).browse_space();
-        baaz.browser
-            .read(cx)
-            .tabs
-            .person_tabs(space.as_deref())
-            .iter()
-            .map(|tab| {
-                let page = baaz.browser.read(cx).states.get(&tab.id).map(|state| state.read(cx));
-                let (loading, audible, crashed, live) = match page {
-                    Some(page) => {
-                        let progress = page.progress();
-                        (
-                            progress > 0.0 && progress < 1.0,
-                            page.audible(),
-                            page.crashed().is_some(),
-                            true,
-                        )
-                    }
-                    None => (false, false, false, false),
-                };
-                let discarded = !live && tab.url != crate::browser::tabs::BLANK && !tab.url.is_empty();
-                (tab.id.0, loading, audible, crashed, discarded, tab.needs_attention)
-            })
-            .collect()
-    }
-
-    /// The task folders: one `(session, tabs)` pair per session
-    /// in the current project that owns tabs, in first-seen order, each
-    /// tab as `(id, session-active)`. A session tab opening or closing
-    /// moves the key directly; a retitle moves it through the
-    /// tabs-model generation.
-    pub(crate) fn browse_groups_fingerprint(baaz: &Harness, cx: &gpui::App) -> Vec<BrowseGroupPrint> {
-        if !baaz.browser.read(cx).tabs_loaded {
-            return Vec::new();
-        }
-        let space = baaz.browser.read(cx).browse_space();
-        baaz.browser
-            .read(cx)
-            .tabs
-            .session_tabs(space.as_deref())
-            .iter()
-            .map(|(session, tabs)| {
-                let owner = crate::browser::Owner::Session(session.clone());
-                let active = baaz.browser.read(cx).tabs.active_of(&owner, None);
-                let rows = tabs.iter().map(|tab| (tab.id.0, Some(tab.id) == active)).collect();
-                (session.clone(), rows)
-            })
-            .collect()
-    }
-}
-
-impl SidebarKey {
-    /// The key the pane would render this frame.
-    pub(crate) fn current(baaz: &Harness, cx: &gpui::App) -> Self {
-        let visible = baaz.visible_sessions(cx);
-        let grouping = baaz.sidebar_grouping(cx);
-        let selected = baaz
-            .open_state.pending_id
-            .clone()
-            .or_else(|| baaz.active.as_ref().map(|a| a.read(cx).session_id.clone()))
-            .map(|id| baaz.chain_head(&id));
-        let auth = match &baaz.auth {
-            Auth::Probing => (0, String::new(), String::new(), String::new(), false),
-            Auth::SignedOut => (1, String::new(), String::new(), String::new(), false),
-            Auth::SignedIn(identity) => (
-                2,
-                identity.initial(),
-                identity.display_name(),
-                identity.email.clone(),
-                identity.is_api_key(),
-            ),
-        };
-        // The mode switch shows both counts, so both are key inputs: the
-        // sessions in the current project (the switch's own count,
-        // including rowless sessions created this run) and the project's
-        // person tabs.
-        let current_project = baaz.current_project.clone();
-        // The Browse fingerprints cost model walks and label-free triples,
-        // but only Browse shows them: outside Browse they stay empty, so
-        // a Sessions frame never pays for the tab model at all.
-        let browse_mode = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
-        let (browse_tabs, tabs_generation, browse_flags, browse_groups) = if browse_mode {
-            (
-                Self::browse_tabs_fingerprint(baaz, cx),
-                baaz.browser.read(cx).tabs.generation,
-                Self::browse_flags_fingerprint(baaz, cx),
-                Self::browse_groups_fingerprint(baaz, cx),
-            )
-        } else {
-            (Vec::new(), 0, Vec::new(), Vec::new())
-        };
-        let browse_session_tab = baaz.browser.read(cx).browse_session_tab.map(|id| id.0);
-        let account_menu_open = baaz.overlays.read(cx).is_open(MenuKind::Account);
-        Self {
-            visible: Rc::as_ptr(&visible) as usize,
-            grouping: Rc::as_ptr(&grouping) as usize,
-            selected,
-            renaming: baaz.renaming(cx),
-            reveal: baaz.reveal.clone(),
-            auth,
-            current_project,
-            browse_tabs,
-            tabs_generation,
-            browse_flags,
-            browse_groups,
-            browse_session_tab,
-            favicons: baaz.browser.read(cx).favicons.generation,
-            bookmarks: baaz.browser.read(cx).data.read(cx).generation(),
-            pinned: Rc::as_ptr(&baaz.sidebar_pinned(cx)) as usize,
-            hovered: baaz.sidebar_hovered.clone(),
-            hovered_group: baaz.hovered_group.clone(),
-            hovered_projects_header: baaz.hovered_projects_header,
-            hovered_today_header: baaz.hovered_today_header,
-            pinned_open: baaz.pinned_open,
-            view_menu_open: baaz.overlays.read(cx).is_open(MenuKind::ViewOptions),
-            account_menu_open,
-            agent_work: baaz.terminal_service.activity_print(),
-            view_options: (
-                baaz.show_empty,
-                baaz.show_hidden,
-                baaz.show_archived,
-                baaz.hidden_count(),
-            ),
-            browse_menu: baaz.overlays.read(cx).stack.browse_menu().cloned(),
-            browse_naming: baaz.browser.read(cx).browse_naming.clone(),
-            current_space: baaz.browser.read(cx).tabs.current_space.clone(),
-            loading: baaz.sidebar_loading(),
-            skills_on: baaz.skills_page.read(cx).catalog.on_count(),
-            plan: muse_plan_label(baaz.tier.as_ref()),
-            row_menu: baaz.open_row_menu(cx),
-            usage_minute: if account_menu_open { crate::account_usage::now_secs() / 60 } else { 0 },
-        }
-    }
-}
-
 /// What a regroup or filter change looks like to the virtual list (owner
 /// round 6): the grouping mode and the three list-management toggles.
-/// [`Harness::sync_sidebar_list`] resets the list state when this changes
+/// [`SidebarPane::sync_list`] resets the list state when this changes
 /// and splices everything else, so group open/close and fold expand keep
 /// the offset.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -563,246 +467,744 @@ pub(crate) fn row_detail_seat(
     Some(gpui::point(edge.origin.x + edge.size.width + px(SESSION_DETAIL_GAP), row.origin.y))
 }
 
-impl Harness {
-    /// Re-arm the sidebar pane when its inputs changed.
-    ///
-    /// Called from `on_frame`, before anything draws: while the key matches,
-    /// wheel notifies leave the pane clean and gpui reuses its cached
-    /// element instead of rebuilding the column. The comparison itself is a
-    /// few pointer reads and small clones — no list rebuild.
-    /// Answers whether the key moved (the pane was re-armed).
-    pub(crate) fn sync_sidebar_pane(&mut self, cx: &mut Context<Self>) -> bool {
-        let key = SidebarKey::current(self, cx);
-        if self.sidebar_key.as_ref() != Some(&key) {
-            self.sidebar_key = Some(key);
-            crate::log::boot_mark("pane-notify");
-            self.sidebar_pane.update(cx, |_, cx| cx.notify());
-            return true;
+impl SidebarPane {
+    /// The id the pane hands the virtual list.
+    pub(crate) const SIDEBAR_VIEW_ID: &'static str = "sessions";
+
+    /// The column over `list`, typing renames in `rename`.
+    pub(crate) fn new(list: Entity<SessionList>, rename: Entity<TextareaState>, cx: &mut Context<Self>) -> Self {
+        let subscriptions = vec![
+            // A list change re-renders the column from the list's own
+            // event. An event, not a notify: gpui-pre drops an observer's
+            // notify raised inside a draw, while an event always reaches
+            // its subscribers once the draw is over.
+            cx.subscribe(&list, |_, _, _: &SessionListEvent, cx| cx.notify()),
+            // The window preferences the column draws (grouping, sort,
+            // summary line, mode, collapse) live in the layout global: a
+            // change re-renders the cached pane with no notify at the write.
+            cx.observe_global::<crate::layout::LayoutStore>(|_, cx| cx.notify()),
+        ];
+        Self {
+            list,
+            rename,
+            facts: SidebarFacts::default(),
+            frame: SidebarFrame::default(),
+            list_state: sidebar_list_state(0),
+            hovered: None,
+            hovered_group: None,
+            hovered_projects_header: false,
+            hovered_today_header: false,
+            pinned_open: true,
+            prev_rows: Vec::new(),
+            prev_grouping: None,
+            prev_regroup: None,
+            wheel: SidebarWheelState::default(),
+            user_scrolled: false,
+            reveal: None,
+            reveal_unknown: None,
+            mode_fade_since: None,
+            scroll_sweep: None,
+            detail: RowDetail::default(),
+            group_menu_bounds: HashMap::new(),
+            hover_timer: None,
+            reveal_poke: None,
+            _subscriptions: subscriptions,
+            #[cfg(test)]
+            renders: 0,
         }
-        false
     }
 
-    /// The sessions list's current scroll position: what
-    /// `sidebar-wheel:` and the resize drag log sample. The list walks down
-    /// as `item_ix` grows, with `offset_in_item` the pixels into that row —
-    /// the sidebar analogue of `SessionView::bench_list_top`.
-    pub(crate) fn sidebar_list_top(&self) -> ListOffset {
-        self.sidebar_list.logical_scroll_top()
-    }
-
-    /// Whether a sidebar wheel gesture is in flight:
-    /// an event landed within the horizon. While this holds the pane
-    /// presents every tick and no reveal installs.
-    pub(crate) fn sidebar_gesture_active(&self) -> bool {
-        self.sidebar_wheel.borrow().gesture_until.is_some_and(|until| std::time::Instant::now() < until)
-    }
-
-    /// Push one frame-paced sweep delta into the sidebar's accumulator
-    ///: the same three writes
-    /// [`sidebar_wheel_capture`]'s real event handler makes — accumulate,
-    /// re-arm the gesture horizon, mark scrolled — so a `sidebar-scroll-
-    /// sweep:` tick is indistinguishable from a real wheel event to
-    /// everything downstream (the drain, the reveal disarm, the trace).
-    /// Called once per tick from `on_frame`, never from a dispatched event,
-    /// so it never borrows the entity.
-    pub(crate) fn push_sidebar_scroll_sweep(&mut self, dy: f32, cx: &mut Context<Self>) {
-        {
-            let mut state = self.sidebar_wheel.borrow_mut();
-            state.pending += px(dy);
-            state.gesture_until = Some(std::time::Instant::now() + SIDEBAR_GESTURE_HORIZON);
-            state.scrolled = true;
+    /// Take what the root knows this frame. Never notifies the root; it
+    /// notifies the pane only when the facts differ from the last ones —
+    /// answering whether they did. Called from the root's render: a notify
+    /// raised inside the draw lands on the next frame, so the caller asks
+    /// for one. The frame (width, drag) is taken without a notify: a width
+    /// change re-renders the cached pane through its bounds.
+    pub(crate) fn push_facts(&mut self, facts: SidebarFacts, frame: SidebarFrame, cx: &mut Context<Self>) -> bool {
+        self.frame = frame;
+        if self.facts == facts {
+            return false;
         }
-        self.sidebar_pane.update(cx, |_, cx| cx.notify());
+        self.facts = facts;
+        cx.notify();
+        true
+    }
+
+    /// Arm the one-shot reveal for `id`, an outside activation, or clear
+    /// any armed one (`None`: a quiet click). A `fresh` arm owns the list
+    /// again: the next user scroll disarms it.
+    pub(crate) fn set_reveal(&mut self, id: Option<String>, fresh: bool, cx: &mut Context<Self>) {
+        if id.is_none() && self.reveal.is_none() && self.reveal_unknown.is_none() {
+            return;
+        }
+        if fresh && id.is_some() {
+            self.user_scrolled = false;
+        }
+        self.reveal = id;
+        self.reveal_unknown = None;
+        cx.notify();
+    }
+
+    /// The person owns the list (a divider drag, a scripted sweep): any
+    /// armed reveal is disarmed and none reinstalls until the next arm.
+    pub(crate) fn user_owns_list(&mut self) {
+        self.reveal = None;
+        self.reveal_unknown = None;
+        self.user_scrolled = true;
+    }
+
+    /// A provisional session id became a real one: an armed reveal follows it.
+    pub(crate) fn rekey_reveal(&mut self, old: &str, new: &str) {
+        if self.reveal.as_deref() == Some(old) {
+            self.reveal = Some(new.to_owned());
+        }
+        if let Some((id, _)) = self.reveal_unknown.as_mut().filter(|(id, _)| id == old) {
+            *id = new.to_owned();
+        }
+    }
+
+    /// The sessions list's current scroll position: what `sidebar-wheel:`
+    /// and the resize drag log sample. The list walks down as `item_ix`
+    /// grows, with `offset_in_item` the pixels into that row — the sidebar
+    /// analogue of `SessionView::bench_list_top`.
+    pub(crate) fn list_top(&self) -> ListOffset {
+        self.list_state.logical_scroll_top()
+    }
+
+    /// Whether a sidebar wheel gesture is in flight: an event landed within
+    /// the horizon. While this holds the pane presents every tick and no
+    /// reveal installs.
+    pub(crate) fn gesture_active(&self) -> bool {
+        self.wheel.gesture_until.is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    /// Start the mode switch's fade: the new rows arrive over [`MODE_FADE`].
+    /// No notify: the switch itself is a layout write, which the pane
+    /// observes.
+    pub(crate) fn start_mode_fade(&mut self, at: std::time::Instant) {
+        self.mode_fade_since = Some(at);
+    }
+
+    /// Start a frame-paced wheel sweep (`sidebar-scroll-sweep:`).
+    pub(crate) fn start_scroll_sweep(&mut self, sweep: crate::resize::ScrollSweep, cx: &mut Context<Self>) {
+        self.scroll_sweep = Some(sweep);
+        cx.notify();
+    }
+
+    /// Push one sweep delta into the accumulator: the same three writes a
+    /// real wheel gesture makes — accumulate, re-arm the gesture horizon,
+    /// mark scrolled — so a sweep tick is indistinguishable from a real
+    /// wheel event to everything downstream (the drain, the reveal disarm,
+    /// the trace).
+    fn push_wheel(&mut self, dy: f32) {
+        self.wheel.pending += px(dy);
+        self.wheel.gesture_until = Some(std::time::Instant::now() + SIDEBAR_GESTURE_HORIZON);
+        self.wheel.scrolled = true;
+    }
+
+    /// Advance a scripted sweep one tick, asking for the next frame while it
+    /// runs; the root's frame trace takes its row per tick.
+    fn advance_sweep(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sweep) = self.scroll_sweep.as_mut() else { return };
+        match sweep.advance() {
+            Some(dy) => {
+                self.push_wheel(dy);
+                aui_motion::request_frame(window);
+                cx.emit(SidebarEvent::SweepTick);
+            }
+            None => self.scroll_sweep = None,
+        }
     }
 
     /// A real wheel event over the sidebar: the person scrolled. Disarms any
     /// armed reveal and marks the list user-scrolled until the next
     /// activation, and dismisses the group menu and the hover card.
-    pub(crate) fn note_sidebar_wheel(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn note_wheel(&mut self, cx: &mut Context<Self>) {
         self.reveal = None;
         self.reveal_unknown = None;
-        self.sidebar_user_scrolled = true;
-        self.dismiss_group_menu(cx);
-        self.close_row_detail();
+        self.user_scrolled = true;
+        cx.emit(SidebarEvent::Scrolled);
+        self.close_row_detail(cx);
     }
 
-    /// Apply the capture handler's input:
-    /// take the accumulated travel into exactly one `ListState::scroll_by`
-    /// per frame, disarm any armed reveal (the user's scroll wins), and mark
-    /// scrolled-since-armed so none reinstalls until the next activation.
-    /// Called once per pane render from `render_sidebar`, before the list
-    /// lays out — the sidebar twin of `SessionView::drain_pending_wheel`.
+    /// Apply the wheel's input: take the accumulated travel into exactly
+    /// one `ListState::scroll_by` per frame, disarm any armed reveal (the
+    /// user's scroll wins), and mark scrolled-since-armed so none reinstalls
+    /// until the next activation. Called once per pane render, before the
+    /// list lays out — the sidebar twin of `SessionView::drain_pending_wheel`.
     /// Returns whether the user scrolled this frame: a scroll dismisses an
     /// open group menu (the calm option) and is what the `sbwheel` probe
     /// line reports.
-    pub(crate) fn drain_sidebar_wheel(&mut self) -> bool {
-        let (pending, scrolled) = {
-            let mut state = self.sidebar_wheel.borrow_mut();
-            (std::mem::replace(&mut state.pending, px(0.0)), std::mem::replace(&mut state.scrolled, false))
-        };
+    fn drain_wheel(&mut self) -> bool {
+        let pending = std::mem::replace(&mut self.wheel.pending, px(0.0));
+        let scrolled = std::mem::replace(&mut self.wheel.scrolled, false);
         if scrolled {
             self.reveal = None;
             self.reveal_unknown = None;
-            self.sidebar_user_scrolled = true;
+            self.user_scrolled = true;
         }
         if pending == px(0.0) {
             return scrolled;
         }
         // The transcript's sign: a positive wheel delta climbs toward the
         // head, so the pixel walk takes it negated.
-        self.sidebar_list.scroll_by(-pending);
+        self.list_state.scroll_by(-pending);
         SIDEBAR_WHEEL_DRAINS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         scrolled
     }
 
-    /// The local favicon file for `tab`, once its icon has been fetched.
-    fn favicon_file(&self, tab: &crate::browser::tabs::Tab, cx: &gpui::App) -> Option<String> {
-        let url = tab.favicon.as_deref()?;
-        Some(self.browser.read(cx).favicons.file(url)?.to_string_lossy().into_owned())
-    }
-
-    pub(crate) fn browse_person_snaps(&self, cx: &gpui::App) -> Vec<BrowseTabSnap> {
-        if !self.browser.read(cx).tabs_loaded {
-            return Vec::new();
-        }
-        let space = self.browser.read(cx).browse_space();
-        let active =
-            self.browser.read(cx).tabs.active_of(&crate::browser::Owner::Person, space.as_deref());
-        self.browser
-            .read(cx)
-            .tabs
-            .person_tabs(space.as_deref())
-            .iter()
-            .map(|tab| {
-                let page = self.browser.read(cx).states.get(&tab.id);
-                let loading = match page {
-                    Some(state) => {
-                        let progress = state.read(cx).progress();
-                        progress > 0.0 && progress < 1.0
+    /// Every intent the screen reports. What is the column's own — hover,
+    /// the Pinned disclosure, the hover card, a group menu's seat — it
+    /// settles here; everything else goes to the root as
+    /// [`SidebarEvent::Intent`].
+    pub(crate) fn intent(&mut self, intent: SidebarIntent, window: &mut Window, cx: &mut Context<Self>) {
+        // What the pointer is over is the column's alone: settled here,
+        // never sent on, and a redraw only when it moved. `(redraw, mine)`.
+        let (redraw, mine) = match &intent {
+            SidebarIntent::Hover(id, bounds) => {
+                let id = id.as_ref().map(|id| id.to_string());
+                let moved = self.hovered != id;
+                if moved {
+                    // The hover card follows session rows only: leaving one
+                    // disarms it, entering one arms the delay with the row's
+                    // bounds (the card seats beside the pane at its top).
+                    if let Some(previous) = self.hovered.take() {
+                        self.note_row_hover(previous, false, None, cx);
                     }
-                    None => false,
-                };
-                BrowseTabSnap {
-                    id: tab.id,
-                    title: crate::browser::tabs::tab_label(&tab.title, &tab.url),
-                    initial: crate::browser::tabs::tab_initial(&tab.title, &tab.url),
-                    active: Some(tab.id) == active,
-                    pinned: tab.pinned,
-                    loading,
-                    favicon: self.favicon_file(tab, cx),
+                    if let Some(next) = id.clone().filter(|id| self.list.read(cx).has_row(id)) {
+                        self.note_row_hover(next, true, *bounds, cx);
+                    }
+                    self.hovered = id;
                 }
-            })
-            .collect()
-    }
-
-    /// Every session in the current project that owns tabs, in
-    /// first-seen order: the session id, its sidebar name (or "New
-    /// session" when it has no row yet), and its tabs.
-    fn browse_session_groups(&self, cx: &gpui::App) -> Vec<(String, String, Vec<BrowseSessionTabSnap>)> {
-        if !self.browser.read(cx).tabs_loaded {
-            return Vec::new();
+                (moved, true)
+            }
+            SidebarIntent::HoverGroup(id) => {
+                let id = id.as_ref().map(|id| id.to_string());
+                (std::mem::replace(&mut self.hovered_group, id.clone()) != id, true)
+            }
+            SidebarIntent::HoverProjectsHeader(on) => {
+                (std::mem::replace(&mut self.hovered_projects_header, *on) != *on, true)
+            }
+            SidebarIntent::Browse(BrowseIntent::HoverTodayHeader(on)) => {
+                (std::mem::replace(&mut self.hovered_today_header, *on) != *on, true)
+            }
+            // The Pinned disclosure is the column's own; the root still
+            // hears the intent (any intent but the menus' closes them).
+            SidebarIntent::TogglePinned => {
+                self.pinned_open = !self.pinned_open;
+                (true, false)
+            }
+            // A click is the row's, not the card's: it dismisses the hover
+            // card, and the scripted pin with it.
+            SidebarIntent::Select(_) | SidebarIntent::RowAction(..) => {
+                self.close_row_detail(cx);
+                self.detail.forced = None;
+                (false, false)
+            }
+            // The screen reports no bounds for a group head's `…`; the
+            // pointer stands on it at the click, so its project menu seats
+            // there (a keyboard open seats wherever the pointer is).
+            SidebarIntent::GroupAction(id, GroupAction::Menu) => {
+                let at = window.mouse_position();
+                self.group_menu_bounds.insert(id.to_string(), Bounds::new(at, gpui::size(px(1.0), px(1.0))));
+                (false, false)
+            }
+            _ => (false, false),
+        };
+        if redraw {
+            cx.notify();
         }
-        let visible = self.visible_sessions(cx);
-        self.browser
-            .read(cx)
-            .tabs
-            .session_tabs(None)
-            .iter()
-            .map(|(session, tabs)| {
-                let owner = crate::browser::Owner::Session(session.clone());
-                let active = self.browser.read(cx).tabs.active_of(&owner, None);
-                // The sidebar name, or "New session" while the session
-                // has no row yet (an unsent session is filtered from the
-                // list) — never the bare "Session".
-                let label = visible
-                    .iter()
-                    .find(|entry| entry.id == *session)
-                    .map(|entry| entry.label.clone())
-                    // A browser chat is hidden from the list: its folder
-                    // takes the card's title (R3).
-                    .or_else(|| self.is_browser_chat(session).then(|| self.browser_chat_title_for(session, cx)))
-                    .unwrap_or_else(|| crate::sidebar::UNNAMED.to_owned());
-                let rows = tabs
-                    .iter()
-                    .map(|tab| BrowseSessionTabSnap {
-                        favicon: self.favicon_file(tab, cx),
-                        id: tab.id,
-                        title: crate::browser::tabs::tab_label(&tab.title, &tab.url),
-                        initial: crate::browser::tabs::tab_initial(&tab.title, &tab.url),
-                        active: Some(tab.id) == active,
-                    })
-                    .collect();
-                (session.clone(), label, rows)
-            })
-            .collect()
+        if !mine {
+            cx.emit(SidebarEvent::Intent(intent));
+        }
     }
 
-    /// Whether the sidebar still draws its skeleton rows: until the index
-    /// has landed, and after that only while there is nothing to paint —
-    /// the wire has not answered and no boot row exists. The boot rows
-    /// (`install_provisional_rows`) exist to be painted before
-    /// `session/list` lands (baa4338: rows at ~162 ms instead of ~1.2 s);
-    /// the D3 screen's `loading` waited for the list again, which is a
-    /// skeleton for as long as Muse's first listing takes — 1.4 s typically,
-    /// 20 s once on 2026-10-21.
-    pub(crate) fn sidebar_loading(&self) -> bool {
-        !self.index_loaded || (!self.sessions_loaded && !self.sessions.iter().any(|e| e.provisional))
+    /// `sidebar-hover:<id>`: stand the pointer state on `id`'s row, as its
+    /// own hover report would (the hover card is not armed). An id with no
+    /// session fails the step.
+    pub(crate) fn hover_step(&mut self, id: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if !self.list.read(cx).has_row(id) {
+            return Err(format!("no session row `{id}`"));
+        }
+        self.hovered = Some(id.to_owned());
+        cx.notify();
+        Ok(())
     }
 
+    /// Fold one row hover report into the hover card's state: entering a
+    /// new row arms the card's delay and seats it from the row's own bounds
+    /// — never the pointer — leaving the armed row closes it, and anything
+    /// else changes nothing. This is the only writer: pane renders never
+    /// touch the hover state, so a render can neither arm nor disarm a row.
+    /// Entering never redraws (nothing shows until the delay elapses); the
+    /// timer says [`SidebarEvent::DetailChanged`] when the card opens, and
+    /// leaving says it when an open card closes — the root draws the card.
+    pub(crate) fn note_row_hover(
+        &mut self,
+        id: String,
+        hovered: bool,
+        row: Option<Bounds<Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if hovered {
+            if self.detail.hovered_row.as_deref() == Some(id.as_str()) {
+                crate::hover_trace!("note id={id} entered already-armed");
+                return;
+            }
+            let Some(row) = row else {
+                crate::hover_trace!("note id={id} entered no-bounds");
+                return;
+            };
+            // The seated anchor the card opens at: the sidebar's right edge
+            // plus the card gap, top-aligned with the row.
+            match row_detail_seat(&self.detail.pane_bounds, &row) {
+                Some(seat) => crate::hover_trace!(
+                    "note id={id} entered arm seat={:.0},{:.0}",
+                    f32::from(seat.x),
+                    f32::from(seat.y)
+                ),
+                None => crate::hover_trace!(
+                    "note id={id} entered arm no-sidebar-edge row={:.0},{:.0}",
+                    f32::from(row.origin.x),
+                    f32::from(row.origin.y)
+                ),
+            }
+            self.detail.hovered_row = Some(id.clone());
+            self.detail.hover_since = Some(std::time::Instant::now());
+            self.detail.shown = false;
+            self.detail.trigger = Some(row);
+            self.hover_timer = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(aui::nav::SESSION_DETAIL_DELAY).await;
+                let _ = this.update(cx, |pane, cx| {
+                    let matches = pane.detail.hovered_row.as_deref() == Some(&id);
+                    if matches && !pane.detail.shown {
+                        pane.detail.shown = true;
+                        cx.emit(SidebarEvent::DetailChanged);
+                    }
+                    crate::hover_trace!("timer src=note id={id} matches={matches} shown={}", pane.detail.shown);
+                });
+            }));
+            return;
+        }
+        if self.detail.hovered_row.as_deref() == Some(id.as_str()) {
+            crate::hover_trace!("note id={id} left close shown={}", self.detail.shown);
+            self.close_row_detail(cx);
+            cx.emit(SidebarEvent::DetailChanged);
+        } else {
+            crate::hover_trace!("note id={id} left ignored armed={:?}", self.detail.hovered_row);
+        }
+    }
+
+    /// Close the hover card: pointer left, wheel moved, row clicked, card
+    /// clicked. The scripted pin ([`RowDetail::forced`]) is not hover state
+    /// and survives this; clicks clear it where they land. A card that was
+    /// showing says so, so the root redraws without it.
+    pub(crate) fn close_row_detail(&mut self, cx: &mut Context<Self>) {
+        let was_shown = self.detail.shown;
+        self.detail.hovered_row = None;
+        self.detail.hover_since = None;
+        self.detail.shown = false;
+        self.detail.trigger = None;
+        self.hover_timer = None;
+        if was_shown {
+            cx.emit(SidebarEvent::DetailChanged);
+        }
+    }
+
+    /// What a regroup or filter change looks like to the virtual list: the
+    /// mode and the three list-management toggles. Group open/close and
+    /// fold expand are NOT in the key — they splice like any other local
+    /// insert or remove, so the offset survives them. Compared on every
+    /// render before anything draws; a change resets the list state to the
+    /// flattened length.
+    fn regroup_key(&self, cx: &gpui::App) -> SidebarRegroupKey {
+        let list = self.list.read(cx);
+        SidebarRegroupKey {
+            group_by: SessionList::effective_group_by(cx),
+            sort_by: crate::layout::Layout::get(cx).sort_by,
+            show_hidden: list.show_hidden,
+            show_empty: list.show_empty,
+            show_archived: list.show_archived,
+            summary_line: crate::layout::Layout::get(cx).summary_line,
+        }
+    }
+
+    /// Keep the caller-owned list state on the flattened rows: re-flattened
+    /// per render; `reset` after a regroup or filter change (the one sync
+    /// that drops the offset — the old offset is meaningless against a
+    /// rebuilt model), `splice` after a local insert or remove (open/close,
+    /// fold expand, sessions arriving or leaving), `remeasure_items` after a
+    /// text-only height change (same rows, new grouping pointer). A mismatch
+    /// never panics in the list — it paints blanks past the model — so the
+    /// debug assertion below is the contract, not a guardrail.
+    pub(crate) fn sync_list(&mut self, rows: &[SidebarRow], grouping: &Rc<Grouping>, cx: &gpui::App) {
+        // The splice below tracks the top item by index, so rows inserted
+        // above carry a steered or parked top away from its row; repaired
+        // after the sync, once the new rows are in.
+        let top_before = self.list_state.logical_scroll_top();
+        // The render bends the count to the screen's skeleton rows while
+        // loading; put the state back on the previous flattened rows so the
+        // splice below diffs against what the list really holds.
+        if self.list_state.item_count() != self.prev_rows.len() {
+            self.list_state.reset(self.prev_rows.len());
+        }
+        let key = self.regroup_key(cx);
+        if self.prev_regroup.as_ref() != Some(&key) {
+            self.list_state.reset(rows.len());
+            self.prev_regroup = Some(key);
+        } else if rows != self.prev_rows.as_slice() {
+            // The common prefix and suffix stay; the middle was swapped.
+            // Moves degrade to remove-plus-insert, which still lands the
+            // count exactly — only the preserved offset approximates.
+            let prev = &self.prev_rows;
+            let mut prefix = 0usize;
+            while prefix < prev.len() && prefix < rows.len() && prev[prefix] == rows[prefix] {
+                prefix += 1;
+            }
+            let mut suffix = 0usize;
+            while suffix < prev.len() - prefix
+                && suffix < rows.len() - prefix
+                && prev[prev.len() - 1 - suffix] == rows[rows.len() - 1 - suffix]
+            {
+                suffix += 1;
+            }
+            self.list_state.splice(prefix..prev.len() - suffix, rows.len() - prefix - suffix);
+        } else if self.prev_grouping.as_ref().is_none_or(|cached| !Rc::ptr_eq(cached, grouping)) {
+            // Same rows, rebuilt grouping: text moved under stable rows
+            // (a rename, a new left line, a branch appearing), so cached
+            // heights may lie. Remeasure the window the list asks for.
+            if !rows.is_empty() {
+                self.list_state.remeasure_items(0..rows.len());
+            }
+        }
+        self.prev_rows = rows.to_vec();
+        self.prev_grouping = Some(Rc::clone(grouping));
+        debug_assert_eq!(
+            self.list_state.item_count(),
+            rows.len(),
+            "sidebar list out of sync: {} items for {} rows",
+            self.list_state.item_count(),
+            rows.len()
+        );
+        self.repair_scroll(top_before, rows, grouping, cx);
+    }
+
+    /// Whether the list may move on its own: never under a user scroll, a
+    /// gesture or a divider drag.
+    fn list_is_free(&self) -> bool {
+        !self.user_scrolled && !self.gesture_active() && !self.frame.resizing
+    }
+
+    /// Re-anchor the scroll position after [`Self::sync_list`] spliced:
+    /// gpui's splice keeps the top *item by index*, so rows the staged boot
+    /// loads insert above carry a steered or parked top away from where it
+    /// belongs. While the user has not scrolled, an armed reveal re-steers
+    /// to its row by id (a reveal for an id with no row waits without moving
+    /// anything), and a top-parked list with nothing to steer to stays
+    /// parked at row 0. A user-scrolled, gesture-driven or resizing list is
+    /// never touched — same gate as the render.
+    fn repair_scroll(&mut self, before: ListOffset, rows: &[SidebarRow], grouping: &Grouping, cx: &gpui::App) {
+        if !self.list_is_free() {
+            return;
+        }
+        if let Some(reveal_id) = self.reveal.clone() {
+            let wanted = SharedString::from(reveal_id.as_str());
+            let target = row_index_for_session(rows, grouping, &wanted)
+                .or_else(|| self.head_row(rows, grouping, &reveal_id, cx));
+            if let Some(ix) = target {
+                steer_to_row(&self.list_state, ix);
+                return;
+            }
+            // No row (yet): the wait itself must not move the list, nor let
+            // the splice carry a parked top away under it.
+        }
+        if before.item_ix == 0 && before.offset_in_item == px(0.0) {
+            let after = self.list_state.logical_scroll_top();
+            if after.item_ix != 0 || after.offset_in_item != px(0.0) {
+                ensure_row_visible(&self.list_state, 0);
+            }
+        }
+    }
+
+    /// The group head (or header) row for a session with no session row: a
+    /// closed group holds its sessions out of the flattened model. Mirrors
+    /// the old current-group fallback — reveal the head, never auto-expand.
+    fn head_row(&self, rows: &[SidebarRow], grouping: &Grouping, reveal_id: &str, cx: &gpui::App) -> Option<usize> {
+        let list = self.list.read(cx);
+        reveal_head_row(
+            &list.sessions,
+            &list.overrides,
+            &list.provider_sessions,
+            self.facts.current_project.as_deref(),
+            rows,
+            grouping,
+            reveal_id,
+        )
+    }
+
+    /// Steer the virtual list to the outside-activated session, moving the
+    /// least distance that shows its row whole: the row itself when the
+    /// flattened model has one — folds rescue held-back rows for the
+    /// pending target, so no expansion dance — else its group head for a
+    /// closed group (never auto-expanded, like before) or for a rowless
+    /// session whose project resolves past the rows (a draft before its
+    /// first send reveals its project head), else wait for an id with no
+    /// row yet (a fork before `load_sessions`'s reply lands) up to
+    /// [`REVEAL_UNKNOWN_FRAMES`] attempts, else clear a flag with nowhere
+    /// to go (a *known* session that still has no landing row gives up on
+    /// the first miss, same as before — only an unrecognised id gets the
+    /// grace period; the rowless *active* session never gives up while it
+    /// stays open). A sidebar click never sets the flag; wheel and resize
+    /// disarm it. Called on every render while armed, until the row reports
+    /// visible once the rows have settled (`sessions_loaded`): before the
+    /// first layout the viewport is unknown and the steer is a no-op, and a
+    /// fully visible row moves nothing.
+    fn reveal_row(&mut self, rows: &[SidebarRow], grouping: &Grouping, reveal_id: &str, cx: &mut Context<Self>) {
+        let wanted = SharedString::from(reveal_id);
+        // A pinned session sits in the Pinned section above the list, always
+        // in view: its reveal is done, and its project head is never the
+        // target (it used to land there, the row being lifted out).
+        let pinned = self.list.read(cx).pinned(&self.facts.list, cx);
+        if pinned.iter().any(|row| row.id == wanted) {
+            self.reveal = None;
+            self.reveal_unknown = None;
+            return;
+        }
+        let target = row_index_for_session(rows, grouping, &wanted)
+            .or_else(|| self.head_row(rows, grouping, reveal_id, cx));
+        let Some(ix) = target else {
+            // The rowless active session keeps its arm: a brand-new session
+            // has no row until its first send, and the reveal falls back to
+            // its project head only once the head resolves — disarming here
+            // would strand the scroll-follow before the row is born. Any
+            // other miss disarms or streaks as before; a later switch, a
+            // quiet click or a user scroll still clears the arm.
+            let known = self.list.read(cx).has_row(reveal_id);
+            if rowless_reveal_stays_armed(self.facts.list.active.as_deref(), reveal_id, known) {
+                self.reveal_unknown = None;
+                return;
+            }
+            if known {
+                // A known session with nowhere to go: a waiting flag
+                // outlives its activation and can move a list the user
+                // scrolled meanwhile.
+                self.reveal = None;
+                self.reveal_unknown = None;
+                return;
+            }
+            // An id this window has never listed: most likely its row is
+            // simply not born yet. The sites that create it (the
+            // `turn/started` local-row insert, a `load_sessions` reply)
+            // invalidate the list, which brings this function around again
+            // with fresh rows — so waiting here costs nothing extra, just a
+            // bound so a reveal for an id that never arrives (a failed
+            // fork, a send that never lands) cannot spin forever.
+            let (id, streak) = next_reveal_unknown_streak(self.reveal_unknown.take(), reveal_id);
+            self.reveal_unknown = Some((id, streak));
+            if streak > REVEAL_UNKNOWN_FRAMES {
+                self.reveal = None;
+                self.reveal_unknown = None;
+            }
+            return;
+        };
+        self.reveal_unknown = None;
+        // A steer that moves the list under an open group menu mis-seats
+        // it: dismiss first, like a user scroll does.
+        let steers = self.list_state.item_is_above_viewport(ix) == Some(true)
+            || self.list_state.item_is_below_viewport(ix) == Some(true);
+        if steers {
+            cx.emit(SidebarEvent::Scrolled);
+        }
+        let jumped = steer_to_row(&self.list_state, ix);
+        let above = self.list_state.item_is_above_viewport(ix);
+        let below = self.list_state.item_is_below_viewport(ix);
+        if above == Some(false) && below == Some(false) {
+            // The row is on screen — but while the first `session/list` is
+            // still landing, later stages reindex around it and the splice
+            // carries the steered top away (see `repair_scroll`, which
+            // tracks the row by id meanwhile): stay armed until the rows
+            // settle. No poke meanwhile — nothing is outstanding.
+            if self.list.read(cx).sessions_loaded {
+                self.reveal = None;
+            }
+        } else if (above.is_none() || below.is_none()) && !jumped {
+            // The list has not laid out yet: a degenerate zero-height
+            // sidebar rect would otherwise have every pane render spawn
+            // another poke, which renders, which pokes again, forever —
+            // `bench-idle` never settling. Leave the flag armed with nothing
+            // scheduled; whatever eventually lays the list out (a resize, a
+            // normal render) brings this function around again.
+        } else {
+            // The steer above only stages the list's pending scroll: no
+            // frame applies it on its own (a cached pane runs none), and a
+            // notify from inside the draw schedules nothing — so wake the
+            // pane from a task outside the draw. The poke stops the frame
+            // the row reports visible (the flag consumes above), so a
+            // settled list never spins.
+            self.reveal_poke = Some(cx.spawn(async move |this, cx| {
+                let _ = this.update(cx, |_, cx| cx.notify());
+            }));
+        }
+    }
+
+    /// The screen's model: the grouping and pinned rows from the list, the
+    /// nav rows, the selection and rename, the hover facts the intents
+    /// write, the view options from the list's filters, the account and
+    /// Browse mode's rows from the root's facts.
+    pub(crate) fn model(&self, cx: &gpui::App) -> SidebarModel {
+        let list = self.list.read(cx);
+        let facts = &self.facts;
+        let layout = crate::layout::Layout::get(cx);
+        let editing = facts.renaming.clone().map(|session| EditingState {
+            session: session.into(),
+            draft: self.rename.read(cx).value().to_string().into(),
+        });
+        // The Skills row wears the on-count (D54): how many skills are on;
+        // the screen draws none at zero (docs/83 §4). Automations is gone
+        // until the feature exists (plan stage P).
+        let mut nav = vec![
+            NavItem { id: NAV_PROJECTS.into(), label: "Add project".into(), icon: IconName::Folder, count: None, active: false },
+            NavItem { id: NAV_SKILLS.into(), label: "Skills".into(), icon: IconName::Slash, count: Some(facts.skills_on as u32), active: false },
+        ];
+        // "Needs you" (task 3.4): first among the nav rows while anything
+        // waits on the person, and while its filter is on (so it can be
+        // turned off when the last one is answered).
+        let waiting = crate::attention::waiting(list.visible(&facts.list, cx).iter()).len();
+        let filter = crate::attention::Notifier::filter_on(cx);
+        if waiting > 0 || filter {
+            nav.insert(0, NavItem { id: NAV_NEEDS_YOU.into(), label: "Needs you".into(), icon: IconName::Bell, count: Some(waiting as u32), active: filter });
+        }
+        let group_by = match SessionList::effective_group_by(cx) {
+            crate::layout::GroupBy::Project => GroupKey::Project,
+            crate::layout::GroupBy::Date => GroupKey::Date,
+        };
+        let sort_by = match layout.sort_by {
+            crate::layout::SortBy::Recent => SortKey::Recent,
+            crate::layout::SortBy::Created => SortKey::Created,
+            crate::layout::SortBy::Name => SortKey::Name,
+        };
+        let mode = match layout.mode {
+            crate::layout::Mode::Sessions => Mode::Sessions,
+            crate::layout::Mode::Browse => Mode::Browse,
+        };
+        // Browse's rows as the root pushed them, with what the column owns:
+        // the Today header's hover and the naming field's live draft.
+        let browse = (mode == Mode::Browse).then(|| facts.browse.clone()).flatten().map(|mut browse| {
+            browse.hovered_today_header = self.hovered_today_header;
+            if let Some(editing) = browse.editing.as_mut() {
+                editing.draft = self.rename.read(cx).value().to_string().into();
+            }
+            browse
+        });
+        SidebarModel {
+            mode,
+            search: None,
+            nav,
+            pinned: (*list.pinned(&facts.list, cx)).clone(),
+            pinned_open: self.pinned_open,
+            grouping: list.grouping(&facts.list, cx),
+            selected: facts.selected.clone().map(SharedString::from),
+            // The row a right-click menu belongs to stays lit while it is open
+            // (canvas Menus board).
+            hovered: match facts.browse_menu.as_ref().map(|menu| &menu.target) {
+                Some(BrowseMenuTarget::Tab { id, .. }) if mode == Mode::Browse => Some(id.clone()),
+                Some(BrowseMenuTarget::Folder(id)) if mode == Mode::Browse => Some(format!("folder-{id}").into()),
+                Some(BrowseMenuTarget::TaskFolder { session, .. }) if mode == Mode::Browse => {
+                    Some(format!("folder-{session}").into())
+                }
+                _ => self.hovered.clone().map(SharedString::from),
+            },
+            hovered_group: self.hovered_group.clone().map(SharedString::from),
+            hovered_projects_header: self.hovered_projects_header,
+            highlighted: None,
+            editing,
+            row_menu: facts.row_menu.clone().map(SharedString::from),
+            loading: list.loading(),
+            view_menu_open: facts.view_menu_open,
+            view_options: ViewOptions {
+                group_by,
+                sort_by,
+                show_empty: list.show_empty,
+                show_hidden: list.show_hidden,
+                hidden_count: list.hidden_count(),
+                show_archived: list.show_archived,
+                // Baaz reads no PR data yet: the row stays, disabled, "Soon"
+                // (owner 2026-10-11).
+                show_pr_status: false,
+                pr_status_available: false,
+                search_all_projects: layout.search_all_projects,
+            },
+            // Settings › Sidebar › "Show a summary line" (docs/83 §4).
+            bylines: if layout.summary_line { Bylines::Summary } else { Bylines::Off },
+            account: facts.account.clone(),
+            browse,
+        }
+    }
+}
+
+impl Render for SidebarPane {
     /// The sidebar column as the library's v2 screen (D3): a
-    /// [`SidebarModel`] built from Baaz state on every pane render, the
-    /// screen's intents routed back to the handlers in this file. The host
-    /// owns the one `ListState` ([`Self::sidebar_list`]) the screen renders
-    /// through, created once and kept; it resets on a regroup
-    /// (`sync_sidebar_list`) and matches `screen_item_count` otherwise.
-    pub(crate) fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// [`SidebarModel`] built on every pane render, the screen's intents
+    /// routed through [`SidebarPane::intent`]. The pane owns the one
+    /// `ListState` the screen renders through, created once and kept; it
+    /// resets on a regroup ([`SidebarPane::sync_list`]) and matches
+    /// `screen_item_count` otherwise.
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        SIDEBAR_PANE_RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(test)]
+        {
+            self.renders += 1;
+        }
+        if crate::session::frame_trace_enabled() {
+            TRACE_PANE_TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         // One travel per frame (the scripted sweep feeds the accumulator;
         // a real wheel scrolls the library list directly).
-        let user_scrolled = self.drain_sidebar_wheel();
+        self.advance_sweep(window, cx);
+        let user_scrolled = self.drain_wheel();
         if user_scrolled {
-            self.dismiss_group_menu(cx);
-            self.close_row_detail();
+            cx.emit(SidebarEvent::Scrolled);
+            self.close_row_detail(cx);
         }
-        if self.sidebar_gesture_active() {
+        if self.gesture_active() {
             aui_motion::request_frame(window);
         }
-        static FIRST_ROWS_DONE: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        let visible = self.visible_sessions(cx);
-        if !self.sidebar_loading()
-            && !visible.is_empty()
-            && !FIRST_ROWS_DONE.swap(true, std::sync::atomic::Ordering::Relaxed)
-        {
-            crate::log::boot_mark(&format!("first-rows-painted rows={}", visible.len()));
+        static FIRST_ROWS_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let (visible_len, loading) = {
+            let list = self.list.read(cx);
+            (list.visible(&self.facts.list, cx).len(), list.loading())
+        };
+        if !loading && visible_len > 0 && !FIRST_ROWS_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            crate::log::boot_mark(&format!("first-rows-painted rows={visible_len}"));
         }
         // The cached grouping (pinned rows lifted out of it) and its
         // flattened rows: the caller-owned list state is synced to their
         // length — `reset` after a regroup, `splice` after a local insert.
-        let grouping = self.sidebar_grouping(cx);
+        let grouping = self.list.read(cx).grouping(&self.facts.list, cx);
         let rows = flatten_sidebar(&grouping, false);
-        let model = self.sidebar_model(cx);
+        let model = self.model(cx);
         // Browse draws no session list: leave its state (and its scroll
         // offset) exactly as Sessions left it, so switching back lands where
         // the person was. Sessions syncs it to the rows; while loading the
         // screen draws skeleton rows the grouping does not have, and the
         // state follows the screen's count.
         if model.mode == Mode::Sessions {
-            self.sync_sidebar_list(&rows, &grouping, cx);
+            self.sync_list(&rows, &grouping, cx);
             let count = screen_item_count(&model);
-            if self.sidebar_list.item_count() != count {
-                self.sidebar_list.reset(count);
+            if self.list_state.item_count() != count {
+                self.list_state.reset(count);
             }
         }
-        // The one-shot reveal, exactly as before: outside activations only,
-        // never during a gesture, a user scroll or a resize drag.
-        if model.mode == Mode::Sessions && !self.sidebar_user_scrolled && !self.sidebar_gesture_active() && !self.resize.active {
+        // The one-shot reveal: outside activations only, never during a
+        // gesture, a user scroll or a resize drag.
+        if model.mode == Mode::Sessions && self.list_is_free() {
             if let Some(reveal_id) = self.reveal.clone() {
-                self.reveal_sidebar_row(&rows, &grouping, &reveal_id, cx);
+                self.reveal_row(&rows, &grouping, &reveal_id, cx);
             }
         }
-        let baaz = cx.entity().downgrade();
-        let screen = sidebar_screen(Self::SIDEBAR_VIEW_ID, model, self.sidebar_list.clone())
-            .width(px(self.resize.width))
+        let pane = cx.entity().downgrade();
+        let screen = sidebar_screen(Self::SIDEBAR_VIEW_ID, model, self.list_state.clone())
+            .width(px(self.frame.width))
             .rename_textarea(&self.rename)
             // v3: the sidebar has no ground of its own — on the frame in the
             // column, on Floating in the peek card; the shell's bar carries
@@ -812,7 +1214,7 @@ impl Harness {
             // native page (`overlay.rs`).
             .external_menus(true)
             .on_intent(move |intent, window, cx| {
-                let _ = baaz.update(cx, |this, cx| this.sidebar_intent(intent, window, cx));
+                let _ = pane.update(cx, |pane, cx| pane.intent(intent, window, cx));
             });
         // The pane's own rect, once per frame: the hover card's side seat
         // hangs off its right edge.
@@ -820,12 +1222,15 @@ impl Harness {
         let wheel = cx.entity().downgrade();
         // A mode switch: the new rows arrive on FF's swap timing (80 ms
         // ease-out), the one motion the Sessions | Browse switch has beside
-        // its indicator's slide.
+        // its indicator's slide. The pane is cached, so it asks for its own
+        // next frame until the fade has run.
         let fade = match self.mode_fade_since {
             Some(since) => {
                 let k = (cx.background_executor().now().duration_since(since).as_secs_f32() / MODE_FADE.as_secs_f32()).clamp(0.0, 1.0);
                 if k < 1.0 {
                     aui_motion::request_frame(window);
+                } else {
+                    self.mode_fade_since = None;
                 }
                 aui_tokens::Easing::OUT.sample(k)
             }
@@ -839,1205 +1244,16 @@ impl Harness {
             // menu and the hover card, like the scripted sweep does. The
             // library list scrolls itself; this only listens.
             .on_scroll(move |_, _, cx| {
-                let _ = wheel.update(cx, |this, cx| this.note_sidebar_wheel(cx));
+                let _ = wheel.update(cx, |pane, cx| pane.note_wheel(cx));
             })
             .on_children_prepainted(move |bounds, _, cx| {
                 if let Some(first) = bounds.first() {
                     let bounds = *first;
-                    let _ = pane_report.update(cx, |this, cx| {
-                        Harness::note_trigger_bounds(&mut this.sidebar_bounds, bounds, cx);
-                    });
+                    let _ = pane_report.update(cx, |pane, _| pane.detail.pane_bounds = Some(bounds));
                 }
             })
             .child(screen)
-            .into_any_element()
     }
-
-    /// The sidebar's toggle, drawn by the shell in the sidebar's chrome row
-    /// (open) and in the peek card's row (closed).
-    pub(crate) fn render_sidebar_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
-        let show = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.toggle_sidebar(cx));
-        // One label in both states: a state-specific one is captured when the
-        // tooltip arms and then reads wrong for a moment after the click flips
-        // the state (seen live 2026-10-13: "Show sidebar" over an open sidebar).
-        let label = "Toggle sidebar  ⌘B";
-        div()
-            .id("hd-minimal-sidebar")
-            .debug_selector(|| "hd-minimal-sidebar".into())
-            .flex_none()
-            .child(
-                icon_button("sidebar-show", IconName::Sidebar)
-                    .ghost()
-                    .size(ButtonSize::Sm)
-                    .accessibility_label(label)
-                    .on_click(move |e, w, cx| show(e, w, cx)),
-            )
-            .into_any_element()
-    }
-
-    /// The screen's model from Baaz state: the grouping and pinned rows
-    /// from the list cache, the nav rows, the selection and rename, the
-    /// hover facts the intents below write, the view options from the
-    /// filter flags, the account from the signed-in identity (its usage
-    /// cards only while the menu is open), and Browse mode's rows.
-    pub(crate) fn sidebar_model(&self, cx: &mut Context<Self>) -> SidebarModel {
-        let view_menu_open = self.overlays.read(cx).is_open(MenuKind::ViewOptions);
-        let account_menu_open = self.overlays.read(cx).is_open(MenuKind::Account);
-        let row_menu = self.open_row_menu(cx);
-        // One identity per chain: the selected row is the head (Y2a).
-        let selected = self
-            .open_state.pending_id
-            .clone()
-            .or_else(|| self.active.as_ref().map(|a| a.read(cx).session_id.clone()))
-            .map(|id| self.chain_head(&id));
-        let editing = self.renaming(cx).map(|session| EditingState {
-            session: session.into(),
-            draft: self.rename.read(cx).value().to_string().into(),
-        });
-        // The Skills row wears the on-count (D54): how many skills are on;
-        // the screen draws none at zero (docs/83 §4). Automations is gone
-        // until the feature exists (plan stage P).
-        let on = self.skills_page.read(cx).catalog.on_count();
-        let mut nav = vec![
-            NavItem { id: NAV_PROJECTS.into(), label: "Add project".into(), icon: IconName::Folder, count: None, active: false },
-            NavItem { id: NAV_SKILLS.into(), label: "Skills".into(), icon: IconName::Slash, count: Some(on as u32), active: false },
-        ];
-        // "Needs you" (task 3.4): first among the nav rows while anything
-        // waits on the person, and while its filter is on (so it can be
-        // turned off when the last one is answered).
-        let waiting = crate::attention::waiting(self.visible_sessions(cx).iter()).len();
-        let filter = crate::attention::Notifier::filter_on(cx);
-        if waiting > 0 || filter {
-            nav.insert(0, NavItem { id: NAV_NEEDS_YOU.into(), label: "Needs you".into(), icon: IconName::Bell, count: Some(waiting as u32), active: filter });
-        }
-        let group_by = match self.effective_group_by(cx) {
-            crate::layout::GroupBy::Project => GroupKey::Project,
-            crate::layout::GroupBy::Date => GroupKey::Date,
-        };
-        let sort_by = match crate::layout::Layout::get(cx).sort_by {
-            crate::layout::SortBy::Recent => SortKey::Recent,
-            crate::layout::SortBy::Created => SortKey::Created,
-            crate::layout::SortBy::Name => SortKey::Name,
-        };
-        let mode = match crate::layout::Layout::get(cx).mode {
-            crate::layout::Mode::Sessions => Mode::Sessions,
-            crate::layout::Mode::Browse => Mode::Browse,
-        };
-        let browse = (mode == Mode::Browse).then(|| self.browse_model(cx));
-        SidebarModel {
-            mode,
-            search: None,
-            nav,
-            pinned: (*self.sidebar_pinned(cx)).clone(),
-            pinned_open: self.pinned_open,
-            grouping: self.sidebar_grouping(cx),
-            selected: selected.map(SharedString::from),
-            // The row a right-click menu belongs to stays lit while it is open
-            // (canvas Menus board).
-            hovered: match self.overlays.read(cx).stack.browse_menu().map(|menu| &menu.target) {
-                Some(aui::screens::sidebar::BrowseMenuTarget::Tab { id, .. }) if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse => Some(id.clone()),
-                Some(aui::screens::sidebar::BrowseMenuTarget::Folder(id)) if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse => Some(format!("folder-{id}").into()),
-                Some(aui::screens::sidebar::BrowseMenuTarget::TaskFolder { session, .. }) if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse => {
-                    Some(format!("folder-{session}").into())
-                }
-                _ => self.sidebar_hovered.clone().map(SharedString::from),
-            },
-            hovered_group: self.hovered_group.clone().map(SharedString::from),
-            hovered_projects_header: self.hovered_projects_header,
-            highlighted: None,
-            editing,
-            row_menu: row_menu.map(SharedString::from),
-            loading: self.sidebar_loading(),
-            view_menu_open,
-            view_options: ViewOptions {
-                group_by,
-                sort_by,
-                show_empty: self.show_empty,
-                show_hidden: self.show_hidden,
-                hidden_count: self.hidden_count(),
-                show_archived: self.show_archived,
-                // Baaz reads no PR data yet: the row stays, disabled, "Soon"
-                // (owner 2026-10-11).
-                show_pr_status: false,
-                pr_status_available: false,
-                search_all_projects: crate::layout::Layout::get(cx).search_all_projects,
-            },
-            // Settings › Sidebar › "Show a summary line" (docs/83 §4).
-            bylines: if crate::layout::Layout::get(cx).summary_line { Bylines::Summary } else { Bylines::Off },
-            account: self.sidebar_account(account_menu_open, cx),
-            browse,
-        }
-    }
-
-    /// The footer and its menu: the signed-in person (or the signed-out
-    /// placeholder), the tier's plan label, and — only while the menu is
-    /// open — one usage card per enabled provider from `usage_rows`.
-    fn sidebar_account(&self, menu_open: bool, cx: &gpui::App) -> Account {
-        // Every provider alike (owner, 2026-10-29: the footer read Muse's
-        // sign-in as the app's): the account of the provider new sessions
-        // start on when it is connected, else the first connected one in
-        // switcher order. Muse's plan label still comes from its tier.
-        let muse_plan = || muse_plan_label(self.tier.as_ref()).unwrap_or_default();
-        let (name, email, initial, plan, status) = footer_identity(self.provider_statuses(cx), &self.new_provider, muse_plan);
-        let usage = if menu_open { self.sidebar_usage() } else { Vec::new() };
-        Account {
-            name: name.into(),
-            email: email.into(),
-            plan: plan.into(),
-            initial: initial.into(),
-            status,
-            menu_open,
-            usage,
-        }
-    }
-
-    /// The account menu's usage cards: `usage_rows` (the Providers page's
-    /// rows) re-shaped as the screen's `ProviderUsage` — one meter line per
-    /// window, or one unavailable line carrying the reason.
-    fn sidebar_usage(&self) -> Vec<ProviderUsage> {
-        let signed_in = matches!(self.auth, Auth::SignedIn(_));
-        let now = crate::account_usage::now_secs();
-        let muse_feed = signed_in.then(|| crate::account_usage::MuseFeed { tier: self.tier.clone() });
-        crate::account_usage::usage_rows(&crate::provider_status::live_statuses(), muse_feed, now)
-            .into_iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let lines = match row.state {
-                    UsageRowState::Windows(windows, _) => windows
-                        .into_iter()
-                        .map(|w| UsageLine { label: w.label, fraction: w.used_fraction, resets: w.resets_at_text })
-                        .collect(),
-                    UsageRowState::Unavailable(reason) => {
-                        vec![UsageLine { label: reason, fraction: 0.0, resets: SharedString::default() }]
-                    }
-                };
-                ProviderUsage {
-                    name: provider_display_name(row.provider),
-                    plan: row.plan.unwrap_or_default(),
-                    initial: row.provider.letter().into(),
-                    tint: index as u8,
-                    lines,
-                }
-            })
-            .collect()
-    }
-
-    /// Browse mode's rows: the current space's person tabs (pinned ones as
-    /// tiles, the rest in Today or in your folders), every session that owns
-    /// tabs as a task folder, the shown page's address and history, the
-    /// spaces, and the open menu / name field.
-    fn browse_model(&self, cx: &mut Context<Self>) -> BrowseModel {
-        let space = self.browser.read(cx).browse_space().unwrap_or_default();
-        let snaps = self.browse_person_snaps(cx);
-        let folder_of: std::collections::HashMap<crate::browser::TabId, Option<String>> =
-            self.browser.read(cx).tabs.tabs.iter().map(|tab| (tab.id, tab.folder.clone())).collect();
-        // One tab is active in Browse: the one the centre shows. Each session
-        // also has an active tab of its own, and counting those lit every
-        // agent tab's row and moved the selected pill onto the last of them
-        // (owner screenshots 2026-10-11: the page's own row had none).
-        let shown = self.browser.read(cx).browse_centre_shown(cx);
-        let tab = |id: crate::browser::TabId, title: String, initial: String, _owner_active: bool, loading: bool, favicon: Option<String>| BrowseTab {
-            id: browse_tab_key(id).into(),
-            title: title.into(),
-            initial: initial.into(),
-            active: Some(id) == shown,
-            loading,
-            favicon: favicon.map(Into::into),
-        };
-        let mut pins = Vec::new();
-        let mut today = Vec::new();
-        let mut in_folders: std::collections::HashMap<String, Vec<BrowseTab>> = std::collections::HashMap::new();
-        for snap in snaps {
-            if snap.pinned {
-                pins.push(BrowsePin { id: browse_tab_key(snap.id).into(), initial: snap.initial.into(), label: snap.title.into(), favicon: snap.favicon.map(Into::into) });
-                continue;
-            }
-            let folder = folder_of.get(&snap.id).cloned().flatten();
-            let row = tab(snap.id, snap.title, snap.initial, snap.active, snap.loading, snap.favicon);
-            match folder.filter(|id| self.browser.read(cx).tabs.folders.iter().any(|f| &f.id == id)) {
-                Some(folder) => in_folders.entry(folder).or_default().push(row),
-                None => today.push(row),
-            }
-        }
-        let folders = self
-            .browser
-            .read(cx)
-            .tabs
-            .folders_in(&space)
-            .into_iter()
-            .map(|folder| BrowseFolder {
-                id: folder.id.clone().into(),
-                name: folder.name.clone().into(),
-                kind: FolderKind::Yours,
-                open: folder.open,
-                tabs: in_folders.remove(&folder.id).unwrap_or_default(),
-            })
-            .collect();
-        let task_folders = self
-            .browse_session_groups(cx)
-            .into_iter()
-            .map(|(session, label, rows)| {
-                let entry = self.sessions.iter().find(|entry| entry.id == session);
-                let page_work = self.terminal_service.agent_activity(&session);
-                let asking = page_work.as_ref().is_some_and(|work| work.asking.is_some());
-                let running = entry.is_some_and(|entry| entry.running) || page_work.is_some();
-                let waiting = asking || entry.is_some_and(|entry| !entry.attention.is_empty() || entry.approval_command.is_some() || entry.pending_question.is_some());
-                let held = page_work.as_ref().is_some_and(|work| work.held);
-                let typing = page_work.as_ref().is_some_and(|work| crate::browser::face_types(&work.label));
-                let (state, face) = task_face_for(waiting, held, running, typing);
-                BrowseFolder {
-                    id: session.into(),
-                    name: label.into(),
-                    kind: FolderKind::Task { state, face, status: face.status_word().into(), needs_you: waiting },
-                    open: true,
-                    // A session's tabs load in its own pane; their rows keep
-                    // the favicon (the groups key carries no page facts).
-                    tabs: rows.into_iter().map(|row| tab(row.id, row.title, row.initial, row.active, false, row.favicon)).collect(),
-                }
-            })
-            .collect();
-        let shown = self.browser.read(cx).browse_centre_shown(cx);
-        // The live page's URL, falling back to the tab's — the same read
-        // the toolbar makes, so the two never disagree.
-        let live_url = self.browse_centre_state(cx).map(|state| state.read(cx).url().to_string()).unwrap_or_default();
-        let url = if live_url.is_empty() {
-            shown.and_then(|id| self.browser.read(cx).tabs.get(id)).map(|tab| tab.url.clone()).unwrap_or_default()
-        } else {
-            live_url
-        };
-        let address = split_address(&url);
-        let history = shown.and_then(|id| self.browser.read(cx).histories.get(&id));
-        let spaces: Vec<BrowseSpace> = self
-            .browser
-            .read(cx)
-            .tabs
-            .spaces
-            .iter()
-            .map(|space| BrowseSpace { id: space.id.clone().into(), name: space.name.clone().into(), own_signins: space.own_signins })
-            .collect();
-        let current = self.browser.read(cx).tabs.spaces.iter().position(|s| s.id == space).unwrap_or(0);
-        let editing = self.browser.read(cx).browse_naming.clone().map(|target| BrowseEditing { target, draft: self.rename.read(cx).value().to_string().into() });
-        // D4: the downloads button exists while downloads list; its dot
-        // says one is running.
-        let downloads = self.browser.read(cx).browse_downloads(cx);
-        let downloads = (!downloads.is_empty())
-            .then(|| downloads.iter().any(|(_, _, d)| d.state == aui_webview::DownloadStatus::Downloading));
-        BrowseModel {
-            bookmarked: self.browser.read(cx).browse_centre_shown(cx)
-                .and_then(|id| self.browser.read(cx).tabs.get(id).map(|tab| tab.url.clone()))
-                .is_some_and(|url| self.browser.read(cx).data.read(cx).is_bookmarked(&url)),
-            host: address.host,
-            path: address.path,
-            can_go_back: history.is_some_and(|h| h.can_back()),
-            can_go_forward: history.is_some_and(|h| h.can_forward()),
-            pins,
-            tabs: today,
-            folders,
-            task_folders,
-            spaces: if spaces.is_empty() { vec![BrowseSpace { id: crate::browser::tabs::PERSONAL.into(), name: "Personal".into(), own_signins: false }] } else { spaces },
-            downloads,
-            space: current,
-            hovered_today_header: self.hovered_today_header,
-            editing,
-            menu: self.overlays.read(cx).stack.browse_menu().cloned(),
-        }
-    }
-
-    /// Every intent the screen reports, routed to the handler Baaz already
-    /// had for it. Any intent that is not the menus' own closes an open
-    /// view-options or account menu: the screen draws the menus, the host
-    /// decides when they go (outside clicks and Escape are its to detect).
-    pub(crate) fn sidebar_intent(&mut self, intent: SidebarIntent, window: &mut Window, cx: &mut Context<Self>) {
-        let keeps_menu = matches!(
-            intent,
-            SidebarIntent::ViewOptions
-                | SidebarIntent::ViewOption(_)
-                | SidebarIntent::Account
-                | SidebarIntent::AccountAction(_)
-                | SidebarIntent::RowAction(_, RowAction::More)
-                | SidebarIntent::MenuBackdrop
-                | SidebarIntent::DismissMenus
-                | SidebarIntent::Hover(..)
-                | SidebarIntent::HoverGroup(_)
-                | SidebarIntent::HoverProjectsHeader(_)
-                | SidebarIntent::Browse(BrowseIntent::HoverTodayHeader(_))
-        );
-        if !keeps_menu {
-            let open = self.overlays.read(cx).is_open(MenuKind::ViewOptions)
-                || self.overlays.read(cx).is_open(MenuKind::Account)
-                || self.overlays.read(cx).is_open(MenuKind::SessionRow);
-            if open {
-                self.overlays.update(cx, |overlays, _| overlays.close_menu());
-            }
-        }
-        match intent {
-            SidebarIntent::Search => self.open_search(window, cx),
-            SidebarIntent::NewSession => self.new_session(window, cx),
-            SidebarIntent::Nav(id) => match id.as_ref() {
-                NAV_PROJECTS => self.open_projects(false, window, cx),
-                NAV_SKILLS => self.open_skills(cx),
-                NAV_NEEDS_YOU => self.toggle_needs_you_filter(cx),
-                _ => {}
-            },
-            SidebarIntent::Select(id) => {
-                // A sidebar click never arms the reveal: the clicked row is
-                // under the cursor (owner round 6). It dismisses the hover
-                // card: the click is the row's, not the card's.
-                self.close_row_detail();
-                self.forced_detail = None;
-                self.resume_quiet(id.to_string(), window, cx);
-            }
-            SidebarIntent::Toggle(id) => self.toggle_group(id.to_string(), cx),
-            SidebarIntent::TogglePinned => self.pinned_open = !self.pinned_open,
-            SidebarIntent::ViewOptions => {
-                if !self.just_dismissed(MenuKind::ViewOptions, cx) {
-                    self.open_menu(MenuKind::ViewOptions, cx);
-                }
-            }
-            SidebarIntent::ViewOption(option) => self.apply_view_option(option, cx),
-            SidebarIntent::MenuBackdrop => {}
-            SidebarIntent::DismissMenus => {
-                // Remember what the press closed: when the press was on the
-                // menu's own trigger, the click that follows must not reopen it.
-                let closed = self.overlays.read(cx).menu().map(|menu| menu.kind);
-                self.overlays.update(cx, |overlays, _| {
-                    overlays.stack.note_pressed_shut(closed.map(crate::overlay_stack::Trigger::Menu));
-                    overlays.close_menu();
-                });
-            }
-            SidebarIntent::AddProject => self.open_projects(false, window, cx),
-            // A group row's actions: `+` starts a session in that project
-            // (and makes it current), `…` opens its project menu. On "Other
-            // workspaces" `+` has nowhere to start, so it offers adoption.
-            SidebarIntent::GroupAction(id, GroupAction::New) => {
-                if id.as_ref() == crate::sidebar::OTHER_GROUP {
-                    self.open_projects(false, window, cx);
-                } else {
-                    self.new_session_in(Some(id.to_string()), window, cx);
-                }
-            }
-            SidebarIntent::GroupAction(id, GroupAction::Menu) => {
-                // The screen reports no bounds for the head's `…`; the
-                // pointer stands on it at the click, so the menu seats
-                // there (a keyboard open seats wherever the pointer is).
-                let at = window.mouse_position();
-                self.group_menu_bounds.insert(id.to_string(), Bounds::new(at, gpui::size(px(1.0), px(1.0))));
-                if id.as_ref() == crate::sidebar::OTHER_GROUP {
-                    self.open_project_menu(None, false, cx);
-                } else {
-                    self.open_project_menu(Some(id.to_string()), false, cx);
-                }
-            }
-            SidebarIntent::GroupAction(id, GroupAction::ToggleMore) | SidebarIntent::ToggleMore(id) => {
-                self.toggle_expanded(id.to_string(), cx);
-            }
-            // The row's `⋯`: its menu opens under it, or closes when it is
-            // that row's menu already (the press that closed it is not a
-            // reopen).
-            SidebarIntent::RowAction(id, RowAction::More) => {
-                self.close_row_detail();
-                self.forced_detail = None;
-                let open = self.open_row_menu(cx).as_deref() == Some(id.as_ref());
-                if !open && !self.just_dismissed(MenuKind::SessionRow, cx) {
-                    self.open_row_menu_for(id.to_string(), cx);
-                } else {
-                    self.overlays.update(cx, |overlays, _| overlays.close_menu());
-                }
-            }
-            SidebarIntent::RowAction(id, action) => {
-                self.close_row_detail();
-                self.forced_detail = None;
-                match action {
-                    RowAction::Rename => self.start_rename(id.to_string(), window, cx),
-                    RowAction::Pin => self.toggle_pin(id.to_string(), cx),
-                    // One archive affordance: a listed session asks first,
-                    // an archived one goes straight back.
-                    RowAction::Archive => {
-                        let archived =
-                            self.sessions.iter().find(|e| e.id == id.as_ref()).is_some_and(|e| e.archived);
-                        if archived {
-                            self.unarchive_session(id.to_string(), cx);
-                        } else {
-                            self.open_archive_dialog(id.to_string(), cx);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            SidebarIntent::Rename(id, text) => {
-                self.rename_session(id.to_string(), Some(text.to_string()), cx);
-                self.focus_composer = true;
-            }
-            SidebarIntent::RenameCancel => {
-                self.overlays.update(cx, |o, _| {
-                    o.stack.close(crate::overlay_stack::LayerKind::RenameSession);
-                });
-                self.focus_composer = true;
-            }
-            SidebarIntent::Account => {
-                if !self.just_dismissed(MenuKind::Account, cx) {
-                    self.open_menu(MenuKind::Account, cx);
-                }
-            }
-            SidebarIntent::AccountAction(action) => {
-                self.overlays.update(cx, |overlays, _| overlays.close_menu());
-                match action {
-                    AccountAction::Settings => self.open_settings(0, cx),
-                    AccountAction::Providers => self.open_providers(cx),
-                    // The menu carries no sign-out row (each provider signs
-                    // out on its card); the intent, if anything sends it,
-                    // goes where those cards are.
-                    AccountAction::SignOut => self.open_providers(cx),
-                }
-            }
-            SidebarIntent::Hover(id, bounds) => {
-                let id = id.map(|id| id.to_string());
-                if self.sidebar_hovered != id {
-                    // The hover card follows session rows only: leaving one
-                    // disarms it, entering one arms the delay with the row's
-                    // bounds (the card seats beside the pane at its top).
-                    if let Some(previous) = self.sidebar_hovered.take() {
-                        self.note_row_hover(previous, false, None, cx);
-                    }
-                    if let Some(next) = id.clone().filter(|id| self.sessions.iter().any(|entry| &entry.id == id)) {
-                        self.note_row_hover(next, true, bounds, cx);
-                    }
-                    self.sidebar_hovered = id;
-                    self.sidebar_pane.update(cx, |_, cx| cx.notify());
-                }
-                return;
-            }
-            SidebarIntent::HoverGroup(id) => {
-                let id = id.map(|id| id.to_string());
-                if self.hovered_group != id {
-                    self.hovered_group = id;
-                    self.sidebar_pane.update(cx, |_, cx| cx.notify());
-                }
-                return;
-            }
-            SidebarIntent::HoverProjectsHeader(on) => {
-                if self.hovered_projects_header != on {
-                    self.hovered_projects_header = on;
-                    self.sidebar_pane.update(cx, |_, cx| cx.notify());
-                }
-                return;
-            }
-            SidebarIntent::Browse(intent) => self.browse_intent(intent, window, cx),
-        }
-        cx.notify();
-    }
-
-    /// Whether `kind` was dismissed by the press of the click now arriving:
-    /// a trigger's own click after an outside-press close toggles it shut,
-    /// never back open.
-    /// `sidebar-hover:<id>`: stand the sidebar's pointer state on `id`'s
-    /// row, as its own hover report would (the hover card is not armed).
-    /// An id with no session fails the step.
-    pub(crate) fn step_sidebar_hover(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let id = rest.trim();
-        if !self.sessions.iter().any(|entry| entry.id == id) {
-            return Err(format!("no session row `{id}`"));
-        }
-        self.sidebar_hovered = Some(id.to_owned());
-        self.sidebar_pane.update(cx, |_, cx| cx.notify());
-        Ok(())
-    }
-
-    /// `row-menu:<id>`: open `id`'s row menu (never a toggle). An id with
-    /// no session fails the step.
-    pub(crate) fn step_row_menu(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let id = rest.trim();
-        if !self.sessions.iter().any(|entry| entry.id == id) {
-            return Err(format!("no session row `{id}`"));
-        }
-        self.open_row_menu_for(id.to_owned(), cx);
-        Ok(())
-    }
-
-    /// The session whose row menu (`⋯`) stands open, if one does.
-    pub(crate) fn open_row_menu(&self, cx: &gpui::App) -> Option<String> {
-        self.overlays.read(cx).menu().filter(|menu| menu.kind == MenuKind::SessionRow).and_then(|menu| menu.session.clone())
-    }
-
-    /// Open `session`'s row menu, replacing whatever menu was open.
-    pub(crate) fn open_row_menu_for(&mut self, session: String, cx: &mut Context<Self>) {
-        if let Some(view) = self.active.clone() {
-            view.update(cx, |view, cx| view.close_plus_menu(cx));
-        }
-        self.overlays.update(cx, |overlays, _| overlays.open(crate::overlays::Menu::session_row(session)));
-        self.sidebar_pane.update(cx, |_, cx| cx.notify());
-        cx.notify();
-    }
-
-    /// Whether this click on `kind`'s trigger is the tail of the press that
-    /// just closed `kind`'s menu ([`crate::overlay_stack::OverlayStack::note_pressed_shut`]).
-    fn just_dismissed(&mut self, kind: MenuKind, cx: &mut Context<Self>) -> bool {
-        self.overlays
-            .update(cx, |overlays, _| overlays.stack.pressed_shut(crate::overlay_stack::Trigger::Menu(kind)))
-            .is_some_and(|ago| ago < crate::overlay_stack::REPRESS)
-    }
-
-    /// One row of the view-options menu (or its Group by / Sort by
-    /// submenus). Toggles keep the menu open, so the check is seen to
-    /// change; a submenu choice and Clear empty close it.
-    fn apply_view_option(&mut self, option: ViewOption, cx: &mut Context<Self>) {
-        match option {
-            ViewOption::GroupBy(key) => {
-                self.set_group_by(
-                    match key {
-                        GroupKey::Project => crate::layout::GroupBy::Project,
-                        GroupKey::Date => crate::layout::GroupBy::Date,
-                    },
-                    cx,
-                );
-                self.overlays.update(cx, |overlays, _| overlays.close_menu());
-            }
-            ViewOption::SortBy(key) => {
-                self.set_sort_by(
-                    match key {
-                        SortKey::Recent => crate::layout::SortBy::Recent,
-                        SortKey::Created => crate::layout::SortBy::Created,
-                        SortKey::Name => crate::layout::SortBy::Name,
-                    },
-                    cx,
-                );
-                self.overlays.update(cx, |overlays, _| overlays.close_menu());
-            }
-            ViewOption::ToggleEmpty => {
-                self.show_empty = !self.show_empty;
-                self.invalidate_list();
-            }
-            ViewOption::ToggleHidden => {
-                self.show_hidden = !self.show_hidden;
-                self.invalidate_list();
-            }
-            ViewOption::ToggleArchived => {
-                self.show_archived = !self.show_archived;
-                self.invalidate_list();
-            }
-            // Disabled while Baaz reads no PR data: never reported.
-            ViewOption::TogglePrStatus => {}
-            ViewOption::ToggleSearchAll => self.toggle_search_scope(cx),
-            ViewOption::ClearEmpty => {
-                self.overlays.update(cx, |overlays, _| overlays.close_menu());
-                self.clear_empty(cx);
-            }
-        }
-    }
-
-    /// Browse mode's intents, routed to the browser's own handlers.
-    fn browse_intent(&mut self, intent: BrowseIntent, window: &mut Window, cx: &mut Context<Self>) {
-        match intent {
-            BrowseIntent::Address => {
-                let url = self.browse_centre_state(cx).map(|state| state.read(cx).url().to_string()).unwrap_or_default();
-                self.focus_browse_address_with(&url, window, cx);
-            }
-            BrowseIntent::SiteInfo => {
-                let open = self.browse_centre_state(cx).is_some();
-                self.overlays.update(cx, |o, _| o.stack.set(crate::overlay_stack::Layer::SiteInfo, open));
-                cx.notify();
-            }
-            BrowseIntent::Bookmark => self.edit_shown_bookmark(window, cx),
-            BrowseIntent::Back => self.browse_go_back(window, cx),
-            BrowseIntent::Forward => self.browse_go_forward(window, cx),
-            BrowseIntent::Reload => {
-                if let Some(id) = self.browser.read(cx).browse_centre_shown(cx) {
-                    self.reload_browse_tab(id, window, cx);
-                }
-            }
-            BrowseIntent::NewTab => self.new_browse_sidebar_tab(window, cx),
-            BrowseIntent::PageMenu(anchor) => self.toggle_browse_page_menu(anchor, window, cx),
-            BrowseIntent::Downloads(anchor) => self.toggle_browse_downloads(anchor, cx),
-            BrowseIntent::Extensions(anchor) => self.toggle_browse_extensions(anchor, cx),
-            BrowseIntent::Page(action) => self.browse_page_action(action, window, cx),
-            BrowseIntent::OpenPin(id) | BrowseIntent::SelectTab(id) => {
-                if let Some(id) = browse_tab_id(&id) {
-                    self.browse_sidebar_tab(id, false, window, cx);
-                }
-            }
-            BrowseIntent::CloseTab(id) => {
-                if let Some(id) = browse_tab_id(&id) {
-                    self.browse_sidebar_tab(id, true, window, cx);
-                }
-            }
-            BrowseIntent::ToggleFolder(id) => {
-                if self.browser.update(cx, |browser, _| browser.tabs.toggle_folder(&id)) {
-                    self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
-                }
-            }
-            BrowseIntent::OpenTaskChat(session) => self.browse_task_folder_action(&session, TaskFolderAction::OpenChat, window, cx),
-            BrowseIntent::HoverTodayHeader(on) => {
-                if self.hovered_today_header != on {
-                    self.hovered_today_header = on;
-                    self.sidebar_pane.update(cx, |_, cx| cx.notify());
-                }
-            }
-            BrowseIntent::Ask => self.browse_ask_page(window, cx),
-            BrowseIntent::SwitchSpace(index) => self.browse_switch_space(index, window, cx),
-            BrowseIntent::NewSpace => self.start_browse_naming(BrowseNaming::Space(None), "", window, cx),
-            BrowseIntent::NewFolder => self.browse_new_folder(None, window, cx),
-            BrowseIntent::CloseAll => self.browse_close_all(window, cx),
-            BrowseIntent::OpenMenu(menu) => self.open_browse_menu(menu, cx),
-            BrowseIntent::CloseMenu => self.close_browse_menu(cx),
-            BrowseIntent::Tab(id, action) => {
-                if let Some(id) = browse_tab_id(&id) {
-                    self.browse_tab_action(id, action, window, cx);
-                }
-            }
-            BrowseIntent::Folder(id, action) => self.browse_folder_action(&id, action, window, cx),
-            BrowseIntent::TaskFolder(session, action) => self.browse_task_folder_action(&session, action, window, cx),
-            BrowseIntent::Space(id, action) => self.browse_space_action(&id, action, window, cx),
-            BrowseIntent::Name(target, text) => self.commit_browse_name(target, &text, cx),
-            BrowseIntent::NameCancel => self.cancel_browse_name(cx),
-        }
-    }
-    pub(crate) fn render_row_detail(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (element, reason) = self.build_row_detail(cx);
-        let shown = element.is_some();
-        // Diagnosis only (`BAAZ_HOVER_TRACE=1`): one line per result
-        // change, never per frame — the root calls this every frame.
-        let changed = self.hover_trace_last_shown != Some(shown);
-        self.hover_trace_last_shown = Some(shown);
-        if changed {
-            crate::hover_trace!(
-                "render result={} reason={reason} id={:?} hovered={:?} shown={} trigger={}",
-                if shown { "Some" } else { "None" },
-                self.forced_detail.clone().or_else(|| self.hovered_row.clone()),
-                self.hovered_row,
-                self.hover_shown,
-                self.hover_trigger.is_some()
-            );
-        }
-        element
-    }
-
-    /// The card builder behind [`Self::render_row_detail`], with the reason
-    /// a missing card is missing: `not-shown` (still inside the delay),
-    /// `no-hovered-row`, `no-trigger`, `no-sidebar-edge`, or the forced
-    /// pin's own misses and unknown rows under `unknown-row` / `forced-*`.
-    fn build_row_detail(&mut self, cx: &mut Context<Self>) -> (Option<AnyElement>, &'static str) {
-        let (id, row) = match self.forced_detail.clone() {
-            Some(id) => {
-                let Some((known, bounds)) = self.selected_row_bounds.clone() else {
-                    return (None, "forced-no-bounds");
-                };
-                if known != id {
-                    return (None, "forced-id-mismatch");
-                }
-                (id, bounds)
-            }
-            None => {
-                if !self.hover_shown {
-                    return (None, "not-shown");
-                }
-                let Some(hovered) = self.hovered_row.clone() else {
-                    return (None, "no-hovered-row");
-                };
-                let Some(row) = self.hover_trigger else {
-                    return (None, "no-trigger");
-                };
-                (hovered, row)
-            }
-        };
-        // The seat's other half: the laid-out pane's right edge. Before the
-        // first prepaint there is no edge, so there is no card this frame.
-        let Some(edge) = self.sidebar_bounds else {
-            return (None, "no-sidebar-edge");
-        };
-        let sidebar_right = edge.origin.x + edge.size.width;
-        let visible = self.visible_sessions(cx);
-        // The visible rows first, then the whole list: a card pinned to a
-        // filtered-out row still names it honestly.
-        let Some(entry) = visible
-            .iter()
-            .find(|entry| entry.id == id)
-            .or_else(|| self.sessions.iter().find(|entry| entry.id == id))
-        else {
-            return (None, "unknown-row");
-        };
-        let now = crate::sidebar::grouping_now(&visible);
-        // The open session's own fold is fresher than the joined row: no
-        // wire event will ever sync it on a `--replay` window, and the
-        // pending words live only there. A presentation-local overlay, never
-        // a write to the list — the wire sync owns the entries.
-        let mut entry = entry.clone();
-        if let Some(view) = self.active.clone() {
-            let view = view.read(cx);
-            if view.session_id == id {
-                let (approval, question) = view.row_pending();
-                if approval.is_some() {
-                    entry.approval_command = approval;
-                }
-                if question.is_some() {
-                    entry.pending_question = question;
-                }
-                if entry.last_ask.as_deref().map(str::trim).is_none_or(|s| s.is_empty()) {
-                    entry.last_ask = view.last_user_text();
-                }
-                if entry.description.trim().is_empty() {
-                    if let Some(summary) = view.last_summary_text() {
-                        entry.description = summary;
-                    }
-                }
-            }
-        }
-        let data = entry.detail_data(now);
-        let card_id: ElementId = (ElementId::from("row-detail"), SharedString::from(id.clone())).into();
-        let mut card = aui::nav::session_detail(card_id);
-        if let Some(title) = data.title {
-            card = card.title(title);
-        }
-        if let Some(ask) = data.ask {
-            card = card.ask(ask);
-        }
-        if let Some(reply) = data.reply {
-            card = card.reply(reply);
-        }
-        if let Some(status) = data.status {
-            card = card.status(status.kind, status.detail);
-        }
-        if let Some(project) = data.project {
-            card = card.project(project);
-        }
-        if let Some(branch) = data.branch {
-            card = card.branch(branch);
-        }
-        if let Some(turns) = data.turns {
-            card = card.turns(turns);
-        }
-        if let Some(updated) = data.updated {
-            card = card.updated(updated);
-        }
-        if let Some(workspace) = data.workspace {
-            card = card.workspace(workspace);
-        }
-        if let Some(question) = data.pending_question {
-            card = card.pending_question(question);
-        }
-        if let Some(approval) = data.pending_approval {
-            card = card.pending_approval(approval);
-        }
-        // `anchored_session_detail_at_sidebar` takes the card itself, so no
-        // wrapper rides along: the card carries no click handler of its own,
-        // and a click that lands on it is a no-op rather than a row action.
-        // That corner is nearly unreachable — reaching the card means leaving
-        // the row, and leaving closes it — while every row click still
-        // lands on its row (the card hangs beside the sidebar, never over
-        // it) and dismisses through the select/action listeners; the row's
-        // own leave report and scroll close it.
-        (
-            Some(anchored_session_detail_at_sidebar(row, sidebar_right, card).into_any_element()),
-            "shown",
-        )
-    }
-
-    /// What a regroup or filter change looks like to the virtual list
-    ///: the mode and the three list-management toggles.
-    /// Group open/close and fold expand are NOT in the key — they splice
-    /// like any other local insert or remove, so the offset survives them.
-    /// Compared in `render_sidebar` before anything draws; a change resets
-    /// the list state to the flattened length.
-    pub(crate) fn regroup_key(&self, cx: &gpui::App) -> SidebarRegroupKey {
-        SidebarRegroupKey {
-            group_by: self.effective_group_by(cx),
-            sort_by: crate::layout::Layout::get(cx).sort_by,
-            show_hidden: self.show_hidden,
-            show_empty: self.show_empty,
-            show_archived: self.show_archived,
-            summary_line: crate::layout::Layout::get(cx).summary_line,
-        }
-    }
-
-    /// Keep the caller-owned list state on the flattened rows:
-    /// re-flattened per frame by the caller; `reset` after a regroup or
-    /// filter change (the one sync that
-    /// drops the offset — the old offset is meaningless against a rebuilt
-    /// model), `splice` after a local insert or remove (open/close, fold
-    /// expand, sessions arriving or leaving), `remeasure_items` after a
-    /// text-only height change (same rows, new grouping pointer). A
-    /// mismatch never panics in the list — it paints blanks past the model
-    /// — so the debug assertion below is the contract, not a guardrail.
-    pub(crate) fn sync_sidebar_list(&mut self, rows: &[SidebarRow], grouping: &Rc<Grouping>, cx: &gpui::App) {
-        // The splice below tracks the top item by index, so rows inserted
-        // above carry a steered or parked top away from its row; repaired
-        // after the sync, once the new rows are in.
-        let top_before = self.sidebar_list.logical_scroll_top();
-        // `render_sidebar` bends the count to the screen's skeleton rows
-        // while loading; put the state back on the previous flattened rows
-        // so the splice below diffs against what the list really holds.
-        if self.sidebar_list.item_count() != self.prev_sidebar_rows.len() {
-            self.sidebar_list.reset(self.prev_sidebar_rows.len());
-        }
-        let key = self.regroup_key(cx);
-        if self.prev_sidebar_regroup.as_ref() != Some(&key) {
-            self.sidebar_list.reset(rows.len());
-            self.prev_sidebar_regroup = Some(key);
-        } else if rows != self.prev_sidebar_rows.as_slice() {
-            // The common prefix and suffix stay; the middle was swapped.
-            // Moves degrade to remove-plus-insert, which still lands the
-            // count exactly — only the preserved offset approximates.
-            let prev = &self.prev_sidebar_rows;
-            let mut prefix = 0usize;
-            while prefix < prev.len() && prefix < rows.len() && prev[prefix] == rows[prefix] {
-                prefix += 1;
-            }
-            let mut suffix = 0usize;
-            while suffix < prev.len() - prefix
-                && suffix < rows.len() - prefix
-                && prev[prev.len() - 1 - suffix] == rows[rows.len() - 1 - suffix]
-            {
-                suffix += 1;
-            }
-            self.sidebar_list
-                .splice(prefix..prev.len() - suffix, rows.len() - prefix - suffix);
-        } else if self
-            .prev_sidebar_grouping
-            .as_ref()
-            .is_none_or(|cached| !Rc::ptr_eq(cached, grouping))
-        {
-            // Same rows, rebuilt grouping: text moved under stable rows
-            // (a rename, a new left line, a branch appearing), so cached
-            // heights may lie. Remeasure the window the list asks for.
-            if !rows.is_empty() {
-                self.sidebar_list.remeasure_items(0..rows.len());
-            }
-        }
-        self.prev_sidebar_rows = rows.to_vec();
-        self.prev_sidebar_grouping = Some(Rc::clone(grouping));
-        debug_assert_eq!(
-            self.sidebar_list.item_count(),
-            rows.len(),
-            "sidebar list out of sync: {} items for {} rows",
-            self.sidebar_list.item_count(),
-            rows.len()
-        );
-        self.repair_sidebar_scroll(top_before, rows, grouping);
-    }
-
-    /// Re-anchor the scroll position after [`Self::sync_sidebar_list`]
-    /// spliced: gpui's splice keeps the top *item by index*, so rows the
-    /// staged boot loads insert above carry a steered or parked top away
-    /// from where it belongs. While the user has not scrolled, an armed
-    /// reveal re-steers to its row by id (a reveal for an id with no row
-    /// waits without moving anything), and a top-parked list with nothing
-    /// to steer to stays parked at row 0. A user-scrolled, gesture-driven
-    /// or resizing list is never touched — same gate as the frame renderer.
-    fn repair_sidebar_scroll(&mut self, before: ListOffset, rows: &[SidebarRow], grouping: &Grouping) {
-        if self.sidebar_user_scrolled || self.sidebar_gesture_active() || self.resize.active {
-            return;
-        }
-        if let Some(reveal_id) = self.reveal.clone() {
-            let wanted = SharedString::from(reveal_id.as_str());
-            let target = row_index_for_session(rows, grouping, &wanted)
-                .or_else(|| self.reveal_head_row(rows, grouping, &reveal_id));
-            if let Some(ix) = target {
-                steer_to_row(&self.sidebar_list, ix);
-                return;
-            }
-            // No row (yet): the wait itself must not move the list, nor let
-            // the splice carry a parked top away under it.
-        }
-        if before.item_ix == 0 && before.offset_in_item == px(0.0) {
-            let after = self.sidebar_list.logical_scroll_top();
-            if after.item_ix != 0 || after.offset_in_item != px(0.0) {
-                ensure_row_visible(&self.sidebar_list, 0);
-            }
-        }
-    }
-
-    /// The id `render_sidebar` hands the virtual list.
-    pub(crate) const SIDEBAR_VIEW_ID: &'static str = "sessions";
-
-    /// Fold one row hover report into the hover state: entering a new row
-    /// arms the detail's delay and seats it from the row's own bounds —
-    /// never the pointer — leaving the armed row closes it, and anything
-    /// else changes nothing. This is the only writer: pane renders never
-    /// touch the hover state, so a render can neither arm nor disarm a row.
-    /// Fires from the rows' own hover events, so this runs even when the
-    /// sidebar pane itself renders nothing — the timer's notify reaches only
-    /// the root, whose cached pane never re-renders, which is why the row
-    /// bounds land here. Entering never notifies (nothing shows until the
-    /// delay elapses); the timer notifies when the card opens, and leaving
-    /// notifies when an open card closes.
-    pub(crate) fn note_row_hover(
-        &mut self,
-        id: String,
-        hovered: bool,
-        row: Option<Bounds<Pixels>>,
-        cx: &mut Context<Self>,
-    ) {
-        if hovered {
-            if self.hovered_row.as_deref() == Some(id.as_str()) {
-                crate::hover_trace!("note id={id} entered already-armed");
-                return;
-            }
-            let Some(row) = row else {
-                crate::hover_trace!("note id={id} entered no-bounds");
-                return;
-            };
-            // The seated anchor the card opens at: the sidebar's right edge
-            // plus the card gap, top-aligned with the row.
-            match row_detail_seat(&self.sidebar_bounds, &row) {
-                Some(seat) => crate::hover_trace!(
-                    "note id={id} entered arm seat={:.0},{:.0}",
-                    f32::from(seat.x),
-                    f32::from(seat.y)
-                ),
-                None => crate::hover_trace!(
-                    "note id={id} entered arm no-sidebar-edge row={:.0},{:.0}",
-                    f32::from(row.origin.x),
-                    f32::from(row.origin.y)
-                ),
-            }
-            self.hovered_row = Some(id.clone());
-            self.hover_since = Some(std::time::Instant::now());
-            self.hover_shown = false;
-            self.hover_trigger = Some(row);
-            let pending = cx.entity().downgrade();
-            self.tasks.push(cx.spawn(async move |_, cx| {
-                cx.background_executor().timer(aui::nav::SESSION_DETAIL_DELAY).await;
-                let _ = pending.update(cx, |this, cx| {
-                    let matches = this.hovered_row.as_deref() == Some(&id);
-                    if matches && !this.hover_shown {
-                        this.hover_shown = true;
-                        cx.notify();
-                    }
-                    crate::hover_trace!(
-                        "timer src=note id={id} matches={matches} shown={}",
-                        this.hover_shown
-                    );
-                });
-            }));
-            return;
-        }
-        if self.hovered_row.as_deref() == Some(id.as_str()) {
-            crate::hover_trace!("note id={id} left close shown={}", self.hover_shown);
-            self.close_row_detail();
-            cx.notify();
-        } else {
-            crate::hover_trace!("note id={id} left ignored armed={:?}", self.hovered_row);
-        }
-    }
-
-    /// Close the hover card: pointer left, wheel moved, row clicked, card
-    /// clicked. The scripted pin ([`Harness::forced_detail`]) is not hover
-    /// state and survives this; clicks clear it where they land.
-    pub(crate) fn close_row_detail(&mut self) {
-        self.hovered_row = None;
-        self.hover_since = None;
-        self.hover_shown = false;
-        self.hover_trigger = None;
-    }
-
-    /// Steer the virtual list to the outside-activated session, moving the
-    /// least distance that shows its row whole: the row
-    /// itself when the flattened model has one — folds rescue held-back
-    /// rows for the pending target, so no expansion dance — else its group
-    /// head for a closed group (never auto-expanded, like before) or for a
-    /// rowless session whose project resolves past the rows (a draft before
-    /// its first send reveals its project head), else wait for an id with
-    /// no row yet (a fork before `load_sessions`'s reply lands) up to
-    /// [`REVEAL_UNKNOWN_FRAMES`] attempts, else clear a flag with nowhere
-    /// to go (a *known* session that still has no landing row gives up
-    /// on the first miss, same as before — only an unrecognised id gets
-    /// the grace period; the rowless *active* session never gives up while
-    /// it stays open). A sidebar
-    /// click never sets the flag; wheel and resize disarm it. Called on
-    /// selection change and the frames after, until the row reports visible
-    /// once the rows have settled (`sessions_loaded`): before the first
-    /// layout the viewport is unknown and the steer is a no-op, and a fully
-    /// visible row moves nothing.
-    fn reveal_sidebar_row(
-        &mut self,
-        rows: &[SidebarRow],
-        grouping: &Grouping,
-        reveal_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let wanted = SharedString::from(reveal_id);
-        // A pinned session sits in the Pinned section above the list, always
-        // in view: its reveal is done, and its project head is never the
-        // target (it used to land there, the row being lifted out).
-        if self.sidebar_pinned(cx).iter().any(|row| row.id == wanted) {
-            self.reveal = None;
-            self.reveal_unknown = None;
-            return;
-        }
-        let target = row_index_for_session(rows, grouping, &wanted)
-            .or_else(|| self.reveal_head_row(rows, grouping, reveal_id));
-        let Some(ix) = target else {
-            // The rowless active session keeps its arm: a brand-new session
-            // has no row until its first send, and the reveal falls back to
-            // its project head only once the head resolves — disarming here
-            // would strand the scroll-follow before the row is born. Any
-            // other miss disarms or streaks as before; a later switch, a
-            // quiet click or a user scroll still clears the arm.
-            let active_id = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
-            let known = self.sessions.iter().any(|e| e.id == reveal_id);
-            if rowless_reveal_stays_armed(active_id.as_deref(), reveal_id, known) {
-                self.reveal_unknown = None;
-                return;
-            }
-            if self.sessions.iter().any(|e| e.id == reveal_id) {
-                // A known session with nowhere to go: a
-                // waiting flag outlives its activation and can move a list
-                // the user scrolled meanwhile.
-                self.reveal = None;
-                self.reveal_unknown = None;
-                return;
-            }
-            // An id this window has never listed: most likely its row is
-            // simply not born yet. The sites that create it (the
-            // `turn/started` local-row insert, a `load_sessions` reply)
-            // already `invalidate_list`/notify, which is what brings this
-            // function around again with fresh rows — so waiting here
-            // costs nothing extra, just a bound so a reveal for an id that
-            // never arrives (a failed fork, a send that never lands)
-            // cannot spin forever.
-            let (id, streak) = next_reveal_unknown_streak(self.reveal_unknown.take(), reveal_id);
-            self.reveal_unknown = Some((id, streak));
-            if streak > REVEAL_UNKNOWN_FRAMES {
-                self.reveal = None;
-                self.reveal_unknown = None;
-            }
-            return;
-        };
-        self.reveal_unknown = None;
-        // A steer that moves the list under an open group menu mis-seats
-        // it: dismiss first, like a user scroll does.
-        let steers = self.sidebar_list.item_is_above_viewport(ix) == Some(true)
-            || self.sidebar_list.item_is_below_viewport(ix) == Some(true);
-        if steers {
-            self.dismiss_group_menu(cx);
-        }
-        let jumped = steer_to_row(&self.sidebar_list, ix);
-        let above = self.sidebar_list.item_is_above_viewport(ix);
-        let below = self.sidebar_list.item_is_below_viewport(ix);
-        if above == Some(false) && below == Some(false) {
-            // The row is on screen — but while the first `session/list` is
-            // still landing, later stages reindex around it and the splice
-            // carries the steered top away (see `repair_sidebar_scroll`,
-            // which tracks the row by id meanwhile): stay armed until the
-            // rows settle. No poke meanwhile — nothing is outstanding.
-            if self.sessions_loaded {
-                self.reveal = None;
-            }
-        } else if (above.is_none() || below.is_none()) && !jumped {
-            // The list has not laid out yet: a degenerate zero-height sidebar rect would otherwise
-            // have every pane render spawn another pane-notify task, which
-            // renders, which pokes again, forever — `bench-idle` never
-            // settling. Leave the flag armed with nothing scheduled;
-            // whatever eventually lays the list out (a resize, a normal
-            // render) brings this function around again for a fresh read.
-        } else {
-            // The steer above only stages the list's pending scroll: no
-            // frame applies it on its own (a cached pane runs none), and a
-            // notify from inside the draw schedules nothing — so wake the
-            // pane from a task outside the draw, the old reveal's poke in
-            // new clothes. The poke stops the frame the row reports visible
-            // (the flag consumes above), so a settled list never spins.
-            let pane = self.sidebar_pane.clone();
-            self.tasks.push(cx.spawn(async move |this, cx| {
-                let _ = this.update(cx, |_, cx| {
-                    pane.update(cx, |_, cx| cx.notify());
-                });
-            }));
-        }
-    }
-
-    /// The group head (or header) row for a session with no session row: a
-    /// closed group holds its sessions out of the flattened model. Mirrors
-    /// the old current-group fallback — reveal the head, never auto-expand.
-    fn reveal_head_row(&self, rows: &[SidebarRow], grouping: &Grouping, reveal_id: &str) -> Option<usize> {
-        reveal_head_row(
-            &self.sessions,
-            &self.overrides,
-            &self.provider_sessions,
-            self.current_project.as_deref(),
-            rows,
-            grouping,
-            reveal_id,
-        )
-    }
-
-    /// Dismiss an open group-row project menu, if any. The header menu
-    /// seats from the fixed crumb and is never dismissed by list movement.
-    fn dismiss_group_menu(&mut self, cx: &mut Context<Self>) {
-        if self
-            .overlays
-            .read(cx)
-            .menu()
-            .is_some_and(|menu| menu.kind == MenuKind::Project && !menu.project_header)
-        {
-            self.overlays.update(cx, |overlays, _| overlays.close_menu());
-        }
-    }
-
-    /// The field the row being renamed holds: the library's dense recipe —
-    /// a borderless, chromeless single line at the row-title size, with the
-    /// 1 px focus border on the wrapper instead of the component. The wrapper
-    /// is a flex row centring its child, fixed to the 22 px box the module
-    /// docs in `aui::nav::session_row` prescribe (20 px of field in 4 px of
-    /// row padding is exactly the 30 px row): the editor's own line box plus
-    /// its internal padding used to stand taller, so the row grew and the
-    /// list below jumped. Clipping is horizontal only, so a long name scrolls
-    /// under the caret instead of spilling a second line, and the row keeps
-    /// its own height while a rename is open, so siblings never move. The
-    /// commit path is unchanged. The header title takes one element built
-    /// here; the sidebar row takes a builder (see the `editing` call in
-    /// `render_sidebar`) because the library builds that row more than once
-    /// per frame.
-    pub(crate) fn rename_field(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        Self::rename_editor(
-            &self.rename,
-            cx.aui().colors,
-            self.rename.focus_handle(cx).is_focused(window),
-            cx.entity().downgrade(),
-        )
-    }
-
-    /// One rename editor, built from its pieces with no view context: the
-    /// per-build half of [`Self::rename_field`]. Entity-agnostic on purpose —
-    /// the virtual list calls the row's builder with `(&mut Window, &mut
-    /// App)` inside layout, where there is no `Context` to bind a listener
-    /// with, so the confirm action upgrades the weak handle instead. Builds
-    /// only, never notifies: a builder runs inside layout.
-    fn rename_editor(
-        rename: &Entity<TextareaState>,
-        p: Palette,
-        focused: bool,
-        baaz: WeakEntity<Self>,
-    ) -> AnyElement {
-        div()
-            .w_full()
-            .key_context(RENAME_CONTEXT)
-            .on_action(move |_: &ConfirmRename, window, cx| {
-                let _ = baaz.update(cx, |this, cx| this.commit_rename(window, cx));
-            })
-            .child(
-                div()
-                    .w_full()
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .overflow_x_hidden()
-                    .py(px(0.0))
-                    .px(px(6.0))
-                    .rounded(px(scale::R_SM))
-                    .border_1()
-                    .border_color(if focused { p.accent_ring } else { p.line })
-                    .bg(p.surface_1)
-                    // The editor keeps its natural line box (`h_auto`): the
-                    // library's 20 px recipe stands its glyphs on the bottom
-                    // edge of a 22 px wrapper and clips their descenders. The
-                    // wrapper is the fixed box that keeps the row's height;
-                    // the editor centres in it and may overhang the border by
-                    // a pixel or two of line box, which draws nothing.
-                    .child(dense_field(rename).h_auto().whitespace_nowrap().overflow_x_hidden()),
-            )
-            .into_any_element()
-    }
-
 }
 
 /// The tier's plan label for the footer and its menu, or `None` while
@@ -2050,17 +1266,17 @@ pub(crate) fn muse_plan_label(tier: Option<&Tier>) -> Option<String> {
 }
 
 /// The nav row ids the screen reports back through `SidebarIntent::Nav`.
-const NAV_PROJECTS: &str = "projects";
-const NAV_SKILLS: &str = "skills";
+pub(crate) const NAV_PROJECTS: &str = "projects";
+pub(crate) const NAV_SKILLS: &str = "skills";
 /// The sidebar's "Needs you" filter row (task 3.4).
-const NAV_NEEDS_YOU: &str = "needs-you";
+pub(crate) const NAV_NEEDS_YOU: &str = "needs-you";
 
 /// A Browse tab's id as the screen's stable row key, and back.
-fn browse_tab_key(id: crate::browser::TabId) -> String {
+pub(crate) fn browse_tab_key(id: crate::browser::TabId) -> String {
     format!("tab-{}", id.0)
 }
 
-fn browse_tab_id(key: &str) -> Option<crate::browser::TabId> {
+pub(crate) fn browse_tab_id(key: &str) -> Option<crate::browser::TabId> {
     key.strip_prefix("tab-")?.parse().ok().map(crate::browser::TabId)
 }
 
@@ -2070,6 +1286,7 @@ mod tests {
     use gpui::point;
     use gpui_kit::base::v_flex;
     use gpui::TestAppContext;
+    use crate::app::Harness;
 
     use std::cell::Cell;
     use std::collections::{HashMap, HashSet};
@@ -2481,14 +1698,15 @@ mod tests {
         vc: &mut gpui::VisualTestContext,
     ) -> (Option<String>, Option<String>) {
         vc.update(|_, cx| {
-            let h = baaz.read(cx);
-            let selected = SidebarKey::current(h, cx).selected;
+            baaz.update(cx, |h, cx| {
+            let selected = h.sidebar_facts(cx).selected;
             let grouping = h.sidebar_grouping(cx);
             let crate::sidebar::Grouping::Project(groups) = &*grouping else {
                 panic!("two adoptions group by project");
             };
             let current = groups.iter().find(|g| g.current).map(|g| g.id.to_string());
             (selected, current)
+            })
         })
     }
 
@@ -2502,12 +1720,12 @@ mod tests {
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
         let ids: Vec<String> = vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
+            baaz.update(cx, |h, cx| {
                 (0..2)
                     .map(|i| {
                         let root = dir.join(format!("proj-{i}"));
                         std::fs::create_dir_all(&root).expect("temp root");
-                        h.projects.add(&root).id.clone()
+                        h.session_list.update(cx, |list, _| list.projects.add(&root).id.clone())
                     })
                     .collect()
             })
@@ -2517,12 +1735,12 @@ mod tests {
         let workspace = dir.to_string_lossy().into_owned();
         let open = active_view(vc, &workspace, "s-row");
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.sessions.push(scroll_entry("s-row", &ids[0]));
-                h.sessions_loaded = true;
-                h.index_loaded = true;
+            baaz.update(cx, |h, cx| {
+                h.session_list.update(cx, |list, _| list.sessions.push(scroll_entry("s-row", &ids[0])));
+                h.session_list.update(cx, |list, _| list.sessions_loaded = true);
+                h.session_list.update(cx, |list, _| list.index_loaded = true);
                 h.active = Some(open.clone());
-                h.invalidate_list();
+                h.invalidate_list(cx);
             })
         });
         let (selected, current) = selected_and_current(&baaz, vc);
@@ -2534,7 +1752,7 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 h.set_override("s-new", |m| m.project = Some(ids[1].clone()), cx);
                 h.active = Some(draft.clone());
-                h.invalidate_list();
+                h.invalidate_list(cx);
             })
         });
         let (selected, current) = selected_and_current(&baaz, vc);
@@ -2543,10 +1761,10 @@ mod tests {
         b3c_teardown(&dir, guard, old);
     }
 
-    /// B2a-H2: the cached pane re-arms on a mode switch, so the switch
+    /// B2a-H2: the cached pane re-renders on a mode switch, so the switch
     /// row at the top of the column never goes stale. The mode is a window
     /// preference: the pane observes the layout global (task 4.1), so the
-    /// write alone notifies it — nothing in the key, no notify at the write.
+    /// write alone notifies it — no fact, no notify at the write.
     #[gpui::test]
     fn sidebar_pane_rearms_on_mode_switch(cx: &mut TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -2567,20 +1785,20 @@ mod tests {
         b3c_teardown(&dir, guard, old);
     }
 
-    /// B2a-H3: the cached pane re-arms when the Browse sidebar's inputs
-    /// change — a select, a pin, a close, an expand and the open tab
-    /// menu all move the key.
+    /// B2a-H3: the cached pane re-renders when the Browse sidebar's inputs
+    /// change — a select, a pin, a close and the open tab menu all move the
+    /// facts the root pushes (`Harness::sidebar_facts`).
     #[gpui::test]
-    fn sidebar_key_changes_with_browse_tabs(cx: &mut TestAppContext) {
+    fn sidebar_facts_change_with_browse_tabs(cx: &mut TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (dir, guard, old, args) = b3c_state("browse-key");
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
-                // The Browse fingerprints key only in Browse mode (a
-                // Sessions frame never walks the tab model), so the test
-                // enters Browse the way the switch does.
+                // Browse's rows are facts only in Browse mode (a Sessions
+                // frame never walks the tab model), so the test enters
+                // Browse the way the switch does.
                 crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
                 h.browser.update(cx, |browser, _| browser.tabs_loaded = true);
                 let space = h.browser.read(cx).browse_space();
@@ -2588,8 +1806,8 @@ mod tests {
                 h.browser.update(cx, |bv, _| bv.tabs.open(space, crate::browser::Owner::Person, "https://b.example/", None));
             })
         });
-        let opened = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
-        // A select moves the key.
+        let opened = vc.update(|_, cx| baaz.update(cx, |h, cx| h.sidebar_facts(cx)));
+        // A select moves the facts.
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 let space = h.browser.read(cx).browse_space();
@@ -2597,9 +1815,9 @@ mod tests {
                 h.browser.update(cx, |browser, _| browser.tabs.activate(id));
             })
         });
-        let selected = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
-        assert!(opened != selected, "a tab select re-arms the cached pane");
-        // A pin moves the key (the pinned tile appears).
+        let selected = vc.update(|_, cx| baaz.update(cx, |h, cx| h.sidebar_facts(cx)));
+        assert!(opened != selected, "a tab select moves the facts, so the cached pane re-renders");
+        // A pin moves the facts (the pinned tile appears).
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 let space = h.browser.read(cx).browse_space();
@@ -2607,19 +1825,19 @@ mod tests {
                 h.browser.update(cx, |browser, _| browser.tabs.set_pinned(id, true));
             })
         });
-        let pinned = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
-        assert!(selected != pinned, "a pin re-arms the cached pane");
-        // A close moves the key.
+        let pinned = vc.update(|_, cx| baaz.update(cx, |h, cx| h.sidebar_facts(cx)));
+        assert!(selected != pinned, "a pin moves the facts");
+        // A close moves the facts.
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 let id = h.browser.read(cx).tabs.tabs[0].id;
                 h.browser.update(cx, |browser, _| browser.tabs.close(id));
             })
         });
-        let closed = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
-        assert!(pinned != closed, "a close re-arms the cached pane");
+        let closed = vc.update(|_, cx| baaz.update(cx, |h, cx| h.sidebar_facts(cx)));
+        assert!(pinned != closed, "a close moves the facts");
         // The open tab menu (Browse's right-click menu on a tab, an entry
-        // on the overlay stack) is keyed too.
+        // on the overlay stack) is a fact too.
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 let id = h.browser.read(cx).tabs.tabs.first().map(|tab| tab.id).expect("a tab");
@@ -2632,8 +1850,8 @@ mod tests {
                 );
             })
         });
-        let menu = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
-        assert!(closed != menu, "the tab menu re-arms the cached pane");
+        let menu = vc.update(|_, cx| baaz.update(cx, |h, cx| h.sidebar_facts(cx)));
+        assert!(closed != menu, "the tab menu moves the facts");
         b3c_teardown(&dir, guard, old);
     }
 
@@ -2844,7 +2062,7 @@ mod tests {
     }
 
     /// B3c: hermetic state plus boot args for a throwaway window, for
-    /// driving `sync_sidebar_list` the way the staged boot loads do. The
+    /// driving `SidebarPane::sync_list` the way the staged boot loads do. The
     /// caller builds the window itself: the empty window borrows the test
     /// context, so it cannot come back out of a helper.
     fn b3c_state(
@@ -2961,6 +2179,7 @@ mod tests {
         let (dir, guard, old, args) = b3c_state("top");
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
+        let pane = vc.update(|_, cx| baaz.read(cx).sidebar_pane.clone());
         // First batch: one date bucket, nothing pinned.
         let g1 = Grouping::Date(vec![DateGroup::new(
             "Older",
@@ -2970,14 +2189,14 @@ mod tests {
         assert_eq!(rows1.len(), 4, "header plus three sessions");
         let g1 = Rc::new(g1);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
+            pane.update(cx, |h, cx| {
                 assert!(h.reveal.is_none(), "no session is active, so nothing arms a reveal");
-                h.sync_sidebar_list(&rows1, &g1, cx);
-                assert_eq!(h.sidebar_list.item_count(), rows1.len());
+                h.sync_list(&rows1, &g1, cx);
+                assert_eq!(h.list_state.item_count(), rows1.len());
                 // Park the list the way a painted top leaves it: the splice
                 // below only carries a materialised scroll top.
-                h.sidebar_list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
-                assert_eq!(h.sidebar_list_top().item_ix, 0, "the first paint parks at the top");
+                h.list_state.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
+                assert_eq!(h.list_top().item_ix, 0, "the first paint parks at the top");
             })
         });
         // Second batch: the wire list adds a pinned session, which lifts a
@@ -2996,11 +2215,11 @@ mod tests {
         assert_eq!(rows2.len(), 6, "pinned header, pinned row, then the old rows");
         let g2 = Rc::new(g2);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                h.sync_sidebar_list(&rows2, &g2, cx);
-                assert_eq!(h.sidebar_list.item_count(), rows2.len());
+            pane.update(cx, |h, cx| {
+                h.sync_list(&rows2, &g2, cx);
+                assert_eq!(h.list_state.item_count(), rows2.len());
                 assert_eq!(
-                    h.sidebar_list_top().item_ix,
+                    h.list_top().item_ix,
                     0,
                     "staged loads must not carry a top-parked list with no active session"
                 );
@@ -3022,6 +2241,7 @@ mod tests {
         let (dir, guard, old, args) = b3c_state("unknown");
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
+        let pane = vc.update(|_, cx| baaz.read(cx).sidebar_pane.clone());
         let g1 = Grouping::Date(vec![DateGroup::new(
             "Older",
             vec![b3c_summary("u-1", false), b3c_summary("u-2", false), b3c_summary("u-3", false)],
@@ -3030,15 +2250,15 @@ mod tests {
         let g1 = Rc::new(g1);
         // Boot order: the activation arms the reveal before any rows land.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
+            pane.update(cx, |h, cx| {
                 h.reveal = Some("s-draft".to_owned());
                 h.reveal_unknown = None;
-                h.sidebar_user_scrolled = false;
-                h.sync_sidebar_list(&rows1, &g1, cx);
+                h.user_scrolled = false;
+                h.sync_list(&rows1, &g1, cx);
                 // Park the list the way a painted top leaves it (a parked
                 // scroll, not a reveal steer — the draft has no row).
-                h.sidebar_list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
-                assert_eq!(h.sidebar_list_top().item_ix, 0, "the first paint parks at the top");
+                h.list_state.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
+                assert_eq!(h.list_top().item_ix, 0, "the first paint parks at the top");
             })
         });
         let g2 = Grouping::Date(vec![DateGroup::new(
@@ -3053,13 +2273,13 @@ mod tests {
         let rows2 = flatten_sidebar(&g2, false);
         let g2 = Rc::new(g2);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                h.sync_sidebar_list(&rows2, &g2, cx);
+            pane.update(cx, |h, cx| {
+                h.sync_list(&rows2, &g2, cx);
                 // The wait itself never steers, even called every frame: the
                 // draft has no row anywhere yet.
-                h.reveal_sidebar_row(&rows2, &g2, "s-draft", cx);
+                h.reveal_row(&rows2, &g2, "s-draft", cx);
                 assert_eq!(
-                    h.sidebar_list_top().item_ix,
+                    h.list_top().item_ix,
                     0,
                     "a reveal for an id with no row must not move the list"
                 );
@@ -3086,6 +2306,7 @@ mod tests {
         let (dir, guard, old, args) = b3c_state("reveal");
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
+        let pane = vc.update(|_, cx| baaz.read(cx).sidebar_pane.clone());
         // First batch: three sessions, the boot session last — small enough
         // that its row is on screen, so the reveal below completes (or, once
         // fixed, waits out the staging) before the big batch lands.
@@ -3096,27 +2317,27 @@ mod tests {
         assert_eq!(rows1.len(), 4, "header plus three sessions");
         let g1 = Rc::new(g1);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                assert!(!h.sessions_loaded, "the wire list has not landed yet");
-                h.sync_sidebar_list(&rows1, &g1, cx);
-                assert_eq!(h.sidebar_list.item_count(), rows1.len());
+            pane.update(cx, |h, cx| {
+                assert!(!h.list.read(cx).sessions_loaded, "the wire list has not landed yet");
+                h.sync_list(&rows1, &g1, cx);
+                assert_eq!(h.list_state.item_count(), rows1.len());
             })
         });
-        let state = vc.update(|_, cx| baaz.read(cx).sidebar_list.clone());
+        let state = vc.update(|_, cx| pane.read(cx).list_state.clone());
         draw_b3c_list(vc, &g1, &state);
         // Boot order: the activation arms the reveal while staging.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
+            pane.update(cx, |h, cx| {
                 h.reveal = Some("s-2".to_owned());
                 h.reveal_unknown = None;
-                h.sidebar_user_scrolled = false;
-                h.reveal_sidebar_row(&rows1, &g1, "s-2", cx);
+                h.user_scrolled = false;
+                h.reveal_row(&rows1, &g1, "s-2", cx);
             })
         });
         draw_b3c_list(vc, &g1, &state);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                h.reveal_sidebar_row(&rows1, &g1, "s-2", cx);
+            pane.update(cx, |h, cx| {
+                h.reveal_row(&rows1, &g1, "s-2", cx);
             })
         });
         // Second batch: twenty newer sessions land above (provider rows,
@@ -3130,9 +2351,9 @@ mod tests {
         assert_eq!(rows2.len(), 24, "header plus twenty-three sessions");
         let g2 = Rc::new(g2);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                h.sync_sidebar_list(&rows2, &g2, cx);
-                assert_eq!(h.sidebar_list.item_count(), rows2.len());
+            pane.update(cx, |h, cx| {
+                h.sync_list(&rows2, &g2, cx);
+                assert_eq!(h.list_state.item_count(), rows2.len());
             })
         });
         // Frame pump, the way the renderer drives the armed reveal: each
@@ -3141,49 +2362,49 @@ mod tests {
         let target = row_index_for_session(&rows2, &g2, &"s-2".into()).expect("the boot row has an index");
         for _ in 0..30 {
             vc.update(|_, cx| {
-                baaz.update(cx, |h, cx| {
+                pane.update(cx, |h, cx| {
                     if let Some(id) = h.reveal.clone() {
-                        h.reveal_sidebar_row(&rows2, &g2, &id, cx);
+                        h.reveal_row(&rows2, &g2, &id, cx);
                     }
                 })
             });
             draw_b3c_list(vc, &g2, &state);
             let settled = vc.update(|_, cx| {
-                baaz.read(cx).sidebar_list.item_is_above_viewport(target) == Some(false)
-                    && baaz.read(cx).sidebar_list.item_is_below_viewport(target) == Some(false)
+                pane.read(cx).list_state.item_is_above_viewport(target) == Some(false)
+                    && pane.read(cx).list_state.item_is_below_viewport(target) == Some(false)
             });
             if settled {
                 break;
             }
         }
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
+            pane.update(cx, |h, _| {
                 assert_eq!(
                     h.reveal.as_deref(),
                     Some("s-2"),
                     "the staged reveal stays armed until the rows settle"
                 );
                 assert_eq!(
-                    h.sidebar_list.item_is_above_viewport(target),
+                    h.list_state.item_is_above_viewport(target),
                     Some(false),
                     "the active row is not above the viewport after the loads settle"
                 );
                 assert_eq!(
-                    h.sidebar_list.item_is_below_viewport(target),
+                    h.list_state.item_is_below_viewport(target),
                     Some(false),
                     "the active row is visible after the loads settle"
                 );
                 assert!(
-                    h.sidebar_list_top().item_ix > 0,
+                    h.list_top().item_ix > 0,
                     "the list steered to the active row, not row 0"
                 );
             })
         });
         // The wire list lands: rows settle, the same reveal completes.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                h.sessions_loaded = true;
-                h.reveal_sidebar_row(&rows2, &g2, "s-2", cx);
+            pane.update(cx, |h, cx| {
+                h.list.update(cx, |list, _| list.sessions_loaded = true);
+                h.reveal_row(&rows2, &g2, "s-2", cx);
                 assert_eq!(h.reveal, None, "the settled reveal completes once its row is visible");
             })
         });
@@ -3205,45 +2426,46 @@ mod tests {
         let (dir, guard, old, args) = b3c_state("far");
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
+        let pane = vc.update(|_, cx| baaz.read(cx).sidebar_pane.clone());
         let rows: Vec<aui::nav::SessionSummary> = (0..2000).map(|i| b3c_summary(&format!("s-{i}"), false)).collect();
         let g = Grouping::Status(vec![StatusGroup::new("g", "G", "2000", rows)]);
         let flat = flatten_sidebar(&g, false);
         let g = Rc::new(g);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                h.sessions_loaded = true;
-                h.sync_sidebar_list(&flat, &g, cx);
+            pane.update(cx, |h, cx| {
+                h.list.update(cx, |list, _| list.sessions_loaded = true);
+                h.sync_list(&flat, &g, cx);
             })
         });
-        let state = vc.update(|_, cx| baaz.read(cx).sidebar_list.clone());
+        let state = vc.update(|_, cx| pane.read(cx).list_state.clone());
         draw_b3c_list(vc, &g, &state);
         let target = row_index_for_session(&flat, &g, &"s-1950".into()).expect("the far row has an index");
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
+            pane.update(cx, |h, _| {
                 h.reveal = Some("s-1950".to_owned());
                 h.reveal_unknown = None;
-                h.sidebar_user_scrolled = false;
+                h.user_scrolled = false;
             })
         });
         let mut settled = false;
         for _ in 0..6 {
             vc.update(|_, cx| {
-                baaz.update(cx, |h, cx| {
+                pane.update(cx, |h, cx| {
                     if let Some(id) = h.reveal.clone() {
-                        h.reveal_sidebar_row(&flat, &g, &id, cx);
+                        h.reveal_row(&flat, &g, &id, cx);
                     }
                 })
             });
             draw_b3c_list(vc, &g, &state);
             settled = vc.update(|_, cx| {
-                baaz.read(cx).sidebar_list.item_is_above_viewport(target) == Some(false)
-                    && baaz.read(cx).sidebar_list.item_is_below_viewport(target) == Some(false)
+                pane.read(cx).list_state.item_is_above_viewport(target) == Some(false)
+                    && pane.read(cx).list_state.item_is_below_viewport(target) == Some(false)
             });
             if settled {
                 break;
             }
         }
-        let top = vc.update(|_, cx| baaz.read(cx).sidebar_list_top());
+        let top = vc.update(|_, cx| pane.read(cx).list_top());
         assert!(settled, "the far row is on screen within a few frames (top {top:?}, target {target})");
         // A near target keeps the measured steer: no jump that would put
         // it at the very top and hide the rows above it (its group header).
@@ -3308,7 +2530,7 @@ mod tests {
         // `session/list` already lists the draft as a zero-turn wire row.
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                h.sessions.push(empty_entry("s-fresh"));
+                h.session_list.update(cx, |list, _| list.sessions.push(empty_entry("s-fresh")));
                 // A new session is a draft until a turn starts: what keeps
                 // the open session's own exemption off it.
                 h.open_state.drafts.insert("p-fresh".into(), "s-fresh".into());
@@ -3322,7 +2544,7 @@ mod tests {
                 let view =
                     cx.new(|cx| crate::session::SessionView::new("s-fresh".into(), host, window, cx));
                 h.active = Some(view);
-                h.invalidate_list();
+                h.invalidate_list(cx);
             });
         });
         let visible = vc.update(|_, cx| {
@@ -3339,15 +2561,17 @@ mod tests {
         // The first send reveals it: `first_send_update` marks the row
         // running (`sidebar.rs:939`), which fails `is_empty` on its own.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _cx| {
-                let row = h.sessions.iter_mut().find(|entry| entry.id == "s-fresh").expect("fresh row");
-                assert!(
-                    crate::sidebar::first_send_update(row, Some("Fix the header"), chrono::Local::now(), false),
-                    "the first send touches a zero-turn row"
-                );
+            baaz.update(cx, |h, cx| {
+                h.session_list.update(cx, |list, _| {
+                    let row = list.sessions.iter_mut().find(|entry| entry.id == "s-fresh").expect("fresh row");
+                    assert!(
+                        crate::sidebar::first_send_update(row, Some("Fix the header"), chrono::Local::now(), false),
+                        "the first send touches a zero-turn row"
+                    );
+                });
                 // The turn started: the session is no draft any more.
                 h.open_state.drafts.retain(|_, id| id != "s-fresh");
-                h.invalidate_list();
+                h.invalidate_list(cx);
             });
         });
         let visible = vc.update(|_, cx| {
@@ -3363,7 +2587,7 @@ mod tests {
         // until its first turn starts.
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                h.sessions.push(empty_entry("s-root"));
+                h.session_list.update(cx, |list, _| list.sessions.push(empty_entry("s-root")));
                 h.open_state.unsent.insert("s-root".into());
                 let host = crate::session::SessionHost {
                     provider_id: "echo".into(),
@@ -3375,7 +2599,7 @@ mod tests {
                 let view =
                     cx.new(|cx| crate::session::SessionView::new("s-root".into(), host, window, cx));
                 h.active = Some(view);
-                h.invalidate_list();
+                h.invalidate_list(cx);
             });
         });
         let visible = vc.update(|_, cx| {
@@ -3383,11 +2607,13 @@ mod tests {
         });
         assert!(!visible.contains(&"s-root".to_owned()), "an unsent root session has no row, got {visible:?}");
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _cx| {
-                let row = h.sessions.iter_mut().find(|entry| entry.id == "s-root").expect("root row");
-                crate::sidebar::first_send_update(row, Some("Map the folder"), chrono::Local::now(), false);
+            baaz.update(cx, |h, cx| {
+                h.session_list.update(cx, |list, _| {
+                    let row = list.sessions.iter_mut().find(|entry| entry.id == "s-root").expect("root row");
+                    crate::sidebar::first_send_update(row, Some("Map the folder"), chrono::Local::now(), false);
+                });
                 h.open_state.unsent.remove("s-root");
-                h.invalidate_list();
+                h.invalidate_list(cx);
             });
         });
         let visible = vc.update(|_, cx| {
@@ -3398,8 +2624,8 @@ mod tests {
         // two-member chain exempts the head from the empty filter.
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                h.sessions.push(empty_entry("h-src"));
-                h.sessions.push(empty_entry("h-dst"));
+                h.session_list.update(cx, |list, _| list.sessions.push(empty_entry("h-src")));
+                h.session_list.update(cx, |list, _| list.sessions.push(empty_entry("h-dst")));
                 h.set_override("h-src", |meta| meta.handoff_to = Some("h-dst".into()), cx);
                 let host = crate::session::SessionHost {
                     provider_id: "echo".into(),
@@ -3411,7 +2637,7 @@ mod tests {
                 let view =
                     cx.new(|cx| crate::session::SessionView::new("h-dst".into(), host, window, cx));
                 h.active = Some(view);
-                h.invalidate_list();
+                h.invalidate_list(cx);
             });
         });
         let visible = vc.update(|_, cx| {
@@ -3443,40 +2669,42 @@ mod tests {
         let baaz = b3c_window(vc, args);
         let open = active_view(vc, &workspace, "s-live");
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
+            baaz.update(cx, |h, cx| {
                 // The open session: zero turns, not running, unnamed, no
                 // draft — the turn started and never settled.
                 let mut live = scroll_entry("s-live", "p");
                 live.turns = 0;
                 live.project = None;
-                h.sessions.push(live);
+                h.session_list.update(cx, |list, _| list.sessions.push(live));
                 // Another session with a recorded ask and zero turns.
                 let mut asked = scroll_entry("s-asked", "p");
                 asked.turns = 0;
                 asked.project = None;
                 asked.last_ask = Some("Explain the schema".into());
-                h.sessions.push(asked);
-                // A provider session admitted once: its record holds the
-                // first prompt, nothing else.
-                crate::provider_sessions::upsert_open(
-                    &mut h.provider_sessions,
-                    "claude-code",
-                    "s-admitted",
-                    None,
-                    None,
-                    None,
-                );
-                crate::provider_sessions::note_first_prompt(&mut h.provider_sessions, "s-admitted", "Draw the db");
-                h.merge_provider_rows();
+                h.session_list.update(cx, |list, _| list.sessions.push(asked));
+                h.session_list.update(cx, |list, _| {
+                    // A provider session admitted once: its record holds the
+                    // first prompt, nothing else.
+                    crate::provider_sessions::upsert_open(
+                        &mut list.provider_sessions,
+                        "claude-code",
+                        "s-admitted",
+                        None,
+                        None,
+                        None,
+                    );
+                });
+                h.session_list.update(cx, |list, _| crate::provider_sessions::note_first_prompt(&mut list.provider_sessions, "s-admitted", "Draw the db"));
+                h.merge_provider_rows(cx);
                 // And a true noise row, which still goes.
                 let mut noise = scroll_entry("s-noise", "p");
                 noise.turns = 0;
                 noise.project = None;
-                h.sessions.push(noise);
-                h.sessions_loaded = true;
-                h.index_loaded = true;
+                h.session_list.update(cx, |list, _| list.sessions.push(noise));
+                h.session_list.update(cx, |list, _| list.sessions_loaded = true);
+                h.session_list.update(cx, |list, _| list.index_loaded = true);
                 h.active = Some(open.clone());
-                h.invalidate_list();
+                h.invalidate_list(cx);
             })
         });
         let visible = vc.update(|_, cx| {
@@ -3531,16 +2759,23 @@ mod tests {
     /// mark the lists loaded.
     fn load_sessions(h: &mut Harness, n: usize, cx: &mut gpui::App) {
         crate::layout::Layout::stage(cx, |layout| layout.group_by = Some(crate::layout::GroupBy::Date));
-        h.sessions = (0..n).map(|i| list_entry(&format!("s{i}"), i == n - 1)).collect();
-        h.sessions_loaded = true;
-        h.index_loaded = true;
-        h.invalidate_list();
+        h.session_list.update(cx, |list, _| list.sessions = (0..n).map(|i| list_entry(&format!("s{i}"), i == n - 1)).collect());
+        h.session_list.update(cx, |list, _| list.sessions_loaded = true);
+        h.session_list.update(cx, |list, _| list.index_loaded = true);
+        h.invalidate_list(cx);
     }
 
     fn render_once(vc: &mut gpui::VisualTestContext, baaz: &Entity<Harness>) {
-        vc.update(|window, cx| {
+        // The root pushes its facts, then the pane renders itself.
+        let pane = vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
-                let _ = h.render_sidebar(window, cx);
+                h.push_sidebar_facts(cx);
+                h.sidebar_pane.clone()
+            })
+        });
+        vc.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                let _ = pane.render(window, cx);
             })
         });
     }
@@ -3551,12 +2786,13 @@ mod tests {
         let (dir, guard, old, args) = b3c_state("browse-keeps-list");
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
+        let pane = vc.update(|_, cx| baaz.read(cx).sidebar_pane.clone());
         vc.update(|_, cx| baaz.update(cx, |h, cx| load_sessions(h, 40, cx)));
         render_once(vc, &baaz);
         let (count, top) = vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.sidebar_list.scroll_to(gpui::ListOffset { item_ix: 9, offset_in_item: px(0.0) });
-                (h.sidebar_list.item_count(), h.sidebar_list.logical_scroll_top())
+            pane.update(cx, |h, _| {
+                h.list_state.scroll_to(gpui::ListOffset { item_ix: 9, offset_in_item: px(0.0) });
+                (h.list_state.item_count(), h.list_state.logical_scroll_top())
             })
         });
         assert!(count > 20, "the sessions area has rows: {count}");
@@ -3564,13 +2800,13 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |_, cx| crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse)));
         render_once(vc, &baaz);
         let (browse_count, browse_top) =
-            vc.update(|_, cx| baaz.update(cx, |h, _| (h.sidebar_list.item_count(), h.sidebar_list.logical_scroll_top())));
+            vc.update(|_, cx| pane.update(cx, |h, _| (h.list_state.item_count(), h.list_state.logical_scroll_top())));
         assert_eq!(browse_count, count, "Browse must not resize the Sessions list state");
         assert_eq!(browse_top.item_ix, top.item_ix);
         assert_eq!(browse_top.offset_in_item, top.offset_in_item);
         vc.update(|_, cx| baaz.update(cx, |_, cx| crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Sessions)));
         render_once(vc, &baaz);
-        let back = vc.update(|_, cx| baaz.update(cx, |h, _| h.sidebar_list.logical_scroll_top()));
+        let back = vc.update(|_, cx| pane.read(cx).list_top());
         assert_eq!(back.item_ix, top.item_ix, "switching back lands where the person was");
         b3c_teardown(&dir, guard, old);
     }
@@ -3581,15 +2817,16 @@ mod tests {
         let (dir, guard, old, args) = b3c_state("wheel-disarm");
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
+        let pane = vc.update(|_, cx| baaz.read(cx).sidebar_pane.clone());
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
+            pane.update(cx, |h, cx| {
                 h.reveal = Some("s1".to_owned());
                 h.reveal_unknown = Some(("s1".to_owned(), 2));
-                h.sidebar_user_scrolled = false;
-                h.note_sidebar_wheel(cx);
+                h.user_scrolled = false;
+                h.note_wheel(cx);
                 assert!(h.reveal.is_none());
                 assert!(h.reveal_unknown.is_none());
-                assert!(h.sidebar_user_scrolled);
+                assert!(h.user_scrolled);
             })
         });
         b3c_teardown(&dir, guard, old);
@@ -3601,22 +2838,147 @@ mod tests {
         let (dir, guard, old, args) = b3c_state("pinned-reveal");
         let vc = cx.add_empty_window();
         let baaz = b3c_window(vc, args);
+        let pane = vc.update(|_, cx| baaz.read(cx).sidebar_pane.clone());
         vc.update(|_, cx| baaz.update(cx, |h, cx| load_sessions(h, 40, cx)));
         render_once(vc, &baaz);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                h.sidebar_list.scroll_to(gpui::ListOffset { item_ix: 6, offset_in_item: px(0.0) });
-                let before = h.sidebar_list.logical_scroll_top();
-                assert!(h.sidebar_pinned(cx).iter().any(|row| row.id.as_ref() == "s39"), "s39 is pinned");
-                let grouping = h.sidebar_grouping(cx);
+            pane.update(cx, |h, cx| {
+                h.list_state.scroll_to(gpui::ListOffset { item_ix: 6, offset_in_item: px(0.0) });
+                let before = h.list_state.logical_scroll_top();
+                let (pinned, grouping) = {
+                    let list = h.list.read(cx);
+                    (list.pinned(&h.facts.list, cx), list.grouping(&h.facts.list, cx))
+                };
+                assert!(pinned.iter().any(|row| row.id.as_ref() == "s39"), "s39 is pinned");
                 let rows = flatten_sidebar(&grouping, false);
                 h.reveal = Some("s39".to_owned());
-                h.reveal_sidebar_row(&rows, &grouping, "s39", cx);
+                h.reveal_row(&rows, &grouping, "s39", cx);
                 assert!(h.reveal.is_none(), "a pinned row is always in view");
-                let after = h.sidebar_list.logical_scroll_top();
+                let after = h.list_state.logical_scroll_top();
                 assert_eq!((after.item_ix, after.offset_in_item), (before.item_ix, before.offset_in_item));
             })
         });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// Task 4.7: a window whose root view is the real `Harness`, so the
+    /// column renders through the shell's `.cached(...)` embed, the way the
+    /// app draws it.
+    fn rooted_window(
+        cx: &mut TestAppContext,
+        args: crate::Args,
+    ) -> (Entity<Harness>, Entity<SidebarPane>, &mut gpui::VisualTestContext) {
+        let (baaz, vc) =
+            cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        vc.run_until_parked();
+        let pane = vc.update(|_, cx| baaz.read(cx).sidebar_pane.clone());
+        (baaz, pane, vc)
+    }
+
+    /// The session rows the column draws, `(id, label)`, pinned first: what
+    /// its model says, date-grouped.
+    fn drawn_rows(vc: &mut gpui::VisualTestContext, pane: &Entity<SidebarPane>) -> Vec<(String, String)> {
+        vc.update(|_, cx| {
+            let model = pane.read(cx).model(cx);
+            let Grouping::Date(groups) = &*model.grouping else { panic!("the probe groups by date") };
+            model
+                .pinned
+                .iter()
+                .chain(groups.iter().flat_map(|group| group.sessions.iter()))
+                .map(|row| (row.id.to_string(), row.name.to_string()))
+                .collect()
+        })
+    }
+
+    /// Task 4.7, done-when: the sidebar re-renders from model events only. A
+    /// new session row, a title landing and a pin each reach the column
+    /// through the session list's own event — the pane re-renders and draws
+    /// the change — with not one notify of the root.
+    #[gpui::test]
+    fn a_list_change_redraws_the_column_with_no_root_notify(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("list-redraw");
+        let (baaz, pane, vc) = rooted_window(cx, args);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| load_sessions(h, 5, cx)));
+        vc.run_until_parked();
+        let list = vc.update(|_, cx| baaz.read(cx).session_list.clone());
+        let root_notifies = Rc::new(Cell::new(0u32));
+        let count = root_notifies.clone();
+        let _watch = vc.update(|_, cx| cx.observe(&baaz, move |_, _| count.set(count.get() + 1)));
+        let renders = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| pane.read(cx).renders);
+
+        // A new session lands in the list.
+        let before = renders(vc);
+        vc.update(|_, cx| {
+            list.update(cx, |list, cx| {
+                list.sessions.push(list_entry("s-new", false));
+                list.invalidate(cx);
+            })
+        });
+        vc.run_until_parked();
+        assert!(renders(vc) > before, "a new row re-renders the column");
+        assert!(drawn_rows(vc, &pane).iter().any(|(id, _)| id == "s-new"), "the column draws the new row");
+
+        // A title lands: a one-row change (`RowChanged`).
+        let ids: HashSet<String> = std::iter::once("s1".to_owned()).collect();
+        let before = renders(vc);
+        vc.update(|_, cx| {
+            list.update(cx, |list, cx| {
+                list.overrides.entry("s1".to_owned()).or_default().name = Some("Landed title".into());
+                list.rejoin_scoped(Some(&ids), cx);
+            })
+        });
+        vc.run_until_parked();
+        assert!(renders(vc) > before, "a landed title re-renders the column");
+        assert!(
+            drawn_rows(vc, &pane).iter().any(|(id, label)| id == "s1" && label == "Landed title"),
+            "the column draws the landed title"
+        );
+
+        // A pin: the row moves to the Pinned section.
+        let before = renders(vc);
+        vc.update(|_, cx| {
+            list.update(cx, |list, cx| {
+                list.overrides.entry("s2".to_owned()).or_default().pinned = true;
+                list.rejoin_scoped(Some(&std::iter::once("s2".to_owned()).collect()), cx);
+            })
+        });
+        vc.run_until_parked();
+        assert!(renders(vc) > before, "a pin re-renders the column");
+        assert!(
+            vc.update(|_, cx| pane.read(cx).model(cx).pinned.iter().any(|row| row.id.as_ref() == "s2")),
+            "the column draws the pin"
+        );
+
+        assert_eq!(root_notifies.get(), 0, "no list change notified the root");
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// Task 4.7, the other half: a root notify that changed nothing the
+    /// column draws re-renders the root (composition) and leaves the cached
+    /// column alone — no frame-time key, no re-arm. A root fact that did
+    /// move (a row menu opening) re-renders it.
+    #[gpui::test]
+    fn a_root_notify_with_no_list_change_leaves_the_column_alone(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("root-notify");
+        let (baaz, pane, vc) = rooted_window(cx, args);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| load_sessions(h, 5, cx)));
+        vc.run_until_parked();
+        let renders = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| pane.read(cx).renders);
+        let before = renders(vc);
+        take_baaz_root_renders();
+        for _ in 0..3 {
+            vc.update(|_, cx| baaz.update(cx, |_, cx| cx.notify()));
+            vc.run_until_parked();
+        }
+        assert!(take_baaz_root_renders() > 0, "the root re-rendered");
+        assert_eq!(renders(vc), before, "the cached column did not re-render");
+        // A fact only the root knows moved: the column takes it.
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_row_menu_for("s1".to_owned(), cx)));
+        vc.run_until_parked();
+        assert!(renders(vc) > before, "an opened row menu re-renders the column");
+        assert_eq!(vc.update(|_, cx| pane.read(cx).model(cx).row_menu), Some("s1".into()));
         b3c_teardown(&dir, guard, old);
     }
 
@@ -3642,7 +3004,7 @@ mod tests {
                 (filed, pinned, session)
             })
         });
-        let browse = vc.update(|_, cx| baaz.update(cx, |h, cx| h.sidebar_model(cx).browse));
+        let browse = vc.update(|_, cx| baaz.update(cx, |h, cx| h.sidebar_facts(cx).browse));
         let browse = browse.expect("Browse mode carries a browse model");
         assert_eq!(browse.folders.len(), 1);
         assert_eq!(browse.folders[0].name.as_ref(), "Reading");

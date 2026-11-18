@@ -309,7 +309,7 @@ impl Harness {
             return;
         }
         self.import.scanning = true;
-        let (home, known, projects) = self.import_inputs();
+        let (home, known, projects) = self.import_inputs(cx);
         cx.spawn(async move |this, cx| {
             let plan = cx
                 .background_executor()
@@ -336,10 +336,10 @@ impl Harness {
 
     /// What a plan needs from the window: the owner home, the ids Baaz
     /// already has, and the projects as `(id, root)`.
-    fn import_inputs(&self) -> (PathBuf, HashSet<String>, import::ProjectRoots) {
+    fn import_inputs(&self, cx: &gpui::App) -> (PathBuf, HashSet<String>, import::ProjectRoots) {
         let home = import::owner_home();
-        let known: HashSet<String> = self.provider_sessions.keys().cloned().collect();
-        let projects = self.projects.sorted().into_iter().map(|p| (p.id.clone(), p.root.clone())).collect();
+        let known: HashSet<String> = self.session_list.read(cx).provider_sessions.keys().cloned().collect();
+        let projects = self.session_list.read(cx).projects.sorted().into_iter().map(|p| (p.id.clone(), p.root.clone())).collect();
         (home, known, projects)
     }
 
@@ -360,7 +360,7 @@ impl Harness {
         if !import::scan_allowed() {
             return;
         }
-        let (home, known, projects) = self.import_inputs();
+        let (home, known, projects) = self.import_inputs(cx);
         let plan = import::plan(&import::scan_home(&home), &known, &projects, Some(&home));
         self.land_import_plan(plan, cx);
     }
@@ -472,7 +472,7 @@ impl Harness {
         let Some(choice) = self.import_sheet(cx).and_then(|s| s.choice) else { return };
         let queue: VecDeque<(Found, Option<String>)> = import::chosen(&plan, &choice)
             .into_iter()
-            .filter(|found| !self.provider_sessions.contains_key(&found.session_id))
+            .filter(|found| !self.session_list.read(cx).provider_sessions.contains_key(&found.session_id))
             .map(|found| {
                 let project = plan.folder(found.cwd.as_deref().unwrap_or("")).and_then(|f| f.project.clone());
                 (found.clone(), project)
@@ -530,7 +530,7 @@ impl Harness {
         }
         let batch: Vec<(Found, Option<String>)> = run.queue.drain(..size.min(run.queue.len())).collect();
         run.in_flight = true;
-        let known: HashSet<String> = self.provider_sessions.keys().cloned().collect();
+        let known: HashSet<String> = self.session_list.read(cx).provider_sessions.keys().cloned().collect();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -548,7 +548,7 @@ impl Harness {
     /// thread), the journal noted, the sidebar merged, the bar moved.
     fn land_import_batch(&mut self, batch: Vec<(Found, Option<String>)>, result: import::BatchResult, cx: &mut Context<Self>) {
         let records = result.records;
-        let added = import::land(&mut self.provider_sessions, records);
+        let added = self.session_list.update(cx, |list, _| import::land(&mut list.provider_sessions, records));
         let plan = self.import.plan().cloned().unwrap_or_default();
         let Some(run) = self.import.run.as_mut() else { return };
         run.in_flight = false;
@@ -574,14 +574,14 @@ impl Harness {
         let run_id = run.id.clone();
         let sessions: Vec<import::JournalSession> = added
             .iter()
-            .filter_map(|id| self.provider_sessions.get(id))
+            .filter_map(|id| self.session_list.read(cx).provider_sessions.get(id))
             .map(|record| import::JournalSession { provider: record.provider.clone(), session_id: record.session_id.clone() })
             .collect();
         self.import.journal.note(&run_id, sessions);
         if !added.is_empty() {
             self.persist_provider_sessions(cx);
             self.write_import_journal();
-            if self.merge_provider_rows() {
+            if self.merge_provider_rows(cx) {
                 cx.notify();
             }
         }
@@ -618,12 +618,12 @@ impl Harness {
     /// write the store and the journal, re-merge the sidebar and the search
     /// rows, re-plan.
     pub(crate) fn undo_import(&mut self, id: &str, cx: &mut Context<Self>) {
-        let removed = import::undo(&mut self.provider_sessions, &mut self.import.journal, id);
+        let removed = self.session_list.update(cx, |list, _| import::undo(&mut list.provider_sessions, &mut self.import.journal, id));
         self.write_import_journal();
         if !removed.is_empty() {
             self.persist_provider_sessions(cx);
-            self.merge_provider_rows();
-            self.invalidate_list();
+            self.merge_provider_rows(cx);
+            self.invalidate_list(cx);
             self.rebuild_search_index(cx);
         }
         if self.import.run.as_ref().is_some_and(|run| run.id == id) {
@@ -653,7 +653,7 @@ impl Harness {
             self.close_settings(cx);
         }
         if let Some(id) = first {
-            self.reveal = Some(id);
+            self.sidebar_pane.update(cx, |pane, cx| pane.set_reveal(Some(id), false, cx));
         }
         cx.notify();
     }
@@ -725,7 +725,7 @@ impl Harness {
     /// journal is an `Err`.
     pub(crate) fn step_import_undo(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let id = self.import.journal.runs.last().map(|run| run.id.clone()).ok_or("no import run to undo")?;
-        self.undo_stack.retain(|batch| *batch != crate::app::UndoBatch::Imported(id.clone()));
+        self.session_list.update(cx, |list, _| list.undo_stack.retain(|batch| *batch != crate::app::UndoBatch::Imported(id.clone())));
         self.undo_import(&id, cx);
         Ok(())
     }
@@ -735,15 +735,15 @@ impl Harness {
     /// The import line's words under a Claude Code / Codex Settings card,
     /// or `None` (no cache yet, no sessions, or not one of the two). The
     /// Settings page draws it ([`card_line_row`]).
-    pub(crate) fn import_card_line(&self, id: ProviderId) -> Option<CardLine> {
+    pub(crate) fn import_card_line(&self, id: ProviderId, cx: &gpui::App) -> Option<CardLine> {
         let provider = match id {
             ProviderId::ClaudeCode => CLAUDE,
             ProviderId::Codex => CODEX,
             ProviderId::Muse => return None,
         };
         let plan = self.import.plan()?;
-        let live = live_tally(plan, provider, &self.provider_sessions);
-        card_line(&live, provider, self.import.journal.imported(provider, &self.provider_sessions))
+        let live = live_tally(plan, provider, &self.session_list.read(cx).provider_sessions);
+        card_line(&live, provider, self.import.journal.imported(provider, &self.session_list.read(cx).provider_sessions))
     }
 
     /// The connect screen's assist runs for the import offer: "Found N
@@ -819,7 +819,7 @@ impl Harness {
                 });
                 let chosen = import::chosen(plan, choice)
                     .into_iter()
-                    .filter(|found| !self.provider_sessions.contains_key(&found.session_id))
+                    .filter(|found| !self.session_list.read(cx).provider_sessions.contains_key(&found.session_id))
                     .count();
                 Some(ChooseFacts {
                     listed,

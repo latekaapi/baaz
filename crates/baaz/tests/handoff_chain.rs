@@ -183,7 +183,7 @@ fn sidebar_half_wiring_one_row_per_chain() {
         "list builds must collapse member rows to the head row"
     );
     assert!(
-        open.contains("chain_head(&session_id)"),
+        open.contains("chain_head(&session_id, cx)"),
         "opening any id must resolve to the chain head first"
     );
     assert!(

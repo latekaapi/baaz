@@ -765,7 +765,7 @@ impl Harness {
     fn line_view(&self, cx: &App) -> Option<(aui::browse::agent_window::LineState, Option<String>)> {
         if let Some(session) = self.line_session(cx) {
             if let Some(activity) = self.terminal_service.agent_activity(&session) {
-                let name = self.session_lane_provider(&session).label();
+                let name = self.session_lane_provider(&session, cx).label();
                 let host = self.terminal_service.page_host(&session, cx).unwrap_or_default();
                 return Some((Self::agent_line_state(&activity, name, &host), Some(session)));
             }
@@ -951,7 +951,7 @@ impl Harness {
         }
         let state = self.existing_browser(cx)?;
         let page = state.read(cx);
-        let agent = self.active.as_ref().map(|v| v.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id));
+        let agent = self.active.as_ref().map(|v| v.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id, cx));
         let name = agent.map(|p| p.label()).unwrap_or("Muse");
         let menu_open = {
             let pane = self.right_pane.read(cx);
@@ -1148,8 +1148,8 @@ impl Harness {
     pub(crate) fn overlay_content(&mut self, kind: OverlayKind, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         match kind {
             OverlayKind::BrowseMenu => {
-                let model = self.sidebar_model(cx);
-                let browse = model.browse?;
+                let browse = (crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse)
+                    .then(|| self.browse_model(cx))?;
                 let baaz = cx.entity().downgrade();
                 let on_intent = std::rc::Rc::new(move |intent: SidebarIntent, _: &mut Window, cx: &mut App| {
                     let _ = baaz.update(cx, |baaz, cx| baaz.queue_sidebar_intent(intent, cx));

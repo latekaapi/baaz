@@ -496,7 +496,8 @@ impl BrowserView {
     /// opener lands in the background instead.
     ///
     /// Answers whether any tab was placed. Each placement redraws the view,
-    /// so the cached sidebar re-arms on the next frame with the new row: a
+    /// so the root's next render pushes the new row into the cached
+    /// sidebar's facts (`Harness::compose_sidebar`): a
     /// popup drained only by the frame waited for the next input —
     /// ⌘-click and the menu's "Open Link in New Tab" showed nothing until
     /// the person clicked again (owner, 9 Nov).

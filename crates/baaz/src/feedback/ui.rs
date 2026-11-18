@@ -1538,10 +1538,10 @@ impl crate::app::Harness {
     /// report prints them (`Sessions` / `Browse`, `Browser`, `Files`, …);
     /// a session with no title reads `New session`, never a raw id.
     pub(crate) fn feedback_context(&self, window: &mut Window, cx: &gpui::App) -> ScreenContext {
-        let project = self.current_project().map(|p| p.name.clone());
+        let project = self.current_project(cx).map(|p| p.name.clone());
         let session_id = self.feedback_session_id(cx);
         let session_title = session_id.as_ref().map(|id| {
-            self.session_display_name(&self.chain_head(id), cx)
+            self.session_display_name(&self.chain_head(id, cx), cx)
         });
         let size = window.viewport_size();
         ScreenContext {
@@ -3939,12 +3939,12 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         assert!(vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active));
-        let sessions_before = vc.update(|_, cx| baaz.read(cx).sessions.len());
+        let sessions_before = vc.update(|_, cx| baaz.read(cx).session_list.read(cx).sessions.len());
         vc.simulate_keystrokes("cmd-n");
         vc.simulate_keystrokes("tab");
         vc.update(|window, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.sessions.len(), sessions_before, "⌘N opened a session under the layer");
+            assert_eq!(harness.session_list.read(cx).sessions.len(), sessions_before, "⌘N opened a session under the layer");
             assert!(harness.active.is_none(), "⌘N opened a draft under the layer");
             assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
             assert!(
@@ -5251,7 +5251,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
-        let sessions_before = vc.update(|_, cx| baaz.read(cx).sessions.len());
+        let sessions_before = vc.update(|_, cx| baaz.read(cx).session_list.read(cx).sessions.len());
         vc.update(|window, cx| {
             window.dispatch_action(Box::new(crate::app::NewSession), cx);
         });
@@ -5263,7 +5263,7 @@ mod tests {
         });
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.sessions.len(), sessions_before, "⌘N opens no session while Active");
+            assert_eq!(harness.session_list.read(cx).sessions.len(), sessions_before, "⌘N opens no session while Active");
             assert!(harness.active.is_none(), "⌘N opens no draft while Active");
             assert!(!harness.settings_open(cx), "Settings… stays closed while Active");
             assert!(harness.overlays.read(cx).palette().is_none(), "the palette stays closed while Active");

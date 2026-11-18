@@ -208,9 +208,9 @@ pub(super) fn install_fake_muse(
 }
 
 /// Adopt `dir` as the current project and pick muse for new sessions.
-pub(super) fn adopt_for_muse(harness: &mut Harness, dir: &std::path::Path) -> String {
-    let id = harness.projects.add(dir).id.clone();
-    harness.projects.current = Some(id.clone());
+pub(super) fn adopt_for_muse(harness: &mut Harness, dir: &std::path::Path, cx: &mut gpui::App) -> String {
+    let id = harness.session_list.update(cx, |list, _| list.projects.add(dir).id.clone());
+    harness.session_list.update(cx, |list, _| list.projects.current = Some(id.clone()));
     harness.current_project = Some(id.clone());
     harness.new_provider = ProviderId::Muse.as_str().to_owned();
     id
@@ -255,10 +255,10 @@ pub(super) fn provider_draft_window<'a>(
         cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
     vc.run_until_parked();
     let project = vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             harness.provider_factory = factory;
             mark_muse_up(harness);
-            let project = adopt_for_muse(harness, dir);
+            let project = adopt_for_muse(harness, dir, cx);
             harness.new_provider = ProviderId::Codex.as_str().to_owned();
             project
         })
@@ -355,27 +355,29 @@ pub(super) fn parking_factory() -> crate::providers::ProviderFactory {
 /// it: the record plus its sidebar row.
 pub(super) fn z4_seed_stored_codex(harness: &mut Harness, cx: &mut Context<Harness>) {
     use std::collections::HashMap;
-    harness.provider_sessions.insert(
-        "s-codex-old".into(),
-        crate::provider_sessions::ProviderSessionRecord {
-            provider: "codex".into(),
-            session_id: "s-codex-old".into(),
-            workspace: None,
-            project: None,
-            created_ms: 1_700_000_000_000,
-            updated_ms: 1_700_000_000_000,
-            turns: 2,
-            title: Some("Inquiry About Current Model".into()),
-            first_prompt: Some("which model is this".into()),
-            handoff_to: None,
-            handoff_from: None,
-            handoff_from_provider: None,
-            handoff_title: None,
-            display_texts: HashMap::new(),
-            origin: None,
-        },
-    );
-    harness.merge_provider_rows();
+    harness.session_list.update(cx, |list, _| {
+        list.provider_sessions.insert(
+            "s-codex-old".into(),
+            crate::provider_sessions::ProviderSessionRecord {
+                provider: "codex".into(),
+                session_id: "s-codex-old".into(),
+                workspace: None,
+                project: None,
+                created_ms: 1_700_000_000_000,
+                updated_ms: 1_700_000_000_000,
+                turns: 2,
+                title: Some("Inquiry About Current Model".into()),
+                first_prompt: Some("which model is this".into()),
+                handoff_to: None,
+                handoff_from: None,
+                handoff_from_provider: None,
+                handoff_title: None,
+                display_texts: HashMap::new(),
+                origin: None,
+            },
+        );
+    });
+    harness.merge_provider_rows(cx);
     // The failed session's own right pane stands open: the failure
     // lands on it, like every activation lands on its session's.
     harness.set_override(

@@ -1425,16 +1425,18 @@ mod tests {
             baaz.update(cx, |harness, cx| {
                 harness.ensure_tabs_loaded(cx);
                 let owner = super::Owner::Session("tab-close".to_owned());
-                harness.overrides.insert(
-                    "tab-close".to_owned(),
-                    crate::sessions::SessionMeta {
-                        right: Some(crate::sessions::RightState {
-                            browser_url: Some("https://seed.example/".into()),
+                harness.session_list.update(cx, |list, _| {
+                    list.overrides.insert(
+                        "tab-close".to_owned(),
+                        crate::sessions::SessionMeta {
+                            right: Some(crate::sessions::RightState {
+                                browser_url: Some("https://seed.example/".into()),
+                                ..Default::default()
+                            }),
                             ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                );
+                        },
+                    );
+                });
                 let first = harness.browser.update(cx, |browser, _| browser.tabs.open(None, owner.clone(), "https://a.example/", None));
                 let second = harness.browser.update(cx, |browser, _| browser.tabs.open(None, owner.clone(), "https://b.example/", Some(first)));
                 let page_second = harness.ensure_tab_page("tab-close", second, window, cx);
@@ -1463,7 +1465,7 @@ mod tests {
                 );
                 assert!(
                     harness
-                        .overrides
+                        .session_list.read(cx).overrides
                         .get("tab-close")
                         .and_then(|meta| meta.right.clone())
                         .and_then(|right| right.browser_url)

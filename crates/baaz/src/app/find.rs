@@ -59,7 +59,7 @@ impl Harness {
         let scope: Option<String> = if crate::layout::Layout::get(cx).search_all_projects {
             None
         } else {
-            self.current_project().map(|p| p.root.to_string_lossy().into_owned())
+            self.current_project(cx).map(|p| p.root.to_string_lossy().into_owned())
         };
         let work = move || match crate::search::open() {
             Ok(connection) => {
@@ -105,8 +105,8 @@ impl Harness {
     /// the rows without a window; [`Self::rebuild_search_index`] writes
     /// them to `search.db` (`docs/22-handoff.md` §8.4).
     #[cfg(test)]
-    pub(crate) fn search_session_rows(&self) -> Vec<crate::search::SessionRow> {
-        self.search_sync_rows().into_iter().map(|(row, _, _)| row).collect()
+    pub(crate) fn search_session_rows(&self, cx: &gpui::App) -> Vec<crate::search::SessionRow> {
+        self.search_sync_rows(cx).into_iter().map(|(row, _, _)| row).collect()
     }
 
     /// [`Self::search_session_rows`] with what [`crate::search::sync_sessions`]
@@ -115,8 +115,8 @@ impl Harness {
     /// everything that decides what is written — the row's own words and
     /// each body source's `updated_at_us`. No body text is read or cloned
     /// here: this runs on the UI thread.
-    pub(crate) fn search_sync_rows(&self) -> Vec<(crate::search::SessionRow, Vec<String>, i64)> {
-        self.search_rows_scoped(None).unwrap_or_default()
+    pub(crate) fn search_sync_rows(&self, cx: &gpui::App) -> Vec<(crate::search::SessionRow, Vec<String>, i64)> {
+        self.search_rows_scoped(None, cx).unwrap_or_default()
     }
 
     /// [`Self::search_sync_rows`] for the sessions `only` names (`None`:
@@ -126,8 +126,7 @@ impl Harness {
     /// caller rebuilds everything.
     pub(crate) fn search_rows_scoped(
         &self,
-        only: Option<&std::collections::HashSet<String>>,
-    ) -> Option<Vec<(crate::search::SessionRow, Vec<String>, i64)>> {
+        only: Option<&std::collections::HashSet<String>>, cx: &gpui::App) -> Option<Vec<(crate::search::SessionRow, Vec<String>, i64)>> {
         use std::collections::HashMap;
         let wanted = |id: &str| only.is_none_or(|ids| ids.contains(id));
         // One cache over the whole build: each distinct index root is
@@ -138,20 +137,20 @@ impl Harness {
         // of UI thread per rebuild on 2,600 sessions (perf P1). The marked
         // ids are collected once instead.
         let marked: std::collections::HashSet<&str> = self
-            .sessions
+            .session_list.read(cx).sessions
             .iter()
             .filter(|entry| entry.side_marker && wanted(&entry.id))
             .map(|entry| entry.id.as_str())
             .collect();
         let is_side = |id: &str| {
-            self.side_sessions.contains(id)
-                || self.overrides.get(id).is_some_and(|meta| meta.side_session)
+            self.session_list.read(cx).side_sessions.contains(id)
+                || self.session_list.read(cx).overrides.get(id).is_some_and(|meta| meta.side_session)
                 || marked.contains(id)
         };
         let mut per_session: HashMap<String, crate::search::SessionRow> = HashMap::new();
         let indexed: Vec<(&String, &crate::index::IndexEntry)> = match only {
-            Some(ids) => ids.iter().filter_map(|id| self.index.get_key_value(id)).collect(),
-            None => self.index.iter().collect(),
+            Some(ids) => ids.iter().filter_map(|id| self.session_list.read(cx).index.get_key_value(id)).collect(),
+            None => self.session_list.read(cx).index.iter().collect(),
         };
         for (session_id, entry) in indexed {
             // Title side sessions never reach the search palette: their
@@ -159,7 +158,7 @@ impl Harness {
             if is_side(session_id) {
                 continue;
             }
-            let meta = self.overrides.get(session_id);
+            let meta = self.session_list.read(cx).overrides.get(session_id);
             let name =
                 meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
             let derived = meta
@@ -177,7 +176,7 @@ impl Harness {
             // once rather than once per indexed session.
             let adopted = workspace
                 .as_deref()
-                .and_then(|root| self.projects.find_by_canonical_root(root, &mut canon))
+                .and_then(|root| self.session_list.read(cx).projects.find_by_canonical_root(root, &mut canon))
                 .map(|p| p.name.clone());
             per_session.insert(
                 session_id.clone(),
@@ -196,11 +195,11 @@ impl Harness {
         // names them, and their words come from their stored transcripts
         // ([`crate::provider_search`]) when the row is written. A session
         // both stores know (never expected) keeps its index row.
-        for (session_id, record) in &self.provider_sessions {
+        for (session_id, record) in &self.session_list.read(cx).provider_sessions {
             if !wanted(session_id) || per_session.contains_key(session_id) || is_side(session_id) {
                 continue;
             }
-            let meta = self.overrides.get(session_id);
+            let meta = self.session_list.read(cx).overrides.get(session_id);
             let trimmed = |text: Option<&String>| text.map(|t| t.trim()).filter(|t| !t.is_empty()).map(str::to_owned);
             let title = trimmed(record.title.as_ref()).unwrap_or_default();
             let first_prompt = trimmed(record.first_prompt.as_ref()).unwrap_or_default();
@@ -213,7 +212,7 @@ impl Harness {
             let workspace = record.workspace.as_deref().map(|root| canon.get(root));
             let adopted = workspace
                 .as_deref()
-                .and_then(|root| self.projects.find_by_canonical_root(root, &mut canon))
+                .and_then(|root| self.session_list.read(cx).projects.find_by_canonical_root(root, &mut canon))
                 .map(|p| p.name.clone());
             per_session.insert(
                 session_id.clone(),
@@ -240,7 +239,7 @@ impl Harness {
             Some(ids) => {
                 // Standing alone: every named id rowed, none in a chain —
                 // each is its own singleton head below.
-                let alone = self.with_chain_index(|chains| {
+                let alone = self.with_chain_index(cx, |chains| {
                     ids.iter().all(|id| {
                         per_session.contains_key(id) && chains.head(id) == *id && chains.members(id).len() == 1
                     })
@@ -250,13 +249,13 @@ impl Harness {
                 }
                 None
             }
-            None => Some(self.chain_index()),
+            None => Some(self.chain_index(cx)),
         };
         let head_of = |id: &str| chain_index.as_ref().map_or_else(|| id.to_owned(), |chains| chains.head(id));
         // The sidebar's labels by id: one pass, not a scan of the list per
         // head (2,600 heads × 2,600 rows).
         let labels: HashMap<&str, &String> = self
-            .sessions
+            .session_list.read(cx).sessions
             .iter()
             .filter(|entry| wanted(&entry.id))
             .map(|entry| (entry.id.as_str(), &entry.label))
@@ -278,7 +277,7 @@ impl Harness {
                 for member in members {
                     if let Some(row) = per_session.remove(&member) {
                         let body_ids = vec![member.clone()];
-                        let fingerprint = self.search_fingerprint(&row, &body_ids);
+                        let fingerprint = self.search_fingerprint(&row, &body_ids, cx);
                         out.push((row, body_ids, fingerprint));
                     }
                 }
@@ -337,7 +336,7 @@ impl Harness {
                     format!("{}\n{}", base.body, extra.join("\n"))
                 };
             }
-            let fingerprint = self.search_fingerprint(&base, &body_ids);
+            let fingerprint = self.search_fingerprint(&base, &body_ids, cx);
             out.push((base, body_ids, fingerprint));
         }
         Some(out)
@@ -345,20 +344,20 @@ impl Harness {
 
     /// A stable hash of what a search row would write: its words and each
     /// body source's last activity. Never 0, which means "always write".
-    fn search_fingerprint(&self, row: &crate::search::SessionRow, body_ids: &[String]) -> i64 {
+    fn search_fingerprint(&self, row: &crate::search::SessionRow, body_ids: &[String], cx: &gpui::App) -> i64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         (&row.session_id, &row.label, &row.title, &row.first_prompt, &row.body, &row.project, &row.workspace)
             .hash(&mut hasher);
         for id in body_ids {
             id.hash(&mut hasher);
-            self.index.get(id).and_then(|entry| entry.updated_at_us).hash(&mut hasher);
+            self.session_list.read(cx).index.get(id).and_then(|entry| entry.updated_at_us).hash(&mut hasher);
             // A provider transcript grows with each settled exchange, which
             // moves its record's turn count and stamp. Hashed only when there
             // is a record: a Muse row's fingerprint stays what it was before
             // provider rows existed, so an upgrade rewrites only the new rows
             // (hashing a `None` here rewrote all 2,612 rows once, 23 s).
-            if let Some(record) = self.provider_sessions.get(id) {
+            if let Some(record) = self.session_list.read(cx).provider_sessions.get(id) {
                 (record.turns, record.updated_ms).hash(&mut hasher);
             }
         }
@@ -408,7 +407,7 @@ impl Harness {
         if ids.is_empty() {
             return;
         }
-        let Some(rows) = self.search_rows_scoped(Some(ids)) else {
+        let Some(rows) = self.search_rows_scoped(Some(ids), cx) else {
             self.rebuild_search_index(cx);
             return;
         };
@@ -418,7 +417,7 @@ impl Harness {
             SEARCH_SCOPED_REBUILDS.set(SEARCH_SCOPED_REBUILDS.get() + 1);
         }
         let index_path = crate::index::index_path();
-        let provider_of = self.search_body_owners();
+        let provider_of = self.search_body_owners(cx);
         let work = move || {
             let _turn = SEARCH_REBUILD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let Ok(mut connection) = crate::search::open() else { return };
@@ -439,10 +438,10 @@ impl Harness {
         #[cfg(test)]
         SEARCH_REBUILDS.set(SEARCH_REBUILDS.get() + 1);
         let at = std::time::Instant::now();
-        let rows = self.search_sync_rows();
+        let rows = self.search_sync_rows(cx);
         crate::log::boot_mark(&format!("search-rows-built rows={} in={}ms", rows.len(), at.elapsed().as_millis()));
         let index_path = crate::index::index_path();
-        let provider_of = self.search_body_owners();
+        let provider_of = self.search_body_owners(cx);
         let work = move || {
             // One rebuild at a time: two overlapping ones fought over the
             // database lock (8 s and 20 s at boot), and the second now finds
@@ -477,19 +476,19 @@ impl Harness {
 
     /// Which search body ids are provider-lane sessions, and whose: their
     /// words come from their stored transcripts, never from Muse's index.
-    pub(crate) fn search_body_owners(&self) -> std::collections::HashMap<String, String> {
-        self.provider_sessions
+    pub(crate) fn search_body_owners(&self, cx: &gpui::App) -> std::collections::HashMap<String, String> {
+        self.session_list.read(cx).provider_sessions
             .iter()
-            .filter(|(id, _)| !self.index.contains_key(*id))
+            .filter(|(id, _)| !self.session_list.read(cx).index.contains_key(*id))
             .map(|(id, record)| (id.clone(), record.provider.clone()))
             .collect()
     }
 
     /// The badge a search row wears: its project's display name, or the
     /// folder name when no project holds the session.
-    pub(crate) fn search_badge(&self, session_id: &str) -> Option<String> {
-        let entry = self.sessions.iter().find(|e| e.id == session_id)?;
-        match entry.project.as_deref().and_then(|id| self.projects.find(id)) {
+    pub(crate) fn search_badge(&self, session_id: &str, cx: &gpui::App) -> Option<String> {
+        let entry = self.session_list.read(cx).sessions.iter().find(|e| e.id == session_id)?;
+        match entry.project.as_deref().and_then(|id| self.session_list.read(cx).projects.find(id)) {
             Some(project) => Some(project.name.clone()),
             None => entry.workspace.as_deref().map(crate::sidebar::workspace_folder),
         }
@@ -520,7 +519,7 @@ impl Harness {
         }
         for hit in &self.search_files {
             let label = self
-                .sessions
+                .session_list.read(cx).sessions
                 .iter()
                 .find(|entry| entry.id == hit.session_id)
                 .map(|entry| entry.label.clone())

@@ -441,7 +441,7 @@ impl Harness {
                         let session = id
                             .strip_prefix("s:")
                             .or_else(|| id.strip_prefix("f:").and_then(|rest| rest.split_once(':').map(|(session, _)| session)));
-                        let badge = session.and_then(|session| self.search_badge(session)).map(SharedString::from);
+                        let badge = session.and_then(|session| self.search_badge(session, cx)).map(SharedString::from);
                         (id, label, detail, badge)
                     })
                     .collect(),
@@ -497,7 +497,7 @@ impl Harness {
     pub(crate) fn project_candidates(&self, cx: &App) -> Vec<ProjectRow> {
         let mut rows = Vec::new();
         let visible = self.visible_sessions(cx);
-        for project in self.ordered_projects() {
+        for project in self.ordered_projects(cx) {
             let root = project.root.to_string_lossy().into_owned();
             let count = visible.iter().filter(|e| e.project.as_deref() == Some(project.id.as_str())).count();
             // No coloured tiles anywhere: adopted projects wear the folder
@@ -512,7 +512,7 @@ impl Harness {
             });
         }
         let adopted: std::collections::HashSet<String> = self
-            .projects
+            .session_list.read(cx).projects
             .projects
             .iter()
             .map(|p| crate::projects::canonical_path(&p.root).to_string_lossy().into_owned())
@@ -520,7 +520,7 @@ impl Harness {
         // Baaz's own state directory holds the tier probe's throwaway
         // workspace; it is never a project anyone means to adopt.
         let own_state = [crate::store::support_dir(), crate::store::default_support_dir()];
-        for (root, count, _) in crate::index::workspaces(&self.index) {
+        for (root, count, _) in crate::index::workspaces(&self.session_list.read(cx).index) {
             if adopted.contains(&crate::projects::canonical_str(&root)) {
                 continue;
             }

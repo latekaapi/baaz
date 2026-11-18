@@ -456,19 +456,19 @@ impl Harness {
         let name = if name.is_empty() { "Fix ledger chart" } else { name };
         let id = format!("fixture-{}", name.to_lowercase().replace(' ', "-"));
         self.ensure_tabs_loaded(cx);
-        if !self.sessions.iter().any(|entry| entry.id == id) {
+        if !self.session_list.read(cx).sessions.iter().any(|entry| entry.id == id) {
             let now = chrono::Local::now();
             let space = self.browser.read(cx).browse_space();
             let workspace =
-                self.current_project().map(|project| project.root.to_string_lossy().into_owned());
-            self.sessions.push(crate::sidebar::local_started_row(&id, name.to_owned(), space.clone(), workspace, now));
-            self.invalidate_list();
+                self.current_project(cx).map(|project| project.root.to_string_lossy().into_owned());
+            self.session_list.update(cx, |list, _| list.sessions.push(crate::sidebar::local_started_row(&id, name.to_owned(), space.clone(), workspace, now)));
+            self.invalidate_list(cx);
         }
         let space = self.browser.read(cx).browse_space();
         let tab_id = self.browser.update(cx, |browser, _| browser.tabs.open(space, Owner::Session(id.clone()), "https://example.com", None));
         self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         // The agent's tools can reach it, so a live check needs no provider.
-        let root = self.current_project().map(|project| project.root.clone()).unwrap_or_else(std::env::temp_dir);
+        let root = self.current_project(cx).map(|project| project.root.clone()).unwrap_or_else(std::env::temp_dir);
         self.terminal_service.register_session(&id, root);
         self.ensure_tab_page(&id, tab_id, window, cx);
         self.set_mode(crate::layout::Mode::Browse, window, cx);

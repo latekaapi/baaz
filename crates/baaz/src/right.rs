@@ -1009,7 +1009,7 @@ impl Harness {
             self.browser.update(cx, |browser, _| browser.browser_url_focus_armed = false);
         }
         let mut right = self
-            .overrides
+            .session_list.read(cx).overrides
             .get(session_id)
             .and_then(|meta| meta.right.clone())
             .unwrap_or_default();
@@ -2925,7 +2925,7 @@ mod tests {
         });
         vc.run_until_parked();
         let root = vc
-            .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
+            .update(|_, cx| baaz.read(cx).right_project(cx).map(|(root, _)| root))
             .expect("the hermetic workspace is adopted at boot");
         vc.update(|window, cx| {
             let handle = files_handler(baaz.read(cx).right_pane.downgrade(), root.clone());
@@ -3042,7 +3042,7 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.refresh_right_now(cx)));
         vc.run_until_parked();
         let pane = vc.update(|_, cx| baaz.read(cx).right_pane.clone());
-        let root = vc.update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root)).expect("the repo is the project");
+        let root = vc.update(|_, cx| baaz.read(cx).right_project(cx).map(|(root, _)| root)).expect("the repo is the project");
         let rows = |vc: &mut gpui::VisualTestContext| {
             vc.update(|_, cx| {
                 pane.read(cx)
@@ -3089,7 +3089,7 @@ mod tests {
         std::fs::write(state.2.join("long.py"), format!("x = {}\n", "1 + ".repeat(200))).unwrap();
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.show_right(crate::layout::RightKind::Files, cx)));
         vc.run_until_parked();
-        let root = vc.update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root)).expect("the hermetic workspace is adopted at boot");
+        let root = vc.update(|_, cx| baaz.read(cx).right_project(cx).map(|(root, _)| root)).expect("the hermetic workspace is adopted at boot");
         vc.update(|window, cx| {
             files_handler(baaz.read(cx).right_pane.downgrade(), root.clone())(&FileTreeAction::Select(SharedString::from("long.py")), window, cx);
         });

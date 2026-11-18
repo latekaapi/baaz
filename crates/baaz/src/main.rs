@@ -110,6 +110,7 @@ mod setup;
 mod shot;
 mod sidebar;
 mod sidebar_view;
+mod session_list;
 mod skills;
 mod skills_page;
 mod steps;

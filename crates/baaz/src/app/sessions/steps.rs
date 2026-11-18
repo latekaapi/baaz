@@ -156,7 +156,7 @@ impl Harness {
             send: self.args.send.is_some(),
             steps_pending: crate::steps::steps_need_a_session(&self.args.steps),
             steps_begin_with_new: crate::steps::steps_begin_with_new(&self.args.steps),
-            sessions_loaded: self.sessions_loaded,
+            sessions_loaded: self.session_list.read(cx).sessions_loaded,
         }) {
             BootDecision::Idle | BootDecision::WaitForList => return,
             BootDecision::Open => {}
@@ -184,7 +184,7 @@ impl Harness {
         let id = if wanted == "latest" {
             // The list arrives `updatedAt` descending, and the sidebar sorts on
             // the same field, so the newest row is the head of the grouping.
-            self.sessions.iter().filter(|e| !e.hidden).max_by_key(|e| e.updated).map(|e| e.id.clone())
+            self.session_list.read(cx).sessions.iter().filter(|e| !e.hidden).max_by_key(|e| e.updated).map(|e| e.id.clone())
         } else {
             Some(wanted)
         };
@@ -305,24 +305,24 @@ impl Harness {
 
     /// `hidden`: list hidden sessions anyway (a toggle).
     pub(crate) fn step_toggle_hidden(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        self.show_hidden = !self.show_hidden;
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| list.show_hidden = !list.show_hidden);
+        self.invalidate_list(cx);
         cx.notify();
         Ok(())
     }
 
     /// `empty`: list sessions with no turns anyway (a toggle).
     pub(crate) fn step_toggle_empty(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        self.show_empty = !self.show_empty;
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| list.show_empty = !list.show_empty);
+        self.invalidate_list(cx);
         cx.notify();
         Ok(())
     }
 
     /// `show-archived`: list archived sessions anyway (a toggle).
     pub(crate) fn step_toggle_archived(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        self.show_archived = !self.show_archived;
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| list.show_archived = !list.show_archived);
+        self.invalidate_list(cx);
         cx.notify();
         Ok(())
     }
@@ -416,7 +416,7 @@ impl Harness {
         let pane = crate::sidebar_view::take_sidebar_pane_renders();
         let root = crate::sidebar_view::take_baaz_root_renders();
         let drains = crate::sidebar_view::take_sidebar_wheel_drains();
-        let before = self.sidebar_list_top();
+        let before = self.sidebar_list_top(cx);
         let size = window.bounds().size;
         let at = point(px(100.0), size.height * 0.4);
         // Dispatched after this update returns: the sidebar's own wheel
@@ -438,12 +438,12 @@ impl Harness {
                     );
                 }
             });
-            let _ = this.update(cx, |this, _| {
-                let after = this.sidebar_list_top();
+            let _ = this.update(cx, |this, cx| {
+                let after = this.sidebar_list_top(cx);
                 // The flattened row count (heads + folds + sessions): `item_ix`
                 // walks the flattened model, so a probe comparing it against
                 // `rows=` needs the same count.
-                let rows = this.prev_sidebar_rows.len();
+                let rows = this.sidebar_pane.read(cx).prev_rows.len();
                 let centre = crate::session::take_centre_renders();
                 crate::baaz_log!(
                     "sbwheel dy={dy} n={n} sidebar_ix={bix}+{boff:.1}->{aix}+{aoff:.1} rows={rows} pane={pane} root={root} centre={centre} drains={drains}",
@@ -477,9 +477,7 @@ impl Harness {
         let (to, step) = rest.split_once(',').unwrap_or((rest, "4"));
         let to: f32 = to.trim().parse().map_err(|_| format!("`{to}` is not a width"))?;
         let step: f32 = step.trim().parse().map_err(|_| format!("`{step}` is not a step in px"))?;
-        self.reveal = None;
-        self.reveal_unknown = None;
-        self.sidebar_user_scrolled = true;
+        self.sidebar_pane.update(cx, |pane, _| pane.user_owns_list());
         self.resize.sweep = Some(crate::resize::ResizeSweep::new(to, step));
         self.resize.active = true;
         self.resize.scripted = true;
@@ -490,8 +488,9 @@ impl Harness {
     /// `sidebar-scroll-sweep:<dy,finger_ticks,tail_ticks>`: a frame-paced
     /// sidebar wheel gesture — `dy` held for
     /// `finger_ticks` rendered frames, then decaying to 5% of `dy` over
-    /// `tail_ticks` more, one push per tick via
-    /// [`Self::push_sidebar_scroll_sweep`]. The
+    /// `tail_ticks` more, one push per tick into the sidebar pane's own
+    /// accumulator (`SidebarPane::start_scroll_sweep`; the pane advances it
+    /// once per render). The
     /// in-process fallback for a real `CGEvent` gesture: where the session
     /// cannot post or confirm a real event (no activatable app, no readable
     /// screencapture), a posted event's landing window cannot be confirmed
@@ -502,7 +501,8 @@ impl Harness {
     /// step.
     pub(crate) fn step_sidebar_scroll_sweep(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let (dy, finger, tail) = parse_scroll_sweep(rest)?;
-        self.sidebar_scroll_sweep = Some(crate::resize::ScrollSweep::new(dy, finger, tail));
+        let sweep = crate::resize::ScrollSweep::new(dy, finger, tail);
+        self.sidebar_pane.update(cx, |pane, cx| pane.start_scroll_sweep(sweep, cx));
         cx.notify();
         Ok(())
     }
@@ -541,14 +541,18 @@ impl Harness {
         }
         // A probe the drag must not move keeps every line's index equal;
         // the list walks down as `item_ix` grows.
-        let top = self.sidebar_list_top();
+        let top = self.sidebar_list_top(cx);
+        let (reveal, scrolled) = {
+            let pane = self.sidebar_pane.read(cx);
+            (pane.reveal.clone(), pane.user_scrolled)
+        };
         crate::baaz_log!(
             "rsdrag {phase} w={} sidebar_ix={}+{:.1} reveal={:?} scrolled={} ract={}",
             self.resize.width,
             top.item_ix,
             f32::from(top.offset_in_item),
-            self.reveal,
-            self.sidebar_user_scrolled,
+            reveal,
+            scrolled,
             self.resize.active
         );
         Ok(())
@@ -572,10 +576,11 @@ impl Harness {
     /// fails the step. Free: no pointer, no turn.
     pub(crate) fn step_row_detail(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let id = rest.trim();
-        if !id.is_empty() && !self.sessions.iter().any(|entry| entry.id == id) {
+        if !id.is_empty() && !self.session_list.read(cx).sessions.iter().any(|entry| entry.id == id) {
             return Err(format!("no sidebar row `{id}`"));
         }
-        self.forced_detail = if id.is_empty() { None } else { Some(id.to_owned()) };
+        let forced = if id.is_empty() { None } else { Some(id.to_owned()) };
+        self.sidebar_pane.update(cx, |pane, _| pane.detail.forced = forced);
         cx.notify();
         Ok(())
     }
@@ -597,14 +602,20 @@ impl Harness {
     pub(crate) fn step_hover(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let id = rest.trim();
         let (known, bounds) = self
+            .sidebar_pane
+            .read(cx)
+            .detail
             .selected_row_bounds
             .clone()
             .ok_or("no selected row bounds yet (pair with `click:` and a `wait:`)")?;
         if !id.is_empty() && known != id {
             return Err(format!("`{id}` is not the selected row (`{known}`); pair with `click:{id}` first"));
         }
-        self.note_row_hover(known.clone(), true, Some(bounds), cx);
-        match crate::sidebar_view::row_detail_seat(&self.sidebar_bounds, &bounds) {
+        let seat_edge = self.sidebar_pane.update(cx, |pane, cx| {
+            pane.note_row_hover(known.clone(), true, Some(bounds), cx);
+            pane.detail.pane_bounds
+        });
+        match crate::sidebar_view::row_detail_seat(&seat_edge, &bounds) {
             Some(seat) => crate::baaz_log!(
                 "hover id={known} seat={:.0},{:.0}",
                 f32::from(seat.x),
@@ -625,7 +636,7 @@ impl Harness {
             return Ok(());
         }
         let id = self
-            .projects
+            .session_list.read(cx).projects
             .projects
             .iter()
             .find(|p| p.name == name)
@@ -700,14 +711,14 @@ impl Harness {
         if id.is_empty() {
             return Err("no session id".into());
         }
-        let head = self.chain_head(id);
+        let head = self.chain_head(id, cx);
         if !self.knows_session(id, cx) && !self.knows_session(&head, cx) {
             return Err(format!("no session `{id}`"));
         }
-        if self.overrides.get(&head).is_some_and(|m| m.hidden) && !self.show_hidden {
+        if self.session_list.read(cx).overrides.get(&head).is_some_and(|m| m.hidden) && !self.session_list.read(cx).show_hidden {
             return Err(format!("session `{id}` is hidden"));
         }
-        if self.overrides.get(&head).is_some_and(|m| m.archived) && !self.show_archived {
+        if self.session_list.read(cx).overrides.get(&head).is_some_and(|m| m.archived) && !self.session_list.read(cx).show_archived {
             return Err(format!("session `{id}` is archived"));
         }
         if quiet {
@@ -737,7 +748,7 @@ impl Harness {
         }
         let on = !crate::layout::Layout::get(cx).fold_finished_turns;
         crate::layout::Layout::update(cx, |layout| crate::settings::apply_setting(layout, "fold_finished_turns", on));
-        self.invalidate_list();
+        self.invalidate_list(cx);
         Ok(())
     }
 }

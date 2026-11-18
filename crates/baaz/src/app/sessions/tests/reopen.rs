@@ -76,7 +76,7 @@ fn z4_a_failed_reopen_lands_inline_on_the_clicked_session(cx: &mut gpui::TestApp
             assert!(!harness.open_state.switch_pending, "the verbs waiting on the switch are released");
             // The header names the clicked session, like the selected
             // row does.
-            let head = harness.chain_head("s-codex-old");
+            let head = harness.chain_head("s-codex-old", cx);
             let header = harness.collapsed_head_label(&head, cx).expect("the clicked session has a label");
             let row = harness
                 .visible_sessions(cx)
@@ -211,10 +211,12 @@ fn a_replayed_reopen_asks_no_model_for_anything(cx: &mut gpui::TestAppContext) {
             z4_seed_stored_codex(harness, cx);
             // The record already counted the one exchange the replay
             // folds, as an import or an earlier session counted it.
-            if let Some(record) = harness.provider_sessions.get_mut("s-codex-old") {
-                record.turns = 1;
-                record.title = None;
-            }
+            harness.session_list.update(cx, |list, _| {
+                if let Some(record) = list.provider_sessions.get_mut("s-codex-old") {
+                    record.turns = 1;
+                    record.title = None;
+                }
+            });
             crate::layout::Layout::stage(cx, |layout| {
                 layout.auto_summary = true;
                 layout.auto_title = true;
@@ -246,16 +248,16 @@ fn a_replayed_reopen_asks_no_model_for_anything(cx: &mut gpui::TestAppContext) {
             "the reopen resumed and replayed"
         );
         assert_eq!(
-            harness.provider_sessions.get("s-codex-old").map(|record| record.turns),
+            harness.session_list.read(cx).provider_sessions.get("s-codex-old").map(|record| record.turns),
             Some(1),
             "the replay counted nothing"
         );
         assert!(asked.borrow().is_empty(), "a replayed reopen asks no model: {:?}", asked.borrow());
-        assert!(!harness.byline_live.contains("s-codex-old"), "no rewrite started");
+        assert!(!harness.session_list.read(cx).byline_live.contains("s-codex-old"), "no rewrite started");
         // Opening is not a turn: the row's second line stays what it
         // was (owner, 2026-11-12: clicking a row rewrote its byline).
         assert_eq!(
-            harness.overrides.get("s-codex-old").and_then(|meta| meta.last_ask.clone()).as_deref(),
+            harness.session_list.read(cx).overrides.get("s-codex-old").and_then(|meta| meta.last_ask.clone()).as_deref(),
             Some("Rewritten ask"),
             "a reopen leaves the byline alone"
         );
@@ -295,12 +297,12 @@ fn an_imported_session_from_an_unadopted_folder_shows_in_unfiled(cx: &mut gpui::
                 origin: Some(crate::provider_sessions::ORIGIN_IMPORTED.into()),
             };
             record.project = None;
-            harness.index_loaded = true;
-            harness.sessions_loaded = true;
+            harness.session_list.update(cx, |list, _| list.index_loaded = true);
+            harness.session_list.update(cx, |list, _| list.sessions_loaded = true);
             crate::layout::Layout::stage(cx, |layout| layout.group_by = Some(crate::layout::GroupBy::Project));
-            let added = crate::import::land(&mut harness.provider_sessions, vec![record]);
+            let added = harness.session_list.update(cx, |list, _| crate::import::land(&mut list.provider_sessions, vec![record]));
             assert_eq!(added, vec!["imp-1".to_owned()]);
-            harness.merge_provider_rows();
+            harness.merge_provider_rows(cx);
         });
     });
     vc.run_until_parked();
@@ -335,16 +337,18 @@ fn a_reopen_that_replays_more_than_the_record_counted_keeps_the_rows_time(cx: &m
             harness.provider_factory = factory;
             mark_muse_up(harness);
             z4_seed_stored_codex(harness, cx);
-            if let Some(record) = harness.provider_sessions.get_mut("s-codex-old") {
-                record.turns = 0;
-            }
-            harness.merge_provider_rows();
+            harness.session_list.update(cx, |list, _| {
+                if let Some(record) = list.provider_sessions.get_mut("s-codex-old") {
+                    record.turns = 0;
+                }
+            });
+            harness.merge_provider_rows(cx);
         });
     });
-    let row_time = |harness: &Harness| {
-        harness.sessions.iter().find(|entry| entry.id == "s-codex-old").map(|entry| entry.updated.timestamp_millis())
+    let row_time = |harness: &Harness, cx: &gpui::App| {
+        harness.session_list.read(cx).sessions.iter().find(|entry| entry.id == "s-codex-old").map(|entry| entry.updated.timestamp_millis())
     };
-    let before = vc.update(|_, cx| row_time(baaz.read(cx)));
+    let before = vc.update(|_, cx| row_time(baaz.read(cx), cx));
     assert_eq!(before, Some(1_700_000_000_000), "the row reads its record's time");
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| harness.resume_quiet("s-codex-old".into(), window, cx));
@@ -356,10 +360,10 @@ fn a_reopen_that_replays_more_than_the_record_counted_keeps_the_rows_time(cx: &m
             harness.active.clone().expect("the reopened lane is open").read(cx).session_id,
             "s-codex-old"
         );
-        let record = harness.provider_sessions.get("s-codex-old").expect("the record");
+        let record = harness.session_list.read(cx).provider_sessions.get("s-codex-old").expect("the record");
         assert_eq!(record.turns, 1, "the replay may correct the count");
         assert_eq!(record.updated_ms, 1_700_000_000_000, "opening is not activity: the record keeps its time");
-        assert_eq!(row_time(harness), before, "the row keeps its time, so it keeps its place");
+        assert_eq!(row_time(harness, cx), before, "the row keeps its time, so it keeps its place");
     });
     lane_restore(state);
 }
@@ -384,7 +388,7 @@ fn a_provider_session_reopens_with_its_history_after_a_restart(cx: &mut gpui::Te
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -396,14 +400,16 @@ fn a_provider_session_reopens_with_its_history_after_a_restart(cx: &mut gpui::Te
     // One turn settles, so the record counts history: a reopened
     // draft with no turns opens fresh instead (see the next test).
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
-            crate::provider_sessions::note_settled_turn_counted(
-                &mut harness.provider_sessions,
-                &open_id,
-                1,
-                true,
-            );
-            crate::provider_sessions::write(&harness.provider_sessions);
+        baaz.update(cx, |harness, cx| {
+            harness.session_list.update(cx, |list, _| {
+                crate::provider_sessions::note_settled_turn_counted(
+                    &mut list.provider_sessions,
+                    &open_id,
+                    1,
+                    true,
+                );
+            });
+            crate::provider_sessions::write(&harness.session_list.read(cx).provider_sessions);
         });
     });
     // The restart: the harness forgets its views (active and parked
@@ -414,26 +420,26 @@ fn a_provider_session_reopens_with_its_history_after_a_restart(cx: &mut gpui::Te
     // restart drops them with the process instead.
     let mut forgotten = Vec::new();
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             if let Some(view) = harness.active.take() {
                 forgotten.push(view);
             }
             forgotten.extend(harness.registry.drain_parked());
-            harness.sessions.clear();
-            harness.provider_sessions = crate::provider_sessions::read();
-            harness.merge_provider_rows();
+            harness.session_list.update(cx, |list, _| list.sessions.clear());
+            harness.session_list.update(cx, |list, _| list.provider_sessions = crate::provider_sessions::read());
+            harness.merge_provider_rows(cx);
         });
     });
     let _forgotten = forgotten;
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         assert!(
-            harness.provider_sessions.contains_key(&open_id),
+            harness.session_list.read(cx).provider_sessions.contains_key(&open_id),
             "the record survives the restart"
         );
         assert!(
             harness
-                .sessions
+                .session_list.read(cx).sessions
                 .iter()
                 .any(|entry| entry.id == open_id && entry.provider == crate::providers::ProviderId::Codex),
             "the sidebar reinstalls the provider row from the record"
@@ -608,23 +614,23 @@ fn p4b_harness(
     let (factory, commands) = muse_resume_factory(answer);
     let workspace = dir.to_string_lossy().into_owned();
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             harness.args.offline = false;
             mark_muse_up(harness);
             harness.provider_factory = factory;
-            harness.sessions.clear();
+            harness.session_list.update(cx, |list, _| list.sessions.clear());
             let mut row = chain_muse_entry("s-muse-old", "Chart the ferry routes", 3);
             row.workspace = Some(workspace);
-            harness.sessions.push(row);
-            std::sync::Arc::make_mut(&mut harness.index).insert(
+            harness.session_list.update(cx, |list, _| list.sessions.push(row));
+            harness.session_list.update(cx, |list, _| std::sync::Arc::make_mut(&mut list.index).insert(
                 "s-muse-old".into(),
                 IndexEntry {
                     title: "Ferry routes".into(),
                     first_user_prompt: Some("chart the ferry routes".into()),
                     ..Default::default()
                 },
-            );
-            harness.sessions_loaded = true;
+            ));
+            harness.session_list.update(cx, |list, _| list.sessions_loaded = true);
         });
     });
     (baaz, commands)
@@ -664,12 +670,12 @@ fn a_muse_reopen_without_a_record_writes_one_from_its_row_then_reads_it(cx: &mut
     let state = lane_state("p4b-muse-reopen");
     let vc = cx.add_empty_window();
     let (baaz, commands) = p4b_harness(vc, &state.2, MuseResume::Ok);
-    assert!(vc.update(|_, cx| baaz.read(cx).provider_sessions.is_empty()), "no record before the open");
+    assert!(vc.update(|_, cx| baaz.read(cx).session_list.read(cx).provider_sessions.is_empty()), "no record before the open");
     vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet("s-muse-old".into(), window, cx)));
     vc.run_until_parked();
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
-        let record = harness.provider_sessions.get("s-muse-old").expect("the open wrote a record");
+        let record = harness.session_list.read(cx).provider_sessions.get("s-muse-old").expect("the open wrote a record");
         assert_eq!(record.provider, "muse");
         assert_eq!(record.turns, 3, "the row's turns, so the open-fresh rule cannot drop it");
         assert_eq!(record.title.as_deref(), Some("Ferry routes"));
@@ -681,9 +687,9 @@ fn a_muse_reopen_without_a_record_writes_one_from_its_row_then_reads_it(cx: &mut
         assert!(!view.read(cx).is_starting(), "the lane landed");
         assert!(harness.open_state.provider_open_error.is_none(), "no failure");
         assert!(harness.open_state.drafts.values().all(|id| id != "s-muse-old"), "a reopen is never a draft");
-        assert_eq!(harness.sessions.iter().filter(|e| e.id == "s-muse-old").count(), 1, "one row");
+        assert_eq!(harness.session_list.read(cx).sessions.iter().filter(|e| e.id == "s-muse-old").count(), 1, "one row");
         assert_eq!(
-            harness.sessions.iter().find(|e| e.id == "s-muse-old").map(|e| e.label.as_str()),
+            harness.session_list.read(cx).sessions.iter().find(|e| e.id == "s-muse-old").map(|e| e.label.as_str()),
             Some("Chart the ferry routes"),
             "the row stays the list's"
         );
@@ -695,14 +701,14 @@ fn a_muse_reopen_without_a_record_writes_one_from_its_row_then_reads_it(cx: &mut
     // A restart: views and rows gone, the record read back from disk.
     let mut forgotten = Vec::new();
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             forgotten.extend(harness.active.take());
             forgotten.extend(harness.registry.drain_parked());
-            harness.sessions.clear();
-            std::sync::Arc::make_mut(&mut harness.index).clear();
-            harness.provider_sessions = crate::provider_sessions::read();
-            harness.merge_provider_rows();
-            assert!(harness.sessions.is_empty(), "a Muse record never builds a row: the list owns it");
+            harness.session_list.update(cx, |list, _| list.sessions.clear());
+            harness.session_list.update(cx, |list, _| std::sync::Arc::make_mut(&mut list.index).clear());
+            harness.session_list.update(cx, |list, _| list.provider_sessions = crate::provider_sessions::read());
+            harness.merge_provider_rows(cx);
+            assert!(harness.session_list.read(cx).sessions.is_empty(), "a Muse record never builds a row: the list owns it");
         });
     });
     let _forgotten = forgotten;
@@ -717,7 +723,7 @@ fn a_muse_reopen_without_a_record_writes_one_from_its_row_then_reads_it(cx: &mut
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("reopened");
         assert_eq!(view.read(cx).session_id, "s-muse-old");
-        assert_eq!(harness.provider_sessions.get("s-muse-old").map(|r| r.turns), Some(3));
+        assert_eq!(harness.session_list.read(cx).provider_sessions.get("s-muse-old").map(|r| r.turns), Some(3));
     });
     lane_restore(state);
 }
@@ -798,8 +804,8 @@ fn a_muse_turn_moves_one_row_and_never_relists(cx: &mut gpui::TestAppContext) {
     let vc = cx.add_empty_window();
     let (baaz, _commands) = p4b_harness(vc, &state.2, MuseResume::Ok);
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
-            harness.sessions.push(chain_muse_entry("s-muse-cli", "Run from the CLI", 2));
+        baaz.update(cx, |harness, cx| {
+            harness.session_list.update(cx, |list, _| list.sessions.push(chain_muse_entry("s-muse-cli", "Run from the CLI", 2)));
         });
     });
     vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet("s-muse-old".into(), window, cx)));
@@ -813,9 +819,9 @@ fn a_muse_turn_moves_one_row_and_never_relists(cx: &mut gpui::TestAppContext) {
                 turn_id: "t-4".into(),
             };
             harness.on_session_event(view.clone(), &event, cx);
-            assert!(!harness.sessions_list_in_flight, "an admission never relists");
+            assert!(!harness.session_list.read(cx).fetch.in_flight, "an admission never relists");
             assert_eq!(
-                harness.provider_sessions.get("s-muse-old").and_then(|r| r.first_prompt.clone()).as_deref(),
+                harness.session_list.read(cx).provider_sessions.get("s-muse-old").and_then(|r| r.first_prompt.clone()).as_deref(),
                 Some("chart the ferry routes"),
                 "the record keeps the session's own first words"
             );
@@ -828,24 +834,26 @@ fn a_muse_turn_moves_one_row_and_never_relists(cx: &mut gpui::TestAppContext) {
                 },
                 cx,
             );
-            assert!(!harness.sessions_list_in_flight, "a settle never relists");
+            assert!(!harness.session_list.read(cx).fetch.in_flight, "a settle never relists");
         });
     });
     // The view settles the turn: four folded exchanges would be the
     // fold's word; here the record's count only ever moves up.
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            if let Some(record) = harness.provider_sessions.get_mut("s-muse-old") {
-                record.turns = 4;
-            }
+            harness.session_list.update(cx, |list, _| {
+                if let Some(record) = list.provider_sessions.get_mut("s-muse-old") {
+                    record.turns = 4;
+                }
+            });
             let event = SessionEvent::ProviderTurnFinished {
                 session_id: "s-muse-old".into(),
                 turn_id: "t-4".into(),
                 meta: aui_protocol::TurnMeta::default(),
             };
             harness.on_session_event(view.clone(), &event, cx);
-            assert!(!harness.sessions_list_in_flight, "a finished turn never relists");
-            let row = harness.sessions.iter().find(|e| e.id == "s-muse-old").expect("the row");
+            assert!(!harness.session_list.read(cx).fetch.in_flight, "a finished turn never relists");
+            let row = harness.session_list.read(cx).sessions.iter().find(|e| e.id == "s-muse-old").expect("the row");
             assert_eq!(row.turns, 4, "the one row moved");
             assert_eq!(row.label, "Chart the ferry routes", "and stays the list's row");
         });
@@ -857,7 +865,7 @@ fn a_muse_turn_moves_one_row_and_never_relists(cx: &mut gpui::TestAppContext) {
                 provider::ProviderEvent::TurnRunning { session_id: "s-muse-cli".into(), turn_id: "t-9".into() },
                 cx,
             );
-            assert!(harness.sessions.iter().any(|e| e.id == "s-muse-cli" && e.running), "it reads running");
+            assert!(harness.session_list.read(cx).sessions.iter().any(|e| e.id == "s-muse-cli" && e.running), "it reads running");
             harness.on_hub_event(
                 provider::ProviderEvent::TurnSettled {
                     session_id: "s-muse-cli".into(),
@@ -866,7 +874,7 @@ fn a_muse_turn_moves_one_row_and_never_relists(cx: &mut gpui::TestAppContext) {
                 },
                 cx,
             );
-            assert!(!harness.sessions_list_in_flight, "a settle never relists");
+            assert!(!harness.session_list.read(cx).fetch.in_flight, "a settle never relists");
             // It stands down on the idle `statusChanged`, as before P4-B
             // (docs/64 §4 item 4) — still one row, still no relist.
             harness.on_hub_event(
@@ -877,9 +885,9 @@ fn a_muse_turn_moves_one_row_and_never_relists(cx: &mut gpui::TestAppContext) {
                 },
                 cx,
             );
-            assert!(harness.sessions.iter().any(|e| e.id == "s-muse-cli" && !e.running), "and stands down");
-            assert!(!harness.sessions_list_in_flight, "with no relist");
-            assert!(!harness.provider_sessions.contains_key("s-muse-cli"), "and writes no record");
+            assert!(harness.session_list.read(cx).sessions.iter().any(|e| e.id == "s-muse-cli" && !e.running), "and stands down");
+            assert!(!harness.session_list.read(cx).fetch.in_flight, "with no relist");
+            assert!(!harness.session_list.read(cx).provider_sessions.contains_key("s-muse-cli"), "and writes no record");
         });
     });
     vc.run_until_parked();
@@ -900,54 +908,62 @@ fn a_record_never_conjures_rows_for_chain_members_it_does_not_hold(cx: &mut gpui
     let vc = cx.add_empty_window();
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
-            harness.sessions.clear();
-            harness.overrides.clear();
-            // The trigger: one Muse record (a reopened session).
-            crate::provider_sessions::upsert_listed(
-                &mut harness.provider_sessions,
-                "muse",
-                "s-muse-opened",
-                None,
-                None,
-                Some("Opened".into()),
-                None,
-                2,
-                1,
-                1,
-            );
-            harness.sessions.push(chain_muse_entry("s-muse-opened", "Opened", 2));
-            // A Muse source handed off to a Claude Code session whose
-            // record this state dir does not hold…
-            harness.overrides.insert(
-                "s-muse-src".into(),
-                crate::sessions::SessionMeta { handoff_to: Some("s-claude-missing".into()), ..Default::default() },
-            );
-            harness.sessions.push(chain_muse_entry("s-muse-src", "Source", 1));
+        baaz.update(cx, |harness, cx| {
+            harness.session_list.update(cx, |list, _| list.sessions.clear());
+            harness.session_list.update(cx, |list, _| list.overrides.clear());
+            harness.session_list.update(cx, |list, _| {
+                // The trigger: one Muse record (a reopened session).
+                crate::provider_sessions::upsert_listed(
+                    &mut list.provider_sessions,
+                    "muse",
+                    "s-muse-opened",
+                    None,
+                    None,
+                    Some("Opened".into()),
+                    None,
+                    2,
+                    1,
+                    1,
+                );
+            });
+            harness.session_list.update(cx, |list, _| list.sessions.push(chain_muse_entry("s-muse-opened", "Opened", 2)));
+            harness.session_list.update(cx, |list, _| {
+                // A Muse source handed off to a Claude Code session whose
+                // record this state dir does not hold…
+                list.overrides.insert(
+                    "s-muse-src".into(),
+                    crate::sessions::SessionMeta { handoff_to: Some("s-claude-missing".into()), ..Default::default() },
+                );
+            });
+            harness.session_list.update(cx, |list, _| list.sessions.push(chain_muse_entry("s-muse-src", "Source", 1)));
             // Both members keep overrides of their own (a project, a
             // derived title), as the owner's do.
             for id in ["s-claude-missing", "s-codex-missing"] {
-                harness.overrides.insert(
-                    id.into(),
-                    crate::sessions::SessionMeta { project: Some("p-harness".into()), ..Default::default() },
-                );
+                harness.session_list.update(cx, |list, _| {
+                    list.overrides.insert(
+                        id.into(),
+                        crate::sessions::SessionMeta { project: Some("p-harness".into()), ..Default::default() },
+                    );
+                });
             }
-            // …and a Muse destination of a Codex source with no record:
-            // the destination stands in for itself, the source does not.
-            harness.overrides.insert(
-                "s-muse-dest".into(),
-                crate::sessions::SessionMeta {
-                    handoff_from: Some("s-codex-missing".into()),
-                    handoff_from_provider: Some("codex".into()),
-                    handoff_title: Some("Chain title".into()),
-                    ..Default::default()
-                },
-            );
-            harness.merge_provider_rows();
-            let ids: Vec<&str> = harness.sessions.iter().map(|e| e.id.as_str()).collect();
+            harness.session_list.update(cx, |list, _| {
+                // …and a Muse destination of a Codex source with no record:
+                // the destination stands in for itself, the source does not.
+                list.overrides.insert(
+                    "s-muse-dest".into(),
+                    crate::sessions::SessionMeta {
+                        handoff_from: Some("s-codex-missing".into()),
+                        handoff_from_provider: Some("codex".into()),
+                        handoff_title: Some("Chain title".into()),
+                        ..Default::default()
+                    },
+                );
+            });
+            harness.merge_provider_rows(cx);
+            let ids: Vec<&str> = harness.session_list.read(cx).sessions.iter().map(|e| e.id.as_str()).collect();
             assert!(!ids.contains(&"s-claude-missing"), "no ghost for a member named by a link: {ids:?}");
             assert!(!ids.contains(&"s-codex-missing"), "no ghost for a source named by a link: {ids:?}");
-            let dest = harness.sessions.iter().find(|e| e.id == "s-muse-dest").expect("the destination's row");
+            let dest = harness.session_list.read(cx).sessions.iter().find(|e| e.id == "s-muse-dest").expect("the destination's row");
             assert_eq!(dest.label, "Chain title");
         });
     });

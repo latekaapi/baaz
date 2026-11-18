@@ -253,8 +253,6 @@ pub(crate) struct BrowserData {
     hits: RefCell<Option<Hits>>,
     /// The search in flight, so a render never asks twice.
     asked: RefCell<Option<String>>,
-    /// Bumped whenever bookmarks change, for keys that cache the ★.
-    generation: u64,
     _worker: Task<()>,
     _drain: Task<()>,
 }
@@ -301,7 +299,6 @@ impl BrowserData {
             alias: HashMap::new(),
             hits: RefCell::new(None),
             asked: RefCell::new(None),
-            generation: 0,
             _worker,
             _drain,
         };
@@ -378,7 +375,6 @@ impl BrowserData {
                     Some(oldest) => self.journal.retain(|(at, _)| *at > oldest),
                     None => self.journal.clear(),
                 }
-                self.generation += 1;
                 self.history_changed();
             }
             Landed::Len(len) => {
@@ -405,18 +401,12 @@ impl BrowserData {
                 for (_, op) in &mut self.journal {
                     op.rename(provisional, real);
                 }
-                self.generation += 1;
             }
         }
         cx.notify();
     }
 
     // ---- reads (the front) ----
-
-    /// Bumped whenever the bookmarks change (a write, a snapshot, a landed id).
-    pub(crate) fn generation(&self) -> u64 {
-        self.generation
-    }
 
     /// The person's bookmark for `url`, if any (the newest when several).
     pub(crate) fn bookmark(&self, url: &str) -> Option<Bookmark> {
@@ -649,7 +639,6 @@ impl BrowserData {
         let mark = Bookmark { id, url: url.to_owned(), title: title.to_owned(), folder, added_ms: now };
         self.apply(FrontOp::AddBookmark(mark.clone()));
         self.send(Op::AddBookmark { provisional: id, url: url.to_owned(), title: title.to_owned(), folder, now });
-        self.generation += 1;
         cx.notify();
         mark
     }
@@ -660,7 +649,6 @@ impl BrowserData {
         let id = self.provisional();
         self.apply(FrontOp::AddFolder { id, name: name.to_owned(), parent });
         self.send(Op::AddFolder { provisional: id, name: name.to_owned(), parent, source: "baaz".to_owned() });
-        self.generation += 1;
         cx.notify();
         id
     }
@@ -670,7 +658,6 @@ impl BrowserData {
         let (id, folder) = (self.resolve(id), self.resolve(folder));
         self.apply(FrontOp::UpdateBookmark { id, title: title.to_owned(), folder });
         self.send(Op::UpdateBookmark { id, title: title.to_owned(), folder });
-        self.generation += 1;
         cx.notify();
     }
 
@@ -679,7 +666,6 @@ impl BrowserData {
         let id = self.resolve(id);
         self.apply(FrontOp::RemoveBookmark(id));
         self.send(Op::RemoveBookmark { id });
-        self.generation += 1;
         cx.notify();
     }
 

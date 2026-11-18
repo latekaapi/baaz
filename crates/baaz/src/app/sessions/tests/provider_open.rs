@@ -77,7 +77,7 @@ fn picking_a_non_muse_provider_opens_a_lane_and_starts_no_muse_session(
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -97,12 +97,12 @@ fn picking_a_non_muse_provider_opens_a_lane_and_starts_no_muse_session(
         );
         let open_id = view.read(cx).session_id.clone();
         assert!(
-            harness.provider_sessions.contains_key(&open_id),
+            harness.session_list.read(cx).provider_sessions.contains_key(&open_id),
             "the lane open writes the local record"
         );
         assert!(
             harness
-                .sessions
+                .session_list.read(cx).sessions
                 .iter()
                 .any(|entry| entry.id == open_id && entry.provider == crate::providers::ProviderId::Codex),
             "a provider sidebar row names the lane session"
@@ -133,7 +133,7 @@ fn a_missing_cli_fails_the_open_typed_not_installed(cx: &mut gpui::TestAppContex
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -161,7 +161,7 @@ fn a_failed_provider_connect_surfaces_an_error_and_opens_no_view(cx: &mut gpui::
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::ClaudeCode, None, workspace, window, cx);
         });
     });
@@ -252,9 +252,9 @@ fn a_new_provider_session_opens_on_the_click_and_sends_once_it_lands(cx: &mut gp
         assert!(!view.read(cx).is_starting(), "the open landed");
         assert!(harness.open_state.starts_in_flight.is_empty(), "nothing is still opening");
         assert_eq!(harness.open_state.drafts.get(&project).map(String::as_str), Some("s-open"), "the draft name moved");
-        assert!(harness.provider_sessions.contains_key("s-open"), "the landing writes the record");
-        assert!(!harness.provider_sessions.contains_key(&provisional), "nothing keeps the provisional id");
-        assert!(!harness.overrides.contains_key(&provisional), "nor its overrides");
+        assert!(harness.session_list.read(cx).provider_sessions.contains_key("s-open"), "the landing writes the record");
+        assert!(!harness.session_list.read(cx).provider_sessions.contains_key(&provisional), "nothing keeps the provisional id");
+        assert!(!harness.session_list.read(cx).overrides.contains_key(&provisional), "nor its overrides");
         assert_eq!(harness.open_state.pending_id.as_deref(), Some("s-open"), "the selection follows the id");
     });
     lane_restore(state);
@@ -291,7 +291,7 @@ fn a_failed_provider_open_lands_the_typed_failure_and_retry_keeps_the_send(cx: &
         );
         assert!(harness.open_state.starts_in_flight.is_empty(), "scripted verbs are released");
         assert!(!harness.open_state.drafts.contains_key(&project), "the next New session starts fresh");
-        assert!(harness.provider_sessions.is_empty(), "no record for a session that never was");
+        assert!(harness.session_list.read(cx).provider_sessions.is_empty(), "no record for a session that never was");
         assert!(harness.overlays.read(cx).dialog().is_none(), "inline, not a dialog");
     });
     // Retry on a child that answers: a new draft, the words back in it.
@@ -347,8 +347,10 @@ fn a_landed_provider_draft_moves_its_keys_and_keeps_the_requested_mode(cx: &mut 
             harness.args.approval_mode = Some(aui_protocol::PermissionMode::DenyUnmatched);
             harness.new_session(window, cx);
             let id = harness.active.clone().expect("the draft").read(cx).session_id.clone();
-            harness.overrides.entry(id.clone()).or_default();
-            crate::sessions::write(&harness.overrides);
+            harness.session_list.update(cx, |list, _| {
+                list.overrides.entry(id.clone()).or_default();
+            });
+            crate::sessions::write(&harness.session_list.read(cx).overrides);
             assert!(harness.terminal_dock.read(cx).knows_provider(&id));
             id
         })
@@ -358,8 +360,8 @@ fn a_landed_provider_draft_moves_its_keys_and_keeps_the_requested_mode(cx: &mut 
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the draft");
         assert_eq!(view.read(cx).session_id, "s-open");
-        assert!(!harness.overrides.contains_key(&provisional), "the override moved");
-        assert!(harness.overrides.contains_key("s-open"));
+        assert!(!harness.session_list.read(cx).overrides.contains_key(&provisional), "the override moved");
+        assert!(harness.session_list.read(cx).overrides.contains_key("s-open"));
         assert!(!crate::sessions::read().contains_key(&provisional), "on disk too");
         assert!(!harness.terminal_dock.read(cx).knows_provider(&provisional), "the terminal provider moved");
         assert!(harness.terminal_dock.read(cx).knows_provider("s-open"));
@@ -395,7 +397,7 @@ fn closing_an_opening_provider_draft_forgets_it_and_drops_the_late_child(cx: &mu
     vc.run_until_parked();
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
-        assert!(!harness.provider_sessions.contains_key(&closed), "the late child is recorded nowhere");
+        assert!(!harness.session_list.read(cx).provider_sessions.contains_key(&closed), "the late child is recorded nowhere");
         assert!(!harness.open_state.drafts.values().any(|id| *id == closed), "⌘N cannot reopen the closed view");
         assert!(harness.find_view(&closed, cx).is_none());
     });
@@ -423,7 +425,7 @@ fn a_provider_open_past_its_timeout_fails_the_view(cx: &mut gpui::TestAppContext
     type_unparked(vc, &["h", "i", "enter"]);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.expire_provider_open(&provisional, ProviderId::Codex, Some(project.clone()), workspace, cx)
         });
     });
@@ -440,7 +442,7 @@ fn a_provider_open_past_its_timeout_fails_the_view(cx: &mut gpui::TestAppContext
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         assert!(harness.find_view(&provisional, cx).is_none(), "the late answer never attached");
-        assert!(harness.provider_sessions.is_empty());
+        assert!(harness.session_list.read(cx).provider_sessions.is_empty());
     });
     assert!(!commands.lock().expect("commands").iter().any(|c| matches!(c, provider::Command::SubmitInput { .. })));
     lane_restore(state);
@@ -460,7 +462,7 @@ fn an_opening_provider_draft_is_never_evicted(cx: &mut gpui::TestAppContext) {
             let id = harness.active.clone().expect("the draft").read(cx).session_id.clone();
             // As a project-less open: no `drafts` entry names it.
             harness.open_state.drafts.clear();
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             for n in 0..=SESSION_CACHE_LIMIT {
                 let host = SessionHost {
                     provider_id: ProviderId::Muse.as_str().to_owned(),
@@ -499,7 +501,7 @@ fn opening_a_fork_resumes_it_on_a_new_lane_of_the_same_provider(cx: &mut gpui::T
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_forked_on_provider(
                 ProviderId::Codex,
                 "s-fork".to_owned(),

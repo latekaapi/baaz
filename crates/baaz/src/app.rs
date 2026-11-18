@@ -33,9 +33,11 @@
 //!
 //! * [`crate::login`] — the login screen, the `account/*` lane, the device
 //!   and API-key flows, sign-out, and `render_login`.
-//! * [`crate::sidebar_view`] — the sidebar column: nav block, session rows,
-//!   the empty states, the rename field, the footer, the rail, and the two
-//!   popovers anchored to the column.
+//! * [`crate::sidebar_view`] — the sidebar column as its own view
+//!   (`SidebarPane`: nav block, session rows, the footer, the rail, Browse
+//!   mode's rows), over the [`crate::session_list`] model; the root's half
+//!   (the facts it pushes, the intents it maps, the hover card it seats) is
+//!   `app/sidebar_host.rs`.
 //! * [`crate::dialogs`] — what floats over the window: the modal, the
 //!   palette, the toast stack and the header's overflow menu.
 //! * [`crate::billing`] — the tier probe's lifecycle and the banner it hands
@@ -46,7 +48,7 @@
 //! * [`crate::wire`] — background call, then update.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -67,7 +69,7 @@ use futures::StreamExt;
 use gpui::{
     Bounds, Pixels, PlatformInput, ScrollDelta, ScrollEvent, StatefulInteractiveElement as _,
     StyleRefinement, Styled as _, actions, div, point, prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths,
-    FocusHandle, Focusable, ListState, SharedString, Subscription, Task, Window,
+    FocusHandle, Focusable, SharedString, Subscription, Task, Window,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use aui::interact::{dismiss_layer, interactive, menu_panel, MENU_ROW_H, ROW_GAP};
@@ -89,13 +91,9 @@ use crate::session::{self, Draft, SessionEvent, SessionHost, SessionView};
 use crate::tier::Tier;
 use crate::sessions::SessionMeta;
 use crate::projects::{self, Project, Projects};
-use crate::app::list::ListCache;
-use aui::nav::{sidebar_list_state, SidebarRow};
 
-use crate::sidebar::{self, Grouping, SessionEntry};
-use crate::sidebar_view::{
-    SidebarKey, SidebarPane, SidebarRegroupKey, SidebarWheelState,
-};
+use crate::sidebar::{self, SessionEntry};
+use crate::sidebar_view::SidebarPane;
 use crate::search::{FileHit, SessionHit};
 use crate::terminal::{self, TerminalHost, TerminalService};
 use crate::wire::WireCall;
@@ -563,6 +561,7 @@ mod browser_handoff;
 mod find;
 pub(crate) mod sessions;
 mod list;
+mod sidebar_host;
 mod peek_split;
 mod titles;
 /// F2 feedback mode shell (setting, ⌃⌥⌘F, header slot, Done). Included by
@@ -710,29 +709,13 @@ pub struct Harness {
     /// The setup sheet (D5 B2): an entity that owns the open sheet, its
     /// terminals and their focus (`setup.rs`).
     pub(crate) setup: Entity<crate::setup::SetupHost>,
-    /// Rows from `session/list`, joined with the local index.
-    pub(crate) sessions: Vec<SessionEntry>,
-    /// Bumped by [`Harness::invalidate_list`] whenever anything the sidebar
-    /// and the palette read out of [`Harness::sessions`] changed: the rows
-    /// themselves, the overrides that relabel them, the index, or the
-    /// show-hidden/empty/archived flags. It is the key [`Harness::list_cache`]
-    /// is validated against (findings `performance-5`, `support-2`).
-    pub(crate) list_epoch: u64,
-    /// One sorted visible list and one grouping per change, not per frame.
-    list_cache: RefCell<ListCache>,
-    /// The handoff chains over full storage, built once per `list_epoch`
-    /// and shared by the head, member and view lookups — never rebuilt per
-    /// frame or per row (Y2a3). `list_epoch` is the validity key: every
-    /// storage change invalidates the list, which retires the index with
-    /// it. Interior mutability because the readers (`visible_sessions`,
-    /// `chain_head`, the header) only hold `&self`.
-    chain_index: RefCell<Option<(u64, sidebar::ChainIndex)>>,
-    /// How many chain indexes this run built: the once-per-change proof
-    /// the Y2a3 tests read.
-    chain_index_builds: std::cell::Cell<u64>,
-    /// Muse's index, shared: the per-turn re-read snapshots it with a
-    /// refcount instead of a 2,600-row clone on the UI thread (speed S4).
-    pub(crate) index: std::sync::Arc<HashMap<String, IndexEntry>>,
+    /// The session list (task 4.7): the joined rows, the stores they are
+    /// joined from (index, overrides, provider records, projects,
+    /// branches), the list filters, the title bookkeeping and the caches
+    /// derived from them, as one model entity. A change notifies the list,
+    /// never the root; the sidebar pane observes it
+    /// ([`crate::session_list::SessionList`]).
+    pub(crate) session_list: Entity<crate::session_list::SessionList>,
     pub(crate) active: Option<Entity<SessionView>>,
     /// Opening, switching to and replacing sessions, and the drafts
     /// with no row yet: the state machine [`sessions`] drives.
@@ -740,36 +723,14 @@ pub struct Harness {
     /// The handoff runs, the destination open in flight and the
     /// confirm dialog (H2).
     pub(crate) handoff_state: sessions::HandoffState,
-    /// The pending "ensure visible" row id (`scrollIntoView({ block:
-    /// "nearest" })` semantics). Set only by
-    /// outside-the-sidebar activations — the palette, New session / `+`,
-    /// fork, boot `--session`, the `open:` step — and consumed once, on the
-    /// first prepaint after activation, by the selected-row / current-group
-    /// intents `render_sidebar` installs: above aligns the row's top, below
-    /// its bottom, inside moves nothing. A sidebar click never sets it (the
-    /// clicked row is under the cursor, hence visible), and neither does a
-    /// list refresh, a regroup, a user scroll or a resize drag.
-    pub(crate) reveal: Option<String>,
-    /// An id [`Self::reveal`] named that has no row yet, and how many
-    /// consecutive `reveal_sidebar_row` attempts it has missed on (owner
-    /// round 6, part C4 review #1): a draft before its first send, a fork
-    /// before `load_sessions`'s reply lands. Distinct from "nowhere to
-    /// go" (a known session whose landing row genuinely cannot be found),
-    /// which still gives up on the first miss — this one waits up to
-    /// [`crate::sidebar_view::REVEAL_UNKNOWN_FRAMES`] attempts for the row
-    /// to be born, since the sites that create it (the `turn/started`
-    /// local-row insert, a `load_sessions` reply) already notify and would
-    /// otherwise race a reveal armed moments earlier every time.
-    pub(crate) reveal_unknown: Option<(String, u32)>,
-    /// The sidebar column as its own view: embedded with
-    /// gpui's `.cached(size_full)`, a clean pane reuses its retained subtree
-    /// instead of rebuilding the column on a transcript notify.
-    /// [`Harness::sync_sidebar_pane`] re-arms it from `on_frame` whenever
-    /// [`SidebarKey`] changes.
+    /// The sidebar column as its own view (task 4.7): it owns its scroll,
+    /// hover, reveal, wheel and fade, subscribes to the session list and
+    /// observes the layout global, and is embedded with gpui's
+    /// `.cached(size_full)`, so a clean pane reuses its retained subtree on
+    /// a transcript notify. The root pushes only what it alone knows
+    /// (`Harness::compose_sidebar`) and maps the pane's
+    /// [`crate::sidebar_view::SidebarEvent`]s (`Harness::on_sidebar_event`).
     pub(crate) sidebar_pane: Entity<SidebarPane>,
-    /// The [`SidebarKey`] the pane last rendered for. `None` until the first
-    /// frame, so the pane renders at least once.
-    pub(crate) sidebar_key: Option<SidebarKey>,
     /// Every live view besides `active`: the parked MRU (switching away
     /// parks a view with its fold, scroll position and draft; reopening
     /// shows it at once), the browser chat the line and the card show
@@ -805,61 +766,10 @@ pub struct Harness {
     /// ([`crate::browser::BrowserView`]). It asks the root through
     /// [`crate::browser::BrowserEvent`]s (`Harness::on_browser_event`).
     pub(crate) browser: Entity<crate::browser::BrowserView>,
-    /// A frame-paced sidebar-wheel sweep in flight (`sidebar-scroll-sweep:`
-    /// step): the in-process fallback for a real
-    /// `CGEvent` gesture the environment cannot deliver. `on_frame` owns it;
-    /// it never persists.
-    pub(crate) sidebar_scroll_sweep: Option<crate::resize::ScrollSweep>,
     /// A frame-paced transcript-wheel sweep in flight (`transcript-scroll-
-    /// sweep:` step): the transcript's twin of
-    /// [`Self::sidebar_scroll_sweep`].
+    /// sweep:` step): the transcript's twin of the sidebar pane's own
+    /// sweep. `on_frame` owns it; it never persists.
     pub(crate) transcript_scroll_sweep: Option<crate::resize::ScrollSweep>,
-    /// The sessions list's scroll state: the caller-owned `ListState` the
-    /// virtualised sidebar lays out through. A cheap
-    /// handle; the component itself stays stateless. Kept in sync with the
-    /// flattened rows every frame by `sync_sidebar_list`: `reset` after a
-    /// regroup or filter change, `splice` after a local insert or remove,
-    /// `remeasure_items` after a text-only height change — `item_count`
-    /// always equals the flattened length.
-    pub(crate) sidebar_list: ListState,
-    /// What the pointer is over in the sidebar, as the screen reports it:
-    /// a session id, a Browse tab key, or a reserved chrome key. The row's
-    /// trailing slot swaps to its actions on it.
-    pub(crate) sidebar_hovered: Option<String>,
-    /// The project head the pointer is over: it shows its actions.
-    pub(crate) hovered_group: Option<String>,
-    /// Whether the Projects header shows its actions (hovered).
-    pub(crate) hovered_projects_header: bool,
-    /// Whether Browse's Today header shows its actions (hovered).
-    pub(crate) hovered_today_header: bool,
-    /// Whether the Pinned section is open.
-    pub(crate) pinned_open: bool,
-    /// The flattened rows the list state was last synced to, and the
-    /// regroup key it was last reset for. `render_sidebar` re-flattens per
-    /// frame (an index walk, no summaries cloned) and splices the
-    /// difference, so a regroup is the only sync that drops the offset.
-    pub(crate) prev_sidebar_rows: Vec<SidebarRow>,
-    /// The grouping the rows above were flattened from, behind its cached
-    /// `Rc`: a new pointer with equal rows means text changed under stable
-    /// rows, which is what asks for `remeasure_items`.
-    pub(crate) prev_sidebar_grouping: Option<Rc<Grouping>>,
-    pub(crate) prev_sidebar_regroup: Option<SidebarRegroupKey>,
-    /// The sidebar wheel's input-side state: what the
-    /// capture handler writes, shared behind [`RefCell`] rather than kept
-    /// on the entity. A wheel event can arrive inside a `Harness` update
-    /// (a scripted `sidebar-wheel:` step dispatches from one), and updating
-    /// the entity re-entrantly panics — the shared cell never borrows it,
-    /// so the push is synchronous in every dispatch context and N events
-    /// between paints still coalesce into one drain. `render_sidebar`
-    /// applies it (drains the travel, disarms the reveal, re-arms the
-    /// horizon). Deliberately outside [`crate::sidebar_view::SidebarKey`]:
-    /// keyed travel would re-arm the pane per event through `on_frame`.
-    pub(crate) sidebar_wheel: Rc<RefCell<SidebarWheelState>>,
-    /// Whether the user has scrolled the sidebar since the reveal was last
-    /// armed. A reveal never moves a user-scrolled list:
-    /// the capture handler records the scroll, `render_sidebar` sets this,
-    /// arming clears it, and no reveal installs while it holds.
-    pub(crate) sidebar_user_scrolled: bool,
     /// The two flags a `--screenshot` wait reads out of this window (see
     /// [`crate::shot::CaptureToken`]). Handed to every session view this
     /// window opens and to `capture_and_quit`, so a second window would wait
@@ -891,14 +801,6 @@ pub struct Harness {
     pub(crate) tier_retry: crate::tier::ProbeRetry,
     /// Its timer. Replacing or clearing this cancels it.
     pub(crate) tier_retry_timer: Option<gpui::Task<()>>,
-    /// Baaz's own facts about each session: its name, whether it is
-    /// hidden, and the title derived from its first shell command (spec §3.7).
-    pub(crate) overrides: crate::sessions::Overrides,
-    /// The local record of provider-lane sessions: which provider serves
-    /// each, where it ran, and when it last moved. `session/list` never
-    /// names these sessions, so without this the sidebar forgets them on
-    /// every restart (W5).
-    pub(crate) provider_sessions: crate::provider_sessions::ProviderSessionStore,
     /// The B4M plan cache: computed once off the UI thread by
     /// [`crate::session_migration::Harness::refresh_migration_cache`],
     /// read by every render. `None` until the first background compute
@@ -910,45 +812,8 @@ pub struct Harness {
     /// P7 import (docs/72): the cached scan plan, the open sheet, the run in
     /// flight and the journal Undo reads ([`crate::import_ui`]).
     pub(crate) import: crate::import_ui::ImportUi,
-    /// The adopted workspaces (design `docs/12-projects.md` §4).
-    pub(crate) projects: Projects,
     /// The current project: the open session's project, else the last used.
     pub(crate) current_project: Option<String>,
-    /// The branch behind every project group row, by project id, read on
-    /// each `session/list` off the UI thread.
-    pub(crate) branches: HashMap<String, String>,
-    /// Whether the session list has landed at least once. The sidebar draws
-    /// project groups once the index has: provisional rows debut with their
-    /// groups, so the collapse measures content on its first frame instead
-    /// of opening from an empty box it never re-measures.
-    pub(crate) sessions_loaded: bool,
-    /// Whether the session index has landed at least once: row descriptions
-    /// (and with them, row visibility) come from it.
-    pub(crate) index_loaded: bool,
-    /// A `session/list` fetch is in flight: a second [`Self::load_sessions`]
-    /// meanwhile (at boot the boot session's `session/start` lands while
-    /// the probe answer's fetch is still out) sets
-    /// [`Self::sessions_list_stale`] instead of fetching — the reply below
-    /// issues the one follow-up. Two overlapping fetches used to apply the
-    /// same reply twice, rejoining 337 rows and rebuilding the grouping and
-    /// the search index for nothing.
-    sessions_list_in_flight: bool,
-    /// A refresh was asked for while [`Self::sessions_list_in_flight`]: the
-    /// landing reply reloads once rather than dropping it.
-    sessions_list_stale: bool,
-    /// The last `session/list` this window holds ([`crate::list_cache`]):
-    /// the next listing asks Muse only for rows newer than its newest. Loaded
-    /// from disk by the first index read (or by the first listing, whichever
-    /// runs first); `None` until then, and the listing reads the file itself.
-    pub(crate) saved_list: Option<std::sync::Arc<crate::list_cache::ListCache<crate::list_cache::ListedRow>>>,
-    /// Whether the sidebar owes its cached pane animation frames after a
-    /// mode switch, so the slide runs to rest instead of freezing on its
-    /// first frame. Armed only while the sidebar stands expanded (the
-    /// rail switches instantly) and cleared the frame the Layout spring
-    /// actually rests — never after a fixed delay, never at boot.
-    /// When the last mode switch happened: the sidebar's new rows fade in
-    /// over 80 ms from it (FF's swap arrival), see `render_sidebar`.
-    pub(crate) mode_fade_since: Option<std::time::Instant>,
     /// This window's handle: overlay intents run against it.
     pub(crate) main_window: Option<gpui::AnyWindowHandle>,
     /// The terminal dock under the composer: its tabs (keyed by project
@@ -959,28 +824,6 @@ pub struct Harness {
     /// app registers may list, open, run, read, screen, send and close
     /// these tabs. Dropped (and its socket removed) on quit.
     pub(crate) terminal_service: TerminalService,
-    /// Whether hidden sessions are listed anyway (the Sessions menu's toggle).
-    pub(crate) show_hidden: bool,
-    /// Real session ids with a title generation in flight: their rows read
-    /// the pending placeholder until the title lands or the attempt stands
-    /// down (auto-titles).
-    pub(crate) titles_pending: HashSet<String>,
-    /// Every throwaway title/summary side session id this run minted, plus
-    /// every `side_session` override the store held at boot. The explicit
-    /// record behind the hide rule: `is_side_session` reads this and the
-    /// persisted flag, never the id shape (muse 1.3.0 rejects any
-    /// `session/start` id that is not its own uuid shape, so side ids carry
-    /// no namespace to match on).
-    pub(crate) side_sessions: HashSet<String>,
-    /// Real session ids with a rewrite in flight: late answers for a
-    /// stood-down rewrite are hidden and ignored, never landed.
-    pub(crate) byline_live: HashSet<String>,
-    /// Last rewrite start per real session: the 30 s debounce clock.
-    pub(crate) byline_last_start: HashMap<String, std::time::Instant>,
-    /// Whether sessions with no turns are listed anyway (the Sessions menu's toggle).
-    pub(crate) show_empty: bool,
-    /// Whether archived sessions are listed anyway (the Sessions menu's toggle).
-    pub(crate) show_archived: bool,
     /// The search palette's query field. The card's own query row shows the
     /// result count; typing here re-queries `search.db` off the UI thread.
     /// There is no sidebar quick-filter: ⌘⇧F and the sidebar search icon open
@@ -1016,23 +859,9 @@ pub struct Harness {
     /// The open project menu's own rect: the Colour submenu's anchor is
     /// computed off its right edge at the Colour row's height.
     pub(crate) project_menu_bounds: Option<Bounds<Pixels>>,
-    /// Every rendered project group row's tray `…` button bounds, keyed by
-    /// group id, from `SidebarView::on_group_menu_prepainted` — what a group
-    /// row's project menu seats at. Entries are refreshed while their row is
-    /// rendered and kept afterwards, so a menu opened for a rendered-then-
-    /// scrolled group still seats where the row was.
-    pub(crate) group_menu_bounds: HashMap<String, Bounds<Pixels>>,
-    /// Sessions a `session/read` has already been spent on, so a title that
-    /// genuinely is not there is not asked for once a frame (finding F10).
-    titled: std::collections::HashSet<String>,
-    /// Batches taken out of the list in the last few seconds, newest last:
-    /// the toast's Undo. One `/hide` is a batch of one; one "Clear empty" is
-    /// a batch of everything it hid; one archive confirm is a batch of one
-    /// archived session. One Undo restores the whole batch.
-    pub(crate) undo_stack: Vec<UndoBatch>,
     /// The title last given to the window, so it is only set when it changed.
     window_title: Option<String>,
-    /// The `(list_epoch, active session id)` that title was built for, so the
+    /// The `(list epoch, active session id)` that title was built for, so the
     /// scan and the `format!` behind it run on a change rather than on every
     /// frame (finding `performance-9`).
     window_title_key: Option<(u64, Option<String>)>,
@@ -1043,34 +872,6 @@ pub struct Harness {
     /// "Send anyway" was pressed. Once per app run, deliberately: a person who
     /// accepted the bill this morning should be asked again tomorrow.
     pub(crate) send_anyway: bool,
-    /// The sidebar row under the pointer, if any: the hover detail's owner.
-    /// Written only by the rows' own hover reports (see
-    /// [`Harness::note_row_hover`]); pane renders never touch it.
-    pub(crate) hovered_row: Option<String>,
-    /// When the current hover started: the detail opens past
-    /// [`aui::nav::SESSION_DETAIL_DELAY`], so a pointer travelling past
-    /// rows never flashes the card.
-    pub(crate) hover_since: Option<std::time::Instant>,
-    /// The hover card is past its delay and showing.
-    pub(crate) hover_shown: bool,
-    /// Where the showing card seats: the hovered row's own window bounds,
-    /// carried by the row's hover report and frozen so the card never chases
-    /// the mouse. The seat itself hangs off [`Harness::sidebar_bounds`].
-    pub(crate) hover_trigger: Option<Bounds<Pixels>>,
-    /// The laid-out sidebar pane's window bounds, from the pane's own
-    /// prepaint in [`Harness::render_sidebar`]: what the hover card's side
-    /// seat hangs off (the pane's right edge plus the card gap).
-    pub(crate) sidebar_bounds: Option<Bounds<Pixels>>,
-    /// Capture aid (`row-detail:<id>`): pins the hover card open for one
-    /// row, seated at the selected row's bounds — free, no pointer.
-    pub(crate) forced_detail: Option<String>,
-    /// The selected row's window bounds, from the virtual list's
-    /// `on_selected_prepainted`: what the pinned card seats at.
-    pub(crate) selected_row_bounds: Option<(String, Bounds<Pixels>)>,
-    /// Hover-trace state (`BAAZ_HOVER_TRACE=1`, diagnosis only): the last
-    /// card result `render_row_detail` returned, so the trace logs only on
-    /// change.
-    pub(crate) hover_trace_last_shown: Option<bool>,
     pub(crate) tasks: Vec<Task<()>>,
     /// The boot-time subscriptions: the right pane's events and the text
     /// fields (rename, search, Projects and Commands queries, API key). Made
@@ -1107,11 +908,13 @@ impl Harness {
             state
         });
         let search_query = cx.new(|cx| composer_state_rows("Search sessions and created files", 1, 1, window, cx));
-        // The sidebar column's own view: the weak handle
-        // is this Baaz entity under construction, which `cx.entity()` already
-        // names inside the builder.
-        let baaz_weak = cx.entity().downgrade();
-        let sidebar_pane = cx.new(move |cx| SidebarPane::new(baaz_weak, cx));
+        // The session list, and the sidebar column over it: the pane holds
+        // the list and the rename field, never this entity.
+        let session_list = cx.new(|_| crate::session_list::SessionList::new());
+        let sidebar_pane = {
+            let (list, rename) = (session_list.clone(), rename.clone());
+            cx.new(move |cx| SidebarPane::new(list, rename, cx))
+        };
         // The API-key field: masked, with the capture-safe placeholder. Enter
         // inside it submits (single-line inputs always emit `PressEnter`).
         let api_key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste your key"));
@@ -1200,19 +1003,11 @@ impl Harness {
             provider_model,
             connect_screen,
             setup,
-            sessions: Vec::new(),
-            list_epoch: 0,
-            list_cache: RefCell::new(ListCache::default()),
-            chain_index: RefCell::new(None),
-            chain_index_builds: std::cell::Cell::new(0),
-            index: std::sync::Arc::new(HashMap::new()),
+            session_list,
             active: None,
             open_state: sessions::OpenState::default(),
             handoff_state: sessions::HandoffState::default(),
-            reveal: None,
-            reveal_unknown: None,
             sidebar_pane,
-            sidebar_key: None,
             registry: registry::SessionRegistry::default(),
             overlays,
             feedback: feedback_ui::FeedbackUi::new(feedback_ui::FeedbackUi::probe_for(), cx),
@@ -1221,19 +1016,7 @@ impl Harness {
             browser,
             peek_pinned: false,
             lights_hidden: false,
-            sidebar_scroll_sweep: None,
             transcript_scroll_sweep: None,
-            sidebar_list: sidebar_list_state(0),
-            sidebar_hovered: None,
-            hovered_group: None,
-            hovered_projects_header: false,
-            hovered_today_header: false,
-            pinned_open: true,
-            prev_sidebar_rows: Vec::new(),
-            prev_sidebar_grouping: None,
-            prev_sidebar_regroup: None,
-            sidebar_wheel: Rc::new(RefCell::new(SidebarWheelState::default())),
-            sidebar_user_scrolled: false,
             capture,
             user_shell: true,
             session_mcp: false,
@@ -1244,28 +1027,12 @@ impl Harness {
             tier_probing: false,
             tier_retry: Default::default(),
             tier_retry_timer: None,
-            overrides: crate::sessions::Overrides::new(),
-            provider_sessions: crate::provider_sessions::read(),
             migration_cache: None,
             migration_refresh_in_flight: false,
             import: crate::import_ui::ImportUi::boot(),
-            projects: Projects::default(),
             current_project: None,
-            branches: HashMap::new(),
-            sessions_loaded: false,
-            index_loaded: false,
-            sessions_list_in_flight: false,
-            sessions_list_stale: false,
-            saved_list: None,
             terminal_dock,
             terminal_service,
-            show_hidden: false,
-            show_empty: false,
-            show_archived: false,
-            titles_pending: HashSet::new(),
-            side_sessions: HashSet::new(),
-            byline_live: HashSet::new(),
-            byline_last_start: HashMap::new(),
             search_query: search_query.clone(),
             search_sessions: Vec::new(),
             search_files: Vec::new(),
@@ -1275,24 +1042,12 @@ impl Harness {
             skills_page,
             overflow_bounds: None,
             project_menu_bounds: None,
-            group_menu_bounds: HashMap::new(),
-            titled: std::collections::HashSet::new(),
-            undo_stack: Vec::new(),
             window_title: None,
             window_title_key: None,
             search_status: RefCell::new(None),
             send_anyway: false,
-            hovered_row: None,
-            hover_since: None,
-            hover_shown: false,
-            hover_trigger: None,
-            sidebar_bounds: None,
-            forced_detail: None,
-            selected_row_bounds: None,
-            hover_trace_last_shown: None,
             tasks: Vec::new(),
             field_subscriptions: Vec::new(),
-            mode_fade_since: None,
             main_window: None,
         };
         // Every window preference lives in the layout global (task 4.1): a
@@ -1327,7 +1082,7 @@ impl Harness {
                 harness.update(cx, |harness, cx| {
                     // A browser chat browses in tabs of its own, in Browse
                     // (its task folder), never in a Sessions pane (R3).
-                    if harness.is_browser_chat(&session) {
+                    if harness.is_browser_chat(&session, cx) {
                         harness.run_on_main(cx, move |harness, window, cx| harness.open_browser_chat_tab(&session, window, cx));
                     } else {
                         harness.show_browser_for_agent(&session, cx);
@@ -1448,6 +1203,9 @@ impl Harness {
         // `browser.db` landings redraw the view itself, never the root.
         let browser = this.browser.clone();
         this.field_subscriptions.push(cx.subscribe_in(&browser, window, Self::on_browser_event));
+        // The sidebar column's intents and wake-ups (task 4.7).
+        let sidebar = this.sidebar_pane.clone();
+        this.field_subscriptions.push(cx.subscribe_in(&sidebar, window, Self::on_sidebar_event));
         // The default-browser cache (B2a-H7b): render reads the cache only,
         // so the LaunchServices lookup runs at launch and on every regained
         // focus (a switch made in System Settings shows without a restart).
@@ -1479,7 +1237,7 @@ impl Harness {
                 _ => {}
             }
         }));
-        this.overrides = crate::sessions::read();
+        this.session_list.update(cx, |list, _| list.overrides = crate::sessions::read());
         // A damaged store was set aside while booting, or a background write
         // fails later: one toast each (docs/81 A F8, F9). The wake channel
         // is closed in tests, like the status wake: those call
@@ -1503,17 +1261,15 @@ impl Harness {
         }));
         // A restart mid-flight still hides every side session: the persisted
         // `side_session` flags rejoin the in-memory record at boot.
-        this.side_sessions = this
-            .overrides
-            .iter()
-            .filter(|(_, meta)| meta.side_session)
-            .map(|(id, _)| id.clone())
-            .collect();
+        this.session_list.update(cx, |list, _| {
+            list.side_sessions =
+                list.overrides.iter().filter(|(_, meta)| meta.side_session).map(|(id, _)| id.clone()).collect();
+        });
         // Before anything reads it: "New session" with no project starts
         // here, and on a first launch that click comes before the person has
         // adopted anything at all.
         projects::ensure_default_workspace();
-        this.boot_projects();
+        this.boot_projects(cx);
         // `--tier` is a scripted answer to a probe that has not been run, and
         // it applies to every mode — including `--replay`, which is how the
         // banner is captured for nothing.
@@ -1539,10 +1295,10 @@ impl Harness {
             // A scripted sidebar draws without a list reply — but only when
             // one was asked for, so the login captures draw as they did.
             if this.args.sidebar_fixture.is_some() {
-                this.apply_sidebar_fixture();
-                this.sessions_loaded = true;
-                this.index_loaded = true;
-                this.invalidate_list();
+                this.apply_sidebar_fixture(cx);
+                this.session_list.update(cx, |list, _| list.sessions_loaded = true);
+                this.session_list.update(cx, |list, _| list.index_loaded = true);
+                this.invalidate_list(cx);
             }
             return this;
         }
@@ -1577,7 +1333,7 @@ impl Harness {
         // a workspace and holds nothing worth priming a picker with. Adopting
         // a project, or starting a session in a folder, loads them then.
         if this.current_project.is_some() {
-            this.load_menu_sources(std::path::PathBuf::from(this.workspace()), cx);
+            this.load_menu_sources(std::path::PathBuf::from(this.workspace(cx)), cx);
         }
         // B4M's one-time prompt: deferred past construction (the hook runs
         // inside `drain`, where touching the Harness re-enters it — the
@@ -1596,8 +1352,8 @@ impl Harness {
 
     /// The workspace path as the wire and the header want it: the current
     /// project's root, else the launch workspace.
-    pub(crate) fn workspace(&self) -> String {
-        self.current_project()
+    pub(crate) fn workspace(&self, cx: &gpui::App) -> String {
+        self.current_project(cx)
             .map(|p| p.root.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.args.workspace.to_string_lossy().into_owned())
     }
@@ -1655,11 +1411,11 @@ impl Harness {
     /// The current project: the open session's project, else the last used —
     /// else the most recently opened adoption whose root is on disk. A
     /// missing root is never current, but stays adopted.
-    pub(crate) fn current_project(&self) -> Option<&Project> {
+    pub(crate) fn current_project<'a>(&self, cx: &'a gpui::App) -> Option<&'a Project> {
         self.current_project
             .as_deref()
-            .and_then(|id| self.projects.find_available(id))
-            .or_else(|| self.projects.most_recent_available())
+            .and_then(|id| self.session_list.read(cx).projects.find_available(id))
+            .or_else(|| self.session_list.read(cx).projects.most_recent_available())
     }
 
     /// The header and window title for a chain head: the collapsed view
@@ -1671,16 +1427,16 @@ impl Harness {
         // brief as the derived title can never fill the whole header, and
         // the row and the header read the same words.
         if let Some(entry) = self.visible_sessions(cx).iter().find(|e| e.id == head) {
-            let pending = entry.title_pending || self.titles_pending.contains(&entry.id);
+            let pending = entry.title_pending || self.session_list.read(cx).titles_pending.contains(&entry.id);
             return Some(crate::sidebar::one_line(crate::sidebar::display_label(
                 &entry.label,
                 pending,
             )));
         }
-        self.sessions.iter().find(|e| e.id == head).map(|e| {
-            let pending = e.title_pending || self.titles_pending.contains(&e.id);
+        self.session_list.read(cx).sessions.iter().find(|e| e.id == head).map(|e| {
+            let pending = e.title_pending || self.session_list.read(cx).titles_pending.contains(&e.id);
             let text = if !e.named {
-                sidebar::handoff_title_of(head, &self.provider_sessions, &self.overrides)
+                sidebar::handoff_title_of(head, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides)
                     .map(|t| sidebar::one_line(&t))
                     .unwrap_or_else(|| e.label.clone())
             } else {
@@ -1697,8 +1453,8 @@ impl Harness {
         // One identity per chain: the raw view id resolves to its head,
         // and the collapsed view row — the same label the sidebar's one
         // row wears — names the window (Y2a, Y2a3).
-        let label = session.and_then(|id| self.collapsed_head_label(&self.chain_head(&id), cx));
-        match self.current_project() {
+        let label = session.and_then(|id| self.collapsed_head_label(&self.chain_head(&id, cx), cx));
+        match self.current_project(cx) {
             Some(project) => match label {
                 Some(label) => format!("{label} \u{2014} {}", project.name),
                 None => project.name.clone(),
@@ -1709,8 +1465,8 @@ impl Harness {
 
     /// The current project's name, which is what the header and the empty
     /// state show — or the app name when no project is current.
-    fn workspace_name(&self) -> String {
-        self.current_project().map(|p| p.name.clone()).unwrap_or_else(|| "Baaz".to_owned())
+    fn workspace_name(&self, cx: &gpui::App) -> String {
+        self.current_project(cx).map(|p| p.name.clone()).unwrap_or_else(|| "Baaz".to_owned())
     }
 
     /// Read the projects store and settle the current project (decision D39):
@@ -1720,14 +1476,14 @@ impl Harness {
     /// opened adoption; else the launch directory, unless it is `/` or
     /// `$HOME`, where the window opens with no project and the hero owns the
     /// empty state. The file is written when anything above changed it.
-    pub(super) fn boot_projects(&mut self) {
+    pub(super) fn boot_projects(&mut self, cx: &mut gpui::App) {
         // `--no-project` boots the hero: nothing adopted, nothing current.
         if self.args.no_project {
-            self.projects = Projects::default();
+            self.session_list.update(cx, |list, _| list.projects = Projects::default());
             self.current_project = None;
             return;
         }
-        self.projects = projects::read();
+        self.session_list.update(cx, |list, _| list.projects = projects::read());
         let scripted = self.args.replay.is_some()
             || self.args.offline
             || !self.args.steps.is_empty()
@@ -1741,34 +1497,34 @@ impl Harness {
         let launch_adoptable = projects::is_workspace_root(&self.args.workspace);
         if self.args.workspace_explicit || (scripted && launch_adoptable) {
             let workspace = self.args.workspace.clone();
-            let id = self.projects.add(&workspace).id.clone();
-            self.projects.touch(&id);
-            if self.projects.current.as_deref() != Some(id.as_str()) {
-                self.projects.current = Some(id);
+            let id = self.session_list.update(cx, |list, _| list.projects.add(&workspace).id.clone());
+            self.session_list.update(cx, |list, _| list.projects.touch(&id));
+            if self.session_list.read(cx).projects.current.as_deref() != Some(id.as_str()) {
+                self.session_list.update(cx, |list, _| list.projects.current = Some(id));
             }
             dirty = true;
-        } else if self.projects.current.as_deref().is_some_and(|id| self.projects.find_available(id).is_some()) {
+        } else if self.session_list.read(cx).projects.current.as_deref().is_some_and(|id| self.session_list.read(cx).projects.find_available(id).is_some()) {
             // The stored current project still exists on disk: keep it, untouched.
             // A missing root is not current (it stays adopted, and comes back
             // when the path does).
-        } else if let Some(recent) = self.projects.most_recent_available().map(|p| p.id.clone()) {
-            self.projects.current = Some(recent);
+        } else if let Some(recent) = self.session_list.read(cx).projects.most_recent_available().map(|p| p.id.clone()) {
+            self.session_list.update(cx, |list, _| list.projects.current = Some(recent));
             dirty = true;
         } else {
             let launch = self.args.workspace.clone();
             if projects::is_workspace_root(&launch) {
-                let id = self.projects.add(&launch).id.clone();
-                self.projects.touch(&id);
-                self.projects.current = Some(id);
+                let id = self.session_list.update(cx, |list, _| list.projects.add(&launch).id.clone());
+                self.session_list.update(cx, |list, _| list.projects.touch(&id));
+                self.session_list.update(cx, |list, _| list.projects.current = Some(id));
                 dirty = true;
-            } else if self.projects.current.is_some() {
-                self.projects.current = None;
+            } else if self.session_list.read(cx).projects.current.is_some() {
+                self.session_list.update(cx, |list, _| list.projects.current = None);
                 dirty = true;
             }
         }
-        self.current_project = self.projects.current.clone();
+        self.current_project = self.session_list.read(cx).projects.current.clone();
         if dirty {
-            projects::write(&self.projects);
+            projects::write(&self.session_list.read(cx).projects);
         }
     }
 
@@ -1864,11 +1620,10 @@ impl Harness {
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, cx| view.set_muse_starting(false, cx));
         }
-        if !self.sessions_loaded {
-            self.sessions_loaded = true;
-            self.merge_provider_rows();
-            self.invalidate_list();
-            let _ = self.sync_sidebar_pane(cx);
+        if !self.session_list.read(cx).sessions_loaded {
+            self.session_list.update(cx, |list, _| list.sessions_loaded = true);
+            self.merge_provider_rows(cx);
+            self.invalidate_list(cx);
         }
         cx.notify();
     }
@@ -1951,10 +1706,16 @@ impl Harness {
             // then overlays its own truth, which is fresher than any
             // listing.
             ProviderEvent::StatusChanged { session_id, running, attention } => {
-                if !self.is_side_session(&session_id) {
-                    if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
-                        entry.apply_status_changed(running, &attention);
-                        self.invalidate_list();
+                if !self.is_side_session(&session_id, cx) {
+                    let found = self.session_list.update(cx, |list, _| {
+                        list.sessions
+                            .iter_mut()
+                            .find(|entry| entry.id == session_id)
+                            .map(|entry| entry.apply_status_changed(running, &attention))
+                            .is_some()
+                    });
+                    if found {
+                        self.invalidate_list(cx);
                     }
                 }
                 self.sync_row_live(&session_id, false, cx);
@@ -2189,9 +1950,10 @@ impl Harness {
             layout::Mode::Browse => layout.enter_browse(),
             layout::Mode::Sessions => layout.leave_browse(),
         });
-        // The sidebar's new rows fade in (the cached pane is re-armed from
-        // `on_frame` while the fade runs).
-        self.mode_fade_since = Some(cx.background_executor().now());
+        // The sidebar's new rows fade in (the pane asks for its own frames
+        // while the fade runs).
+        let at = cx.background_executor().now();
+        self.sidebar_pane.update(cx, |pane, _| pane.start_mode_fade(at));
         if mode == layout::Mode::Browse {
             self.ensure_browse_tab(window, cx);
         }
@@ -2297,7 +2059,7 @@ impl Harness {
         state: crate::sessions::RightState,
         cx: &mut Context<Self>,
     ) {
-        self.overrides.entry(session_id.to_owned()).or_default().right = Some(state);
+        self.session_list.update(cx, |list, _| list.overrides.entry(session_id.to_owned()).or_default().right = Some(state));
         self.schedule_overrides_write(cx);
     }
 
@@ -2319,14 +2081,19 @@ impl Harness {
         if self.pending_switch_dest(cx).is_some() {
             return;
         }
-        let entry = self.overrides.entry(session_id.to_owned()).or_default();
-        let mut right = entry.right.clone().unwrap_or_default();
-        if right.browser_url.as_deref() == Some(url.as_str()) {
-            return;
+        let changed = self.session_list.update(cx, |list, _| {
+            let entry = list.overrides.entry(session_id.to_owned()).or_default();
+            let mut right = entry.right.clone().unwrap_or_default();
+            if right.browser_url.as_deref() == Some(url.as_str()) {
+                return false;
+            }
+            right.browser_url = Some(url);
+            entry.right = Some(right);
+            true
+        });
+        if changed {
+            self.schedule_overrides_write(cx);
         }
-        right.browser_url = Some(url);
-        entry.right = Some(right);
-        self.schedule_overrides_write(cx);
     }
 
     /// The cheap right-pane persists' write: a snapshot queued on the
@@ -2335,8 +2102,8 @@ impl Harness {
     /// own animation frame on the disk. Newest wins: a rename, pin or
     /// archive saved inside the window replaces this snapshot
     /// ([`crate::store::JsonStore`]).
-    pub(crate) fn schedule_overrides_write(&mut self, _cx: &mut Context<Self>) {
-        crate::sessions::save_soon(&self.overrides);
+    pub(crate) fn schedule_overrides_write(&mut self, cx: &mut Context<Self>) {
+        crate::sessions::save_soon(&self.session_list.read(cx).overrides);
     }
 
     /// Land every queued session-store write now (B7fix, B7fix2): on a
@@ -2425,14 +2192,14 @@ impl Harness {
         else {
             return;
         };
-        let (files_preview, files_selected, files_expanded) = match self.right_project() {
+        let (files_preview, files_selected, files_expanded) = match self.right_project(cx) {
             Some((root, _)) => self.right_pane.read(cx).files_state(&root),
             None => (None, None, Vec::new()),
         };
         // Z7a: the session's last browser URL rides along untouched — the
         // navigation sync owns it, and a pane toggle must never clear it.
         let browser_url = self
-            .overrides
+            .session_list.read(cx).overrides
             .get(&session_id)
             .and_then(|meta| meta.right.clone())
             .and_then(|right| right.browser_url);
@@ -2462,7 +2229,7 @@ impl Harness {
         // before the incoming session's loads — a switch is the durability
         // point the toggle gesture itself must not pay for.
         self.flush_stores();
-        let stored = self.overrides.get(session_id).and_then(|meta| meta.right.clone());
+        let stored = self.session_list.read(cx).overrides.get(session_id).and_then(|meta| meta.right.clone());
         let open = stored.as_ref().is_some_and(|state| state.open);
         if crate::layout::Layout::get(cx).right_open != open {
             crate::layout::Layout::stage(cx, |layout| layout.right_open = open);
@@ -2471,7 +2238,7 @@ impl Harness {
         if let Some(state) = &stored {
             crate::layout::Layout::stage(cx, |layout| layout.right_kind = Some(state.kind));
         }
-        if let Some((root, _)) = self.right_project() {
+        if let Some((root, _)) = self.right_project(cx) {
             self.with_right_pane(cx, |pane, cx| pane.restore_files(&root, stored.as_ref(), cx));
         }
         // B7fix2: a switch that lands open on Browser builds the webview on
@@ -2483,8 +2250,8 @@ impl Harness {
     /// The project the right pane reads for: root plus display name, from the
     /// in-memory current project — never the projects store on disk, which the
     /// old render path re-read on every frame.
-    pub(crate) fn right_project(&self) -> Option<(std::path::PathBuf, String)> {
-        self.current_project().map(|project| (project.root.clone(), project.name.clone()))
+    pub(crate) fn right_project(&self, cx: &gpui::App) -> Option<(std::path::PathBuf, String)> {
+        self.current_project(cx).map(|project| (project.root.clone(), project.name.clone()))
     }
 
     /// A new terminal tab on the current project, opening the dock for it
@@ -2523,9 +2290,9 @@ impl Harness {
         let title = rest.trim();
         let title = if title.is_empty() { "terminal".to_owned() } else { title.to_owned() };
         let root = self
-            .current_project()
+            .current_project(cx)
             .map(|project| project.root.clone())
-            .unwrap_or_else(|| PathBuf::from(self.workspace()));
+            .unwrap_or_else(|| PathBuf::from(self.workspace(cx)));
         // The scripted dock stays shut while the Settings page stands open
         // (B11b): a capture aid must not flip hidden state either.
         if self.settings_open(cx) {
@@ -2545,12 +2312,12 @@ impl Harness {
     /// the current project, the active session, and the durable provider
     /// records for the origins of the project's tabs.
     pub(crate) fn dock_facts(&self, cx: &App) -> terminal::DockFacts {
-        let project = self.current_project().map(|project| project.root.clone());
+        let project = self.current_project(cx).map(|project| project.root.clone());
         let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
         let mut records = HashMap::new();
         if let Some(root) = &project {
             for tab in self.terminal_dock.read(cx).host().read(cx).tabs_for(root) {
-                let record = tab.origin_session.as_ref().and_then(|session| Some((session, self.provider_sessions.get(session)?)));
+                let record = tab.origin_session.as_ref().and_then(|session| Some((session, self.session_list.read(cx).provider_sessions.get(session)?)));
                 if let Some((session, record)) = record {
                     records.insert(session.clone(), record.provider.clone());
                 }
@@ -2579,7 +2346,7 @@ impl Harness {
     /// ([`terminal::TerminalDock::tab_provider`]).
     #[cfg(test)]
     pub(crate) fn terminal_tab_provider(&self, origin: Option<&str>, cx: &App) -> Option<aui_icons::Provider> {
-        let record = origin.and_then(|session| self.provider_sessions.get(session)).map(|record| record.provider.as_str());
+        let record = origin.and_then(|session| self.session_list.read(cx).provider_sessions.get(session)).map(|record| record.provider.as_str());
         self.terminal_dock.read(cx).tab_provider(origin, record)
     }
 
@@ -3423,7 +3190,7 @@ impl Harness {
         // One identity per chain: header, window and selection all resolve
         // the raw id to its head, and the collapsed view row names it —
         // the same label the sidebar's one row wears (Y2a, Y2a3).
-        let target = target.map(|id| self.chain_head(&id));
+        let target = target.map(|id| self.chain_head(&id, cx));
         // The Skills page names itself plainly while open: "Skills".
         if self.skills_open(cx) {
             Some(self.skills_page.read(cx).title(cx).to_string())
@@ -3530,7 +3297,7 @@ impl Harness {
         // where a live session of that root would.
         let workspace = sidebar::replay_workspace(&path)
             .map(|root| projects::canonical_str(&root))
-            .unwrap_or_else(|| self.workspace());
+            .unwrap_or_else(|| self.workspace(cx));
         let (provider, workspace) = (self.args.provider.clone(), workspace);
         let overlays = self.overlays.clone();
         let capture = self.capture.clone();
@@ -3563,17 +3330,17 @@ impl Harness {
         // moment it is not the open one — so switching sessions in a replay
         // window would shrink the list under the scroll (the click moved
         // `-1262 → -1198` on the clamp, not on the reveal).
-        let mut replayed = SessionEntry::replayed(&view.read(cx).session_id, &path, &self.projects);
+        let mut replayed = SessionEntry::replayed(&view.read(cx).session_id, &path, &self.session_list.read(cx).projects);
         // A title Baaz already stored for this capture (a rename, or the
         // transcript-derived title an earlier open wrote) names the row the
         // way it names a live one. Without this only the first open in a
         // state dir showed the transcript's title: `title_from_transcript`
         // below sees the stored one and stops, and the row kept the file
         // name on every later open (the `jump-pill` capture flake).
-        if let Some(label) = sidebar::label_ladder(self.overrides.get(&replayed.id), None, None) {
+        if let Some(label) = sidebar::label_ladder(self.session_list.read(cx).overrides.get(&replayed.id), None, None) {
             replayed.label = label.to_owned();
         }
-        replayed.named = self.overrides.get(&replayed.id).is_some_and(|meta| meta.name.is_some());
+        replayed.named = self.session_list.read(cx).overrides.get(&replayed.id).is_some_and(|meta| meta.name.is_some());
         replayed.turns = view.read(cx).session().map(|s| s.turns.len() as u64).unwrap_or(0);
         // The replayed row stands for the folded capture, and no wire event
         // will ever sync it the way `session/list` does live: read the open
@@ -3597,15 +3364,15 @@ impl Harness {
                 }
             }
         }
-        self.sessions = vec![replayed];
+        self.session_list.update(cx, |list, _| list.sessions = vec![replayed]);
         // A scripted sidebar joins the replayed row, as if the wire had
         // listed it beside the capture.
-        self.apply_sidebar_fixture();
+        self.apply_sidebar_fixture(cx);
         // The replay's one row is the whole list, and there is no index
         // to wait for: both have landed.
-        self.sessions_loaded = true;
-        self.index_loaded = true;
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| list.sessions_loaded = true);
+        self.session_list.update(cx, |list, _| list.index_loaded = true);
+        self.invalidate_list(cx);
         // A replayed window has no wire, but the search palette still needs
         // the host's session index: read it (read-only) and rebuild `search.db`
         // so `--steps search:<query>` screenshots show session hits.
@@ -3624,7 +3391,7 @@ impl Harness {
             .map(|view| (view.session_id.clone(), view.provider_kind()));
         if let Some((session_id, provider)) = replayed {
             let root = self
-                .current_project()
+                .current_project(cx)
                 .map(|project| project.root.clone())
                 .unwrap_or_else(|| self.args.workspace.clone());
             self.register_terminal_session(&session_id, root, provider.as_str(), cx);
@@ -4793,7 +4560,7 @@ impl Harness {
 
     fn render_no_session(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
-        if self.current_project().is_none() {
+        if self.current_project(cx).is_none() {
             let start = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
                 this.new_session(window, cx)
             });
@@ -4839,7 +4606,7 @@ impl Harness {
             .gap(px(scale::SP_3))
             .pb(px(HERO_LIFT))
             .child(crate::mascot::empty_mascot(window, cx))
-            .child(div().text_role(aui_tokens::TextRole::Subtitle).text_color(p.ink).child(self.workspace_name()))
+            .child(div().text_role(aui_tokens::TextRole::Subtitle).text_color(p.ink).child(self.workspace_name(cx)))
             .child(
                 div()
                     .text_role(aui_tokens::TextRole::Body)
@@ -4864,7 +4631,7 @@ impl Harness {
     pub(crate) fn reveal_created(&mut self, rest: &str, cx: &mut Context<Self>) {
         let Some((session_id, path)) = rest.split_once(':') else { return };
         let workspace =
-            self.sessions.iter().find(|e| e.id == session_id).and_then(|e| e.workspace.clone());
+            self.session_list.read(cx).sessions.iter().find(|e| e.id == session_id).and_then(|e| e.workspace.clone());
         let full = match workspace {
             Some(root) => std::path::PathBuf::from(root).join(path),
             None => self.args.workspace.join(path),
@@ -4887,7 +4654,7 @@ impl Harness {
     pub(crate) fn search_status(&self, cx: &gpui::App) -> SharedString {
         let blank = self.search_query.read(cx).value().trim().is_empty();
         let scoped = !crate::layout::Layout::get(cx).search_all_projects;
-        let project = self.current_project().map(|p| p.name.clone()).unwrap_or_default();
+        let project = self.current_project(cx).map(|p| p.name.clone()).unwrap_or_default();
         let key = (blank, self.search_sessions.len(), self.search_files.len(), scoped, project.clone());
         let mut cache = self.search_status.borrow_mut();
         if let Some((cached, status)) = cache.as_ref() {
@@ -4983,7 +4750,7 @@ impl Harness {
         let stale = {
             let active = self.active.as_ref().map(|a| a.read(cx).session_id.as_str());
             self.window_title_key.as_ref().map(|(epoch, id)| (*epoch, id.as_deref()))
-                != Some((self.list_epoch, active))
+                != Some((self.session_list.read(cx).epoch, active))
         };
         if stale {
             let title = self.window_title(cx);
@@ -4991,7 +4758,7 @@ impl Harness {
                 window.set_window_title(&title);
                 self.window_title = Some(title);
             }
-            self.window_title_key = Some((self.list_epoch, self.active_id(cx)));
+            self.window_title_key = Some((self.session_list.read(cx).epoch, self.active_id(cx)));
         }
         // A release outside the window never reaches the overlay: a drag that
         // is still armed while the window is inactive is over, settled where
@@ -5035,27 +4802,9 @@ impl Harness {
                 cx.notify();
             }
         }
-        // A frame-paced sidebar-wheel sweep (`sidebar-scroll-sweep:` step):
-        // the same push the real capture handler
-        // makes (`sidebar_view::sidebar_wheel_capture`), once per rendered
-        // frame instead of once per posted `CGEvent` — the in-process
-        // fallback where the environment delivers no real gesture (see
-        // `docs/02-app.md`). Re-arms itself via `request_animation_frame`
-        // through `push_sidebar_scroll_sweep`'s own notify; drops itself
-        // when the sweep reports done.
-        if self.sidebar_scroll_sweep.is_some() {
-            let dy = self.sidebar_scroll_sweep.as_mut().and_then(|sweep| sweep.advance());
-            match dy {
-                Some(dy) => {
-                    self.push_sidebar_scroll_sweep(dy, cx);
-                    aui_motion::request_frame(window);
-                }
-                None => self.sidebar_scroll_sweep = None,
-            }
-        }
         // A frame-paced transcript-wheel sweep (`transcript-scroll-sweep:`
         // step): the transcript's twin of the
-        // sidebar sweep above, pushing into the active session's own
+        // sidebar pane's own sweep, pushing into the active session's own
         // accumulator (`SessionView::push_wheel`) instead of the sidebar's.
         if self.transcript_scroll_sweep.is_some() {
             let dy = self.transcript_scroll_sweep.as_mut().and_then(|sweep| sweep.advance());
@@ -5072,27 +4821,6 @@ impl Harness {
                 None => self.transcript_scroll_sweep = None,
             }
         }
-        // The sidebar pane's inputs may have changed without a notify of its
-        // own (a session event, a probe answer, the minute rollover): re-arm
-        // it here, before anything draws, so a transcript notify alone never
-        // rebuilds the column. A notify raised inside this draw lands after
-        // it, and a quiet window may take no frame for seconds (a page load's
-        // `loading` key painted only after the load had ended): ask for the
-        // next one so the re-armed pane draws now.
-        if self.sync_sidebar_pane(cx) {
-            aui_motion::request_frame(window);
-        }
-        // A mode switch fades the sidebar's new rows in, but the pane is
-        // cached: nothing would re-render it mid-fade, so keep re-arming it
-        // on animation frames until the fade has run.
-        if let Some(since) = self.mode_fade_since {
-            if cx.background_executor().now().duration_since(since) >= crate::sidebar_view::MODE_FADE {
-                self.mode_fade_since = None;
-            } else {
-                aui_motion::request_frame(window);
-                self.sidebar_pane.update(cx, |_, cx| cx.notify());
-            }
-        }
         // The frame trace's per-tick row: written
         // here, not from `render_transcript`, because this runs once per
         // `Harness::render` regardless of which subtree actually rebuilt —
@@ -5100,9 +4828,9 @@ impl Harness {
         // went silent through a sidebar-only or resize-only gesture (parts
         // 4/C1/C2 stopped those from touching the cached transcript at
         // all). Gated up front so a disabled build pays nothing beyond the
-        // one flag check; `sidebar_list`/`resize.width` are read straight
-        // off `self` so nothing about the sidebar needs to render for this
-        // tick to trace.
+        // one flag check; the pane's list top and `resize.width` are only
+        // read, so nothing about the sidebar needs to render for this tick
+        // to trace.
         // `take_trace_rehint` is a single flag shared with the
         // `resize-sweep:` step's own log above: on a tick where both a
         // sweep and the trace are running, the sweep's earlier drain wins
@@ -5110,7 +4838,7 @@ impl Harness {
         // CGEvent-driven measurements this instrument exists for (they
         // never run a scripted sweep at the same time).
         if session::frame_trace_enabled() {
-            let top = self.sidebar_list.logical_scroll_top();
+            let top = self.sidebar_list_top(cx);
             let (transcript, rehint) = self
                 .active
                 .clone()
@@ -5122,7 +4850,7 @@ impl Harness {
                 self.resize.width,
                 self.resize.active,
                 transcript,
-                self.sidebar_gesture_active(),
+                self.sidebar_gesture_active(cx),
                 rehint,
             );
         }
@@ -5191,7 +4919,7 @@ impl Render for Harness {
         } else {
             // The column is its own cached view: clean,
             // gpui reuses its retained subtree and only the centre rebuilds.
-            // `size_full` is what the column wears itself (`render_sidebar`
+            // `size_full` is what the column wears itself (the pane's render
             // fills its cell), so the cached layout resolves to the same
             // bounds the shell offers and any resize re-renders through the
             // bounds key.
@@ -5209,6 +4937,13 @@ impl Render for Harness {
                 Some((nav, surface, chrome)) => (Some(nav), Some(surface), Some(chrome)),
                 None => (None, None, None),
             };
+            // The column's facts go in before it is composed: only what the
+            // root alone knows, and a notify of the pane only when it moved
+            // (`compose_sidebar`). A root render that changed none of them
+            // leaves the cached column alone.
+            if settings_nav.is_none() {
+                self.compose_sidebar(window, cx);
+            }
             let sidebar: AnyElement = if let Some(nav) = settings_nav {
                 nav
             } else if window.is_a11y_active() {
@@ -5958,7 +5693,7 @@ impl Harness {
         }
         // An open file preview is the next thing Escape takes back: back
         // to the tree, keeping the selected marker and the scroll offset.
-        if let Some((root, _)) = self.right_project() {
+        if let Some((root, _)) = self.right_project(cx) {
             if self.with_right_pane(cx, |pane, cx| pane.close_file_preview_for(&root, cx)) {
                 let focus = self.right_pane.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
@@ -6123,27 +5858,29 @@ mod tests {
         let root = state.2.clone();
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
-                // The durable record names a minted session …
-                h.provider_sessions.insert(
-                    "minted-1".to_owned(),
-                    crate::provider_sessions::ProviderSessionRecord {
-                        provider: "codex".to_owned(),
-                        session_id: "minted-1".to_owned(),
-                        workspace: None,
-                        project: None,
-                        created_ms: 0,
-                        updated_ms: 0,
-                        turns: 0,
-                        title: None,
-                        first_prompt: None,
-                        handoff_to: None,
-                        handoff_from: None,
-                        handoff_from_provider: None,
-            handoff_title: None,
-                        display_texts: std::collections::HashMap::new(),
-                        origin: None,
-                    },
-                );
+                h.session_list.update(cx, |list, _| {
+                    // The durable record names a minted session …
+                    list.provider_sessions.insert(
+                        "minted-1".to_owned(),
+                        crate::provider_sessions::ProviderSessionRecord {
+                            provider: "codex".to_owned(),
+                            session_id: "minted-1".to_owned(),
+                            workspace: None,
+                            project: None,
+                            created_ms: 0,
+                            updated_ms: 0,
+                            turns: 0,
+                            title: None,
+                            first_prompt: None,
+                            handoff_to: None,
+                            handoff_from: None,
+                            handoff_from_provider: None,
+                handoff_title: None,
+                            display_texts: std::collections::HashMap::new(),
+                            origin: None,
+                        },
+                    );
+                });
                 // … while the bridge map names the pre-ack request id.
                 h.register_terminal_session("cmd-open", root.clone(), "codex", cx);
                 h.register_terminal_session("cc-bridge", root.clone(), "claude-code", cx);
@@ -6407,7 +6144,7 @@ mod tests {
         assert!(vc.update(|_, cx| baaz.read(cx).settings_open(cx)));
         let (right_open, terminal_open, overrides) = vc.update(|_, cx| {
             let h = baaz.read(cx);
-            (crate::layout::Layout::get(cx).right_open, crate::layout::Layout::get(cx).terminal_open, h.overrides.clone())
+            (crate::layout::Layout::get(cx).right_open, crate::layout::Layout::get(cx).terminal_open, h.session_list.read(cx).overrides.clone())
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_terminal(window, cx)));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
@@ -6420,7 +6157,7 @@ mod tests {
             let h = baaz.read(cx);
             assert_eq!(crate::layout::Layout::get(cx).right_open, right_open, "toggle_right changed hidden state");
             assert_eq!(crate::layout::Layout::get(cx).terminal_open, terminal_open, "a dock command changed hidden state");
-            assert!(h.overrides == overrides, "a per-session pane record was written");
+            assert!(h.session_list.read(cx).overrides == overrides, "a per-session pane record was written");
             assert!(h.settings_open(cx), "a guarded command closed Settings");
         });
         // The matching palette action is ignored the same way: it neither
@@ -6470,7 +6207,7 @@ mod tests {
             assert!(opened.is_ok(), "the scripted dock opens: {opened:?}");
         }
         let dock = vc.update(|_, cx| baaz.read(cx).terminal_dock.clone());
-        let root = vc.update(|_, cx| baaz.read(cx).current_project().map(|project| project.root.clone())).expect("the hermetic workspace is the project");
+        let root = vc.update(|_, cx| baaz.read(cx).current_project(cx).map(|project| project.root.clone())).expect("the hermetic workspace is the project");
         let tabs = vc.update(|_, cx| dock.read(cx).host().read(cx).tabs_for(&root).iter().map(|tab| tab.id.clone()).collect::<Vec<_>>());
         assert_eq!(tabs.len(), 2, "two tabs on the project");
         let active = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| dock.read(cx).host().read(cx).active_for(&root).map(|tab| tab.id.clone()));
@@ -6818,6 +6555,8 @@ mod tests {
         assert!(
             vc.update(|_, cx| baaz
                 .read(cx)
+                .session_list
+                .read(cx)
                 .overrides
                 .get("s-1")
                 .and_then(|meta| meta.right.clone())
@@ -6946,9 +6685,9 @@ mod tests {
         dir: &std::path::Path,
     ) {
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                let id = h.projects.add(dir).id.clone();
-                h.projects.current = Some(id.clone());
+            baaz.update(cx, |h, cx| {
+                let id = h.session_list.update(cx, |list, _| list.projects.add(dir).id.clone());
+                h.session_list.update(cx, |list, _| list.projects.current = Some(id.clone()));
                 h.current_project = Some(id);
             })
         });
@@ -8033,7 +7772,7 @@ mod tests {
             // Pin the mapping so both arms provably cover their variant.
             let (signed_in, no_session, has_project, expected_title) = vc.update(|_, cx| {
                 let h = baaz.read(cx);
-                (matches!(h.auth, super::Auth::SignedIn(_)), h.active.is_none(), h.current_project().is_some(), h.window_title(cx))
+                (matches!(h.auth, super::Auth::SignedIn(_)), h.active.is_none(), h.current_project(cx).is_some(), h.window_title(cx))
             });
             assert!(signed_in, "the shell never signed in (no_project={no_project})");
             assert!(no_session, "a session opened on its own (no_project={no_project})");
@@ -8074,22 +7813,24 @@ mod tests {
         });
         let long = "w".repeat(2000);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.sessions.push(crate::sidebar::local_started_row(
-                    "s-long",
-                    crate::sidebar::one_line(&long),
-                    None,
-                    None,
-                    crate::clock::now_local(),
-                ));
-                h.sessions_loaded = true;
-                h.index_loaded = true;
-                h.invalidate_list();
+            baaz.update(cx, |h, cx| {
+                h.session_list.update(cx, |list, _| {
+                    list.sessions.push(crate::sidebar::local_started_row(
+                        "s-long",
+                        crate::sidebar::one_line(&long),
+                        None,
+                        None,
+                        crate::clock::now_local(),
+                    ));
+                });
+                h.session_list.update(cx, |list, _| list.sessions_loaded = true);
+                h.session_list.update(cx, |list, _| list.index_loaded = true);
+                h.invalidate_list(cx);
             })
         });
         let (row_len, head_len) = vc.update(|_, cx| {
             let h = baaz.read(cx);
-            let row = h.sessions.iter().find(|e| e.id == "s-long").expect("the row");
+            let row = h.session_list.read(cx).sessions.iter().find(|e| e.id == "s-long").expect("the row");
             let head = h.collapsed_head_label("s-long", cx).expect("the header title");
             (row.label.chars().count(), head.chars().count())
         });
@@ -8332,7 +8073,7 @@ mod tests {
         open_session!("sess-a");
         show!(crate::layout::RightKind::Files);
         let root =
-            vc.update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root).expect("a project"));
+            vc.update(|_, cx| baaz.read(cx).right_project(cx).map(|(root, _)| root).expect("a project"));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.with_right_pane(cx, |pane, cx| pane.begin_file_preview_for(&root, "Cargo.toml", cx))));
         macro_rules! previewed {
             () => {
@@ -8422,7 +8163,7 @@ mod tests {
         });
         vc.run_until_parked();
         let root = vc
-            .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
+            .update(|_, cx| baaz.read(cx).right_project(cx).map(|(root, _)| root))
             .expect("the hermetic workspace is adopted at boot");
         let files = vc.update(|_, cx| baaz.read(cx).right_pane.read(cx).cache.files_for(&root));
         assert!(files.is_some(), "the background re-read lands the file listing in the cache");
@@ -8460,7 +8201,7 @@ mod tests {
         });
         vc.run_until_parked();
         let root = vc
-            .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
+            .update(|_, cx| baaz.read(cx).right_project(cx).map(|(root, _)| root))
             .expect("the hermetic workspace is adopted at boot");
         std::fs::write(root.join("note.txt"), "version one\n").unwrap();
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.with_right_pane(cx, |pane, cx| pane.begin_file_preview_for(&root, "note.txt", cx))));
@@ -8546,7 +8287,7 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         let root = vc
-            .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
+            .update(|_, cx| baaz.read(cx).right_project(cx).map(|(root, _)| root))
             .expect("the hermetic workspace is adopted at boot");
         std::fs::create_dir_all(root.join("crates/baaz/src")).unwrap();
         let view = vc.update(|window, cx| {
@@ -8613,7 +8354,7 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         let root = vc
-            .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
+            .update(|_, cx| baaz.read(cx).right_project(cx).map(|(root, _)| root))
             .expect("the hermetic workspace is adopted at boot");
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/main.rs"), "fn main() {\n    println!(\"hi\");\n}\n").unwrap();
@@ -8677,7 +8418,7 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         let root = vc
-            .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
+            .update(|_, cx| baaz.read(cx).right_project(cx).map(|(root, _)| root))
             .expect("the hermetic workspace is adopted at boot");
         std::fs::create_dir_all(root.join("site")).unwrap();
         std::fs::write(root.join("site/kitchen sink.html"), "<h1>hi</h1>").unwrap();
@@ -8731,7 +8472,7 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         let root = vc
-            .update(|_, cx| baaz.read(cx).right_project().map(|(root, _)| root))
+            .update(|_, cx| baaz.read(cx).right_project(cx).map(|(root, _)| root))
             .expect("the hermetic workspace is adopted at boot");
         std::fs::write(root.join("index.html"), "<h1>hi</h1>").unwrap();
         std::fs::write(root.join("notes.md"), "# Notes\n").unwrap();
@@ -9033,14 +8774,14 @@ mod tests {
             cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
         });
         let row = |baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext| {
-            vc.update(|_, cx| baaz.read(cx).sessions.iter().find(|e| e.id == "s-bg").cloned().expect("the row"))
+            vc.update(|_, cx| baaz.read(cx).session_list.read(cx).sessions.iter().find(|e| e.id == "s-bg").cloned().expect("the row"))
         };
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 let mut entry = crate::sidebar::local_started_row("s-bg", "Chart it".into(), None, None, Local::now());
                 entry.running = false;
                 entry.turns = 1;
-                h.sessions.push(entry);
+                h.session_list.update(cx, |list, _| list.sessions.push(entry));
                 h.on_hub_event(provider::ProviderEvent::TurnRunning { session_id: "s-bg".into(), turn_id: "t-1".into() }, cx);
             })
         });
@@ -9142,7 +8883,7 @@ mod tests {
         // the turn and the row reads running from it.
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
-                h.sessions.push(idle_row("s-1"));
+                h.session_list.update(cx, |list, _| list.sessions.push(idle_row("s-1")));
                 let view = h.active.clone().expect("a session is open");
                 view.update(cx, |view, cx| {
                     view.apply(crate::session::wire_note("turn/started", "s-1", serde_json::json!({"turnId": "t-1"})), cx);
@@ -9151,7 +8892,7 @@ mod tests {
             })
         });
         assert!(
-            vc.update(|_, cx| baaz.read(cx).sessions.iter().any(|e| e.id == "s-1" && e.running)),
+            vc.update(|_, cx| baaz.read(cx).session_list.read(cx).sessions.iter().any(|e| e.id == "s-1" && e.running)),
             "the started turn arms the row"
         );
         // The list reply still says idle: the wholesale replace stands the
@@ -9160,14 +8901,14 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 let wire = vec![idle_row("s-1")];
-                h.sessions = crate::sidebar::merge_session_list(wire, &h.sessions);
-                h.merge_provider_rows();
+                h.session_list.update(cx, |list, _| list.sessions = crate::sidebar::merge_session_list(wire, &list.sessions));
+                h.merge_provider_rows(cx);
                 h.sync_all_live_rows(cx);
             })
         });
         let (running, kind) = vc.update(|_, cx| {
             let h = baaz.read(cx);
-            let entry = h.sessions.iter().find(|e| e.id == "s-1").expect("the row survives the merge");
+            let entry = h.session_list.read(cx).sessions.iter().find(|e| e.id == "s-1").expect("the row survives the merge");
             let status = entry.row_status(Local::now());
             (entry.running, status.kind)
         });

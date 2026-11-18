@@ -53,19 +53,21 @@ fn search_rows_skip_side_sessions_by_every_mark(cx: &mut gpui::TestAppContext) {
     let vc = cx.add_empty_window();
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             for id in ["s-plain", "s-set", "s-meta", "s-marker"] {
-                std::sync::Arc::make_mut(&mut harness.index).insert(id.into(), IndexEntry { title: id.into(), ..Default::default() });
+                harness.session_list.update(cx, |list, _| std::sync::Arc::make_mut(&mut list.index).insert(id.into(), IndexEntry { title: id.into(), ..Default::default() }));
             }
-            harness.side_sessions.insert("s-set".into());
-            harness.overrides.insert(
-                "s-meta".into(),
-                crate::sessions::SessionMeta { side_session: true, ..Default::default() },
-            );
+            harness.session_list.update(cx, |list, _| list.side_sessions.insert("s-set".into()));
+            harness.session_list.update(cx, |list, _| {
+                list.overrides.insert(
+                    "s-meta".into(),
+                    crate::sessions::SessionMeta { side_session: true, ..Default::default() },
+                );
+            });
             let mut marked = chain_muse_entry("s-marker", "Marker", 1);
             marked.side_marker = true;
-            harness.sessions.push(marked);
-            let ids: Vec<String> = harness.search_session_rows().into_iter().map(|row| row.session_id).collect();
+            harness.session_list.update(cx, |list, _| list.sessions.push(marked));
+            let ids: Vec<String> = harness.search_session_rows(cx).into_iter().map(|row| row.session_id).collect();
             assert_eq!(ids, vec!["s-plain".to_owned()], "only the ordinary session is searchable");
         });
     });
@@ -98,54 +100,54 @@ fn boot_rows_reply_and_rejoin_read_one_label(cx: &mut gpui::TestAppContext) {
     }))
     .expect("a list row");
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
-            std::sync::Arc::make_mut(&mut harness.index).insert(
+        baaz.update(cx, |harness, cx| {
+            harness.session_list.update(cx, |list, _| std::sync::Arc::make_mut(&mut list.index).insert(
                 "s-chain".into(),
                 IndexEntry { title: "Index title".into(), updated_at_us: Some(1), ..Default::default() },
-            );
-            let reply = |harness: &mut Harness| {
-                let joined = SessionEntry::join(&wire, harness.index.get("s-chain"), None, &harness.projects);
-                harness.sessions = sidebar::merge_session_list(vec![joined], &harness.sessions);
-                harness.invalidate_list();
-                harness.search_sync_rows().into_iter().map(|(row, _, fp)| (row.label, fp)).collect::<Vec<_>>()
+            ));
+            let reply = |harness: &mut Harness, cx: &mut gpui::App| {
+                let joined = SessionEntry::join(&wire, harness.session_list.read(cx).index.get("s-chain"), None, &harness.session_list.read(cx).projects);
+                harness.session_list.update(cx, |list, _| list.sessions = sidebar::merge_session_list(vec![joined], &list.sessions));
+                harness.invalidate_list(cx);
+                harness.search_sync_rows(cx).into_iter().map(|(row, _, fp)| (row.label, fp)).collect::<Vec<_>>()
             };
             // The index alone: the label moves when the reply lands.
-            harness.install_provisional_rows();
+            harness.install_provisional_rows(cx);
             let boot: Vec<_> =
-                harness.search_sync_rows().into_iter().map(|(row, _, fp)| (row.label, fp)).collect();
+                harness.search_sync_rows(cx).into_iter().map(|(row, _, fp)| (row.label, fp)).collect();
             assert_eq!(boot[0].0, "Index title");
-            assert_ne!(boot, reply(harness), "without the saved list the row is rewritten");
+            assert_ne!(boot, reply(harness, cx), "without the saved list the row is rewritten");
             // With the saved list: nothing moves.
-            harness.sessions.clear();
-            harness.saved_list = Some(std::sync::Arc::new(crate::list_cache::ListCache {
+            harness.session_list.update(cx, |list, _| list.sessions.clear());
+            harness.session_list.update(cx, |list, _| list.fetch.saved = Some(std::sync::Arc::new(crate::list_cache::ListCache {
                 sessions: vec![wire.clone()],
                 ..Default::default()
-            }));
-            harness.install_provisional_rows();
-            let row = harness.sessions.iter().find(|e| e.id == "s-chain").expect("a boot row");
+            })));
+            harness.install_provisional_rows(cx);
+            let row = harness.session_list.read(cx).sessions.iter().find(|e| e.id == "s-chain").expect("a boot row");
             assert!(row.provisional && !row.running && !row.needs_title, "wire facts that may have moved stay zero");
             let boot: Vec<_> =
-                harness.search_sync_rows().into_iter().map(|(row, _, fp)| (row.label, fp)).collect();
+                harness.search_sync_rows(cx).into_iter().map(|(row, _, fp)| (row.label, fp)).collect();
             assert_eq!(boot[0].0, "Wire title");
-            assert_eq!(boot, reply(harness), "the reply changes no search row");
+            assert_eq!(boot, reply(harness, cx), "the reply changes no search row");
             // Nor does a rejoin after it (every index refresh and override
             // edit runs one): it used to read the index label, uncut.
-            harness.rejoin();
+            harness.rejoin(cx);
             let rejoined: Vec<_> =
-                harness.search_sync_rows().into_iter().map(|(row, _, fp)| (row.label, fp)).collect();
+                harness.search_sync_rows(cx).into_iter().map(|(row, _, fp)| (row.label, fp)).collect();
             assert_eq!(rejoined, boot, "a rejoin reads the same ladder as the join");
             // A label past 80 characters is cut the same way on both paths.
             let long = "word ".repeat(40);
-            std::sync::Arc::make_mut(&mut harness.index).get_mut("s-chain").expect("indexed").title = long.clone();
+            harness.session_list.update(cx, |list, _| std::sync::Arc::make_mut(&mut list.index).get_mut("s-chain").expect("indexed").title = long.clone());
             let mut untitled = wire.clone();
             untitled.title = None;
-            harness.saved_list = Some(std::sync::Arc::new(crate::list_cache::ListCache {
+            harness.session_list.update(cx, |list, _| list.fetch.saved = Some(std::sync::Arc::new(crate::list_cache::ListCache {
                 sessions: vec![untitled.clone()],
                 ..Default::default()
-            }));
-            harness.rejoin();
-            let row = harness.sessions.iter().find(|e| e.id == "s-chain").expect("a row");
-            let joined = SessionEntry::join(&untitled, harness.index.get("s-chain"), None, &harness.projects);
+            })));
+            harness.rejoin(cx);
+            let row = harness.session_list.read(cx).sessions.iter().find(|e| e.id == "s-chain").expect("a row");
+            let joined = SessionEntry::join(&untitled, harness.session_list.read(cx).index.get("s-chain"), None, &harness.session_list.read(cx).projects);
             assert_eq!(row.label, joined.label, "rejoin and join agree on a long label");
             assert!(row.label.ends_with('\u{2026}'));
         });
@@ -165,21 +167,21 @@ fn a_second_boot_install_keeps_every_row(cx: &mut gpui::TestAppContext) {
     let vc = cx.add_empty_window();
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             for id in ["s-a", "s-b", "s-c"] {
-                std::sync::Arc::make_mut(&mut harness.index).insert(id.into(), IndexEntry { title: id.into(), ..Default::default() });
+                harness.session_list.update(cx, |list, _| std::sync::Arc::make_mut(&mut list.index).insert(id.into(), IndexEntry { title: id.into(), ..Default::default() }));
             }
-            harness.install_provisional_rows();
-            let ids = |h: &Harness| {
-                let mut ids: Vec<String> = h.sessions.iter().filter(|e| e.provisional).map(|e| e.id.clone()).collect();
+            harness.install_provisional_rows(cx);
+            let ids = |h: &Harness, cx: &gpui::App| {
+                let mut ids: Vec<String> = h.session_list.read(cx).sessions.iter().filter(|e| e.provisional).map(|e| e.id.clone()).collect();
                 ids.sort();
                 ids
             };
-            assert_eq!(ids(harness), ["s-a", "s-b", "s-c"]);
+            assert_eq!(ids(harness, cx), ["s-a", "s-b", "s-c"]);
             // The reconcile brings one more row.
-            std::sync::Arc::make_mut(&mut harness.index).insert("s-d".into(), IndexEntry { title: "s-d".into(), ..Default::default() });
-            harness.install_provisional_rows();
-            assert_eq!(ids(harness), ["s-a", "s-b", "s-c", "s-d"], "nothing drops, the new row joins");
+            harness.session_list.update(cx, |list, _| std::sync::Arc::make_mut(&mut list.index).insert("s-d".into(), IndexEntry { title: "s-d".into(), ..Default::default() }));
+            harness.install_provisional_rows(cx);
+            assert_eq!(ids(harness, cx), ["s-a", "s-b", "s-c", "s-d"], "nothing drops, the new row joins");
         });
     });
     lane_restore(state);
@@ -196,14 +198,14 @@ fn the_sidebar_paints_boot_rows_before_the_list_reply(cx: &mut gpui::TestAppCont
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            harness.sessions.retain(|e| e.local);
-            assert!(harness.sidebar_loading(), "nothing has landed");
-            harness.index_loaded = true;
-            assert!(harness.sidebar_loading(), "the index landed empty: still nothing to paint");
-            std::sync::Arc::make_mut(&mut harness.index).insert("s-a".into(), IndexEntry { title: "A".into(), ..Default::default() });
-            harness.install_provisional_rows();
-            assert!(!harness.sessions_loaded, "the wire has not answered");
-            assert!(!harness.sidebar_loading(), "boot rows paint without waiting for the list");
+            harness.session_list.update(cx, |list, _| list.sessions.retain(|e| e.local));
+            assert!(harness.session_list.read(cx).loading(), "nothing has landed");
+            harness.session_list.update(cx, |list, _| list.index_loaded = true);
+            assert!(harness.session_list.read(cx).loading(), "the index landed empty: still nothing to paint");
+            harness.session_list.update(cx, |list, _| std::sync::Arc::make_mut(&mut list.index).insert("s-a".into(), IndexEntry { title: "A".into(), ..Default::default() }));
+            harness.install_provisional_rows(cx);
+            assert!(!harness.session_list.read(cx).sessions_loaded, "the wire has not answered");
+            assert!(!harness.session_list.read(cx).loading(), "boot rows paint without waiting for the list");
             // A zero-turn session from the saved list is filtered as empty
             // now, as the reply's row will be; an index-only row, whose turn
             // count nobody knows yet, still shows.
@@ -214,11 +216,11 @@ fn the_sidebar_paints_boot_rows_before_the_list_reply(cx: &mut gpui::TestAppCont
                 "modelId": null, "providerId": null, "workspaceRoot": "/tmp/w",
             }))
             .expect("a list row");
-            harness.saved_list = Some(std::sync::Arc::new(crate::list_cache::ListCache {
+            harness.session_list.update(cx, |list, _| list.fetch.saved = Some(std::sync::Arc::new(crate::list_cache::ListCache {
                 sessions: vec![zero],
                 ..Default::default()
-            }));
-            harness.install_provisional_rows();
+            })));
+            harness.install_provisional_rows(cx);
             let visible: Vec<String> = harness.visible_sessions(cx).iter().map(|e| e.id.clone()).collect();
             assert!(visible.contains(&"s-a".to_owned()), "the index-only row shows");
             assert!(!visible.contains(&"s-zero".to_owned()), "a known-empty row is filtered before the reply too");
@@ -242,7 +244,7 @@ fn bench_visible_sessions(cx: &mut gpui::TestAppContext) {
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let base = crate::clock::now_local();
-            harness.sessions = (0..crate::perf_budget::SESSIONS)
+            let rows = (0..crate::perf_budget::SESSIONS)
                 .map(|i| {
                     let mut entry = chain_muse_entry(&format!("s-{i:05}"), &format!("Session {i}"), (i % 7) as u64);
                     entry.updated = base - chrono::Duration::minutes(i as i64);
@@ -252,15 +254,16 @@ fn bench_visible_sessions(cx: &mut gpui::TestAppContext) {
                     entry
                 })
                 .collect();
-            harness.sessions_loaded = true;
-            harness.index_loaded = true;
-            harness.invalidate_list();
+            harness.session_list.update(cx, |list, _| list.sessions = rows);
+            harness.session_list.update(cx, |list, _| list.sessions_loaded = true);
+            harness.session_list.update(cx, |list, _| list.index_loaded = true);
+            harness.invalidate_list(cx);
             let shown = harness.visible_sessions(cx).len();
             assert!(shown > 2_000, "the filter keeps the non-empty, unhidden rows: {shown}");
             let mut c = crate::perf_budget::bench_criterion();
             c.bench_function("visible_sessions/2600_after_a_change", |b| {
                 b.iter(|| {
-                    harness.invalidate_list();
+                    harness.invalidate_list(cx);
                     harness.visible_sessions(cx).len()
                 })
             });
@@ -285,11 +288,11 @@ fn bench_turn_settle(cx: &mut gpui::TestAppContext) {
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let (sessions, index) = crate::perf_turn::sidebar_fixture();
-            harness.sessions = sessions;
-            harness.index = std::sync::Arc::new(index);
-            harness.sessions_loaded = true;
-            harness.index_loaded = true;
-            harness.rejoin();
+            harness.session_list.update(cx, |list, _| list.sessions = sessions);
+            harness.session_list.update(cx, |list, _| list.index = std::sync::Arc::new(index));
+            harness.session_list.update(cx, |list, _| list.sessions_loaded = true);
+            harness.session_list.update(cx, |list, _| list.index_loaded = true);
+            harness.rejoin(cx);
             let _ = harness.visible_sessions(cx).len();
             let report = crate::perf_turn::time_settles(harness, 40, cx);
             eprintln!("bench_turn_settle {report}");
@@ -311,34 +314,34 @@ fn a_patched_row_leaves_the_list_a_rebuild_would(cx: &mut gpui::TestAppContext) 
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let (sessions, index) = crate::perf_turn::sidebar_fixture();
-            harness.sessions = sessions;
-            harness.index = std::sync::Arc::new(index);
-            harness.sessions_loaded = true;
-            harness.index_loaded = true;
-            harness.rejoin();
+            harness.session_list.update(cx, |list, _| list.sessions = sessions);
+            harness.session_list.update(cx, |list, _| list.index = std::sync::Arc::new(index));
+            harness.session_list.update(cx, |list, _| list.sessions_loaded = true);
+            harness.session_list.update(cx, |list, _| list.index_loaded = true);
+            harness.rejoin(cx);
             let _ = harness.visible_sessions(cx);
             for (k, id) in ["s-01000", "s-00001", "s-02500"].iter().enumerate() {
-                let ix = harness.sessions.iter().position(|entry| entry.id == *id).expect("fixture row");
-                let before = harness.sessions[ix].clone();
-                let epoch = harness.list_epoch;
-                harness.sessions[ix].turns += 1;
-                harness.sessions[ix].running = k == 1;
-                harness.sessions[ix].description = format!("moved {k}");
-                harness.sessions[ix].updated = crate::clock::now_local() + chrono::Duration::minutes(k as i64 + 1);
-                harness.invalidate_row(&before);
-                assert_eq!(harness.list_epoch, epoch, "a time-and-words move patches, never rebuilds");
+                let ix = harness.session_list.read(cx).sessions.iter().position(|entry| entry.id == *id).expect("fixture row");
+                let before = harness.session_list.read(cx).sessions[ix].clone();
+                let epoch = harness.session_list.read(cx).epoch;
+                harness.session_list.update(cx, |list, _| list.sessions[ix].turns += 1);
+                harness.session_list.update(cx, |list, _| list.sessions[ix].running = k == 1);
+                harness.session_list.update(cx, |list, _| list.sessions[ix].description = format!("moved {k}"));
+                harness.session_list.update(cx, |list, _| list.sessions[ix].updated = crate::clock::now_local() + chrono::Duration::minutes(k as i64 + 1));
+                harness.invalidate_row(&before, cx);
+                assert_eq!(harness.session_list.read(cx).epoch, epoch, "a time-and-words move patches, never rebuilds");
                 let patched = harness.visible_sessions(cx).as_ref().clone();
                 assert_eq!(patched[0].id, *id, "the moved row leads");
-                harness.invalidate_list();
+                harness.invalidate_list(cx);
                 let rebuilt = harness.visible_sessions(cx).as_ref().clone();
                 assert_eq!(patched, rebuilt, "row {id}");
             }
-            let ix = harness.sessions.iter().position(|entry| entry.id == "s-00005").expect("fixture row");
-            let before = harness.sessions[ix].clone();
-            harness.sessions[ix].hidden = !before.hidden;
-            let epoch = harness.list_epoch;
-            harness.invalidate_row(&before);
-            assert_ne!(harness.list_epoch, epoch, "a filtered field rebuilds");
+            let ix = harness.session_list.read(cx).sessions.iter().position(|entry| entry.id == "s-00005").expect("fixture row");
+            let before = harness.session_list.read(cx).sessions[ix].clone();
+            harness.session_list.update(cx, |list, _| list.sessions[ix].hidden = !before.hidden);
+            let epoch = harness.session_list.read(cx).epoch;
+            harness.invalidate_row(&before, cx);
+            assert_ne!(harness.session_list.read(cx).epoch, epoch, "a filtered field rebuilds");
         });
     });
     lane_restore(state);
@@ -353,17 +356,17 @@ fn a_scoped_search_row_is_the_whole_build_s_row(cx: &mut gpui::TestAppContext) {
     let vc = cx.add_empty_window();
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             let (sessions, index) = crate::perf_turn::sidebar_fixture();
-            harness.sessions = sessions;
-            harness.index = std::sync::Arc::new(index);
-            harness.sessions_loaded = true;
-            harness.index_loaded = true;
-            harness.rejoin();
-            let full = harness.search_sync_rows();
+            harness.session_list.update(cx, |list, _| list.sessions = sessions);
+            harness.session_list.update(cx, |list, _| list.index = std::sync::Arc::new(index));
+            harness.session_list.update(cx, |list, _| list.sessions_loaded = true);
+            harness.session_list.update(cx, |list, _| list.index_loaded = true);
+            harness.rejoin(cx);
+            let full = harness.search_sync_rows(cx);
             for id in ["s-00042", "s-01999"] {
                 let ids: std::collections::HashSet<String> = std::iter::once(id.to_owned()).collect();
-                let scoped = harness.search_rows_scoped(Some(&ids)).expect("a plain row stands alone");
+                let scoped = harness.search_rows_scoped(Some(&ids), cx).expect("a plain row stands alone");
                 let whole = full.iter().find(|(row, _, _)| row.session_id == id).expect("in the whole build");
                 assert_eq!(scoped.len(), 1);
                 let words = |(row, body_ids, fingerprint): &(crate::search::SessionRow, Vec<String>, i64)| {
@@ -382,17 +385,17 @@ fn a_scoped_search_row_is_the_whole_build_s_row(cx: &mut gpui::TestAppContext) {
                 assert_eq!(words(&scoped[0]), words(whole), "{id}");
             }
             let unknown: std::collections::HashSet<String> = std::iter::once("s-nowhere".to_owned()).collect();
-            assert!(harness.search_rows_scoped(Some(&unknown)).is_none(), "an id in neither store rebuilds everything");
+            assert!(harness.search_rows_scoped(Some(&unknown), cx).is_none(), "an id in neither store rebuilds everything");
         });
     });
     // A finished turn's index reply and one session's override edit
     // each sync that session's search row alone.
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            let mut next = (*harness.index).clone();
+            let mut next = (*harness.session_list.read(cx).index).clone();
             next.get_mut("s-00042").expect("fixture row").search_text.push_str(" freshword");
             let next = std::sync::Arc::new(next);
-            let changed = crate::index::changed_ids(&harness.index, &next);
+            let changed = crate::index::changed_ids(&harness.session_list.read(cx).index, &next);
             assert_eq!(changed.as_ref().map(|ids| ids.len()), Some(1), "one row moved");
             Harness::reset_search_rebuild_count();
             harness.apply_index_delta(next, changed, cx);
@@ -419,14 +422,14 @@ fn an_override_edit_that_changes_nothing_settles_nothing(cx: &mut gpui::TestAppC
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             // Indexed, so the edit is not the inert new-session case.
-            std::sync::Arc::make_mut(&mut harness.index).insert("s-known".into(), IndexEntry { title: "Known".into(), ..Default::default() });
+            harness.session_list.update(cx, |list, _| std::sync::Arc::make_mut(&mut list.index).insert("s-known".into(), IndexEntry { title: "Known".into(), ..Default::default() }));
             Harness::reset_search_rebuild_count();
             harness.set_override("s-known", |meta| meta.project = Some("p-1".into()), cx);
             assert_eq!(Harness::search_rebuild_count(), 1, "a real change settles");
             Harness::reset_search_rebuild_count();
             harness.set_override("s-known", |meta| meta.project = Some("p-1".into()), cx);
             assert_eq!(Harness::search_rebuild_count(), 0, "the same project again settles nothing");
-            assert_eq!(harness.overrides.get("s-known").and_then(|meta| meta.project.clone()), Some("p-1".into()));
+            assert_eq!(harness.session_list.read(cx).overrides.get("s-known").and_then(|meta| meta.project.clone()), Some("p-1".into()));
         });
     });
     lane_restore(state);
@@ -452,17 +455,19 @@ fn handoff_destination_pane_state_skips_the_list_settle(cx: &mut gpui::TestAppCo
     };
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            harness.overrides.insert(
-                "source-1".to_owned(),
-                crate::sessions::SessionMeta {
-                    right: Some(carried.clone()),
-                    ..Default::default()
-                },
-            );
+            harness.session_list.update(cx, |list, _| {
+                list.overrides.insert(
+                    "source-1".to_owned(),
+                    crate::sessions::SessionMeta {
+                        right: Some(carried.clone()),
+                        ..Default::default()
+                    },
+                );
+            });
             Harness::reset_search_rebuild_count();
             harness.carry_right_state_for_handoff("dest-1", carried.clone(), cx);
             assert_eq!(
-                harness.overrides.get("dest-1").and_then(|meta| meta.right.clone()),
+                harness.session_list.read(cx).overrides.get("dest-1").and_then(|meta| meta.right.clone()),
                 Some(carried.clone()),
                 "the destination inherits the source's pane state"
             );
@@ -491,23 +496,23 @@ fn muse_never_gates_the_other_providers_rows(cx: &mut gpui::TestAppContext) {
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            harness.sessions_loaded = false;
-            harness.sessions.clear();
+            harness.session_list.update(cx, |list, _| list.sessions_loaded = false);
+            harness.session_list.update(cx, |list, _| list.sessions.clear());
             z4_seed_stored_codex(harness, cx);
-            harness.sessions.retain(|entry| !entry.provider.lists_sessions());
-            harness.sessions_loaded = false;
+            harness.session_list.update(cx, |list, _| list.sessions.retain(|entry| !entry.provider.lists_sessions()));
+            harness.session_list.update(cx, |list, _| list.sessions_loaded = false);
             harness.muse_unavailable(crate::connect::MUSE_OFF.into(), cx);
-            assert!(harness.sessions_loaded, "the sidebar settles without a Muse list");
-            assert!(harness.sessions.iter().any(|e| e.id == "s-codex-old"), "the Codex row shows");
+            assert!(harness.session_list.read(cx).sessions_loaded, "the sidebar settles without a Muse list");
+            assert!(harness.session_list.read(cx).sessions.iter().any(|e| e.id == "s-codex-old"), "the Codex row shows");
             assert!(!matches!(harness.wire, crate::app::Wire::Ready));
             // A Muse row beside it, then a Muse sign-out.
-            let mut muse_row = harness.sessions[0].clone();
+            let mut muse_row = harness.session_list.read(cx).sessions[0].clone();
             muse_row.id = "s-muse".into();
             muse_row.provider = crate::providers::ProviderId::Muse;
-            harness.sessions.push(muse_row);
+            harness.session_list.update(cx, |list, _| list.sessions.push(muse_row));
             harness.forget_muse_rows(cx);
-            assert!(harness.sessions.iter().all(|e| e.id != "s-muse"), "Muse's row goes");
-            assert!(harness.sessions.iter().any(|e| e.id == "s-codex-old"), "Codex's row stays");
+            assert!(harness.session_list.read(cx).sessions.iter().all(|e| e.id != "s-muse"), "Muse's row goes");
+            assert!(harness.session_list.read(cx).sessions.iter().any(|e| e.id == "s-codex-old"), "Codex's row stays");
             // Offline chrome boots into the capture login screen; a live
             // launch with Muse signed out does not.
             harness.args.offline = false;
@@ -538,12 +543,16 @@ fn a_provider_sessions_title_comes_from_its_own_provider(cx: &mut gpui::TestAppC
         baaz.update(cx, |harness, cx| {
             mark_muse_up(harness);
             z4_seed_stored_codex(harness, cx);
-            if let Some(record) = harness.provider_sessions.get_mut("s-codex-old") {
-                record.turns = 0;
-            }
-            for entry in harness.sessions.iter_mut().filter(|e| e.id == "s-codex-old") {
-                entry.turns = 0;
-            }
+            harness.session_list.update(cx, |list, _| {
+                if let Some(record) = list.provider_sessions.get_mut("s-codex-old") {
+                    record.turns = 0;
+                }
+            });
+            harness.session_list.update(cx, |list, _| {
+                for entry in list.sessions.iter_mut().filter(|e| e.id == "s-codex-old") {
+                    entry.turns = 0;
+                }
+            });
             crate::layout::Layout::stage(cx, |layout| layout.auto_title = true);
             harness.maybe_start_title("s-codex-old", Some("why does the parser panic".into()), cx);
         });
@@ -553,7 +562,7 @@ fn a_provider_sessions_title_comes_from_its_own_provider(cx: &mut gpui::TestAppC
         let harness = baaz.read(cx);
         assert_eq!(*asked.borrow(), vec![crate::providers::ProviderId::Codex], "Codex wrote it, once");
         assert_eq!(
-            harness.overrides.get("s-codex-old").and_then(|m| m.generated_title.clone()).as_deref(),
+            harness.session_list.read(cx).overrides.get("s-codex-old").and_then(|m| m.generated_title.clone()).as_deref(),
             Some("Parser Panic Fix")
         );
     });
@@ -581,18 +590,20 @@ fn a_muse_sessions_title_rides_a_recorded_hidden_side_session(cx: &mut gpui::Tes
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             install_fake_muse(harness, &state.2, &state.2, &log, None);
-            harness.sessions.push(crate::sidebar::local_started_row(
-                "s-muse-new",
-                "chart the ferry routes".into(),
-                None,
-                None,
-                chrono::Local::now(),
-            ));
+            harness.session_list.update(cx, |list, _| {
+                list.sessions.push(crate::sidebar::local_started_row(
+                    "s-muse-new",
+                    "chart the ferry routes".into(),
+                    None,
+                    None,
+                    chrono::Local::now(),
+                ));
+            });
             crate::layout::Layout::stage(cx, |layout| layout.auto_title = true);
             harness.maybe_start_title("s-muse-new", Some("chart the ferry routes".into()), cx);
-            assert_eq!(harness.side_sessions.len(), 1, "the side session is recorded before the call");
-            let side = harness.side_sessions.iter().next().cloned().expect("a side id");
-            assert!(harness.overrides.get(&side).is_some_and(|meta| meta.hidden && meta.side_session));
+            assert_eq!(harness.session_list.read(cx).side_sessions.len(), 1, "the side session is recorded before the call");
+            let side = harness.session_list.read(cx).side_sessions.iter().next().cloned().expect("a side id");
+            assert!(harness.session_list.read(cx).overrides.get(&side).is_some_and(|meta| meta.hidden && meta.side_session));
         });
     });
     vc.run_until_parked();
@@ -600,7 +611,7 @@ fn a_muse_sessions_title_rides_a_recorded_hidden_side_session(cx: &mut gpui::Tes
         let harness = baaz.read(cx);
         assert_eq!(*asked.borrow(), vec![crate::providers::ProviderId::Muse], "Muse wrote it, once");
         assert_eq!(
-            harness.overrides.get("s-muse-new").and_then(|m| m.generated_title.clone()).as_deref(),
+            harness.session_list.read(cx).overrides.get("s-muse-new").and_then(|m| m.generated_title.clone()).as_deref(),
             Some("Ferry Route Chart")
         );
     });

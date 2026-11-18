@@ -85,7 +85,7 @@ fn q4_pending_provider_switch_hides_the_previous_transcript(cx: &mut gpui::TestA
             );
             assert!(
                 harness
-                    .overrides
+                    .session_list.read(cx).overrides
                     .get("s-codex-old")
                     .and_then(|meta| meta.right.clone())
                     .is_some_and(|right| right.open),
@@ -173,7 +173,7 @@ fn q4c_pending_pane_stays_neutral_and_saves_nothing(cx: &mut gpui::TestAppContex
         });
     });
     let a_pane = vc.update(|_, cx| {
-        baaz.read(cx).overrides.get(&first).and_then(|meta| meta.right.clone()).expect("A's pane stored")
+        baaz.read(cx).session_list.read(cx).overrides.get(&first).and_then(|meta| meta.right.clone()).expect("A's pane stored")
     });
     assert!(a_pane.open, "A's stored pane stands open");
     let b_pane = crate::sessions::RightState {
@@ -240,13 +240,13 @@ fn q4c_pending_pane_stays_neutral_and_saves_nothing(cx: &mut gpui::TestAppContex
                 "the toggle flips the live pane"
             );
             assert_eq!(
-                harness.overrides.get(&first).and_then(|meta| meta.right.clone()),
+                harness.session_list.read(cx).overrides.get(&first).and_then(|meta| meta.right.clone()),
                 Some(a_pane.clone()),
                 "the still-open session's stored pane is untouched by the toggle"
             );
             assert_eq!(
                 harness
-                    .overrides
+                    .session_list.read(cx).overrides
                     .get("s-codex-old")
                     .and_then(|meta| meta.right.clone()),
                 Some(b_pane.clone()),
@@ -265,7 +265,7 @@ fn q4c_pending_pane_stays_neutral_and_saves_nothing(cx: &mut gpui::TestAppContex
             );
             assert_eq!(
                 harness
-                    .overrides
+                    .session_list.read(cx).overrides
                     .get(&first)
                     .and_then(|meta| meta.right.clone())
                     .and_then(|right| right.browser_url),
@@ -274,7 +274,7 @@ fn q4c_pending_pane_stays_neutral_and_saves_nothing(cx: &mut gpui::TestAppContex
             );
             assert_eq!(
                 harness
-                    .overrides
+                    .session_list.read(cx).overrides
                     .get("s-codex-old")
                     .and_then(|meta| meta.right.clone())
                     .and_then(|right| right.browser_url),
@@ -461,27 +461,29 @@ fn q4b_late_landing_never_steals_the_centre(cx: &mut gpui::TestAppContext) {
     // that supersedes the first.
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            harness.provider_sessions.insert(
-                "s-codex-second".into(),
-                crate::provider_sessions::ProviderSessionRecord {
-                    provider: "codex".into(),
-                    session_id: "s-codex-second".into(),
-                    workspace: None,
-                    project: None,
-                    created_ms: 1_700_000_000_001,
-                    updated_ms: 1_700_000_000_001,
-                    turns: 3,
-                    title: Some("Second inquiry".into()),
-                    first_prompt: Some("second prompt".into()),
-                    handoff_to: None,
-                    handoff_from: None,
-                    handoff_from_provider: None,
-                    handoff_title: None,
-                    display_texts: std::collections::HashMap::new(),
-                    origin: None,
-                },
-            );
-            harness.merge_provider_rows();
+            harness.session_list.update(cx, |list, _| {
+                list.provider_sessions.insert(
+                    "s-codex-second".into(),
+                    crate::provider_sessions::ProviderSessionRecord {
+                        provider: "codex".into(),
+                        session_id: "s-codex-second".into(),
+                        workspace: None,
+                        project: None,
+                        created_ms: 1_700_000_000_001,
+                        updated_ms: 1_700_000_000_001,
+                        turns: 3,
+                        title: Some("Second inquiry".into()),
+                        first_prompt: Some("second prompt".into()),
+                        handoff_to: None,
+                        handoff_from: None,
+                        handoff_from_provider: None,
+                        handoff_title: None,
+                        display_texts: std::collections::HashMap::new(),
+                        origin: None,
+                    },
+                );
+            });
+            harness.merge_provider_rows(cx);
             harness.set_override(
                 "s-codex-second",
                 |meta| {
@@ -524,7 +526,7 @@ fn q4b_late_landing_never_steals_the_centre(cx: &mut gpui::TestAppContext) {
             );
             assert!(
                 harness
-                    .overrides
+                    .session_list.read(cx).overrides
                     .get("s-codex-old")
                     .and_then(|meta| meta.right.clone())
                     .is_some_and(|right| right.open),
@@ -629,7 +631,7 @@ fn q4c_fork_pending_loses_to_a_cached_landing(cx: &mut gpui::TestAppContext) {
     // `run_until_parked` between this and the click.
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_forked_on_provider(
                 ProviderId::Codex,
                 "s-fork".to_owned(),
@@ -1061,7 +1063,7 @@ fn switch_provider_through_the_handler_leaves_one_row_and_one_open(
         // what proves the replacement.)
         let _ = draft;
         let rows: Vec<_> =
-            harness.sessions.iter().filter(|entry| !entry.provider.lists_sessions()).collect();
+            harness.session_list.read(cx).sessions.iter().filter(|entry| !entry.provider.lists_sessions()).collect();
         assert_eq!(rows.len(), 1, "exactly one provider row names the lane");
         assert_eq!(rows[0].id, view.read(cx).session_id, "the row is the replacement");
         assert!(!harness.open_state.switch_pending, "the switch landed");
@@ -1294,7 +1296,7 @@ fn y2b2_clicking_another_session_parks_the_switched_draft(cx: &mut gpui::TestApp
         assert_eq!(switched.read(cx).draft_text(cx), "hello unsent", "its text stays with it");
         assert!(!switched.read(cx).is_opening_lane(), "its open landed on the parked draft");
         assert!(
-            !harness.provider_sessions.contains_key(&first),
+            !harness.session_list.read(cx).provider_sessions.contains_key(&first),
             "the replaced draft persists nowhere"
         );
     });
@@ -1389,7 +1391,7 @@ fn y2b2_new_session_reopens_the_switched_draft(cx: &mut gpui::TestAppContext) {
         assert!(harness.open_state.replacing_id().is_none());
         assert!(!harness.open_state.switch_pending, "the verbs are released");
         assert!(harness.registry.parked_len() == 0, "the old draft closed, nothing parks");
-        assert!(!harness.provider_sessions.contains_key(&old), "the old draft persists nowhere");
+        assert!(!harness.session_list.read(cx).provider_sessions.contains_key(&old), "the old draft persists nowhere");
     });
     let locked = shared.inner.lock().expect("y2b2");
     assert_eq!(locked.created.len(), 2, "the lane plus the switch's open, no third");
@@ -1437,7 +1439,7 @@ fn y2b2_second_switch_supersedes_the_first(cx: &mut gpui::TestAppContext) {
         assert!(harness.open_state.replacing_id().is_none(), "the marker is gone");
         assert!(!harness.open_state.switch_pending, "the verbs are released");
         assert!(harness.registry.parked_len() == 0, "nothing parks");
-        let records: Vec<String> = harness.provider_sessions.keys().cloned().collect();
+        let records: Vec<String> = harness.session_list.read(cx).provider_sessions.keys().cloned().collect();
         assert_eq!(
             records,
             vec![view.read(cx).session_id.clone()],
@@ -1490,7 +1492,7 @@ fn y2b2_closing_the_switched_draft_discards_its_open(cx: &mut gpui::TestAppConte
         assert!(harness.open_state.replacing_id().is_none(), "the marker is gone");
         assert!(!harness.open_state.switch_pending, "the verbs are released");
         assert!(
-            harness.provider_sessions.is_empty(),
+            harness.session_list.read(cx).provider_sessions.is_empty(),
             "neither the closed lane nor the switch persists"
         );
     });
@@ -1588,7 +1590,7 @@ fn a_late_finishing_earlier_open_never_steals_the_lane(cx: &mut gpui::TestAppCon
     // whichever happened to finish last.
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace.clone(), window, cx);
             harness.open_on_provider(ProviderId::ClaudeCode, None, workspace, window, cx);
         });
@@ -1604,7 +1606,7 @@ fn a_late_finishing_earlier_open_never_steals_the_lane(cx: &mut gpui::TestAppCon
             "the last ask wins, however the finishes order"
         );
         let rows: Vec<_> =
-            harness.sessions.iter().filter(|entry| !entry.provider.lists_sessions()).collect();
+            harness.session_list.read(cx).sessions.iter().filter(|entry| !entry.provider.lists_sessions()).collect();
         assert_eq!(rows.len(), 1, "the stale finish leaves no row");
         assert_eq!(rows[0].id, view.read(cx).session_id, "the row is the winner");
         assert!(!harness.open_state.switch_pending, "the switch landed");

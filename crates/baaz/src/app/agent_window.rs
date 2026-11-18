@@ -785,7 +785,7 @@ impl Harness {
             .session_tabs(None)
             .iter()
             .map(|(session, _)| {
-                let entry = self.sessions.iter().find(|e| &e.id == session);
+                let entry = self.session_list.read(cx).sessions.iter().find(|e| &e.id == session);
                 let view_busy = self.find_view(session, cx).is_some_and(|v| v.read(cx).busy());
                 let working = entry.is_some_and(|e| e.running) || view_busy || self.terminal_service.agent_activity(session).is_some();
                 (session.clone(), working)

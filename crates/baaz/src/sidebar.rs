@@ -2407,7 +2407,7 @@ pub(crate) mod tests {
     /// What a sidebar frame used to cost at five hundred sessions, and what
     /// it costs now (findings `performance-5`, `support-2`).
     ///
-    /// `render_sidebar` itself needs a window, so this times the two pure
+    /// The sidebar pane's render itself needs a window, so this times the two pure
     /// halves it is made of — the visible filter-and-sort and the grouping
     /// that builds one `SessionSummary` per row — against the cached frame,
     /// which is two `Rc` hand-backs and nothing else now that `sidebar_view`
@@ -3689,7 +3689,7 @@ pub(crate) mod tests {
 
     /// The project-grouping twin of
     /// [`five_hundred_sidebar_rows_cost_less_from_the_cache`]: the pure half
-    /// `render_sidebar` builds in project mode, timed against the cached
+    /// the sidebar pane builds in project mode, timed against the cached
     /// frame, which hands the same `Rc` back. The assertion is only the
     /// ordering, so the test is not a timing flake.
     #[test]

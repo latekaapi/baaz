@@ -293,7 +293,7 @@ impl Harness {
         }
         let current = self.current_project_id();
         let sessions: Vec<(String, String, u64)> = self
-            .sessions
+            .session_list.read(cx).sessions
             .iter()
             .filter(|entry| !entry.archived && !entry.hidden && entry.project == current)
             .map(|entry| (entry.id.clone(), entry.label.clone(), recency_ms(&entry.updated)))
@@ -465,7 +465,7 @@ impl Harness {
     /// closed tabs — capped at 5.
     pub(crate) fn browse_pickup_full(&self, cx: &gpui::App) -> Vec<(toolbar::PickupRow, PickupTarget)> {
         let space = self.browser.read(cx).browse_space();
-        let project_name = self.current_project().map(|project| project.name.clone()).unwrap_or_default();
+        let project_name = self.current_project(cx).map(|project| project.name.clone()).unwrap_or_default();
         let tab_items: Vec<(TabId, String, String)> = if self.browser.read(cx).tabs_loaded {
             self.browser
                 .read(cx)
@@ -483,7 +483,7 @@ impl Harness {
         };
         let current = self.current_project_id();
         let session_items: Vec<(String, String, String)> = self
-            .sessions
+            .session_list.read(cx).sessions
             .iter()
             .filter(|entry| !entry.archived && !entry.hidden && entry.project == current)
             .take(5)

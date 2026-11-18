@@ -630,8 +630,8 @@ impl Harness {
     pub(crate) fn open_pr_form(&mut self, root: &Path, window: &mut Window, cx: &mut Context<Self>) {
         let session = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
         let draft = PrDraftFacts {
-            label: session.as_ref().and_then(|id| self.collapsed_head_label(&self.chain_head(id), cx)),
-            provider: session.as_ref().map(|id| self.session_lane_provider(id)),
+            label: session.as_ref().and_then(|id| self.collapsed_head_label(&self.chain_head(id, cx), cx)),
+            provider: session.as_ref().map(|id| self.session_lane_provider(id, cx)),
             model: session.as_ref().and_then(|id| self.utility_model(id, cx)),
         };
         self.with_right_pane(cx, |pane, cx| pane.open_pr_form_with(root, draft, window, cx));
@@ -647,8 +647,8 @@ impl Harness {
             self.right_pane.update(cx, |pane, cx| pane.land_draft(root, DraftKind::Commit, None, cx));
             return;
         };
-        let provider = self.session_lane_provider(&session);
-        let title = self.collapsed_head_label(&self.chain_head(&session), cx);
+        let provider = self.session_lane_provider(&session, cx);
+        let title = self.collapsed_head_label(&self.chain_head(&session, cx), cx);
         let prompt = commit_prompt(title.as_deref(), files);
         if !crate::utility::supports(provider) {
             self.draft_on_muse(root, DraftKind::Commit, prompt, cx);
@@ -671,7 +671,7 @@ impl Harness {
     /// list scrolled to the first, the rows flashing once (docs/43 §4).
     pub(crate) fn open_turn_changes(&mut self, files: Vec<String>, cx: &mut Context<Self>) {
         self.select_right(crate::layout::RightKind::Changes, cx);
-        let Some((root, _)) = self.right_project() else { return };
+        let Some((root, _)) = self.right_project(cx) else { return };
         self.with_right_pane(cx, |pane, cx| pane.open_turn_files(&root, &files, cx));
     }
 
@@ -680,7 +680,7 @@ impl Harness {
     /// is not a changed row, is an `Err`; a row already open succeeds.
     pub(crate) fn step_changes_open(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let path = rest.trim();
-        let (root, _) = self.right_project().ok_or("no project for the right pane")?;
+        let (root, _) = self.right_project(cx).ok_or("no project for the right pane")?;
         self.select_right(crate::layout::RightKind::Changes, cx);
         self.with_right_pane(cx, |pane, cx| pane.open_change_row(&root, path, cx))
     }

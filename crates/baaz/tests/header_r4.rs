@@ -62,9 +62,18 @@ fn the_session_title_leads_the_centre_header() {
 fn project_menu_openers_survive_without_the_crumb() {
     let menu = source("project_menu.rs");
     assert!(menu.contains("pub(crate) fn open_project_menu("), "open_project_menu stays");
-    assert!(menu.contains("self.group_menu_bounds"), "the menu seats at the group row");
+    assert!(
+        menu.contains("self.sidebar_pane.read(cx).group_menu_bounds"),
+        "the menu seats at the group row (the seat the sidebar pane recorded)"
+    );
     assert!(!menu.contains("crumb_bounds"), "no crumb seat remains");
-    let sidebar = source("sidebar_view.rs");
+    // The pane records the tray's seat and asks; the root opens the menu
+    // (task 4.7: the column's intents are mapped in `app/sidebar_host.rs`).
+    assert!(
+        source("sidebar_view.rs").contains("self.group_menu_bounds.insert("),
+        "the pane records the tray's seat"
+    );
+    let sidebar = source("app/sidebar_host.rs");
     assert!(
         sidebar.contains("self.open_project_menu(None, false, cx)"),
         "the unfiled tray still opens the menu"
@@ -113,6 +122,6 @@ fn switch_project_palette_route_stays() {
 fn empty_state_hero_still_names_the_project() {
     let app = source("app.rs");
     let hero = fn_body(&app, "render_no_session");
-    assert!(hero.contains("self.workspace_name()"), "the hero still names the project");
+    assert!(hero.contains("self.workspace_name(cx)"), "the hero still names the project");
     assert!(hero.contains("button(\"new-session\", \"New session\")"), "the hero button stays");
 }

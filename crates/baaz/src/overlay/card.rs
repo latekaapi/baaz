@@ -127,7 +127,7 @@ impl Harness {
     fn browser_chat_title(&self, cx: &App) -> String {
         let Some(view) = self.registry.browser_chat() else { return "New chat".into() };
         let view = view.read(cx);
-        if let Some(meta) = self.overrides.get(&view.session_id) {
+        if let Some(meta) = self.session_list.read(cx).overrides.get(&view.session_id) {
             if let Some(title) = meta.name.clone().or_else(|| meta.generated_title.clone()) {
                 return title;
             }

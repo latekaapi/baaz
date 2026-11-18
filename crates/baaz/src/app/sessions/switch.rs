@@ -105,13 +105,15 @@ impl Harness {
         // it — the new id inherits what the old one left, unless it already
         // holds its own. The restore at the end of `activate` applies it.
         if new_id != old_id {
-            let carried = self.overrides.get(old_id).and_then(|meta| meta.right.clone());
+            let carried = self.session_list.read(cx).overrides.get(old_id).and_then(|meta| meta.right.clone());
             if let Some(state) = carried {
-                let entry = self.overrides.entry(new_id.clone()).or_default();
-                if entry.right.is_none() {
-                    entry.right = Some(state);
-                    crate::sessions::write(&self.overrides);
-                }
+                self.session_list.update(cx, |list, _| {
+                    let entry = list.overrides.entry(new_id.clone()).or_default();
+                    if entry.right.is_none() {
+                        entry.right = Some(state);
+                        crate::sessions::write(&list.overrides);
+                    }
+                });
             }
         }
         // Carry the unsent draft across when the replacement holds nothing.
@@ -143,19 +145,19 @@ impl Harness {
         // now belongs to the new view.
         if new_id != old_id {
             let unsent = self
-                .provider_sessions
+                .session_list.read(cx).provider_sessions
                 .get(old_id)
                 .is_some_and(|record| record.turns == 0 && record.first_prompt.is_none());
             if unsent {
                 self.registry.forget_where(|id| id == old_id);
-                self.sessions.retain(|entry| entry.id != old_id);
-                self.overrides.remove(old_id);
-                if crate::provider_sessions::remove(&mut self.provider_sessions, old_id) {
+                self.session_list.update(cx, |list, _| list.sessions.retain(|entry| entry.id != old_id));
+                self.session_list.update(cx, |list, _| list.overrides.remove(old_id));
+                if self.session_list.update(cx, |list, _| crate::provider_sessions::remove(&mut list.provider_sessions, old_id)) {
                     self.persist_provider_sessions(cx);
                 }
-                crate::sessions::write(&self.overrides);
-                self.rejoin();
-                self.invalidate_list();
+                crate::sessions::write(&self.session_list.read(cx).overrides);
+                self.rejoin(cx);
+                self.invalidate_list(cx);
             }
         }
         self.open_state.finish_replace();

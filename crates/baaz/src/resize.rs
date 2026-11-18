@@ -261,9 +261,7 @@ impl Harness {
         if self.right_pane.read(cx).resize.active {
             return;
         }
-        self.reveal = None;
-        self.reveal_unknown = None;
-        self.sidebar_user_scrolled = true;
+        self.sidebar_pane.update(cx, |pane, _| pane.user_owns_list());
         let drag = &mut self.resize;
         drag.active = true;
         drag.grab_x = x;
@@ -317,9 +315,7 @@ impl Harness {
         if self.resize.active {
             return;
         }
-        self.reveal = None;
-        self.reveal_unknown = None;
-        self.sidebar_user_scrolled = true;
+        self.sidebar_pane.update(cx, |pane, _| pane.user_owns_list());
         self.right_pane.update(cx, |pane, _| pane.resize.begin(x));
         cx.notify();
     }

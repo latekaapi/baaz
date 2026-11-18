@@ -48,7 +48,7 @@ impl Harness {
             },
             cx,
         );
-        let mode = self.provider_open_mode(Some(&workspace), None);
+        let mode = self.provider_open_mode(Some(&workspace), None, cx);
         let host = SessionHost {
             provider_id: choice.provider.as_str().to_owned(),
             workspace: workspace.clone(),
@@ -99,7 +99,7 @@ impl Harness {
     }
 
     /// Whether `session` is a browser chat (by its record).
-    pub(crate) fn is_browser_chat(&self, session: &str) -> bool {
-        self.overrides.get(session).is_some_and(|meta| meta.browser_chat)
+    pub(crate) fn is_browser_chat(&self, session: &str, cx: &gpui::App) -> bool {
+        self.session_list.read(cx).overrides.get(session).is_some_and(|meta| meta.browser_chat)
     }
 }

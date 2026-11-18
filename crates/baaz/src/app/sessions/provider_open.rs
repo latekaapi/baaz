@@ -145,7 +145,7 @@ impl Harness {
     /// kept through migration would fail the turn, so the server's default
     /// stands instead; no other provider's default ever meets Muse's catalog.
     pub(crate) fn start_model(&self, provider_id: ProviderId, project: Option<&str>, cx: &gpui::App) -> Option<String> {
-        let picks = self.projects.picks(project.and_then(|id| self.projects.find(id)));
+        let picks = self.session_list.read(cx).projects.picks(project.and_then(|id| self.session_list.read(cx).projects.find(id)));
         let remembered = picks.model_for(provider_id.as_str());
         if provider_id.catalog_flags_session_model() {
             return projects::muse_start_model(remembered, &self.muse_catalog_ids(cx));
@@ -165,8 +165,7 @@ impl Harness {
         provider_id: ProviderId,
         mode: aui_protocol::PermissionMode,
         workspace: Option<&str>,
-        project: Option<&str>,
-    ) -> OpenExtras {
+        project: Option<&str>, cx: &gpui::App) -> OpenExtras {
         if !provider_id.open_routes_model_vendor() {
             return OpenExtras { model_provider: None, mode: Some(mode) };
         }
@@ -178,14 +177,14 @@ impl Harness {
         let mode = self
             .args
             .approval_mode
-            .or_else(|| self.projects.picks(self.projects.resolve(workspace, project)).approval_mode);
+            .or_else(|| self.session_list.read(cx).projects.picks(self.session_list.read(cx).projects.resolve(workspace, project)).approval_mode);
         OpenExtras { model_provider: Some(model_provider), mode }
     }
 
-    pub(in crate::app) fn provider_open_mode(&self, workspace: Option<&str>, project: Option<&str>) -> aui_protocol::PermissionMode {
+    pub(in crate::app) fn provider_open_mode(&self, workspace: Option<&str>, project: Option<&str>, cx: &gpui::App) -> aui_protocol::PermissionMode {
         self.args
             .approval_mode
-            .or_else(|| self.projects.picks(self.projects.resolve(workspace, project)).approval_mode)
+            .or_else(|| self.session_list.read(cx).projects.picks(self.session_list.read(cx).projects.resolve(workspace, project)).approval_mode)
             .unwrap_or_default()
     }
 
@@ -230,7 +229,7 @@ impl Harness {
         }
         let factory = self.provider_factory.clone();
         let workspace_bg = workspace.clone();
-        let mode = self.provider_open_mode(Some(&workspace), project.as_deref());
+        let mode = self.provider_open_mode(Some(&workspace), project.as_deref(), cx);
         // The terminal relay's route: the request id is the session id the
         // bridge will answer for (Claude Code takes it as `--session-id`;
         // Codex's bridge answers for it until the minted thread id lands) —
@@ -251,7 +250,7 @@ impl Harness {
         // so the relay keeps routing the bridge's `--session <request_id>`
         // calls at the lane's browser and tabs.
         let alias_from = request_id.clone();
-        let extras = self.open_extras(provider_id, mode, Some(&workspace), project.as_deref());
+        let extras = self.open_extras(provider_id, mode, Some(&workspace), project.as_deref(), cx);
         let cancelled = std::sync::Arc::clone(&self.open_state.provider_opens_cancelled);
         let work = move || {
             provider_open_work(factory, provider_id, request_id, workspace_bg, extras, project, workspace, epoch, Some(cancelled))
@@ -293,7 +292,7 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         use provider::ProviderAdapter as _;
-        let mode = self.provider_open_mode(Some(&workspace), project.as_deref());
+        let mode = self.provider_open_mode(Some(&workspace), project.as_deref(), cx);
         // Each scripted lane its own session: the first keeps `s-scripted`
         // (probe entries reopen it by that id), later ones are numbered.
         static SCRIPTED_LANES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -419,7 +418,7 @@ impl Harness {
         // reads zero turns, so it passed for unsent and ⌘N did nothing.
         // Every provider's session has a record since P4-B (docs/70): a
         // Muse reopen writes one from its list row before it gets here.
-        let fresh = !self.provider_sessions.contains_key(&session_id);
+        let fresh = !self.session_list.read(cx).provider_sessions.contains_key(&session_id);
         if fresh {
             self.open_state.name_draft(project.clone(), &session_id);
         }
@@ -483,28 +482,30 @@ impl Harness {
         // it is also what brings the lane back after a restart — the
         // sidebar reads it, and the click reopens it. Written before the
         // row below is built, so the two never disagree.
-        crate::provider_sessions::upsert_open(
-            &mut self.provider_sessions,
-            provider_id.as_str(),
-            session_id,
-            Some(workspace.clone()),
-            project.clone(),
-            title,
-        );
+        self.session_list.update(cx, |list, _| {
+            crate::provider_sessions::upsert_open(
+                &mut list.provider_sessions,
+                provider_id.as_str(),
+                session_id,
+                Some(workspace.clone()),
+                project.clone(),
+                title,
+            )
+        });
         self.persist_provider_sessions(cx);
         // A provider that lists its own sessions (Muse) owns their rows:
         // the record never builds one. Its row goes in now from what the
         // open knows — zero turns, so out of view until the first send
         // titles it — and no `session/list` round trip is spent on one row.
         if provider_id.lists_sessions() {
-            self.ensure_listed_row(session_id, project, workspace);
+            self.ensure_listed_row(session_id, project, workspace, cx);
             return;
         }
         // No row with content yet: like a muse draft, the session earns
         // its row on the first send (`ProviderTurnAccepted`), titled from
         // the prompt — but the record above already exists, so a restart
         // before that still reopens it.
-        self.merge_provider_rows();
+        self.merge_provider_rows(cx);
     }
 
     /// A local row for a session of a provider that lists its own
@@ -512,8 +513,8 @@ impl Harness {
     /// zero turns (so out of view until its first send), and not running —
     /// opened, not started; the first turn's start arms it. The list's own
     /// row replaces it when it arrives ([`sidebar::merge_session_list`]).
-    pub(super) fn ensure_listed_row(&mut self, session_id: &str, project: Option<String>, workspace: String) {
-        if self.sessions.iter().any(|entry| entry.id == session_id) {
+    pub(super) fn ensure_listed_row(&mut self, session_id: &str, project: Option<String>, workspace: String, cx: &mut gpui::App) {
+        if self.session_list.read(cx).sessions.iter().any(|entry| entry.id == session_id) {
             return;
         }
         let mut row = sidebar::local_started_row(
@@ -524,8 +525,8 @@ impl Harness {
             crate::clock::now_local(),
         );
         row.running = false;
-        self.sessions.push(row);
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| list.sessions.push(row));
+        self.invalidate_list(cx);
     }
 
     /// "New session" on a provider pick (Claude Code / Codex). A plain new
@@ -563,7 +564,7 @@ impl Harness {
         }
         crate::log::boot_mark("new-draft-open");
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
-        let mode = self.provider_open_mode(Some(&workspace), project.as_deref());
+        let mode = self.provider_open_mode(Some(&workspace), project.as_deref(), cx);
         // The request id is the view's id until the child answers: Claude
         // Code takes it as `--session-id`, so it stays; Codex mints a
         // thread id, and the landing renames everything keyed by this one
@@ -592,7 +593,7 @@ impl Harness {
         // the draft asks for — the chip names it and the open's landing
         // sends it, so chip, menu check and child agree from the first
         // frame.
-        let picks = self.projects.picks(project.as_deref().and_then(|id| self.projects.find(id)));
+        let picks = self.session_list.read(cx).projects.picks(project.as_deref().and_then(|id| self.session_list.read(cx).projects.find(id)));
         let carry = self.open_state.take_carry();
         if let Some((mode, effort)) = switch.and(carry) {
             view.update(cx, |view, cx| view.carry_draft_settings(mode, effort, cx));
@@ -644,7 +645,7 @@ impl Harness {
         // by then): cloned before `work` moves the originals.
         let (retry_project, retry_workspace) = (project.clone(), workspace.clone());
         let (timed_project, timed_workspace) = (project.clone(), workspace.clone());
-        let extras = self.open_extras(provider_id, mode, Some(&workspace), project.as_deref());
+        let extras = self.open_extras(provider_id, mode, Some(&workspace), project.as_deref(), cx);
         let cancelled = std::sync::Arc::clone(&self.open_state.provider_opens_cancelled);
         let work = move || {
             provider_open_work(factory, provider_id, opened, workspace_bg, extras, project, workspace, epoch, Some(cancelled))
@@ -707,9 +708,9 @@ impl Harness {
     pub(super) fn forget_provisional(&mut self, provisional: &str, cx: &mut Context<Self>) {
         self.open_state.forget_opening(provisional);
         self.terminal_dock.update(cx, |dock, _| dock.forget_provider(provisional));
-        if self.overrides.remove(provisional).is_some() {
-            crate::sessions::write(&self.overrides);
-            self.invalidate_list();
+        if self.session_list.update(cx, |list, _| list.overrides.remove(provisional).is_some()) {
+            crate::sessions::write(&self.session_list.read(cx).overrides);
+            self.invalidate_list(cx);
         }
     }
 
@@ -836,18 +837,17 @@ impl Harness {
         self.open_state.rekey(old, new);
         // The landing registers the real id; the provisional one goes.
         self.terminal_dock.update(cx, |dock, _| dock.forget_provider(old));
-        if self.reveal.as_deref() == Some(old) {
-            self.reveal = Some(new.to_owned());
-        }
+        // An armed reveal (and its wait for a row) follows the real id.
+        self.sidebar_pane.update(cx, |pane, _| pane.rekey_reveal(old, new));
         self.browser.update(cx, |browser, _| {
             if let Some(ask) = browser.pending_ask_draft.as_mut().filter(|ask| ask.target.as_deref() == Some(old)) {
                 ask.target = Some(new.to_owned());
             }
         });
-        if let Some(meta) = self.overrides.remove(old) {
-            self.overrides.insert(new.to_owned(), meta);
-            crate::sessions::write(&self.overrides);
-            self.invalidate_list();
+        if let Some(meta) = self.session_list.update(cx, |list, _| list.overrides.remove(old)) {
+            self.session_list.update(cx, |list, _| list.overrides.insert(new.to_owned(), meta));
+            crate::sessions::write(&self.session_list.read(cx).overrides);
+            self.invalidate_list(cx);
         }
         self.browser.update(cx, |browser, _| match &mut browser.agent_window.line_ui {
             crate::app::agent_window::LineUi::Answer { session, .. }
@@ -861,9 +861,6 @@ impl Harness {
         });
         if let Some(pages) = self.browser.update(cx, |browser, _| browser.agent_window.browser_chat_pages.remove(old)) {
             self.browser.update(cx, |browser, _| browser.agent_window.browser_chat_pages.insert(new.to_owned(), pages));
-        }
-        if let Some((id, _)) = self.reveal_unknown.as_mut().filter(|(id, _)| id == old) {
-            *id = new.to_owned();
         }
         let owner = crate::browser::Owner::Session(old.to_owned());
         let tabs: Vec<_> = self.browser.read(cx).tabs.tabs_of(&owner).iter().map(|tab| tab.id).collect();
@@ -998,14 +995,14 @@ impl Harness {
         // session its provider lists counts as untouched only when its
         // list row says so: a record written with no row to read (boot
         // `--session` before the list) never drops a real session.
-        if self.record_holds_no_history(&record) {
+        if self.record_holds_no_history(&record, cx) {
             crate::baaz_log!(
                 "provider reopen: {} has no turns, opening fresh",
                 record.session_id
             );
-            crate::provider_sessions::remove(&mut self.provider_sessions, &record.session_id);
+            self.session_list.update(cx, |list, _| crate::provider_sessions::remove(&mut list.provider_sessions, &record.session_id));
             self.persist_provider_sessions(cx);
-            self.merge_provider_rows();
+            self.merge_provider_rows(cx);
             let workspace = record.workspace.clone().unwrap_or_else(|| self.unfiled_workspace());
             self.open_on_provider(provider_id, record.project.clone(), workspace, window, cx);
             return;
@@ -1044,7 +1041,7 @@ impl Harness {
             match crate::session_migration::gate_resume(
                 &owner,
                 &state,
-                &self.provider_sessions,
+                &self.session_list.read(cx).provider_sessions,
                 &record.provider,
                 &record.session_id,
             ) {
@@ -1065,7 +1062,7 @@ impl Harness {
                 crate::session_migration::ResumeGate::BaazHome => {}
             }
             use provider::ProviderAdapter as _;
-            let mode = self.provider_open_mode(record.workspace.as_deref(), record.project.as_deref());
+            let mode = self.provider_open_mode(record.workspace.as_deref(), record.project.as_deref(), cx);
             let mut resumed = provider::scripted::ScriptedProvider::new();
             let bridged = resumed
                 .connect(&conn::connect_info())
@@ -1084,7 +1081,7 @@ impl Harness {
             match bridged {
                 Ok((provider, events, session_id)) => {
                     let workspace =
-                        record.workspace.clone().unwrap_or_else(|| self.workspace());
+                        record.workspace.clone().unwrap_or_else(|| self.workspace(cx));
                     self.finish_provider_open(
                         ProviderOpen {
                             provider_id,
@@ -1121,7 +1118,7 @@ impl Harness {
         // now, and the factory below waits while it comes up.
         self.ensure_provider_started(provider_id, cx);
         let factory = self.provider_factory.clone();
-        let workspace = record.workspace.clone().unwrap_or_else(|| self.workspace());
+        let workspace = record.workspace.clone().unwrap_or_else(|| self.workspace(cx));
         // The terminal relay's route: the resumed session's bridge answers
         // for the stored id, so it is (re-)registered BEFORE the resume
         // runs — refreshing the root it drives — unless the shared child
@@ -1140,8 +1137,8 @@ impl Harness {
         let retry_id = record.session_id.clone();
         // The gate reads the registry off the UI thread: cloned up front
         // for the same reason.
-        let registry = self.provider_sessions.clone();
-        let mode = self.provider_open_mode(Some(&workspace), record.project.as_deref());
+        let registry = self.session_list.read(cx).provider_sessions.clone();
+        let mode = self.provider_open_mode(Some(&workspace), record.project.as_deref(), cx);
         let work = move || -> (Result<ProviderOpen, crate::app::OpenFailed>, usize) {
             // The consent gate, on the background executor: before the
             // person's Move click an old session resumes from its
@@ -1288,14 +1285,14 @@ impl Harness {
             self.open_state.provider_open_error = None;
         }
         self.registry.forget_where(|id| id == session_id);
-        self.sessions.retain(|entry| entry.id != session_id);
-        self.overrides.remove(session_id);
-        if crate::provider_sessions::remove(&mut self.provider_sessions, session_id) {
+        self.session_list.update(cx, |list, _| list.sessions.retain(|entry| entry.id != session_id));
+        self.session_list.update(cx, |list, _| list.overrides.remove(session_id));
+        if self.session_list.update(cx, |list, _| crate::provider_sessions::remove(&mut list.provider_sessions, session_id)) {
             self.persist_provider_sessions(cx);
         }
-        crate::sessions::write(&self.overrides);
-        self.rejoin();
-        self.invalidate_list();
+        crate::sessions::write(&self.session_list.read(cx).overrides);
+        self.rejoin(cx);
+        self.invalidate_list(cx);
         cx.notify();
     }
 
@@ -1318,7 +1315,7 @@ impl Harness {
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         // A fork is an ask like any other: it joins the last-wins epoch.
         let epoch = self.open_state.begin_open();
-        let mode = self.provider_open_mode(Some(&workspace), None);
+        let mode = self.provider_open_mode(Some(&workspace), None, cx);
         // Scripted chrome (`--no-connect` / `--replay`): the stand-in
         // answers `OpenSession` but no resume — the fork still goes
         // through `ResumeSession` so the failure is the honest one.

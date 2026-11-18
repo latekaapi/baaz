@@ -671,9 +671,9 @@ impl Harness {
     /// is the existing one — the render builds it where the window is.
     pub(crate) fn right_facts(&self, cx: &App) -> RightFacts {
         let session = self.active.clone();
-        let provider = session.as_ref().map(|view| self.session_lane_provider(&view.read(cx).session_id));
+        let provider = session.as_ref().map(|view| self.session_lane_provider(&view.read(cx).session_id, cx));
         RightFacts {
-            project: self.right_project(),
+            project: self.right_project(cx),
             session,
             provider,
             pending_neutral: self.pending_right_neutral(cx),

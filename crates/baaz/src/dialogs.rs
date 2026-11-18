@@ -337,10 +337,10 @@ impl Harness {
             .iter()
             .map(|view| {
                 let id = view.read(cx).session_id.clone();
-                if self.is_browser_chat(&id) {
+                if self.is_browser_chat(&id, cx) {
                     return "Browser assistant".to_owned();
                 }
-                self.sessions
+                self.session_list.read(cx).sessions
                     .iter()
                     .find(|entry| entry.id == id)
                     .map(|entry| entry.label.clone())
@@ -396,7 +396,7 @@ impl Harness {
                 // The toast names the project the walk ran in, so a person
                 // with eight roots knows whose picker is short.
                 let name = this
-                    .projects
+                    .session_list.read(cx).projects
                     .find_by_root(&root)
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| key.clone());
@@ -1426,7 +1426,7 @@ mod tests {
             args.replay = Some(capture.clone());
             let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
             vc.run_until_parked();
-            let label = vc.update(|_, cx| baaz.read(cx).sessions.first().map(|row| row.label.clone()));
+            let label = vc.update(|_, cx| baaz.read(cx).session_list.read(cx).sessions.first().map(|row| row.label.clone()));
             assert_eq!(label.as_deref(), Some(want), "the {open} open's row");
             crate::sessions::flush();
         }
@@ -1449,7 +1449,7 @@ mod tests {
         let (pending, drafts, header, row) = vc.update(|_, cx| {
             let b = baaz.read(cx);
             let id = b.active.as_ref().map(|v| v.read(cx).session_id.clone()).expect("the replay is open");
-            (b.open_state.pending_id.clone(), b.open_state.drafts.len(), b.collapsed_head_label(&b.chain_head(&id), cx), b.sessions.first().map(|r| r.label.clone()))
+            (b.open_state.pending_id.clone(), b.open_state.drafts.len(), b.collapsed_head_label(&b.chain_head(&id, cx), cx), b.session_list.read(cx).sessions.first().map(|r| r.label.clone()))
         });
         assert_eq!(pending, None, "nothing is opening over the replay");
         assert_eq!(drafts, 0, "no draft was made for the steps");
@@ -1632,43 +1632,45 @@ mod tests {
         // Rows for the session-backed palettes: three visible sessions feed
         // both Search (empty query lists recents) and Resume.
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, _| {
+            baaz.update(cx, |harness, cx| {
                 for (n, id) in ["s-arrow-1", "s-arrow-2", "s-arrow-3"].iter().enumerate() {
-                    harness.sessions.push(SessionEntry {
-                        id: id.to_string(),
-                        label: format!("Arrow session {n}"),
-                        updated: chrono::Local::now(),
-                        created: chrono::Local::now(),
-                        running: false,
-                        turns: 3,
-                        hidden: false,
-                        pinned: false,
-                        archived: false,
-                        description: "the ask".into(),
-                        replayed: false,
-                        provider: crate::providers::ProviderId::Muse,
-                        named: true,
-                        needs_title: false,
-                        side_marker: false,
-                        title_pending: false,
-                        last_ask: Some("the ask".into()),
-                        local: false,
-                        provisional: false,
-                        turns_unknown: false,
-                        workspace: None,
-                        project: None,
-                        project_name: None,
-                        attention: Vec::new(),
-                        approval_command: None,
-                        pending_question: None,
-                        turn_started: None,
-                        last_error: None,
-                        unread: false,
-                        branch: None,
-                        terminals_running: 0,
+                    harness.session_list.update(cx, |list, _| {
+                        list.sessions.push(SessionEntry {
+                            id: id.to_string(),
+                            label: format!("Arrow session {n}"),
+                            updated: chrono::Local::now(),
+                            created: chrono::Local::now(),
+                            running: false,
+                            turns: 3,
+                            hidden: false,
+                            pinned: false,
+                            archived: false,
+                            description: "the ask".into(),
+                            replayed: false,
+                            provider: crate::providers::ProviderId::Muse,
+                            named: true,
+                            needs_title: false,
+                            side_marker: false,
+                            title_pending: false,
+                            last_ask: Some("the ask".into()),
+                            local: false,
+                            provisional: false,
+                            turns_unknown: false,
+                            workspace: None,
+                            project: None,
+                            project_name: None,
+                            attention: Vec::new(),
+                            approval_command: None,
+                            pending_question: None,
+                            turn_started: None,
+                            last_error: None,
+                            unread: false,
+                            branch: None,
+                            terminals_running: 0,
+                        });
                     });
                 }
-                harness.invalidate_list();
+                harness.invalidate_list(cx);
             })
         });
         // Rows for the Projects palette: two adopted folders. (Boot may have

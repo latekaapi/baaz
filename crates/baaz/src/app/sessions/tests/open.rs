@@ -250,9 +250,9 @@ fn a_new_session_opens_on_the_click_and_its_row_needs_no_list(cx: &mut gpui::Tes
     let baaz = lane_harness(vc, &state.2);
     let log = state.2.join("requests.log");
     let project = vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             install_fake_muse(harness, &state.2, &state.2, &log, None);
-            adopt_for_muse(harness, &state.2)
+            adopt_for_muse(harness, &state.2, cx)
         })
     });
     let minted = vc.update(|window, cx| {
@@ -274,7 +274,7 @@ fn a_new_session_opens_on_the_click_and_its_row_needs_no_list(cx: &mut gpui::Tes
         assert_eq!(view.read(cx).session_id, minted, "the start kept the minted id");
         assert!(!view.read(cx).is_starting(), "the start landed");
         assert!(harness.open_state.starts_in_flight.is_empty(), "nothing is still opening");
-        let row = harness.sessions.iter().find(|entry| entry.id == minted).expect("the row is in");
+        let row = harness.session_list.read(cx).sessions.iter().find(|entry| entry.id == minted).expect("the row is in");
         assert_eq!(row.project.as_deref(), Some(project.as_str()), "it files under its project");
         assert_eq!(row.turns, 0, "zero turns: out of view until its first send");
         assert!(!row.running, "opened, not started: a draft that shows the row must not read Working");
@@ -297,9 +297,9 @@ fn a_failed_early_start_keeps_the_view_and_frees_the_draft(cx: &mut gpui::TestAp
     let vc = cx.add_empty_window();
     let baaz = lane_harness(vc, &state.2);
     let project = vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             mark_muse_up(harness);
-            adopt_for_muse(harness, &state.2)
+            adopt_for_muse(harness, &state.2, cx)
         })
     });
     let minted = vc.update(|window, cx| {
@@ -317,7 +317,7 @@ fn a_failed_early_start_keeps_the_view_and_frees_the_draft(cx: &mut gpui::TestAp
         assert!(harness.find_view(&minted, cx).is_none(), "the dead draft is parked nowhere");
         assert!(harness.open_state.starts_in_flight.is_empty(), "scripted verbs are released");
         assert!(!harness.open_state.drafts.contains_key(&project), "the next New session starts fresh");
-        assert!(!harness.sessions.iter().any(|entry| entry.id == minted), "no row for it");
+        assert!(!harness.session_list.read(cx).sessions.iter().any(|entry| entry.id == minted), "no row for it");
     });
     lane_restore(state);
 }
@@ -333,7 +333,7 @@ fn an_unfiled_session_never_starts_in_the_launch_directory(cx: &mut gpui::TestAp
         let vc = cx.add_empty_window();
         let baaz = lane_harness(vc, &state.2);
         vc.update(|_, cx| {
-            baaz.update(cx, |harness, _| {
+            baaz.update(cx, |harness, cx| {
                 harness.provider_factory = parking_factory();
                 mark_muse_up(harness);
                 // A Finder launch: no `--workspace`, cwd `/`.
@@ -341,8 +341,8 @@ fn an_unfiled_session_never_starts_in_the_launch_directory(cx: &mut gpui::TestAp
                 harness.args.workspace_explicit = false;
                 harness.current_project = None;
                 // First run: nothing adopted, so nothing is current.
-                harness.projects.current = None;
-                harness.projects.projects.clear();
+                harness.session_list.update(cx, |list, _| list.projects.current = None);
+                harness.session_list.update(cx, |list, _| list.projects.projects.clear());
                 harness.new_provider = provider.as_str().to_owned();
             });
         });
@@ -370,7 +370,7 @@ fn quit_asks_when_a_turn_is_running(cx: &mut gpui::TestAppContext) {
         baaz.update(cx, |harness, cx| {
             let host = SessionHost {
                 provider_id: ProviderId::Codex.as_str().to_owned(),
-                workspace: harness.workspace(),
+                workspace: harness.workspace(cx),
                 overlays: harness.overlays.clone(),
                 capture: crate::shot::CaptureToken::default(),
                 terminal_host: None,
@@ -410,7 +410,7 @@ fn a_busy_parked_session_is_never_evicted(cx: &mut gpui::TestAppContext) {
         baaz.update(cx, |harness, cx| {
             let host = SessionHost {
                 provider_id: ProviderId::Codex.as_str().to_owned(),
-                workspace: harness.workspace(),
+                workspace: harness.workspace(cx),
                 overlays: harness.overlays.clone(),
                 capture: crate::shot::CaptureToken::default(),
                 terminal_host: None,
@@ -432,7 +432,7 @@ fn a_busy_parked_session_is_never_evicted(cx: &mut gpui::TestAppContext) {
             for n in 0..=SESSION_CACHE_LIMIT {
                 let host = SessionHost {
                     provider_id: ProviderId::Codex.as_str().to_owned(),
-                    workspace: harness.workspace(),
+                    workspace: harness.workspace(cx),
                     overlays: harness.overlays.clone(),
                     capture: crate::shot::CaptureToken::default(),
                     terminal_host: None,
@@ -484,21 +484,23 @@ fn new_after_open_lands_a_draft(cx: &mut gpui::TestAppContext, name: &str, provi
         baaz.update(cx, |harness, cx| {
             harness.provider_factory = factory;
             install_fake_muse(harness, &state.2, &state.2, &log, None);
-            let project = adopt_for_muse(harness, &state.2);
+            let project = adopt_for_muse(harness, &state.2, cx);
             harness.new_provider = provider.as_str().to_owned();
             z4_seed_stored_codex(harness, cx);
             // The live case: a handoff destination in this project, its
             // one turn the hidden pack acknowledgement — so its row
             // reads zero turns, like a draft's.
-            let record = harness.provider_sessions.get_mut("s-codex-old").expect("seeded");
-            record.project = Some(project);
-            record.turns = 1;
-            record.handoff_from = Some("s-claude-src".into());
-            record.handoff_from_provider = Some("claude-code".into());
-            record.handoff_title = Some("Project Layout Overview Explained".into());
-            record.title = None;
-            record.first_prompt = None;
-            harness.merge_provider_rows();
+            harness.session_list.update(cx, |list, _| {
+                let record = list.provider_sessions.get_mut("s-codex-old").expect("seeded");
+                record.project = Some(project);
+                record.turns = 1;
+                record.handoff_from = Some("s-claude-src".into());
+                record.handoff_from_provider = Some("claude-code".into());
+                record.handoff_title = Some("Project Layout Overview Explained".into());
+                record.title = None;
+                record.first_prompt = None;
+            });
+            harness.merge_provider_rows(cx);
         });
     });
     let new_lands_a_draft = |vc: &mut gpui::VisualTestContext, round: &str| {
@@ -561,9 +563,9 @@ fn what_is_done_while_the_start_is_on_the_wire_goes_when_it_lands(cx: &mut gpui:
     let baaz = lane_harness(vc, &state.2);
     let log = state.2.join("requests.log");
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             install_fake_muse(harness, &state.2, &state.2, &log, None);
-            adopt_for_muse(harness, &state.2);
+            adopt_for_muse(harness, &state.2, cx);
         })
     });
     vc.update(|window, cx| {
@@ -614,9 +616,9 @@ fn a_start_answered_under_another_id_fails_the_view(cx: &mut gpui::TestAppContex
     let baaz = lane_harness(vc, &state.2);
     let log = state.2.join("requests.log");
     let project = vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             install_fake_muse(harness, &state.2, &state.2, &log, Some("s-foreign"));
-            adopt_for_muse(harness, &state.2)
+            adopt_for_muse(harness, &state.2, cx)
         })
     });
     let minted = vc.update(|window, cx| {
@@ -643,7 +645,7 @@ fn a_start_answered_under_another_id_fails_the_view(cx: &mut gpui::TestAppContex
         );
         assert!(harness.open_state.starts_in_flight.is_empty(), "scripted verbs are released");
         assert!(!harness.open_state.drafts.contains_key(&project), "the next New session starts fresh");
-        assert!(!harness.sessions.iter().any(|entry| entry.id == minted), "no row for it");
+        assert!(!harness.session_list.read(cx).sessions.iter().any(|entry| entry.id == minted), "no row for it");
     });
     let requests = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(!requests.contains("turn/start"), "nothing was sent to a session that never landed: {requests}");
@@ -731,7 +733,7 @@ fn escape_closes_the_composer_provider_menu(cx: &mut gpui::TestAppContext) {
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -778,7 +780,7 @@ fn escape_closes_the_composer_plus_menu(cx: &mut gpui::TestAppContext) {
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -837,15 +839,16 @@ fn b2fix_project(
     defaults: &[(&str, &str)],
     catalog: &[&str],
 ) -> String {
-    let workspace = vc.update(|_, cx| baaz.read(cx).workspace());
+    let workspace = vc.update(|_, cx| baaz.read(cx).workspace(cx));
     let project = vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
-            let id = harness.projects.add(std::path::Path::new(&workspace)).id.clone();
-            let adopted =
-                harness.projects.projects.iter_mut().find(|p| p.id == id).expect("just adopted");
-            for &(lane, model) in defaults {
-                adopted.defaults.note_model(lane, model);
-            }
+        baaz.update(cx, |harness, cx| {
+            let id = harness.session_list.update(cx, |list, _| list.projects.add(std::path::Path::new(&workspace)).id.clone());
+            harness.session_list.update(cx, |list, _| {
+                let adopted = list.projects.projects.iter_mut().find(|p| p.id == id).expect("just adopted");
+                for &(lane, model) in defaults {
+                    adopted.defaults.note_model(lane, model);
+                }
+            });
             harness.new_provider = provider.to_owned();
             id
         })
@@ -943,8 +946,8 @@ fn a_pick_in_one_project_starts_the_next_session_in_another(cx: &mut gpui::TestA
     });
     vc.run_until_parked();
     let second = vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
-            let id = harness.projects.add(&other_root).id.clone();
+        baaz.update(cx, |harness, cx| {
+            let id = harness.session_list.update(cx, |list, _| list.projects.add(&other_root).id.clone());
             assert_ne!(id, first, "a second project");
             harness.current_project = Some(id.clone());
             harness.active = None;
@@ -977,9 +980,11 @@ fn a_draft_on_a_remembered_haiku_opens_in_ask(cx: &mut gpui::TestAppContext) {
     let (factory, shared) = y2b2_factory();
     let project = b2fix_project(vc, &baaz, "claude-code", &[("claude-code", "haiku")], &[]);
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
-            let adopted = harness.projects.projects.iter_mut().find(|p| p.id == project).expect("adopted");
-            adopted.defaults.approval_mode = Some(aui_protocol::PermissionMode::OnRequest);
+        baaz.update(cx, |harness, cx| {
+            harness.session_list.update(cx, |list, _| {
+                let adopted = list.projects.projects.iter_mut().find(|p| p.id == project).expect("adopted");
+                adopted.defaults.approval_mode = Some(aui_protocol::PermissionMode::OnRequest);
+            });
             harness.provider_factory = factory;
             mark_muse_up(harness);
             harness.active = None;

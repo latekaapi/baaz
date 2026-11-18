@@ -36,10 +36,10 @@ impl Harness {
     /// lane, a second install, a restored backup — carries no local record
     /// here, so its prompt prefix or side workspace speaks instead. The
     /// local override path keeps working exactly as before.
-    pub(crate) fn is_side_session(&self, session_id: &str) -> bool {
-        self.side_sessions.contains(session_id)
-            || self.overrides.get(session_id).is_some_and(|meta| meta.side_session)
-            || self.sessions.iter().any(|entry| entry.id == session_id && entry.side_marker)
+    pub(crate) fn is_side_session(&self, session_id: &str, cx: &gpui::App) -> bool {
+        self.session_list.read(cx).side_sessions.contains(session_id)
+            || self.session_list.read(cx).overrides.get(session_id).is_some_and(|meta| meta.side_session)
+            || self.session_list.read(cx).sessions.iter().any(|entry| entry.id == session_id && entry.side_marker)
     }
 
     /// Remember a freshly minted side id before its `session/start` runs:
@@ -48,7 +48,7 @@ impl Harness {
     /// still hides by record after a restart — the old prefix rule's one
     /// job, without an id shape the server rejects.
     pub(crate) fn remember_side_session(&mut self, side_id: &str, cx: &mut Context<Self>) {
-        self.side_sessions.insert(side_id.to_owned());
+        self.session_list.update(cx, |list, _| list.side_sessions.insert(side_id.to_owned()));
         self.set_override(
             side_id,
             |meta| {
@@ -74,17 +74,17 @@ impl Harness {
         // paid titler there, whatever the turn count reads (Y2a). Any
         // other session has no pack turn, so its first message always
         // qualifies, pack-shaped or not (Y2a3).
-        if crate::sidebar::is_handoff_dest(session_id, &self.provider_sessions, &self.overrides) {
+        if crate::sidebar::is_handoff_dest(session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides) {
             return;
         }
-        let entry = self.sessions.iter().find(|e| e.id == session_id);
+        let entry = self.session_list.read(cx).sessions.iter().find(|e| e.id == session_id);
         let turns = entry.map(|e| e.turns).unwrap_or(0);
         let eligible = titles::should_title(
             crate::layout::Layout::get(cx).auto_title,
-            self.utility_available(self.session_lane_provider(session_id)),
-            self.overrides.get(session_id),
+            self.utility_available(self.session_lane_provider(session_id, cx)),
+            self.session_list.read(cx).overrides.get(session_id),
             turns,
-            self.is_side_session(session_id),
+            self.is_side_session(session_id, cx),
         );
         if !eligible {
             return;
@@ -98,15 +98,17 @@ impl Harness {
         // restart, or a second `turn/started` before the chain lands all
         // see `title_attempted` and stand down.
         self.set_override(session_id, |meta| meta.title_attempted = true, cx);
-        self.titles_pending.insert(session_id.to_owned());
+        self.session_list.update(cx, |list, _| list.titles_pending.insert(session_id.to_owned()));
         // One watchdog for the whole generation, armed with the trigger
         // rather than with an admission: a chain that hangs still stands
         // down on time, and a retry never extends the deadline.
         self.arm_title_timeout(session_id, cx);
-        if let Some(entry) = self.sessions.iter_mut().find(|e| e.id == session_id) {
-            entry.title_pending = true;
-        }
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| {
+            if let Some(entry) = list.sessions.iter_mut().find(|e| e.id == session_id) {
+                entry.title_pending = true;
+            }
+        });
+        self.invalidate_list(cx);
         self.run_title_attempt(session_id.to_owned(), message, 1, cx);
         cx.notify();
     }
@@ -123,20 +125,20 @@ impl Harness {
         tries: u8,
         cx: &mut Context<Self>,
     ) {
-        if !self.titles_pending.contains(&real_id) {
+        if !self.session_list.read(cx).titles_pending.contains(&real_id) {
             return;
         }
-        let provider = self.session_lane_provider(&real_id);
+        let provider = self.session_lane_provider(&real_id, cx);
         let prompt = titles::title_prompt(&first_message);
         let model = self.utility_model(&real_id, cx);
         let muse = self.muse_side(provider, "baaz auto-title", cx);
         let work = move || crate::utility::complete(provider, model.as_deref(), &prompt, muse);
         self.wire_call(cx, work, move |this, result, cx| {
-            let late = !this.titles_pending.contains(&real_id);
+            let late = !this.session_list.read(cx).titles_pending.contains(&real_id);
             let reason = match result.map(|text| titles::clean_title(&text)) {
                 Ok(Some(title)) => {
-                    let known = this.sessions.iter().any(|entry| entry.id == real_id);
-                    if late && (!known || !titles::should_land_late(this.overrides.get(&real_id))) {
+                    let known = this.session_list.read(cx).sessions.iter().any(|entry| entry.id == real_id);
+                    if late && (!known || !titles::should_land_late(this.session_list.read(cx).overrides.get(&real_id))) {
                         crate::baaz_log!(
                             "late auto-title for {real_id} dropped (renamed or gone); keeping the current label"
                         );
@@ -182,8 +184,8 @@ impl Harness {
 
     /// The provider whose lane `session_id` rides: its provider record's,
     /// else Muse.
-    pub(crate) fn session_lane_provider(&self, session_id: &str) -> crate::providers::ProviderId {
-        self.provider_sessions
+    pub(crate) fn session_lane_provider(&self, session_id: &str, cx: &gpui::App) -> crate::providers::ProviderId {
+        self.session_list.read(cx).provider_sessions
             .get(session_id)
             .map(|record| crate::providers::ProviderId::parse(&record.provider))
             .unwrap_or(crate::providers::ProviderId::Muse)
@@ -216,11 +218,13 @@ impl Harness {
     fn land_title(&mut self, real_id: &str, title: &str, cx: &mut Context<Self>) {
         let title = title.to_owned();
         self.set_override(real_id, |meta| meta.generated_title = Some(title), cx);
-        self.titles_pending.remove(real_id);
-        if let Some(entry) = self.sessions.iter_mut().find(|e| e.id == real_id) {
-            entry.title_pending = false;
-        }
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| list.titles_pending.remove(real_id));
+        self.session_list.update(cx, |list, _| {
+            if let Some(entry) = list.sessions.iter_mut().find(|e| e.id == real_id) {
+                entry.title_pending = false;
+            }
+        });
+        self.invalidate_list(cx);
         cx.notify();
     }
 
@@ -230,11 +234,13 @@ impl Harness {
     /// harvest or watchdog.
     fn fail_title(&mut self, real_id: &str, reason: &str, cx: &mut Context<Self>) {
         crate::baaz_log!("auto-title for {real_id} failed ({reason}); keeping the first prompt");
-        self.titles_pending.remove(real_id);
-        if let Some(entry) = self.sessions.iter_mut().find(|e| e.id == real_id) {
-            entry.title_pending = false;
-        }
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| list.titles_pending.remove(real_id));
+        self.session_list.update(cx, |list, _| {
+            if let Some(entry) = list.sessions.iter_mut().find(|e| e.id == real_id) {
+                entry.title_pending = false;
+            }
+        });
+        self.invalidate_list(cx);
         cx.notify();
     }
 
@@ -245,7 +251,7 @@ impl Harness {
     /// never a retry, never a second generation, so a timeout can never
     /// double-bill.
     fn title_timeout(&mut self, real_id: &str, cx: &mut Context<Self>) {
-        if !self.titles_pending.contains(real_id) {
+        if !self.session_list.read(cx).titles_pending.contains(real_id) {
             return;
         }
         self.stand_down_title(real_id, &format!("no answer in {} s", titles::TITLE_TIMEOUT_SECS), cx);
@@ -258,11 +264,13 @@ impl Harness {
     /// off the back of this one.
     fn stand_down_title(&mut self, real_id: &str, reason: &str, cx: &mut Context<Self>) {
         crate::baaz_log!("auto-title for {real_id} failed ({reason}); keeping the first prompt");
-        self.titles_pending.remove(real_id);
-        if let Some(entry) = self.sessions.iter_mut().find(|e| e.id == real_id) {
-            entry.title_pending = false;
-        }
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| list.titles_pending.remove(real_id));
+        self.session_list.update(cx, |list, _| {
+            if let Some(entry) = list.sessions.iter_mut().find(|e| e.id == real_id) {
+                entry.title_pending = false;
+            }
+        });
+        self.invalidate_list(cx);
         cx.notify();
     }
 
@@ -278,35 +286,19 @@ impl Harness {
         self.wire_tasks().push(task);
     }
 
-    /// Re-apply the titler's ephemeral flags after a list rebuild: pending
-    /// rows read pending, side sessions read hidden — even before their
-    /// override writes land. A free function of the two sets (rather than
-    /// `&self`) so [`Self::rejoin`] can call it mid-iteration over its own
-    /// rows; the persisted `hidden` override is what carries a restart.
-    pub(super) fn apply_title_flags(
-        pending: &std::collections::HashSet<String>,
-        sides: &std::collections::HashSet<String>,
-        entry: &mut crate::sidebar::SessionEntry,
-    ) {
-        if pending.contains(&entry.id) {
-            entry.title_pending = true;
-        }
-        if sides.contains(&entry.id) {
-            entry.hidden = true;
-        }
-    }
-
     /// `title-pending`: capture aid — the active session reads as if its
     /// generation were in flight, so a `--replay` run screenshots the
     /// `Naming this session…` row without spending a turn. No open
     /// session fails the step.
     pub(crate) fn step_title_pending(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let id = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).ok_or("no open session")?;
-        self.titles_pending.insert(id.clone());
-        if let Some(entry) = self.sessions.iter_mut().find(|e| e.id == id) {
-            entry.title_pending = true;
-        }
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| list.titles_pending.insert(id.clone()));
+        self.session_list.update(cx, |list, _| {
+            if let Some(entry) = list.sessions.iter_mut().find(|e| e.id == id) {
+                entry.title_pending = true;
+            }
+        });
+        self.invalidate_list(cx);
         cx.notify();
         Ok(())
     }
@@ -333,11 +325,13 @@ impl Harness {
         let id = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).ok_or("no open session")?;
         let title = titles::clean_title(rest).ok_or_else(|| format!("`{rest}` is not a usable title"))?;
         self.set_override(&id, |meta| meta.generated_title = Some(title), cx);
-        self.titles_pending.remove(&id);
-        if let Some(entry) = self.sessions.iter_mut().find(|e| e.id == id) {
-            entry.title_pending = false;
-        }
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| list.titles_pending.remove(&id));
+        self.session_list.update(cx, |list, _| {
+            if let Some(entry) = list.sessions.iter_mut().find(|e| e.id == id) {
+                entry.title_pending = false;
+            }
+        });
+        self.invalidate_list(cx);
         cx.notify();
         Ok(())
     }
@@ -374,7 +368,7 @@ impl Harness {
     ) {
         // The source session's own provider writes the summary (docs/50
         // P2): its transcript never leaves for another provider's model.
-        let provider = self.session_lane_provider(&source);
+        let provider = self.session_lane_provider(&source, cx);
         // The watchdog is armed now, not once the completion starts: a
         // provider that hangs would otherwise hold the handoff. An answer
         // that lands after the watchdog settled finds no waiting run.
@@ -530,10 +524,10 @@ impl Harness {
         }
         let session_id = view.read(cx).session_id.clone();
         // The session's own provider rewrites its byline (docs/50 P2).
-        if !self.utility_available(self.session_lane_provider(&session_id)) {
+        if !self.utility_available(self.session_lane_provider(&session_id, cx)) {
             return;
         }
-        if self.is_side_session(&session_id) {
+        if self.is_side_session(&session_id, cx) {
             return;
         }
         let running = view.read(cx).is_sending();
@@ -542,7 +536,7 @@ impl Harness {
         // The pack turn and its acknowledgement are the handoff speaking,
         // never words to rewrite a byline from — but only a handoff
         // destination ever has a pack turn (Y2a, Y2a3).
-        if crate::sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides)
+        if crate::sidebar::is_handoff_dest(&session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides)
             && ask.as_deref().is_some_and(crate::sidebar::is_pack_text)
         {
             return;
@@ -551,7 +545,7 @@ impl Harness {
             return;
         }
         let poor = byline::is_poor_excerpt(ask.as_deref(), result.as_deref());
-        let stored = self.overrides.get(&session_id);
+        let stored = self.session_list.read(cx).overrides.get(&session_id);
         let stored_pair =
             (stored.and_then(|m| m.last_ask.as_deref()), stored.and_then(|m| m.last_summary.as_deref()));
         let now = std::time::Instant::now();
@@ -561,13 +555,13 @@ impl Harness {
             poor,
             stored_pair,
             (ask.as_deref(), result.as_deref()),
-            self.byline_last_start.get(&session_id).copied(),
+            self.session_list.read(cx).byline_last_start.get(&session_id).copied(),
             now,
         ) {
             return;
         }
-        self.byline_last_start.insert(session_id.clone(), now);
-        self.byline_live.insert(session_id.clone());
+        self.session_list.update(cx, |list, _| list.byline_last_start.insert(session_id.clone(), now));
+        self.session_list.update(cx, |list, _| list.byline_live.insert(session_id.clone()));
         // One watchdog for the whole rewrite, armed with the start rather
         // than with an admission: a hanging chain still stands down on time,
         // and a retry never extends the deadline.
@@ -593,13 +587,13 @@ impl Harness {
         tries: u8,
         cx: &mut Context<Self>,
     ) {
-        let provider = self.session_lane_provider(&real_id);
+        let provider = self.session_lane_provider(&real_id, cx);
         let prompt = byline::rewrite_prompt(&ask, &result);
         let model = self.utility_model(&real_id, cx);
         let muse = self.muse_side(provider, "baaz auto-summary", cx);
         let work = move || crate::utility::complete(provider, model.as_deref(), &prompt, muse);
         self.wire_call(cx, work, move |this, reply, cx| {
-            if !this.byline_live.contains(&real_id) {
+            if !this.session_list.read(cx).byline_live.contains(&real_id) {
                 return;
             }
             let reason = match reply.map(|text| byline::parse_rewrite(&text)) {
@@ -625,8 +619,8 @@ impl Harness {
             meta.last_ask = Some(ask);
             meta.last_summary = Some(result);
         }, cx);
-        self.byline_live.remove(real_id);
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| list.byline_live.remove(real_id));
+        self.invalidate_list(cx);
         cx.notify();
     }
 
@@ -634,14 +628,14 @@ impl Harness {
     /// dialog, never another attempt past budget.
     fn fail_byline(&mut self, real_id: &str, reason: &str, cx: &mut Context<Self>) {
         crate::baaz_log!("auto-summary for {real_id} failed ({reason}); keeping the free excerpt");
-        self.byline_live.remove(real_id);
+        self.session_list.update(cx, |list, _| list.byline_live.remove(real_id));
         cx.notify();
     }
 
     /// Give up waiting on a rewrite: same shape as a title timeout — the
     /// free excerpt stands, and a late answer is ignored, never retried.
     fn byline_timeout(&mut self, real_id: &str, cx: &mut Context<Self>) {
-        if !self.byline_live.contains(real_id) {
+        if !self.session_list.read(cx).byline_live.contains(real_id) {
             return;
         }
         self.fail_byline(real_id, &format!("no answer in {} s", titles::TITLE_TIMEOUT_SECS), cx);

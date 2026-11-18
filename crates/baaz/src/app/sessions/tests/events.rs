@@ -21,7 +21,7 @@ fn a_lane_lost_twice_keeps_its_transcript_and_grows_the_banner(cx: &mut gpui::Te
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -72,7 +72,7 @@ fn a_lane_turn_outcome_moves_the_rows_failed_state(cx: &mut gpui::TestAppContext
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -87,13 +87,13 @@ fn a_lane_turn_outcome_moves_the_rows_failed_state(cx: &mut gpui::TestAppContext
     let failed = outcome(true, Some("stream disconnected"));
     vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.clone(), &failed, cx)));
     vc.update(|_, cx| {
-        let error = baaz.read(cx).overrides.get(&session_id).and_then(|meta| meta.last_error.clone());
+        let error = baaz.read(cx).session_list.read(cx).overrides.get(&session_id).and_then(|meta| meta.last_error.clone());
         assert_eq!(error.as_deref(), Some("stream disconnected"), "the failure is recorded");
     });
     let ok = outcome(false, None);
     vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.clone(), &ok, cx)));
     vc.update(|_, cx| {
-        let error = baaz.read(cx).overrides.get(&session_id).and_then(|meta| meta.last_error.clone());
+        let error = baaz.read(cx).session_list.read(cx).overrides.get(&session_id).and_then(|meta| meta.last_error.clone());
         assert!(error.is_none(), "a later success stands it down");
     });
     lane_restore(state);
@@ -116,7 +116,7 @@ fn unread_is_set_by_an_unseen_finish_and_cleared_by_reading(cx: &mut gpui::TestA
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -124,7 +124,7 @@ fn unread_is_set_by_an_unseen_finish_and_cleared_by_reading(cx: &mut gpui::TestA
     let view = vc.update(|_, cx| baaz.read(cx).active.clone().expect("the lane is open"));
     let session_id = vc.update(|_, cx| view.read(cx).session_id.clone());
     let unread = |id: &str, cx: &mut gpui::VisualTestContext| {
-        cx.update(|_, cx| baaz.read(cx).overrides.get(id).is_some_and(|meta| meta.unread))
+        cx.update(|_, cx| baaz.read(cx).session_list.read(cx).overrides.get(id).is_some_and(|meta| meta.unread))
     };
     // The open session, at its end: the finish is read as it lands.
     let done = crate::session::SessionEvent::ProviderTurnOutcome { session_id: session_id.clone(), failed: false, error: None };
@@ -145,7 +145,7 @@ fn unread_is_set_by_an_unseen_finish_and_cleared_by_reading(cx: &mut gpui::TestA
     vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.clone(), &lost, cx)));
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
-        let error = harness.overrides.get(&session_id).and_then(|meta| meta.last_error.clone());
+        let error = harness.session_list.read(cx).overrides.get(&session_id).and_then(|meta| meta.last_error.clone());
         assert_eq!(error.as_deref(), Some("the agent exited"), "a lost child is recorded as failed");
     });
     lane_restore(state);
@@ -172,7 +172,7 @@ fn a_background_session_needing_you_posts_and_badges(cx: &mut gpui::TestAppConte
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -185,8 +185,8 @@ fn a_background_session_needing_you_posts_and_badges(cx: &mut gpui::TestAppConte
             row.label = "Rotate the keys".into();
             row.turns = 1;
             row.running = true;
-            harness.sessions.push(row);
-            harness.invalidate_list();
+            harness.session_list.update(cx, |list, _| list.sessions.push(row));
+            harness.invalidate_list(cx);
             harness.check_attention(cx);
         })
     });
@@ -194,9 +194,11 @@ fn a_background_session_needing_you_posts_and_badges(cx: &mut gpui::TestAppConte
     // It asks for an approval.
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            let row = harness.sessions.iter_mut().find(|e| e.id == "s-parked").expect("the row");
-            row.apply_status_changed(true, &[provider::facts::Attention::ApprovalPending]);
-            harness.invalidate_list();
+            harness.session_list.update(cx, |list, _| {
+                let row = list.sessions.iter_mut().find(|e| e.id == "s-parked").expect("the row");
+                row.apply_status_changed(true, &[provider::facts::Attention::ApprovalPending]);
+            });
+            harness.invalidate_list(cx);
             harness.check_attention(cx);
         })
     });
@@ -223,7 +225,7 @@ fn jump_to_next_waiting_cycles_in_order(cx: &mut gpui::TestAppContext) {
     let vc = cx.add_empty_window();
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             harness.provider_factory = scripted_factory();
             mark_muse_up(harness);
             let now = chrono::Local::now();
@@ -234,9 +236,9 @@ fn jump_to_next_waiting_cycles_in_order(cx: &mut gpui::TestAppContext) {
                 if waiting {
                     row.attention = vec![provider::facts::Attention::ApprovalPending];
                 }
-                harness.sessions.push(row);
+                harness.session_list.update(cx, |list, _| list.sessions.push(row));
             }
-            harness.invalidate_list();
+            harness.invalidate_list(cx);
         });
     });
     let target = |vc: &mut gpui::VisualTestContext| {
@@ -290,7 +292,7 @@ fn a_provider_draft_with_no_turns_opens_fresh_instead_of_resuming(
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -302,20 +304,20 @@ fn a_provider_draft_with_no_turns_opens_fresh_instead_of_resuming(
     // The restart, with no turn ever settling: the record counts zero.
     let mut forgotten = Vec::new();
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             if let Some(view) = harness.active.take() {
                 forgotten.push(view);
             }
             forgotten.extend(harness.registry.drain_parked());
-            harness.sessions.clear();
-            harness.provider_sessions = crate::provider_sessions::read();
-            harness.merge_provider_rows();
+            harness.session_list.update(cx, |list, _| list.sessions.clear());
+            harness.session_list.update(cx, |list, _| list.provider_sessions = crate::provider_sessions::read());
+            harness.merge_provider_rows(cx);
         });
     });
     let _forgotten = forgotten;
     vc.update(|_, cx| {
         assert_eq!(
-            baaz.read(cx).provider_sessions.get(&open_id).map(|record| record.turns),
+            baaz.read(cx).session_list.read(cx).provider_sessions.get(&open_id).map(|record| record.turns),
             Some(0),
             "the untouched draft counts no turns"
         );
@@ -349,7 +351,7 @@ fn a_provider_draft_with_no_turns_opens_fresh_instead_of_resuming(
             "no failure dialog on a fresh open"
         );
         assert_eq!(
-            harness.provider_sessions.get(&open_id).map(|record| record.turns),
+            harness.session_list.read(cx).provider_sessions.get(&open_id).map(|record| record.turns),
             Some(0),
             "the reopened record is the fresh one"
         );
@@ -373,7 +375,7 @@ fn a_generated_title_lands_on_a_provider_row(cx: &mut gpui::TestAppContext) {
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -390,7 +392,7 @@ fn a_generated_title_lands_on_a_provider_row(cx: &mut gpui::TestAppContext) {
     });
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
-        let row = harness.sessions.iter().find(|entry| entry.id == open_id).expect("the row");
+        let row = harness.session_list.read(cx).sessions.iter().find(|entry| entry.id == open_id).expect("the row");
         assert_eq!(row.label, "Shiny generated", "the auto-title names the provider row");
     });
     lane_restore(state);
@@ -415,7 +417,7 @@ fn a_finished_provider_turn_counts_and_moves_the_record(cx: &mut gpui::TestAppCo
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -424,7 +426,7 @@ fn a_finished_provider_turn_counts_and_moves_the_record(cx: &mut gpui::TestAppCo
         baaz.update(cx, |harness, cx| {
             let id = harness.active.clone().expect("the lane opened").read(cx).session_id.clone();
             // An old stamp, so the move below is the turn's, not the open's.
-            harness.provider_sessions.get_mut(&id).expect("the open's record").updated_ms = 1;
+            harness.session_list.update(cx, |list, _| list.provider_sessions.get_mut(&id).expect("the open's record").updated_ms = 1);
             id
         })
     });
@@ -441,10 +443,10 @@ fn a_finished_provider_turn_counts_and_moves_the_record(cx: &mut gpui::TestAppCo
     vc.run_until_parked();
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
-        let record = &harness.provider_sessions[&open_id];
+        let record = &harness.session_list.read(cx).provider_sessions[&open_id];
         assert!(record.turns >= 1, "the finished turn counts on the record, held {}", record.turns);
         assert!(record.updated_ms > 1, "the finished turn moves the record");
-        let row = harness.sessions.iter().find(|entry| entry.id == open_id).expect("the row");
+        let row = harness.session_list.read(cx).sessions.iter().find(|entry| entry.id == open_id).expect("the row");
         assert!(row.turns >= 1, "the row reads the counted turn, held {}", row.turns);
         assert!(!row.is_empty(), "a counted session is never empty");
     });
@@ -470,7 +472,7 @@ fn a_retried_first_send_keeps_the_generated_title(cx: &mut gpui::TestAppContext)
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::ClaudeCode, None, workspace, window, cx);
         });
     });
@@ -505,7 +507,7 @@ fn a_retried_first_send_keeps_the_generated_title(cx: &mut gpui::TestAppContext)
     accept(vc, "t-retry");
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
-        let row = harness.sessions.iter().find(|entry| entry.id == open_id).expect("the row");
+        let row = harness.session_list.read(cx).sessions.iter().find(|entry| entry.id == open_id).expect("the row");
         assert_eq!(row.turns, 0, "the first turn never settled");
         assert_eq!(row.label, "Simple HTML Database Structure Explainer", "the retry keeps the title");
         assert_eq!(
@@ -536,7 +538,7 @@ fn a_parked_session_finishing_its_turn_settles_its_row(cx: &mut gpui::TestAppCon
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -548,18 +550,19 @@ fn a_parked_session_finishing_its_turn_settles_its_row(cx: &mut gpui::TestAppCon
     // One settled turn behind it, one in flight: the row reads Working.
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            harness.provider_sessions.get_mut(&first).expect("the first record").turns = 1;
-            harness.merge_provider_rows();
-            let row =
-                harness.sessions.iter_mut().find(|entry| entry.id == first).expect("the first row");
-            row.running = true;
-            row.turn_started = Some(crate::clock::now_local());
+            harness.session_list.update(cx, |list, _| list.provider_sessions.get_mut(&first).expect("the first record").turns = 1);
+            harness.merge_provider_rows(cx);
+            harness.session_list.update(cx, |list, _| {
+                let row = list.sessions.iter_mut().find(|entry| entry.id == first).expect("the first row");
+                row.running = true;
+                row.turn_started = Some(crate::clock::now_local());
+            });
             cx.notify();
         });
     });
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
-        let row = harness.sessions.iter().find(|entry| entry.id == first).expect("the first row");
+        let row = harness.session_list.read(cx).sessions.iter().find(|entry| entry.id == first).expect("the first row");
         assert_eq!(
             row.row_status(crate::clock::now_local()).kind,
             aui::nav::RowStatusKind::Working,
@@ -570,7 +573,7 @@ fn a_parked_session_finishing_its_turn_settles_its_row(cx: &mut gpui::TestAppCon
     // Switching away parks the first view; its subscription must stay.
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -608,7 +611,7 @@ fn a_parked_session_finishing_its_turn_settles_its_row(cx: &mut gpui::TestAppCon
     vc.run_until_parked();
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
-        let row = harness.sessions.iter().find(|entry| entry.id == first).expect("the first row");
+        let row = harness.session_list.read(cx).sessions.iter().find(|entry| entry.id == first).expect("the first row");
         assert!(!row.running, "the parked finish stands the row down");
         assert_eq!(
             row.row_status(crate::clock::now_local()).kind,
@@ -682,7 +685,7 @@ fn chat_view(
 ) -> Entity<SessionView> {
     let host = SessionHost {
         provider_id: ProviderId::Codex.as_str().to_owned(),
-        workspace: harness.workspace(),
+        workspace: harness.workspace(cx),
         overlays: harness.overlays.clone(),
         capture: crate::shot::CaptureToken::default(),
         terminal_host: None,
@@ -781,12 +784,12 @@ fn a_renamed_browser_chat_keeps_its_line(cx: &mut gpui::TestAppContext) {
         baaz.update(cx, |harness, cx| {
             harness.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Answer { question: "q".into(), session: "req-1".into() });
             harness.browser.update(cx, |browser, _| browser.agent_window.browser_chat_pages.insert("req-1".into(), vec![("Page".into(), "https://a.test".into())]));
-            harness.reveal_unknown = Some(("req-1".into(), 3));
+            harness.sidebar_pane.update(cx, |pane, _| pane.reveal_unknown = Some(("req-1".into(), 3)));
             harness.rekey_session("req-1", "thread-9", cx);
             assert_eq!(harness.browser.read(cx).agent_window.line_ui, LineUi::Answer { question: "q".into(), session: "thread-9".into() });
             assert!(harness.browser.read(cx).agent_window.browser_chat_pages.contains_key("thread-9"));
             assert!(!harness.browser.read(cx).agent_window.browser_chat_pages.contains_key("req-1"));
-            assert_eq!(harness.reveal_unknown, Some(("thread-9".into(), 3)));
+            assert_eq!(harness.sidebar_pane.read(cx).reveal_unknown, Some(("thread-9".into(), 3)));
             harness.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Drafting { session: "thread-9".into(), tab: 4 });
             harness.rekey_session("thread-9", "thread-10", cx);
             assert_eq!(harness.browser.read(cx).agent_window.line_ui, LineUi::Drafting { session: "thread-10".into(), tab: 4 });
@@ -814,7 +817,7 @@ fn a_parked_finish_records_its_own_byline(cx: &mut gpui::TestAppContext) {
     let open = |vc: &mut gpui::VisualTestContext| {
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                let workspace = harness.workspace();
+                let workspace = harness.workspace(cx);
                 harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
             });
         });
@@ -857,7 +860,7 @@ fn a_parked_finish_records_its_own_byline(cx: &mut gpui::TestAppContext) {
     vc.run_until_parked();
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
-        let parked = harness.overrides.get(&first_id);
+        let parked = harness.session_list.read(cx).overrides.get(&first_id);
         assert!(
             parked.and_then(|m| m.last_ask.as_deref()).is_some_and(|ask| ask.contains("Parked ask")),
             "the parked session's row gets its own byline: {:?}",
@@ -867,7 +870,7 @@ fn a_parked_finish_records_its_own_byline(cx: &mut gpui::TestAppContext) {
             parked.and_then(|m| m.derived_title.as_deref()).is_some_and(|t| t.contains("Parked ask")),
             "the parked session is titled from its own transcript"
         );
-        let open = harness.overrides.get(&second_id);
+        let open = harness.session_list.read(cx).overrides.get(&second_id);
         assert!(open.and_then(|m| m.last_ask.as_deref()).is_none(), "the open session's byline is untouched");
         assert!(open.and_then(|m| m.derived_title.as_deref()).is_none(), "the open session's title is untouched");
     });
@@ -895,7 +898,7 @@ fn field_subscriptions_survive_opening_a_session(cx: &mut gpui::TestAppContext) 
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -946,7 +949,7 @@ fn a_parked_cancelled_approval_stops_reading_needs_approval(cx: &mut gpui::TestA
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -958,8 +961,8 @@ fn a_parked_cancelled_approval_stops_reading_needs_approval(cx: &mut gpui::TestA
     // the session is open — the active behaviour, unchanged by this fix.
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            harness.provider_sessions.get_mut(&first).expect("the record").turns = 1;
-            harness.merge_provider_rows();
+            harness.session_list.update(cx, |list, _| list.provider_sessions.get_mut(&first).expect("the record").turns = 1);
+            harness.merge_provider_rows(cx);
             let view = harness.active.clone().expect("the lane opened");
             view.update(cx, |view, cx| {
                 view.inject_external_approval(
@@ -983,7 +986,7 @@ fn a_parked_cancelled_approval_stops_reading_needs_approval(cx: &mut gpui::TestA
     vc.run_until_parked();
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
-        let row = harness.sessions.iter().find(|entry| entry.id == first).expect("the row");
+        let row = harness.session_list.read(cx).sessions.iter().find(|entry| entry.id == first).expect("the row");
         assert_eq!(
             row.row_status(crate::clock::now_local()).kind,
             aui::nav::RowStatusKind::NeedsApproval,
@@ -993,7 +996,7 @@ fn a_parked_cancelled_approval_stops_reading_needs_approval(cx: &mut gpui::TestA
     // Switching away parks the session with its pending tap.
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -1051,7 +1054,7 @@ fn a_parked_cancelled_approval_stops_reading_needs_approval(cx: &mut gpui::TestA
     vc.run_until_parked();
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
-        let row = harness.sessions.iter().find(|entry| entry.id == first).expect("the row");
+        let row = harness.session_list.read(cx).sessions.iter().find(|entry| entry.id == first).expect("the row");
         assert_eq!(
             row.row_status(crate::clock::now_local()).kind,
             aui::nav::RowStatusKind::Settled,
@@ -1266,7 +1269,7 @@ fn deleting_a_provider_session_forgets_it_entirely(cx: &mut gpui::TestAppContext
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            let workspace = harness.workspace();
+            let workspace = harness.workspace(cx);
             harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
         });
     });
@@ -1288,9 +1291,9 @@ fn deleting_a_provider_session_forgets_it_entirely(cx: &mut gpui::TestAppContext
     let _held = held;
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
-        assert!(!harness.provider_sessions.contains_key(&open_id), "the record is gone");
+        assert!(!harness.session_list.read(cx).provider_sessions.contains_key(&open_id), "the record is gone");
         assert!(
-            !harness.sessions.iter().any(|entry| entry.id == open_id),
+            !harness.session_list.read(cx).sessions.iter().any(|entry| entry.id == open_id),
             "the row is gone"
         );
         assert!(harness.active.is_none(), "the open view is gone");

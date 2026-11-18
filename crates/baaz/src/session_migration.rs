@@ -1016,7 +1016,7 @@ impl BaazHarness {
         self.migration_refresh_in_flight = true;
         let owner = owner_home();
         let state = crate::store::support_dir();
-        let registry = self.provider_sessions.clone();
+        let registry = self.session_list.read(cx).provider_sessions.clone();
         cx.spawn(async move |this, cx| {
             let plan = cx
                 .background_executor()
@@ -1108,7 +1108,7 @@ impl BaazHarness {
         // A click that beats the background plan (cold start) plans now, in
         // the same background task, instead of moving nothing.
         let owner = owner_home();
-        let registry = self.provider_sessions.clone();
+        let registry = self.session_list.read(cx).provider_sessions.clone();
         self.close_dialog(cx);
         cx.spawn(async move |this, cx| {
             let report = cx

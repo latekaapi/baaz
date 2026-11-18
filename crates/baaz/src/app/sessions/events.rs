@@ -116,7 +116,7 @@ impl Harness {
                 let (session_id, provider) = (session_id.clone(), *provider);
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| {
-                        let workspace = this.workspace();
+                        let workspace = this.workspace(cx);
                         this.open_forked_on_provider(provider, session_id, workspace, window, cx);
                     });
                 }));
@@ -187,18 +187,18 @@ impl Harness {
                 let provider = view.read(cx).provider_kind();
                 self.note_pick(|defaults| {
                     defaults.note_model(provider.as_str(), model_id);
-                });
+                }, cx);
             }
             SessionEvent::EffortSelected { effort } => {
                 let provider = view.read(cx).provider_kind();
                 self.note_pick(|defaults| {
                     defaults.note_effort(provider.as_str(), effort.clone());
-                });
+                }, cx);
             }
             SessionEvent::ModeSelected { mode } => {
                 self.note_pick(|defaults| {
                     defaults.approval_mode = Some(*mode);
-                });
+                }, cx);
             }
             // A fresh session's composer chip picked another provider:
             // nothing was ever sent, so the pick becomes the default and a
@@ -270,8 +270,8 @@ impl Harness {
                 self.hide_session(session_id, cx);
             }
             SessionEvent::ToggleEmpty => {
-                self.show_empty = !self.show_empty;
-                self.invalidate_list();
+                self.session_list.update(cx, |list, _| list.show_empty = !list.show_empty);
+                self.invalidate_list(cx);
             }
             SessionEvent::Resume => self.open_palette(PaletteKind::Resume, cx),
             SessionEvent::ForkPicker => self.open_palette(PaletteKind::Fork, cx),
@@ -321,7 +321,7 @@ impl Harness {
             SessionEvent::RevealPath { abs, highlight } => {
                 let abs = abs.clone();
                 let highlight = highlight.clone();
-                let root = self.right_project().map(|(root, _)| root);
+                let root = self.right_project(cx).map(|(root, _)| root);
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let probe = abs.clone();
                     let is_dir = cx
@@ -329,7 +329,7 @@ impl Harness {
                         .spawn(async move { std::fs::metadata(&probe).ok().map(|meta| meta.is_dir()) })
                         .await;
                     let _ = this.update(cx, |this: &mut Self, cx| {
-                        let owned = root.or_else(|| this.right_project().map(|(root, _)| root));
+                        let owned = root.or_else(|| this.right_project(cx).map(|(root, _)| root));
                         if let Some(owned) = owned {
                             this.reveal_link_path(&owned, &abs, is_dir, highlight, cx);
                         }
@@ -367,58 +367,62 @@ impl Harness {
         // draft any more, whether it already had a row or not.
         self.open_state.admit_turn(&session_id);
         let handoff_dest =
-            sidebar::is_handoff_dest(&session_id, &self.provider_sessions, &self.overrides);
+            sidebar::is_handoff_dest(&session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides);
         // A handoff destination's first words are the pack, then the
         // person's next message on the same chain: neither is the
         // session's own first prompt (Y2a).
         if !handoff_dest {
-            crate::provider_sessions::note_first_prompt(
-                &mut self.provider_sessions,
-                &session_id,
-                &prompt,
-            );
+            self.session_list.update(cx, |list, _| {
+                crate::provider_sessions::note_first_prompt(&mut list.provider_sessions, &session_id, &prompt)
+            });
         }
-        if crate::provider_sessions::touch(&mut self.provider_sessions, &session_id) {
+        if self.session_list.update(cx, |list, _| crate::provider_sessions::touch(&mut list.provider_sessions, &session_id)) {
             self.persist_provider_sessions(cx);
         }
         // A generated title outranks the prompt, even on a retry
         // of a first turn that never settled (`send_title`).
-        let title = sidebar::send_title(&session_id, Some(&prompt), &self.overrides);
-        if !self.sessions.iter().any(|entry| entry.id == session_id) {
+        let title = sidebar::send_title(&session_id, Some(&prompt), &self.session_list.read(cx).overrides);
+        if !self.session_list.read(cx).sessions.iter().any(|entry| entry.id == session_id) {
             // No row yet (a restart between the open and this
             // send): build it now, titled from the prompt — from
             // the record, or for a provider that lists its own
             // sessions, as a local row until the list shows it.
-            self.merge_provider_rows();
+            self.merge_provider_rows(cx);
             if provider_kind.lists_sessions() {
-                let project = self.overrides.get(&session_id).and_then(|m| m.project.clone());
-                let workspace = self.session_workspace(&session_id);
-                self.ensure_listed_row(&session_id, project, workspace);
+                let project = self.session_list.read(cx).overrides.get(&session_id).and_then(|m| m.project.clone());
+                let workspace = self.session_workspace(&session_id, cx);
+                self.ensure_listed_row(&session_id, project, workspace, cx);
                 // A handoff destination's rowless first turn is the
                 // pack: the row carries the chain title (Y2a).
                 if handoff_dest {
-                    let label = sidebar::handoff_title_of(&session_id, &self.provider_sessions, &self.overrides)
+                    let label = sidebar::handoff_title_of(&session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides)
                         .map(|t| sidebar::one_line(&t));
-                    if let (Some(label), Some(entry)) =
-                        (label, self.sessions.iter_mut().find(|entry| entry.id == session_id))
-                    {
-                        entry.label = label;
+                    if let Some(label) = label {
+                        self.session_list.update(cx, |list, _| {
+                            if let Some(entry) = list.sessions.iter_mut().find(|entry| entry.id == session_id) {
+                                entry.label = label;
+                            }
+                        });
                     }
                 }
             }
         }
-        if let Some(entry) = self.sessions.iter_mut().find(|entry| entry.id == session_id) {
-            if sidebar::first_send_update(entry, title, crate::clock::now_local(), handoff_dest) {
-                self.invalidate_list();
-                // The row just went from invisible to visible: a
-                // reveal armed when this session was opened may
-                // already have given up on it (it was filtered as
-                // empty), so re-arm it as an outside activation
-                // does — only for the session this window has open.
-                if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
-                    self.reveal = Some(session_id.clone());
-                    self.reveal_unknown = None;
-                }
+        let born = self.session_list.update(cx, |list, _| {
+            list.sessions
+                .iter_mut()
+                .find(|entry| entry.id == session_id)
+                .is_some_and(|entry| sidebar::first_send_update(entry, title, crate::clock::now_local(), handoff_dest))
+        });
+        if born {
+            self.invalidate_list(cx);
+            // The row just went from invisible to visible: a
+            // reveal armed when this session was opened may
+            // already have given up on it (it was filtered as
+            // empty), so re-arm it as an outside activation
+            // does — only for the session this window has open.
+            if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
+                let id = session_id.clone();
+                self.sidebar_pane.update(cx, |pane, cx| pane.set_reveal(Some(id), false, cx));
             }
         }
         // A first send may earn a generated title: the same cheap
@@ -494,25 +498,22 @@ impl Harness {
                     .count() as u64
             })
             .unwrap_or(0);
-        let counted_before = self.provider_sessions.get(&session_id).map(|record| record.turns);
+        let counted_before = self.session_list.read(cx).provider_sessions.get(&session_id).map(|record| record.turns);
         // Only a turn this window admitted is activity: a reopen's
         // replay may correct the count, never the row's time.
         let live = self.open_state.turns_admitted.contains(&session_id);
-        if crate::provider_sessions::note_settled_turn_counted(
-            &mut self.provider_sessions,
-            &session_id,
-            exchanges,
-            live,
-        ) {
+        if self.session_list.update(cx, |list, _| {
+            crate::provider_sessions::note_settled_turn_counted(&mut list.provider_sessions, &session_id, exchanges, live)
+        }) {
             self.persist_provider_sessions(cx);
         }
-        self.rejoin_provider_row(&session_id);
+        self.rejoin_provider_row(&session_id, cx);
         // A replayed settle — a reopen folding history the record
         // already counted — counted nothing. It is not new work, so
         // it starts no model work either (an imported session has
         // no stored byline, and its reopen fired a paid rewrite on
         // its own provider, 2026-10-30).
-        let counted = self.provider_sessions.get(&session_id).map(|record| record.turns) != counted_before;
+        let counted = self.session_list.read(cx).provider_sessions.get(&session_id).map(|record| record.turns) != counted_before;
         // A new exchange is new searchable words (docs/50 P3): the
         // sync re-reads this one transcript and skips every other
         // row on its fingerprint. A replayed settle counts nothing

@@ -172,7 +172,7 @@ impl Harness {
     /// Look at every row's state and post what changed (see the module
     /// docs). Cheap when the list has not moved since the last look.
     pub(crate) fn check_attention(&mut self, cx: &mut Context<Self>) {
-        let epoch = self.list_epoch;
+        let epoch = self.session_list.read(cx).epoch;
         let notifier = cx.default_global::<Notifier>();
         if notifier.epoch == Some(epoch) {
             return;
@@ -181,7 +181,7 @@ impl Harness {
         let before = std::mem::take(&mut notifier.states);
         let front = self.active_id(cx);
         let prefs = crate::layout::Layout::get(cx).notify_prefs();
-        let look = transitions(&before, self.sessions.iter(), front.as_deref(), app_is_active(), prefs);
+        let look = transitions(&before, self.session_list.read(cx).sessions.iter(), front.as_deref(), app_is_active(), prefs);
         let badge = if prefs.badge { look.needs_you } else { 0 };
         let notifier = cx.default_global::<Notifier>();
         notifier.states = look.states;
@@ -231,7 +231,7 @@ impl Harness {
     pub(crate) fn toggle_needs_you_filter(&mut self, cx: &mut Context<Self>) {
         let notifier = cx.default_global::<Notifier>();
         notifier.filter = !notifier.filter;
-        self.invalidate_list();
+        self.invalidate_list(cx);
         cx.notify();
     }
 
@@ -257,16 +257,19 @@ impl Harness {
     /// `Err`.
     pub(crate) fn step_row_needs_you(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let label = rest.trim();
-        let row = self
-            .sessions
-            .iter_mut()
-            .find(|row| row.label.eq_ignore_ascii_case(label))
-            .ok_or_else(|| format!("no sidebar row is labelled `{label}`"))?;
-        if matches!(row.session_state(), SessionState::NeedsYou(_)) {
-            return Err(format!("`{label}` is already waiting"));
-        }
-        row.approval_command = Some("cargo test --workspace".to_owned());
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| {
+            let row = list
+                .sessions
+                .iter_mut()
+                .find(|row| row.label.eq_ignore_ascii_case(label))
+                .ok_or_else(|| format!("no sidebar row is labelled `{label}`"))?;
+            if matches!(row.session_state(), SessionState::NeedsYou(_)) {
+                return Err(format!("`{label}` is already waiting"));
+            }
+            row.approval_command = Some("cargo test --workspace".to_owned());
+            Ok(())
+        })?;
+        self.invalidate_list(cx);
         self.check_attention(cx);
         cx.notify();
         Ok(())

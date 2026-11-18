@@ -78,12 +78,14 @@ impl Identity {
         false
     }
 
-    /// The name the sidebar footer shows. The key lanes name themselves
+    /// The name the sidebar footer showed (test-only now: see
+    /// [`crate::login::Auth::SignedIn`]). The key lanes name themselves
     /// ("API key", never the stored key's label); otherwise the stored
     /// name (which [`Self::from_account`] already preferred over an
     /// id-looking wire label), unless it still looks like an account id
     /// — then the email, then a bare "Signed in". Never an id, never a
     /// plan, never a meter.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn display_name(&self) -> String {
         match self.lane {
             AccountLane::EnvKey => return "API key (environment)".to_owned(),
@@ -100,7 +102,9 @@ impl Identity {
     }
 
     /// The avatar initial for the sidebar footer, from what the footer
-    /// shows — so "A" on both key lanes, whose footer reads "API key".
+    /// shows — so "A" on both key lanes, whose footer reads "API key"
+    /// (test-only now, like [`Self::display_name`]).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn initial(&self) -> String {
         self.display_name().chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".into())
     }

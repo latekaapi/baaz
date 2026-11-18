@@ -2732,7 +2732,7 @@ impl Render for SkillsPage {
 impl Harness {
     /// What the page needs from the root now (see [`SkillsFacts`]).
     pub(crate) fn skills_facts(&self, cx: &App) -> SkillsFacts {
-        let project = self.current_project();
+        let project = self.current_project(cx);
         SkillsFacts {
             root: project
                 .map(|project| project.root.to_string_lossy().into_owned())

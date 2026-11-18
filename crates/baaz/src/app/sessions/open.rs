@@ -162,11 +162,11 @@ impl Harness {
         cx: &mut Context<Self>,
         switch: Option<u64>,
     ) {
-        if let Some(id) = project.as_deref().filter(|id| self.projects.find_available(id).is_some()) {
-            self.projects.touch(id);
-            self.projects.current = Some(id.to_owned());
+        if let Some(id) = project.as_deref().filter(|id| self.session_list.read(cx).projects.find_available(id).is_some()) {
+            self.session_list.update(cx, |list, _| list.projects.touch(id));
+            self.session_list.update(cx, |list, _| list.projects.current = Some(id.to_owned()));
             self.current_project = Some(id.to_owned());
-            projects::write(&self.projects);
+            projects::write(&self.session_list.read(cx).projects);
             // A new session in another project moves the page's root (D55).
             if self.skills_open(cx) {
                 self.relist_skills(cx);
@@ -174,7 +174,7 @@ impl Harness {
         }
         // A missing root is nowhere to start: fall back to the effective
         // current (a missing current is never current), or start nothing.
-        let current = self.current_project().map(|project| project.id.clone());
+        let current = self.current_project(cx).map(|project| project.id.clone());
         // A live draft in the target project is the session: reopen its view
         // without touching the wire.
         if let Some(id) = current.clone() {
@@ -213,7 +213,7 @@ impl Harness {
         if !(wanted.scripted_draft_is_local() && self.scripted_chrome()) {
             let root = current
                 .as_deref()
-                .and_then(|id| self.projects.find_available(id))
+                .and_then(|id| self.session_list.read(cx).projects.find_available(id))
                 .map(|project| project.root.to_string_lossy().into_owned());
             // A session with no project — on any provider — goes to the
             // default workspace, which is not a project, so it files as
@@ -288,11 +288,11 @@ impl Harness {
     /// holds no turns and nobody named. A replayed row is never a draft.
     /// (A turn in flight is checked by the callers that move content.)
     pub(crate) fn is_live_draft(&self, session_id: &str, cx: &gpui::App) -> bool {
-        if let Some(entry) = self.sessions.iter().find(|e| e.id == session_id) {
+        if let Some(entry) = self.session_list.read(cx).sessions.iter().find(|e| e.id == session_id) {
             return entry.turns == 0 && !entry.named && !entry.replayed;
         }
         if self
-            .overrides
+            .session_list.read(cx).overrides
             .get(session_id)
             .and_then(|m| m.name.clone())
             .is_some_and(|n| !n.trim().is_empty())
@@ -370,7 +370,7 @@ impl Harness {
             self.browser.update(cx, |browser, _| browser.drop_pending_ask());
             return;
         };
-        if self.projects.find(&id).is_none() {
+        if self.session_list.read(cx).projects.find(&id).is_none() {
             crate::baaz_log!("new: no current project; starting nothing");
             self.browser.update(cx, |browser, _| browser.drop_pending_ask());
             return;
@@ -378,7 +378,7 @@ impl Harness {
         let moving = self.open_state.pending_draft.take();
         let retarget = moving.is_some();
         let draft_id = format!("{LOCAL_DRAFT_PREFIX}{id}");
-        let workspace = self.workspace();
+        let workspace = self.workspace(cx);
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let host = SessionHost {
             provider_id: self.new_provider.clone(),
@@ -402,10 +402,10 @@ impl Harness {
         // No row exists for a draft, so the empty state and the later
         // `turn/started` row read the project straight from the store.
         self.set_override(&draft_id, |meta| meta.project = Some(id.clone()), cx);
-        let name = self.current_project().map(|p| p.name.clone());
+        let name = self.current_project(cx).map(|p| p.name.clone());
         let effort = self
-            .projects
-            .picks(self.current_project())
+            .session_list.read(cx).projects
+            .picks(self.current_project(cx))
             .effort_for(&self.new_provider)
             .as_deref()
             .and_then(projects::parse_effort);
@@ -460,9 +460,9 @@ impl Harness {
     /// view. What the `open:`/`click:`/`pin:` steps check before acting,
     /// since offline `resume` would open any id as a blank local view.
     pub(crate) fn knows_session(&self, session_id: &str, cx: &gpui::App) -> bool {
-        self.sessions.iter().any(|entry| entry.id == session_id)
-            || self.provider_sessions.contains_key(session_id)
-            || self.index.contains_key(session_id)
+        self.session_list.read(cx).sessions.iter().any(|entry| entry.id == session_id)
+            || self.session_list.read(cx).provider_sessions.contains_key(session_id)
+            || self.session_list.read(cx).index.contains_key(session_id)
             || self.registry.is_parked(session_id)
             || self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id)
     }
@@ -493,14 +493,14 @@ impl Harness {
         // card or divider link — lands on the head instead. Only the
         // fallback divider's source link bypasses, through
         // `resume_source_read_only`.
-        let session_id = if bypass_chain { session_id } else { self.chain_head(&session_id) };
+        let session_id = if bypass_chain { session_id } else { self.chain_head(&session_id, cx) };
         // A hidden session is never loaded. Hiding is a decision about this
         // window's list, and a list that still opened what it refuses to show
         // would be a list that means nothing. Archived sessions are the same.
-        if self.overrides.get(&session_id).is_some_and(|m| m.hidden) && !self.show_hidden {
+        if self.session_list.read(cx).overrides.get(&session_id).is_some_and(|m| m.hidden) && !self.session_list.read(cx).show_hidden {
             return;
         }
-        if self.overrides.get(&session_id).is_some_and(|m| m.archived) && !self.show_archived {
+        if self.session_list.read(cx).overrides.get(&session_id).is_some_and(|m| m.archived) && !self.session_list.read(cx).show_archived {
             return;
         }
         // B2a-H2b: opening a session while in Browse switches to
@@ -535,14 +535,12 @@ impl Harness {
         // instead.
         self.open_state.pending_id = Some(session_id.clone());
         if quiet {
-            self.reveal = None;
-            self.reveal_unknown = None;
+            self.sidebar_pane.update(cx, |pane, cx| pane.set_reveal(None, false, cx));
         } else {
-            self.reveal = Some(session_id.clone());
-            self.reveal_unknown = None;
             // A fresh arm owns the list again: the next user scroll disarms
             // it.
-            self.sidebar_user_scrolled = false;
+            let id = session_id.clone();
+            self.sidebar_pane.update(cx, |pane, cx| pane.set_reveal(Some(id), true, cx));
         }
         // Live, a session its provider lists (Muse) speaks through its
         // newest list row first: the first open in Baaz of a session made
@@ -553,7 +551,7 @@ impl Harness {
             // A parked view with no record (a provider draft still opening
             // under its request id) just activates: it is no listed
             // session, and nothing must write a record for it.
-            if !self.provider_sessions.contains_key(&session_id) {
+            if !self.session_list.read(cx).provider_sessions.contains_key(&session_id) {
                 if let Some(view) = self.cache_take(&session_id) {
                     crate::log::trace_reset();
                     crate::log::trace_mark("cache-hit");
@@ -568,7 +566,7 @@ impl Harness {
         // click switches to the live session (its lane kept following) —
         // and otherwise the stored record reopens over `ResumeSession`,
         // with its history replayed or paged in.
-        if let Some(record) = self.provider_sessions.get(&session_id).cloned() {
+        if let Some(record) = self.session_list.read(cx).provider_sessions.get(&session_id).cloned() {
             // Traced like a Muse switch: `HistoryReady` marks the stored
             // history painted into the reopened lane.
             crate::log::trace_reset();
@@ -625,8 +623,8 @@ impl Harness {
     /// outside Baaz's records — and gets a record with what is known.
     /// Claude Code and Codex sessions always have their record already.
     fn adopt_listed_record(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        let known = self.provider_sessions.get(session_id).map(|record| record.provider.clone());
-        let row = self.sessions.iter().find(|entry| entry.id == session_id && !entry.replayed);
+        let known = self.session_list.read(cx).provider_sessions.get(session_id).map(|record| record.provider.clone());
+        let row = self.session_list.read(cx).sessions.iter().find(|entry| entry.id == session_id && !entry.replayed);
         let provider = match (row, known.as_deref()) {
             (Some(row), _) if row.provider.lists_sessions() => row.provider,
             (None, None) => match ProviderId::all().into_iter().find(|id| id.lists_sessions()) {
@@ -638,10 +636,10 @@ impl Harness {
             _ => return,
         };
         let listed = self
-            .saved_list
+            .session_list.read(cx).fetch.saved
             .as_deref()
             .and_then(|list| list.sessions.iter().find(|listed| listed.session_id == session_id));
-        let index = self.index.get(session_id);
+        let index = self.session_list.read(cx).index.get(session_id);
         let title = listed.and_then(|l| l.title.clone()).or_else(|| index.map(|i| i.title.clone()));
         let first_prompt = listed
             .and_then(|l| l.first_user_prompt.clone())
@@ -659,18 +657,20 @@ impl Harness {
                 (None, None, 0, now, now)
             }
         };
-        let changed = crate::provider_sessions::upsert_listed(
-            &mut self.provider_sessions,
-            provider.as_str(),
-            session_id,
-            workspace,
-            project,
-            title,
-            first_prompt,
-            turns,
-            created_ms,
-            updated_ms,
-        );
+        let changed = self.session_list.update(cx, |list, _| {
+            crate::provider_sessions::upsert_listed(
+                &mut list.provider_sessions,
+                provider.as_str(),
+                session_id,
+                workspace,
+                project,
+                title,
+                first_prompt,
+                turns,
+                created_ms,
+                updated_ms,
+            )
+        });
         if changed {
             crate::baaz_log!("record written for {} session {session_id} from its list row", provider.as_str());
             self.persist_provider_sessions(cx);
@@ -681,14 +681,14 @@ impl Harness {
     /// prompt ever sent — so its reopen opens fresh instead. A session its
     /// provider lists counts only when its list row confirms zero turns: a
     /// record written with no row behind it never drops a real session.
-    pub(super) fn record_holds_no_history(&self, record: &crate::provider_sessions::ProviderSessionRecord) -> bool {
+    pub(super) fn record_holds_no_history(&self, record: &crate::provider_sessions::ProviderSessionRecord, cx: &gpui::App) -> bool {
         if record.turns > 0 || record.first_prompt.is_some() {
             return false;
         }
         let listed = ProviderId::parse_known(&record.provider).is_some_and(|id| id.lists_sessions());
         !listed
             || self
-                .sessions
+                .session_list.read(cx).sessions
                 .iter()
                 .any(|entry| entry.id == record.session_id && !entry.turns_unknown && entry.turns == 0)
     }
@@ -704,12 +704,12 @@ impl Harness {
     /// the list knows it, else where the next session would go. Anything
     /// about a session reads this; anything about "where the next session
     /// goes" reads the current project directly.
-    pub(crate) fn session_workspace(&self, session_id: &str) -> String {
-        self.sessions
+    pub(crate) fn session_workspace(&self, session_id: &str, cx: &gpui::App) -> String {
+        self.session_list.read(cx).sessions
             .iter()
             .find(|e| e.id == session_id)
             .and_then(|e| e.workspace.clone())
-            .unwrap_or_else(|| self.workspace())
+            .unwrap_or_else(|| self.workspace(cx))
     }
 
     /// A session view opened: the current project becomes that session's
@@ -723,16 +723,16 @@ impl Harness {
     /// now.
     fn adopt_session_project(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let project = self
-            .sessions
+            .session_list.read(cx).sessions
             .iter()
             .find(|e| e.id == session_id)
             .and_then(|e| e.project.clone())
-            .filter(|id| self.projects.find(id).is_some());
+            .filter(|id| self.session_list.read(cx).projects.find(id).is_some());
         let Some(id) = project else { return };
         let moved = self.current_project.as_deref() != Some(id.as_str());
-        self.projects.current = Some(id.clone());
+        self.session_list.update(cx, |list, _| list.projects.current = Some(id.clone()));
         self.current_project = Some(id);
-        projects::write(&self.projects);
+        projects::write(&self.session_list.read(cx).projects);
         // The project moved under the open Skills page: re-list (D55).
         if moved && self.skills_open(cx) {
             self.relist_skills(cx);
@@ -757,7 +757,7 @@ impl Harness {
         // `reopen_provider` for every provider (docs/70). Always Muse —
         // never the new-session default, which read "Codex" or "Claude
         // Code" on a reopened Muse session.
-        let (provider, workspace) = (ProviderId::Muse.as_str().to_owned(), self.session_workspace(&session_id));
+        let (provider, workspace) = (ProviderId::Muse.as_str().to_owned(), self.session_workspace(&session_id, cx));
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let overlays = self.overlays.clone();
         let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone(), terminal_host: Some(self.terminal_host(cx)) };
@@ -923,7 +923,7 @@ impl Harness {
         // empty filter hides forever. Anything with history keeps its
         // record: only the view is forgotten.
         let unsent_draft = self
-            .provider_sessions
+            .session_list.read(cx).provider_sessions
             .get(session_id)
             .is_some_and(|record| record.turns == 0 && record.first_prompt.is_none());
         if unsent_draft {
@@ -987,16 +987,14 @@ impl Harness {
         let session_id = view.read(cx).session_id.clone();
         self.open_state.pending_id = Some(session_id.clone());
         if quiet {
-            self.reveal = None;
-            self.reveal_unknown = None;
+            self.sidebar_pane.update(cx, |pane, cx| pane.set_reveal(None, false, cx));
         } else {
             // The sidebar's one-shot reveal arms on the same swap — and a
             // fresh arm owns the list again: the next user scroll disarms it.
-            self.reveal = Some(session_id.clone());
-            self.reveal_unknown = None;
-            self.sidebar_user_scrolled = false;
+            let id = session_id.clone();
+            self.sidebar_pane.update(cx, |pane, cx| pane.set_reveal(Some(id), true, cx));
         }
-        let project_name = self.project_name_for(&session_id);
+        let project_name = self.project_name_for(&session_id, cx);
         view.update(cx, |view, _| view.set_project_name(project_name));
         // Y2b: a landed switch closes the replaced view in this same update,
         // so no frame renders without a session. Otherwise park as usual.
@@ -1025,7 +1023,7 @@ impl Harness {
         // row-affecting arms read the parked fold without touching its UI.
         self.registry.resubscribe(Some(&view), cx);
         let titles: HashMap<String, String> =
-            self.sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
+            self.session_list.read(cx).sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
         if view.read(cx).provider_kind().has_billing_tier() {
             self.tier_probe_on_muse_lane(cx);
         }
@@ -1113,8 +1111,8 @@ impl Harness {
         // offline switch budget in `scripts/perf-budgets.py` times exactly
         // that). A live window never holds a replay worth keeping.
         let cacheable = (!view.read(cx).is_replay() || self.args.offline)
-            && !self.overrides.get(&session_id).is_some_and(|m| m.hidden)
-            && !self.overrides.get(&session_id).is_some_and(|m| m.archived);
+            && !self.session_list.read(cx).overrides.get(&session_id).is_some_and(|m| m.hidden)
+            && !self.session_list.read(cx).overrides.get(&session_id).is_some_and(|m| m.archived);
         if cacheable {
             self.registry.park(session_id, view);
             // Views named in `drafts` are never evicted from the MRU: the
@@ -1160,9 +1158,9 @@ impl Harness {
     /// It needs no session row, so a pick made while a provider draft is
     /// still opening counts too (it used to be dropped: the draft had no
     /// row to resolve a project from).
-    pub(super) fn note_pick(&mut self, edit: impl FnOnce(&mut crate::projects::ProjectDefaults)) {
-        edit(&mut self.projects.last_picks);
-        projects::write(&self.projects);
+    pub(super) fn note_pick(&mut self, edit: impl FnOnce(&mut crate::projects::ProjectDefaults), cx: &mut gpui::App) {
+        self.session_list.update(cx, |list, _| edit(&mut list.projects.last_picks));
+        projects::write(&self.session_list.read(cx).projects);
     }
     /// The view for `session_id`: the active one, else a parked one.
     pub(crate) fn find_view(&self, session_id: &str, cx: &gpui::App) -> Option<Entity<SessionView>> {

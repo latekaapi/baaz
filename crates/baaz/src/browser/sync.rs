@@ -170,7 +170,7 @@ impl Harness {
         // session-list settle.
         for (session, current) in session_urls {
             let stored = self
-                .overrides
+                .session_list.read(cx).overrides
                 .get(session)
                 .and_then(|meta| meta.right.clone())
                 .and_then(|right| right.browser_url);

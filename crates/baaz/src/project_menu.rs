@@ -4,8 +4,9 @@
 //! Part of the [`Harness`] entity; see [`crate::app`]
 //! for what it owns. The menu wears the Sessions view menu's shape (`view_menu`,
 //! 250 wide) and seats through `aui::overlay::anchored_menu` at the group
-//! row's tray `…` button (whose window bounds the library reports per
-//! frame via `SidebarView::on_group_menu_prepainted`). The Colour submenu
+//! row's tray `…` button (where the pointer stood when the `…` was pressed,
+//! recorded by the sidebar pane in `SidebarPane::group_menu_bounds`). The
+//! Colour submenu
 //! hangs off the menu's right edge at the Colour row's height through a
 //! second `anchored_menu`, so it flips left near the window edge.
 //!
@@ -100,9 +101,9 @@ impl Harness {
         // `adopt_root` leaves the last adoption current; the drop's first
         // folder is the one the person aimed at.
         if let Some(id) = first {
-            self.projects.current = Some(id.clone());
+            self.session_list.update(cx, |list, _| list.projects.current = Some(id.clone()));
             self.current_project = Some(id);
-            projects::write(&self.projects);
+            projects::write(&self.session_list.read(cx).projects);
             self.note_project_changed(cx);
         }
     }
@@ -110,14 +111,14 @@ impl Harness {
     /// Adopt `root` into the sidebar and make it current, without starting
     /// a session there: adopting is not opening. Returns the project id.
     pub(crate) fn adopt_root(&mut self, root: &std::path::Path, cx: &mut Context<Self>) -> String {
-        let id = self.projects.add(root).id.clone();
-        self.projects.touch(&id);
-        self.projects.current = Some(id.clone());
+        let id = self.session_list.update(cx, |list, _| list.projects.add(root).id.clone());
+        self.session_list.update(cx, |list, _| list.projects.touch(&id));
+        self.session_list.update(cx, |list, _| list.projects.current = Some(id.clone()));
         self.current_project = Some(id.clone());
-        projects::write(&self.projects);
+        projects::write(&self.session_list.read(cx).projects);
         self.note_project_changed(cx);
-        self.rejoin();
-        self.invalidate_list();
+        self.rejoin(cx);
+        self.invalidate_list(cx);
         cx.notify();
         id
     }
@@ -125,8 +126,8 @@ impl Harness {
     /// The adoptions in sidebar order: pinned first, then name, never
     /// recency — minus the adoptions whose root is gone.
     /// What the project menu and the Projects palette both list.
-    pub(crate) fn ordered_projects(&self) -> Vec<crate::projects::Project> {
-        self.projects.sorted_available().into_iter().cloned().collect()
+    pub(crate) fn ordered_projects(&self, cx: &gpui::App) -> Vec<crate::projects::Project> {
+        self.session_list.read(cx).projects.sorted_available().into_iter().cloned().collect()
     }
 
     /// The current project just changed: drop the session tab the Browse
@@ -153,7 +154,7 @@ impl Harness {
             let sending =
                 self.active.as_ref().is_some_and(|view| view.read(cx).session_id == active && view.read(cx).is_sending());
             let project_of = self
-                .sessions
+                .session_list.read(cx).sessions
                 .iter()
                 .find(|e| e.id == active)
                 .and_then(|e| e.project.clone())
@@ -167,7 +168,7 @@ impl Harness {
                 self.open_state.forget_draft(&active);
                 // A rowless draft has no row to hide; a rowed one keeps the
                 // old rule so it never strands a visible empty row.
-                if self.sessions.iter().any(|e| e.id == active) {
+                if self.session_list.read(cx).sessions.iter().any(|e| e.id == active) {
                     self.set_override(&active, |meta| meta.hidden = true, cx);
                 }
                 self.open_state.pending_draft = moving;
@@ -182,10 +183,10 @@ impl Harness {
     /// Renaming never touches the project: opening the field must not
     /// reorder the groups.
     fn start_project_rename(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project) = self.projects.find(&id).cloned() else { return };
-        self.projects.current = Some(id.clone());
+        let Some(project) = self.session_list.read(cx).projects.find(&id).cloned() else { return };
+        self.session_list.update(cx, |list, _| list.projects.current = Some(id.clone()));
         self.current_project = Some(id.clone());
-        projects::write(&self.projects);
+        projects::write(&self.session_list.read(cx).projects);
         self.note_project_changed(cx);
         self.rename.update(cx, |state, cx| state.set_value(project.name, window, cx));
         let entry = Self::rename_entry(crate::overlay_stack::Layer::RenameProject(id));
@@ -199,8 +200,8 @@ impl Harness {
     /// Remove button can confirm it. Undo is not offered — re-adding is one
     /// click in the Projects palette.
     pub(crate) fn open_remove_project_dialog(&mut self, id: String, cx: &mut Context<Self>) {
-        let Some(project) = self.projects.find(&id).cloned() else { return };
-        let n = self.sessions.iter().filter(|e| e.project.as_deref() == Some(id.as_str())).count();
+        let Some(project) = self.session_list.read(cx).projects.find(&id).cloned() else { return };
+        let n = self.session_list.read(cx).sessions.iter().filter(|e| e.project.as_deref() == Some(id.as_str())).count();
         let detail = if n == 1 {
             "Its 1 session stays on disk and moves to Unfiled. Nothing in the folder changes.".to_owned()
         } else {
@@ -231,25 +232,25 @@ impl Harness {
         });
         let Some(id) = target else { return };
         self.close_dialog(cx);
-        if !self.projects.remove(&id) {
+        if !self.session_list.update(cx, |list, _| list.projects.remove(&id)) {
             return;
         }
-        self.branches.remove(&id);
+        self.session_list.update(cx, |list, _| list.branches.remove(&id));
         // A removed project takes its unsent draft with it: the parked view
         // stays cached but becomes evictable, and ⌘N can never reopen it.
         self.open_state.drafts.remove(&id);
         // The current project is gone: the most recently opened remaining
         // adoption takes it, or nothing does.
         if self.current_project.as_deref() == Some(id.as_str()) {
-            let next = self.projects.most_recent_available().map(|p| p.id.clone());
-            self.projects.current = next.clone();
+            let next = self.session_list.read(cx).projects.most_recent_available().map(|p| p.id.clone());
+            self.session_list.update(cx, |list, _| list.projects.current = next.clone());
             self.current_project = next;
             self.note_project_changed(cx);
         }
-        projects::write(&self.projects);
+        projects::write(&self.session_list.read(cx).projects);
         // The rows re-resolve by root now, settled once for the whole batch.
         self.clear_session_projects(&id, cx);
-        self.invalidate_list();
+        self.invalidate_list(cx);
         cx.notify();
     }
 
@@ -263,19 +264,21 @@ impl Harness {
         });
         let text = self.rename.read(cx).value().to_string();
         let text = text.trim().to_owned();
-        if let Some(project) = self.projects.projects.iter_mut().find(|p| p.id == id) {
-            project.name = if text.is_empty() {
-                project
-                    .root
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| project.root.to_string_lossy().into_owned())
-            } else {
-                text
-            };
-        }
-        projects::write(&self.projects);
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| {
+            if let Some(project) = list.projects.projects.iter_mut().find(|p| p.id == id) {
+                project.name = if text.is_empty() {
+                    project
+                        .root
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| project.root.to_string_lossy().into_owned())
+                } else {
+                    text
+                };
+            }
+        });
+        projects::write(&self.session_list.read(cx).projects);
+        self.invalidate_list(cx);
         self.focus_composer = true;
         cx.notify();
     }
@@ -315,7 +318,7 @@ impl Harness {
             self.open_project_menu(Some(id), true, cx);
         } else {
             let id = self
-                .projects
+                .session_list.read(cx).projects
                 .projects
                 .iter()
                 .find(|p| p.name == name)
@@ -333,7 +336,7 @@ impl Harness {
     pub(crate) fn step_project_close(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
         let name = rest.trim();
         let id = self
-            .projects
+            .session_list.read(cx).projects
             .projects
             .iter()
             .find(|p| p.name == name)
@@ -369,15 +372,18 @@ impl Harness {
         let slot = rest.trim().parse::<u8>().ok().filter(|slot| (1..=8).contains(slot));
         let slot = slot.ok_or_else(|| format!("`{rest}` is not a colour slot 1–8"))?;
         let id = self.current_project_id().ok_or("no current project")?;
-        let project = self
-            .projects
-            .projects
-            .iter_mut()
-            .find(|p| p.id == id)
-            .ok_or_else(|| format!("current project `{id}` is not adopted"))?;
-        project.colour = slot;
-        projects::write(&self.projects);
-        self.invalidate_list();
+        self.session_list.update(cx, |list, _| {
+            let project = list
+                .projects
+                .projects
+                .iter_mut()
+                .find(|p| p.id == id)
+                .ok_or_else(|| format!("current project `{id}` is not adopted"))?;
+            project.colour = slot;
+            projects::write(&list.projects);
+            Ok::<(), String>(())
+        })?;
+        self.invalidate_list(cx);
         cx.notify();
         Ok(())
     }
@@ -391,7 +397,7 @@ impl Harness {
             other => return Err(format!("unknown grouping `{other}`; known groupings are date, project")),
         };
         crate::layout::Layout::update(cx, |layout| layout.group_by = Some(mode));
-        self.invalidate_list();
+        self.invalidate_list(cx);
         Ok(())
     }
 
@@ -399,7 +405,7 @@ impl Harness {
     /// The flag no longer draws anything (see `Layout::group_bar`).
     pub(crate) fn step_group_bar(&mut self, cx: &mut Context<Self>) -> StepResult {
         crate::layout::Layout::update(cx, |layout| layout.group_bar = !layout.group_bar);
-        self.invalidate_list();
+        self.invalidate_list(cx);
         Ok(())
     }
 
@@ -407,7 +413,7 @@ impl Harness {
     /// Settings › Sidebar switch does.
     pub(crate) fn step_group_branch(&mut self, cx: &mut Context<Self>) -> StepResult {
         crate::layout::Layout::update(cx, |layout| layout.group_branch = !layout.group_branch);
-        self.invalidate_list();
+        self.invalidate_list(cx);
         Ok(())
     }
 
@@ -416,7 +422,7 @@ impl Harness {
     pub(crate) fn step_remove_project(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
         let name = rest.trim();
         let id = self
-            .projects
+            .session_list.read(cx).projects
             .projects
             .iter()
             .find(|p| p.name == name)
@@ -436,7 +442,7 @@ impl Harness {
                 .flatten()
         });
         let id = target.ok_or("no removal dialog is open")?;
-        if self.projects.find(&id).is_none() {
+        if self.session_list.read(cx).projects.find(&id).is_none() {
             return Err(format!("project `{id}` is not adopted"));
         }
         self.confirm_remove_project(cx);
@@ -465,7 +471,7 @@ impl Harness {
         };
         // The project rows in sidebar order, hoisted: the Colour submenu's
         // height inside the menu counts them.
-        let listed = self.ordered_projects();
+        let listed = self.ordered_projects(cx);
         let listed_len = listed.len();
         match target.clone() {
             // The unfiled group carries one row: adopting starts in the
@@ -483,8 +489,8 @@ impl Harness {
                         Some(ProjectMenuAction::Pick(pid)),
                     );
                 }
-                let pinned = self.projects.find(&id).is_some_and(|p| p.pinned);
-                let colour = self.projects.find(&id).map(|p| p.colour).unwrap_or(1);
+                let pinned = self.session_list.read(cx).projects.find(&id).is_some_and(|p| p.pinned);
+                let colour = self.session_list.read(cx).projects.find(&id).map(|p| p.colour).unwrap_or(1);
                 let colour_name = COLOUR_NAMES.get(colour.saturating_sub(1) as usize).unwrap_or(&"?");
                 push(MenuRow::Separator, None);
                 push(MenuRow::Toggle { label: "New session here".into(), checked: false }, Some(ProjectMenuAction::NewHere));
@@ -539,17 +545,19 @@ impl Harness {
                 }
                 Some(ProjectMenuAction::Pin) => {
                     if let Some(id) = target_for.clone() {
-                        if let Some(project) = this.projects.projects.iter_mut().find(|p| p.id == id) {
-                            project.pinned = !project.pinned;
-                        }
-                        projects::write(&this.projects);
-                        this.invalidate_list();
+                        this.session_list.update(cx, |list, _| {
+                            if let Some(project) = list.projects.projects.iter_mut().find(|p| p.id == id) {
+                                project.pinned = !project.pinned;
+                            }
+                        });
+                        projects::write(&this.session_list.read(cx).projects);
+                        this.invalidate_list(cx);
                         cx.notify();
                     }
                 }
                 Some(ProjectMenuAction::Reveal) => {
                     if let Some(root) =
-                        target_for.clone().and_then(|id| this.projects.find(&id).map(|p| p.root.clone()))
+                        target_for.clone().and_then(|id| this.session_list.read(cx).projects.find(&id).map(|p| p.root.clone()))
                     {
                         cx.reveal_path(&root);
                     }
@@ -574,7 +582,7 @@ impl Harness {
         // `top(52)` seat; the open notifies so the menu appears once its
         // row reports.
         let key = target.clone().unwrap_or_else(|| crate::sidebar::OTHER_GROUP.to_owned());
-        let trigger = self.group_menu_bounds.get(&key).copied();
+        let trigger = self.sidebar_pane.read(cx).group_menu_bounds.get(&key).copied();
         let Some(trigger) = trigger else {
             crate::baaz_log!("project menu: no trigger bounds for {key}");
             if from_header || crate::layout::Layout::get(cx).sidebar_open {
@@ -628,7 +636,7 @@ impl Harness {
         // `SEP_MARGIN_Y`).
         if colour_open {
             if let (Some(id), Some(menu_bounds)) = (target, self.project_menu_bounds) {
-                if let Some(current) = self.projects.find(&id).map(|p| p.colour) {
+                if let Some(current) = self.session_list.read(cx).projects.find(&id).map(|p| p.colour) {
                     let row_h = f32::from(cx.aui().metrics.row);
                     let row_top = f32::from(menu_bounds.origin.y)
                         + 6.0
@@ -651,11 +659,13 @@ impl Harness {
                         .collect();
                     let pick = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
                         if let Some(slot) = (1u8..=8).nth(*index) {
-                            if let Some(project) = this.projects.projects.iter_mut().find(|p| p.id == id) {
-                                project.colour = slot;
-                            }
-                            projects::write(&this.projects);
-                            this.invalidate_list();
+                            this.session_list.update(cx, |list, _| {
+                                if let Some(project) = list.projects.projects.iter_mut().find(|p| p.id == id) {
+                                    project.colour = slot;
+                                }
+                            });
+                            projects::write(&this.session_list.read(cx).projects);
+                            this.invalidate_list(cx);
                             cx.notify();
                         }
                     });

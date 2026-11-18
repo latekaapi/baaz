@@ -616,7 +616,7 @@ impl Harness {
                 "  caused by: unknown field `sample_key` at line 3, column 1".into(),
                 "the sample process exited with status 1".into(),
             ],
-            retry: crate::app::ProviderOpenRetry::OpenNew { project: None, workspace: self.workspace(), draft: String::new() },
+            retry: crate::app::ProviderOpenRetry::OpenNew { project: None, workspace: self.workspace(cx), draft: String::new() },
         });
         cx.notify();
         Ok(())
@@ -714,7 +714,7 @@ impl Harness {
         if raw.is_empty() {
             return Err("no path".into());
         }
-        let (root, _) = self.right_project().ok_or("no current project")?;
+        let (root, _) = self.right_project(cx).ok_or("no current project")?;
         let highlight = crate::session::render::parse_link_lines(raw);
         let abs = crate::session::render::resolve_link_path(&root, raw);
         let is_dir = std::fs::metadata(&abs).ok().map(|meta| meta.is_dir());
@@ -739,7 +739,7 @@ impl Harness {
         if id.is_empty() {
             return Err("no path".into());
         }
-        let (root, _) = self.right_project().ok_or("no current project")?;
+        let (root, _) = self.right_project(cx).ok_or("no current project")?;
         crate::layout::Layout::stage(cx, |layout| {
             layout.right_kind = Some(crate::layout::RightKind::Files);
             layout.right_open = true;

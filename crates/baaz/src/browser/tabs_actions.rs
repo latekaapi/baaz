@@ -30,11 +30,14 @@ impl Harness {
         }
         self.browser.update(cx, |browser, _| browser.tabs_loaded = true);
         self.browser.update(cx, |browser, _| browser.tabs = tabs::load());
-        let mut changed = self.browser.update(cx, |browser, _| browser.tabs.migrate_from_overrides(&self.overrides));
+        let list = self.session_list.clone();
+        let mut changed = self.browser.update(cx, |browser, cx| browser.tabs.migrate_from_overrides(&list.read(cx).overrides));
         // Spaces are the browser's own (docs/27 v2): an older file's
         // per-project person tabs become Personal's folders, once.
-        let projects = &self.projects;
-        self.browser.update(cx, |browser, _| changed |= browser.tabs.ensure_spaces(|id| projects.projects.iter().find(|p| p.id == id).map(|p| p.name.clone())));
+        self.browser.update(cx, |browser, cx| {
+            let projects = &list.read(cx).projects;
+            changed |= browser.tabs.ensure_spaces(|id| projects.projects.iter().find(|p| p.id == id).map(|p| p.name.clone()))
+        });
         if changed {
             self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         }
@@ -50,7 +53,7 @@ impl Harness {
         }
         let stored = match owner {
             Owner::Session(session) => self
-                .overrides
+                .session_list.read(cx).overrides
                 .get(session)
                 .and_then(|meta| meta.right.clone())
                 .and_then(|right| right.browser_url),
@@ -442,7 +445,7 @@ impl Harness {
     /// A no-op when the stored URL is already gone.
     pub(super) fn clear_session_browser_url(&mut self, session: &str, cx: &mut Context<Self>) {
         let mut right = match self
-            .overrides
+            .session_list.read(cx).overrides
             .get(session)
             .and_then(|meta| meta.right.clone())
         {
@@ -453,9 +456,11 @@ impl Harness {
             return;
         }
         right.browser_url = None;
-        if let Some(meta) = self.overrides.get_mut(session) {
-            meta.right = Some(right);
-        }
+        self.session_list.update(cx, |list, _| {
+            if let Some(meta) = list.overrides.get_mut(session) {
+                meta.right = Some(right);
+            }
+        });
         self.schedule_overrides_write(cx);
     }
 

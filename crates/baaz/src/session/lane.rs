@@ -5399,7 +5399,8 @@ mod tests {
     /// itself) refolds the shown view, which re-renders — its virtual list
     /// re-syncs to the new rows, and only render does that — and a parked
     /// view, whose rows are refolded though it never draws. "Show a summary
-    /// line" re-arms the cached sidebar pane the same way, without touching
+    /// line" re-renders the cached sidebar pane the same way (the pane
+    /// observes the layout global), without touching
     /// the transcripts. Both choices land in `layout.json`.
     #[gpui::test]
     fn a_setting_flip_reaches_every_reader_through_the_layout_global(cx: &mut gpui::TestAppContext) {

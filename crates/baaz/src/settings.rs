@@ -2217,7 +2217,7 @@ impl Harness {
         if id == "feedback_mode" && !on {
             self.feedback_setting_off(cx);
         }
-        self.invalidate_list();
+        self.invalidate_list(cx);
         // A Notifications switch applies now: the Dock badge follows its
         // switch without waiting for a session to move (task 3.5).
         if id.starts_with("notify_") {
@@ -2248,7 +2248,7 @@ impl Harness {
         if cx.aui().kind != kind {
             aui_tokens::AuiTheme::set_kind(kind, window, cx);
             // Rows cached with the old palette rebuild on the next frame.
-            self.invalidate_list();
+            self.invalidate_list(cx);
         }
         cx.notify();
     }
@@ -2265,7 +2265,7 @@ impl Harness {
         if cx.aui().density != pref.density() {
             aui_tokens::AuiTheme::set_density(pref.density(), window, cx);
             // Rows cached at the old sizes rebuild on the next frame.
-            self.invalidate_list();
+            self.invalidate_list(cx);
             self.retype_sessions(cx);
         }
     }
@@ -2281,7 +2281,7 @@ impl Harness {
         crate::layout::Layout::update(cx, |layout| layout.text_size = pref);
         if cx.aui().text_size != pref.text_size() {
             aui_tokens::AuiTheme::set_text_size(pref.text_size(), window, cx);
-            self.invalidate_list();
+            self.invalidate_list(cx);
             self.retype_sessions(cx);
         }
     }
@@ -2383,7 +2383,7 @@ impl Harness {
         if !crate::layout::Layout::update(cx, |layout| apply_setting(layout, "auto_title", on)) {
             return Err("no auto_title switch to flip".to_owned());
         }
-        self.invalidate_list();
+        self.invalidate_list(cx);
         Ok(())
     }
 
@@ -2395,7 +2395,7 @@ impl Harness {
         if !crate::layout::Layout::update(cx, |layout| apply_setting(layout, "auto_summary", on)) {
             return Err("no auto_summary switch to flip".to_owned());
         }
-        self.invalidate_list();
+        self.invalidate_list(cx);
         Ok(())
     }
 
@@ -2423,7 +2423,7 @@ impl Harness {
         };
         match section {
             "archived" => {
-                let mut archived: Vec<&crate::sidebar::SessionEntry> = self.sessions.iter().filter(|e| e.archived).collect();
+                let mut archived: Vec<&crate::sidebar::SessionEntry> = self.session_list.read(cx).sessions.iter().filter(|e| e.archived).collect();
                 archived.sort_by(|a, b| a.updated.cmp(&b.updated).reverse());
                 facts.archived = archived
                     .into_iter()
@@ -2455,7 +2455,7 @@ impl Harness {
             }
             _ => {
                 if let Some(id) = provider_subpage_id(section) {
-                    facts.import_line = self.import_card_line(id);
+                    facts.import_line = self.import_card_line(id, cx);
                 }
             }
         }

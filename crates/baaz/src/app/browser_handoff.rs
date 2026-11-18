@@ -182,19 +182,19 @@ impl Harness {
     /// The picker's candidates: recent sessions (not browser chats, not
     /// hidden), newest first, then projects — each with the words the
     /// query matches. The picker narrows them ([`HandoffDelegate`]).
-    fn handoff_candidates(&self) -> HandoffCandidates {
+    fn handoff_candidates(&self, cx: &gpui::App) -> HandoffCandidates {
         use aui::browse::handoff::HandoffRow;
         let now = chrono::Local::now();
         let mut entries: Vec<&crate::sidebar::SessionEntry> = self
-            .sessions
+            .session_list.read(cx).sessions
             .iter()
-            .filter(|e| !e.hidden && !e.archived && !e.side_marker && !self.is_browser_chat(&e.id))
+            .filter(|e| !e.hidden && !e.archived && !e.side_marker && !self.is_browser_chat(&e.id, cx))
             .collect();
         entries.sort_by_key(|e| std::cmp::Reverse(e.updated));
         let sessions = entries
             .into_iter()
             .map(|e| {
-                let project = self.project_name_for(&e.id).unwrap_or_default();
+                let project = self.project_name_for(&e.id, cx).unwrap_or_default();
                 let meta = if project.is_empty() { when_label(e.updated, now) } else { format!("{project} · {}", when_label(e.updated, now)) };
                 let target = HandoffTarget::Session(e.id.clone());
                 let row = HandoffRow { id: target.row_id().into(), title: e.label.clone().into(), meta: meta.into(), provider: Some(e.provider.icon()) };
@@ -203,7 +203,7 @@ impl Harness {
             .collect();
         let provider = crate::providers::ProviderId::parse(&self.new_provider);
         let projects = self
-            .projects
+            .session_list.read(cx).projects
             .sorted_available()
             .into_iter()
             .map(|p| {
@@ -221,7 +221,7 @@ impl Harness {
             view.update(cx, |picker, cx| picker.dismiss(cx));
             return;
         }
-        let delegate = HandoffDelegate { candidates: self.handoff_candidates(), matches: (Vec::new(), Vec::new()) };
+        let delegate = HandoffDelegate { candidates: self.handoff_candidates(cx), matches: (Vec::new(), Vec::new()) };
         let view = cx.new(|cx| crate::picker::Picker::with_own_field(delegate, "Find a session or project", cx));
         let picked = cx.subscribe(&view, |this: &mut Self, _, event: &crate::picker::Picked<HandoffTarget>, cx| {
             let target = event.0.clone();
@@ -240,7 +240,7 @@ impl Harness {
     /// first (it draws right after, in this same frame).
     pub(crate) fn render_handoff_picker(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let view = self.handoff_picker_view(cx)?;
-        let candidates = self.handoff_candidates();
+        let candidates = self.handoff_candidates(cx);
         view.update(cx, |picker, cx| picker.push_facts(cx, |delegate| delegate.candidates = candidates));
         Some(view.into_any_element())
     }
@@ -270,8 +270,8 @@ impl Harness {
         // The target: an existing session, or a new one in the project.
         let (target_id, target_label, project_label) = match &target {
             HandoffTarget::Session(id) => {
-                let label = self.sessions.iter().find(|e| &e.id == id).map(|e| e.label.clone()).unwrap_or_default();
-                let project = self.project_name_for(id).unwrap_or_default();
+                let label = self.session_list.read(cx).sessions.iter().find(|e| &e.id == id).map(|e| e.label.clone()).unwrap_or_default();
+                let project = self.project_name_for(id, cx).unwrap_or_default();
                 self.browser.update(cx, |browser, _| browser.pending_ask_draft = Some(crate::app::PendingAsk { target: Some(id.clone()), query: draft }));
                 self.set_mode(crate::layout::Mode::Sessions, window, cx);
                 if self.active_id(cx).as_deref() != Some(id.as_str()) {
@@ -286,7 +286,7 @@ impl Harness {
                 (Some(id.clone()), label, project)
             }
             HandoffTarget::Project(project) => {
-                let name = self.projects.find(project).map(|p| p.name.clone()).unwrap_or_default();
+                let name = self.session_list.read(cx).projects.find(project).map(|p| p.name.clone()).unwrap_or_default();
                 self.browser.update(cx, |browser, _| browser.pending_ask_draft = Some(crate::app::PendingAsk { target: None, query: draft }));
                 self.new_session_in(Some(project.clone()), window, cx);
                 (self.active_id(cx), "a new session".to_owned(), name)
@@ -324,7 +324,7 @@ impl Harness {
 
     /// The card's title for chat `session` (see the overlay's own).
     pub(crate) fn browser_chat_title_for(&self, session: &str, cx: &gpui::App) -> String {
-        if let Some(meta) = self.overrides.get(session) {
+        if let Some(meta) = self.session_list.read(cx).overrides.get(session) {
             if let Some(title) = meta.name.clone().or_else(|| meta.generated_title.clone()) {
                 return title;
             }
