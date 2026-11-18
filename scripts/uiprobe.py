@@ -325,9 +325,9 @@ ENTRIES = {
     # lands the scripted page first (captures always run the fake page,
     # which the predicate counts like a real one), then `toast:` raises
     # the production toast through the production path. Offline, fake
-    # backend, no baselines — capture and look.
+    # backend.
     "toast-header":         {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "mode:browse;tab-new:https://example.com;toast:Feedback saved · 3 notes|/tmp/baaz-report.md"]},
+                                      "--steps", "mode:browse;tab-new:https://example.com;toast:Saved · 3 files|/tmp/baaz-downloads"]},
     "right-changes":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:changes"]},
     "right-files":          {"shot": ["--no-connect", "--login", "signed-in",
@@ -389,32 +389,6 @@ ENTRIES = {
                                              "--steps", "settings:appearance;settings-set:density=compact"]},
     "settings-appearance-large": {"shot": ["--no-connect", "--login", "signed-in",
                                            "--steps", "settings:appearance;settings-set:text-size=large"]},
-    # F2 feedback mode shell: the header slot while Active
-    # (`feedback-mode:on` parks the run-only flag and enters Active) and
-    # paused with a note in the draft (`feedback-mode:pause` after a click
-    # and a note). The paused entry's `click:846,517` is the empty-state
-    # hero button at the probe's fixed 1440×900 capture size. Offline,
-    # idempotent. No baseline yet — generate on main after merge, never to
-    # silence a finding.
-    "feedback-header-active": {"shot": ["--no-connect", "--login", "signed-in",
-                                        "--steps", "feedback-mode:on"]},
-    "feedback-header-paused": {"shot": ["--no-connect", "--login", "signed-in",
-                                        "--steps", "feedback-mode:on;feedback-mode:click:846,517;feedback-mode:note:x;feedback-mode:pause"]},
-    # F3 feedback commenting: `feedback-hover` names the empty-state
-    # hero's `New session` button under the outline, `feedback-note`
-    # leaves its note popover open, `feedback-pins` saves two notes (an
-    # element and a dragged area) so the numbered pins show. The
-    # `click:846,517`/`hover:846,517` is the hero button at the probe's
-    # fixed 1440×900 capture size. Window-only scripts: no `wait:`
-    # (a session verb — it would wait for a session that never opens).
-    # No baseline yet — generate on main after merge, never to silence a
-    # finding.
-    "feedback-hover":       {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "feedback-mode:on;feedback-mode:hover:846,517"]},
-    "feedback-note":        {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "feedback-mode:on;feedback-mode:click:846,517"]},
-    "feedback-pins":        {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "feedback-mode:on;feedback-mode:click:846,517;feedback-mode:note:Make this quieter;feedback-mode:drag:560,300,900,420;feedback-mode:note:Too much space here"]},
     # The Settings page's Archived section: offline, idempotent. No
     # baseline yet — generate on main after merge, never to silence a
     # finding.

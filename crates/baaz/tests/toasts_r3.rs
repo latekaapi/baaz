@@ -122,22 +122,16 @@ fn toast_is_a_documented_window_verb() {
 }
 
 /// D4 (docs/41 §2.11): the corner stack is the toasts' one home — the
-/// newest toast above the feedback slot, right-aligned, 8 apart. The
-/// top-right stack and the header chip are gone.
+/// newest toast, right-aligned. The top-right stack and the header chip
+/// are gone.
 #[test]
-fn the_corner_stack_holds_the_toast_above_the_slot() {
+fn the_corner_stack_holds_the_toast() {
     let dialogs = source("dialogs.rs");
     let stack = fn_body(&dialogs, "render_corner_stack");
-    let toast = stack.find("render_toast_pill").expect("the stack draws the toast");
-    let slot = stack.find("render_feedback_header_slot").expect("the stack draws the feedback slot");
-    assert!(toast < slot, "the toast sits above the slot");
+    assert!(stack.contains("render_toast_pill"), "the stack draws the toast");
     assert!(stack.contains("items_end()"), "right-aligned");
-    assert!(stack.contains("gap(px(scale::SP_3))"), "8 apart");
     assert!(!dialogs.contains("fn render_toasts("), "the top-right stack is gone");
     assert!(!dialogs.contains("fn render_toast_chip("), "the header chip is gone");
-    let app = source("app.rs");
-    let bar = fn_body(&app, "render_bar_chrome");
-    assert!(!bar.contains("render_feedback_header_slot"), "the header no longer carries the slot");
 }
 
 /// Sessions: the stack rides the composer band, its bottom 8 above the

@@ -504,7 +504,6 @@ mod tests {
             settings_open: false,
             overlay_open: false,
             drop_cover: false,
-            feedback_cover: false,
             omnibox_open: false,
             chrome_popover_open: false,
             page_error_open: false,
@@ -522,7 +521,6 @@ mod tests {
             settings_open: false,
             overlay_open: false,
             drop_cover: false,
-            feedback_cover: false,
             omnibox_open: false,
             chrome_popover_open: false,
             page_error_open: false,
@@ -532,19 +530,6 @@ mod tests {
     #[test]
     fn native_view_shows_only_with_pane_open_on_active_browser() {
         assert!(browser_visible(all_clear()));
-    }
-
-    /// F2's cover hides the native view while Active, on the pane and on
-    /// the Browse centre alike — the overlay sits over the page's
-    /// screenshot stand-in.
-    #[test]
-    fn feedback_cover_hides_pane_and_centre() {
-        let mut covered = all_clear();
-        covered.feedback_cover = true;
-        assert!(!browser_visible(covered), "Active feedback obscures the pane page");
-        let mut centre_covered = centre_clear();
-        centre_covered.feedback_cover = true;
-        assert!(!browser_visible(centre_covered), "Active feedback obscures the centre page");
     }
 
     #[test]

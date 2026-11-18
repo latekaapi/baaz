@@ -398,8 +398,8 @@ impl Overlays {
 
     /// Show a note. Toasts are informational here — a compaction that did
     /// nothing, a command this build does not have — so they carry no action.
-    /// Returns the toast's id, so callers with something to retract (the
-    /// feedback shell's "mode is off" note) can dismiss it later.
+    /// Returns the toast's id, so callers with something to retract (a
+    /// provider recheck's settled note) can dismiss it later.
     pub fn toast(&mut self, title: impl Into<String>, body: impl Into<String>, cx: &mut gpui::Context<Self>) -> String {
         self.next_toast += 1;
         let id = format!("toast-{}", self.next_toast);

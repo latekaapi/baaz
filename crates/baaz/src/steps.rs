@@ -66,7 +66,6 @@
 //! | `shell:<cmd>` | `session/userShell`, the approval generator that makes no model call |
 //! | `setmode:<mode>` | `session/setApprovalMode`, without opening the picker |
 //! | `choose:<n>` | the n-th choice of the newest pending approval |
-//! | `feedback-mode:<on\\|pause\\|resume\\|off\\|discard\\|done\\|hover:x,y\\|click:x,y\\|drag:x1,y1,x2,y2\\|note:text\\|cancel>` | feedback mode shell: `on` parks the run-only flag and enters Active, `pause`/`resume` move, `off` clears the flag and parks keeping the draft, `discard` clears it, `done` saves; `hover:`/`click:`/`drag:` point like the mouse through the same handlers (window-logical px, with the cold-tree retry), `note:` fills the open popover and saves (finishing an in-flight capture first), `cancel` closes it unsaved; an unknown sub fails the step, free |
 //! | `feedback:<text>` | type into the open session's approval feedback or question clarify field, without sending, free |
 //! | `answer:<label>` | pick one option on the newest question and send |
 //! | `answers:<a\|b>` | pick several options on the newest question and send |
@@ -433,7 +432,6 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "settings", run: |this, rest, _, cx| this.step_settings(rest, cx) },
     WindowVerb { verb: "settings-set", run: |this, rest, _, cx| this.step_settings_set(rest, cx) },
     WindowVerb { verb: "stall", run: |_, rest, _, _| step_stall(rest) },
-    WindowVerb { verb: "feedback-mode", run: |this, rest, window, cx| this.step_feedback(rest, window, cx) },
     WindowVerb { verb: "pin", run: |this, rest, _, cx| this.step_pin(rest, cx) },
     WindowVerb { verb: "archive", run: |this, _, _, cx| this.step_archive(cx) },
     WindowVerb { verb: "error-dialog", run: |this, rest, _, cx| this.step_error_dialog(rest, cx) },

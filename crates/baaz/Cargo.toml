@@ -29,11 +29,7 @@ cef = ["dep:aui-cef"]
 # `test-support`, whose `Window::render_to_image` `--screenshot` uses,
 # exactly as the gallery's own capture path does. A build without it
 # refuses those flags and `BAAZ_DETERMINISTIC` (exit 2).
-# Feedback Mode's note crop: `Window::render_to_image` is gpui's
-# `test-support`. The release bundle turns this on (and nothing else of the
-# probe) so a note taken in the shipped app keeps its window picture.
-window-capture = ["gpui/test-support"]
-probe = ["window-capture", "dep:gpui_platform", "gpui_platform/test-support", "baaz-core/probe"]
+probe = ["gpui/test-support", "dep:gpui_platform", "gpui_platform/test-support", "baaz-core/probe"]
 
 [dependencies]
 gpui.workspace = true
@@ -77,8 +73,9 @@ ignore.workspace = true
 # stall watchdog and the terminal service.
 libc.workspace = true
 
-# Feedback mode's element probe hit-tests the window through macOS
-# accessibility, in-process (`crates/baaz/src/feedback/probe.rs`).
+# AppKit calls made in-process: notification permission (`attention.rs`),
+# the window's traffic lights (`native_lights.rs`), the single-instance
+# check, the new-tab ground and the Browse float windows.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 log = "0.4"

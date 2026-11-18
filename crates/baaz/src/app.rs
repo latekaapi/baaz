@@ -252,15 +252,6 @@ actions!(
         SkillsClose,
         /// Focus the Settings Shortcuts search field (⌘F on the page).
         SettingsFind,
-        /// Start or pause feedback mode (⌃⌥⌘F).
-        ToggleFeedback,
-        /// Pause feedback mode (Escape on the capture layer).
-        FeedbackEscape,
-        /// Save the open feedback note (Enter in the note popover).
-        FeedbackNoteSave,
-        /// Close the open feedback note without saving (Escape in the
-        /// note popover — the layer's pause never fires there).
-        FeedbackNoteCancel,
     ]
 );
 
@@ -404,30 +395,6 @@ pub fn set_menus(cx: &mut App) {
     // the window-close and app-quit hooks respectively.
     cx.on_action(|_: &CloseWindow, cx: &mut App| {
         crate::baaz_log!("CloseWindow");
-        // Feedback Active swallows the menu-bar close the way the layer
-        // swallows its keys (the same shared guard as the window
-        // handlers below, read off each window's shell here).
-        let blocked = cx.windows().iter().any(|window| {
-            window
-                .downcast::<Root>()
-                .and_then(|handle| {
-                    handle
-                        .update(cx, |root, _, cx| {
-                            root.view()
-                                .clone()
-                                .downcast::<Harness>()
-                                .map(|harness| {
-                                    harness.read(cx).feedback.read(cx).phase == feedback_ui::FeedbackPhase::Active
-                                })
-                                .unwrap_or(false)
-                        })
-                        .ok()
-                })
-                .unwrap_or(false)
-        });
-        if blocked {
-            return;
-        }
         // T1: the close path never sleeps on the main thread — signal only,
         // no probe wait, same as the red dot hook in `main.rs`.
         crate::tier::cleanup_probes_for_close();
@@ -553,7 +520,6 @@ pub fn set_menus(cx: &mut App) {
         ]),
         gpui::Menu::new("Help").items([
             gpui::MenuItem::action("Baaz Documentation", ShowDocs),
-            gpui::MenuItem::action("Feedback Mode", ToggleFeedback),
         ]),
     ]);
 }
@@ -569,11 +535,6 @@ mod sidebar_host;
 mod peek_split;
 mod titles;
 mod window_sync;
-/// F2 feedback mode shell (setting, ⌃⌥⌘F, header slot, Done). Included by
-/// path so `feedback/mod.rs` — F1's frozen model/report API — stays
-/// untouched.
-#[path = "feedback/ui.rs"]
-pub(crate) mod feedback_ui;
 
 /// The connection's own state, which is what the reconnect banner reads.
 pub(crate) enum Wire {
@@ -710,10 +671,6 @@ pub struct Harness {
     /// One entity, shared with the views that draw an entry (the session
     /// view's composer menus, the right pane's, the Browse view's).
     pub(crate) overlays: Entity<Overlays>,
-    /// F2 feedback mode shell: phase, draft, probe, discard arm — its own
-    /// entity, which redraws itself (plan 4.9b); the root draws the layer
-    /// and the header slot from it.
-    pub(crate) feedback: Entity<feedback_ui::FeedbackUi>,
     /// The sidebar divider's width and whatever drag is in flight over it
     /// (see [`crate::resize`]).
     pub(crate) resize: ResizeDrag,
@@ -934,15 +891,6 @@ impl Harness {
             muse_slot.clone(),
         );
         let focus_root = cx.focus_handle();
-        let feedback = cx.new(|cx| {
-            feedback_ui::FeedbackUi::new(feedback_ui::FeedbackUi::probe_for(), overlays.clone(), focus_root.clone(), cx)
-        });
-        // Entering Active closed the dialog through the stack: the root's
-        // half of `close_dialog` (the facts that rode it) follows.
-        cx.subscribe(&feedback, |this: &mut Self, _, event: &feedback_ui::FeedbackEvent, _| match event {
-            feedback_ui::FeedbackEvent::ClosedDialog => this.handoff_state.confirm = None,
-        })
-        .detach();
         let mut this = Self {
             new_provider,
             args,
@@ -962,7 +910,6 @@ impl Harness {
             sidebar_pane,
             registry: registry::SessionRegistry::default(),
             overlays,
-            feedback,
             resize: ResizeDrag::restored(restored),
             right_pane,
             browser,
@@ -2987,8 +2934,8 @@ impl Harness {
     /// toggle past the window's lights, the mode switch at the sidebar's
     /// edge, the title slot (the session title; in Browse, closed only, the
     /// page's way back, back / forward / reload and the address at rest) and
-    /// the actions at the right (the session's actions, the feedback slot
-    /// while that mode is on; the toast moved to the corner stack in D4).
+    /// the actions at the right (the session's actions; the toast moved to
+    /// the corner stack in D4).
     /// The shell draws every slot at the same spot in both states.
     fn render_bar_chrome(&self, window: &mut Window, cx: &mut Context<Self>) -> BarChrome {
         let lead = self.render_sidebar_toggle(cx);
@@ -3113,9 +3060,8 @@ impl Harness {
         }
     }
 
-    /// The session header's actions — the feedback slot while feedback mode
-    /// is on (docs/83 §5), the right pane's views, terminal, the session
-    /// menu — drawn in the centre column's header.
+    /// The session header's actions — the right pane's views, terminal,
+    /// the session menu — drawn in the centre column's header.
     fn session_header_actions(&self, cx: &mut Context<Self>) -> AnyElement {
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
@@ -3142,7 +3088,6 @@ impl Harness {
             .flex_none()
             .items_center()
             .gap(px(ROW_GAP))
-            .children(self.render_feedback_header_slot(cx))
             .child(toggles)
             .child(term_button)
             .child(div().flex_none().mx(px(scale::SP_2)).w_px().h(px(scale::ICON_DEFAULT)).bg(cx.aui().colors.line))
@@ -4040,9 +3985,9 @@ impl Harness {
         let in_band = !self.skills_open(cx) && pending_dest.is_none() && crate::layout::Layout::get(cx).mode != layout::Mode::Browse && self.active.is_some();
         let body = match (in_band || self.corner_in_overlay(cx)).then_some(()).map_or_else(|| self.render_corner_stack(cx), |_| None) {
             // A flex column, never a block: the Skills page's root is
-            // `flex_1`, and in a block parent it took no height — feedback
-            // mode's slot put every page in this wrapper and Skills drew a
-            // blank body (QA 2026-10-30).
+            // `flex_1`, and in a block parent it took no height — a corner
+            // stack put the page in this wrapper and Skills drew a blank
+            // body (QA 2026-10-30).
             Some(stack) => v_flex().relative().flex_1().min_h_0().w_full().child(body).child(Self::corner_at_sheet_bottom(stack)).into_any_element(),
             None => body,
         };
@@ -4784,20 +4729,6 @@ impl Render for Harness {
         // (`OverlayKind::Modal`): the main window draws neither.
         let modal_hosted = self.modal_overlay_wanted(cx);
         let dialog = if modal_hosted { None } else { self.compose_dialog(cx) };
-        // F2: the feedback capture layer (Active only); it paints above
-        // the palette, dialog, settings and menus, with only toasts above
-        // it (and toasts hide while a capture reads the window). The
-        // chrome lives in the header slot instead — no floating bar. R2b
-        // floats a second copy of that slot right above the layer while
-        // Active, so its clicks land. F3 adds the note popover as a sibling
-        // of the layer, never inside its key context, so typing and Escape
-        // reach the note.
-        let feedback_layer = self.render_feedback_layer(window, cx);
-        // R2b: while Active the slot's second copy floats here, right above
-        // the capture layer (which would otherwise swallow its clicks), at
-        // the in-header copy's recorded bounds.
-        let feedback_slot_overlay = self.render_feedback_slot_overlay(window, cx);
-        let feedback_popover = self.render_feedback_popover(window, cx);
         // The connect screen draws its own setup and import sheets
         // (`compose_connect`); drawing them here as well stacked a second
         // scrim under the first (the window behind went to 25 %).
@@ -4911,18 +4842,8 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &ToggleAgentCard, _, cx| this.toggle_agent_card(cx)))
                 .on_action(cx.listener(|this, _: &ToggleAgentColumn, _, cx| this.toggle_agent_column(cx)))
                 .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
-                .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                    if this.feedback.read(cx).blocks_chrome_action() {
-                        return;
-                    }
-                    this.toggle_sidebar(cx)
-                }))
+                .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
                 .on_action(cx.listener(|this, _: &NewSession, window, cx| {
-                    // Feedback Active swallows menu-bar dispatches the way
-                    // the layer swallows its keys (one shared guard).
-                    if this.feedback.read(cx).blocks_chrome_action() {
-                        return;
-                    }
                     // ⌘T lands on the new-tab page with the field focused
                     // (B2a-H4): in Browse it opens a blank person tab,
                     // never a chat session.
@@ -4935,36 +4856,13 @@ impl Render for Harness {
                     // that starts nothing keeps the page.
                     this.new_session(window, cx)
                 }))
-                .on_action(cx.listener(|this, _: &AddProject, window, cx| {
-                    if this.feedback.read(cx).blocks_chrome_action() {
-                        return;
-                    }
-                    this.open_projects(false, window, cx)
-                }))
+                .on_action(cx.listener(|this, _: &AddProject, window, cx| this.open_projects(false, window, cx)))
                 .on_action(cx.listener(|this, _: &Interrupt, _, cx| this.interrupt(cx)))
                 .on_action(cx.listener(|this, _: &Cancel, window, cx| this.cancel(window, cx)))
-                .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
-                    if this.feedback.read(cx).blocks_chrome_action() {
-                        return;
-                    }
-                    this.open_search(window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &MinimizeWindow, window, cx| {
-                    if this.feedback.read(cx).blocks_chrome_action() {
-                        return;
-                    }
-                    window.minimize_window()
-                }))
-                .on_action(cx.listener(|this, _: &ZoomWindow, window, cx| {
-                    if this.feedback.read(cx).blocks_chrome_action() {
-                        return;
-                    }
-                    window.zoom_window()
-                }))
+                .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.open_search(window, cx)))
+                .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
+                .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
                 .on_action(cx.listener(|this, _: &ToggleTheme, window, cx| {
-                    if this.feedback.read(cx).blocks_chrome_action() {
-                        return;
-                    }
                     // The opposite of what the window paints, stored as the
                     // Appearance choice so Settings shows what is painted.
                     let next = if cx.aui().kind.is_dark() {
@@ -4974,33 +4872,13 @@ impl Render for Harness {
                     };
                     this.set_theme_pref(next, Some(window), cx)
                 }))
-                .on_action(cx.listener(|this, _: &ToggleFeedback, window, cx| this.toggle_feedback(window, cx)))
-                .on_action(cx.listener(|this, _: &FeedbackEscape, window, cx| this.escape_feedback(window, cx)))
-                .on_action(cx.listener(|this, _: &ShowAbout, _, cx| {
-                    if this.feedback.read(cx).blocks_chrome_action() {
-                        return;
-                    }
-                    this.show_about(cx)
-                }))
+                .on_action(cx.listener(|this, _: &ShowAbout, _, cx| this.show_about(cx)))
                 // ⌘, (and File → Settings…): the last-visited section this
                 // run, General on first open — an empty target spells that
                 // (`normalize_settings_target`). Never a toggle.
-                .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
-                    if this.feedback.read(cx).blocks_chrome_action() {
-                        return;
-                    }
-                    this.open_settings_page("", cx)
-                }))
-                .on_action(cx.listener(|this, _: &ShowDocs, _, cx| {
-                    if this.feedback.read(cx).blocks_chrome_action() {
-                        return;
-                    }
-                    this.show_docs()
-                }))
+                .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.open_settings_page("", cx)))
+                .on_action(cx.listener(|this, _: &ShowDocs, _, _| this.show_docs()))
                 .on_action(cx.listener(|this, _: &aui::keys::TogglePalette, _, cx| {
-                    if this.feedback.read(cx).blocks_chrome_action() {
-                        return;
-                    }
                     this.open_palette(PaletteKind::Commands, cx)
                 }))
                 // `aui::keys` binds ⌘\ to *its own* `ToggleRightPane`, a
@@ -5019,9 +4897,6 @@ impl Render for Harness {
                 // page holds the keyboard (the keymap claims it at the
                 // CEF router, and this root binding carries it there).
                 .on_action(cx.listener(|this, _: &ToggleBrowseMode, window, cx| {
-                    if this.feedback.read(cx).blocks_chrome_action() {
-                        return;
-                    }
                     this.toggle_browse_mode(window, cx);
                 }))
                 .on_action(cx.listener(|this, _: &NewBrowserTab, window, cx| {
@@ -5148,15 +5023,6 @@ impl Render for Harness {
                 .children(back_history)
                 .children(project_menu)
                 .children(files_menu)
-                // F2: the feedback capture layer paints above the palette,
-                // dialog, settings and menus, so the layer truly covers
-                // them; only toasts stay above the shell. R2b's slot copy
-                // rides right above the layer, so the header controls stay
-                // clickable. F3's note popover rides with it, as the
-                // layer's sibling.
-                .children(feedback_layer)
-                .children(feedback_slot_overlay)
-                .children(feedback_popover)
                 // Painted last: the whole-frame instrument's end. Zero-size,
                 // paints nothing, takes no space — captures are unaffected.
                 .child(session::draw_end_marker()),
@@ -6901,11 +6767,10 @@ mod tests {
     /// A corner stack over a centre with no composer wraps the centre's
     /// body. The wrapper was a block `div`, and the Skills page's root is
     /// `flex_1` — it took no height there, so the page drew a blank body
-    /// (QA 2026-10-30, with feedback mode's slot in the stack). The slot
-    /// lives in the header since docs/83 §5, so a toast holds the stack up.
+    /// (QA 2026-10-30). A toast holds the stack up.
     #[gpui::test]
-    fn the_skills_page_fills_the_centre_with_feedback_mode_on(cx: &mut gpui::TestAppContext) {
-        let state = hermetic_state("skills-feedback-mode");
+    fn the_skills_page_fills_the_centre_under_a_corner_toast(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("skills-corner-toast");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
@@ -6915,7 +6780,6 @@ mod tests {
             baaz.update(cx, |h, cx| {
                 h.args.login = crate::LoginSample::SignedIn;
                 h.apply_login_sample(window, cx);
-                crate::layout::Layout::stage(cx, |layout| layout.feedback_mode = true);
                 h.step_skills("page", window, cx).expect("the Skills page opens");
             })
         });

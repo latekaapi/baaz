@@ -159,26 +159,12 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "SkillsFind", keystroke: "cmd-f", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Search skills" },
     KeymapEntry { action: "SkillsClose", keystroke: "escape", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Leave the Skills page" },
     KeymapEntry { action: "SettingsFind", keystroke: "cmd-f", context: Some(crate::app::SETTINGS_CONTEXT), category: "settings", label: "Search shortcuts" },
-    KeymapEntry { action: "ToggleFeedback", keystroke: "ctrl-alt-cmd-f", context: Some(aui::keys::ROOT_CONTEXT), category: "window", label: "Feedback mode: start or pause" },
-    KeymapEntry { action: "FeedbackEscape", keystroke: "escape", context: Some(crate::app::feedback_ui::FEEDBACK_CONTEXT), category: "window", label: "Pause feedback mode" },
-    KeymapEntry { action: "FeedbackNoteSave", keystroke: "enter", context: Some(crate::app::feedback_ui::FEEDBACK_NOTE_CONTEXT), category: "window", label: "Save feedback note" },
-    KeymapEntry { action: "FeedbackNoteCancel", keystroke: "escape", context: Some(crate::app::feedback_ui::FEEDBACK_NOTE_CONTEXT), category: "window", label: "Cancel feedback note" },
 ];
 
 /// Builds one [`gpui::KeyBinding`] per [`KEYMAP`] row, in table order.
 /// Panics on an unknown action name, so a row that names no real action
-/// fails loudly instead of registering nothing.
-///
-/// Past the table rows, every app-level keystroke (a [`KEYMAP`] row in
-/// [`aui::keys::ROOT_CONTEXT`] or with no context, except `ToggleFeedback`
-/// and `QuitApp`, plus the library's own [`AUI_ROOT_KEYS`]) also binds
-/// `NoAction` in [`crate::app::feedback_ui::FEEDBACK_CONTEXT`]: the capture
-/// layer hangs deeper than `AuiRoot`, so while it holds focus the deeper
-/// row wins and consumes the key — the same mechanism the `BaazTerminal`
-/// rows use. Generated, never hand-listed, so a future root shortcut is
-/// covered automatically. `ToggleFeedback` still pauses from the layer and
-/// `QuitApp` stays global. These rows are not [`KEYMAP`] rows, so the
-/// Settings Shortcuts section (built from the table) never lists them.
+/// fails loudly instead of registering nothing. The composer arrows'
+/// field-depth twins ([`field_twin`]) ride after the table rows.
 pub(crate) fn build_bindings() -> Vec<gpui::KeyBinding> {
     let mut bindings: Vec<gpui::KeyBinding> = KEYMAP
         .iter()
@@ -194,32 +180,6 @@ pub(crate) fn build_bindings() -> Vec<gpui::KeyBinding> {
             bindings.extend(binding_for_action(entry.action, entry.keystroke, Some(&twin)));
         }
     }
-    let feedback = crate::app::feedback_ui::FEEDBACK_CONTEXT;
-    let mut seen: Vec<&str> = Vec::new();
-    let mut swallow = |keystroke: &'static str| {
-        if seen.contains(&keystroke) {
-            return;
-        }
-        seen.push(keystroke);
-        bindings.push(gpui::KeyBinding::new(keystroke, gpui::NoAction {}, Some(feedback)));
-    };
-    for entry in KEYMAP {
-        let app_level = match entry.context {
-            None => true,
-            Some(context) => context == aui::keys::ROOT_CONTEXT,
-        };
-        if !app_level || entry.action == "ToggleFeedback" || entry.action == "QuitApp" {
-            continue;
-        }
-        swallow(entry.keystroke);
-    }
-    for keystroke in AUI_ROOT_KEYS {
-        swallow(keystroke);
-    }
-    // Tab / Shift-Tab move focus (`FocusNext` / `FocusPrev`); while the
-    // layer holds it they must stay on the layer too.
-    swallow("tab");
-    swallow("shift-tab");
     bindings
 }
 
@@ -393,10 +353,6 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
         "SkillsFind" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsFind, context)),
         "SkillsClose" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsClose, context)),
         "SettingsFind" => Some(gpui::KeyBinding::new(keystroke, crate::app::SettingsFind, context)),
-        "ToggleFeedback" => Some(gpui::KeyBinding::new(keystroke, crate::app::ToggleFeedback, context)),
-        "FeedbackEscape" => Some(gpui::KeyBinding::new(keystroke, crate::app::FeedbackEscape, context)),
-        "FeedbackNoteSave" => Some(gpui::KeyBinding::new(keystroke, crate::app::FeedbackNoteSave, context)),
-        "FeedbackNoteCancel" => Some(gpui::KeyBinding::new(keystroke, crate::app::FeedbackNoteCancel, context)),
         "NoAction" => Some(gpui::KeyBinding::new(keystroke, gpui::NoAction {}, context)),
         _ => None,
     }
@@ -1199,20 +1155,13 @@ mod tests {
     use std::collections::HashSet;
 
     /// Every action named in the table builds a binding for that same
-    /// action, in table order — then the generated feedback-layer swallows
-    /// ride past the table: one `NoAction` in `BaazFeedback` per app-level
-    /// keystroke (plus `tab` / `shift-tab`), never a table row, so the
-    /// Shortcuts list stays clean. A new action without a keystroke fails
-    /// here (unknown name panics, or the table prefix disagrees), a dead
-    /// keystroke cannot linger, and an uncovered root shortcut fails the
-    /// tail assertion below.
+    /// action, in table order — then the composer arrows' field-depth
+    /// twins, and nothing else. A new action without a keystroke fails
+    /// here (unknown name panics, or the table prefix disagrees), and a
+    /// dead keystroke cannot linger.
     #[test]
     fn every_table_action_has_a_binding_and_vice_versa() {
         let bindings = build_bindings();
-        assert!(
-            bindings.len() > KEYMAP.len(),
-            "the generated layer swallows ride past the table rows"
-        );
         for (row, binding) in KEYMAP.iter().zip(bindings.iter()) {
             let built = binding.action().name().rsplit("::").next().unwrap_or("");
             assert_eq!(
@@ -1235,33 +1184,6 @@ mod tests {
                 row.keystroke
             );
         }
-        // The tail is exactly the generated swallows: every app-level
-        // keystroke (a root-context or context-free row, except the
-        // toggle and Quit) plus the library's root keys, `tab` and
-        // `shift-tab` — each once, each `NoAction` in `BaazFeedback`.
-        let mut expected: Vec<&str> = Vec::new();
-        for row in KEYMAP {
-            let app_level = match row.context {
-                None => true,
-                Some(context) => context == aui::keys::ROOT_CONTEXT,
-            };
-            if !app_level || row.action == "ToggleFeedback" || row.action == "QuitApp" {
-                continue;
-            }
-            if !expected.contains(&row.keystroke) {
-                expected.push(row.keystroke);
-            }
-        }
-        for keystroke in super::AUI_ROOT_KEYS.iter().copied() {
-            if !expected.contains(&keystroke) {
-                expected.push(keystroke);
-            }
-        }
-        for keystroke in ["tab", "shift-tab"] {
-            if !expected.contains(&keystroke) {
-                expected.push(keystroke);
-            }
-        }
         // Then the composer arrows' field-depth twins (`field_twin`), one
         // per composer arrow row, each matching inside the text field.
         let twins: Vec<_> = KEYMAP.iter().filter_map(|row| super::field_twin(row.context, row.keystroke)).collect();
@@ -1270,83 +1192,7 @@ mod tests {
             assert!(twin.ends_with("> Input"), "{twin} matches at the field's depth");
             assert!(binding.predicate().is_some(), "a twin carries its predicate");
         }
-        let tail = &bindings[KEYMAP.len() + twins.len()..];
-        assert_eq!(
-            tail.len(),
-            expected.len(),
-            "one swallow per app-level keystroke, no more and no fewer"
-        );
-        for (binding, keystroke) in tail.iter().zip(expected.iter()) {
-            let built = binding.action().name().rsplit("::").next().unwrap_or("");
-            assert_eq!(built, "NoAction", "{keystroke} swallows with more than NoAction");
-            let context = binding.predicate().map(|predicate| predicate.to_string());
-            assert_eq!(
-                context.as_deref(),
-                Some(crate::app::feedback_ui::FEEDBACK_CONTEXT),
-                "{keystroke} swallows outside the feedback layer"
-            );
-            let [stroke] = binding.keystrokes() else {
-                panic!("{keystroke} swallow is not a single keystroke");
-            };
-            assert_eq!(
-                stroke.inner(),
-                &crate::keymap::parse_keystroke(keystroke).expect("the table parses"),
-                "{keystroke} swallow moved keystrokes"
-            );
-        }
-    }
-
-    /// ⌃⌥⌘F starts or pauses feedback mode from the root (so it fires
-    /// from a focused Chromium page through the pre-key router), and
-    /// Escape pauses it from the capture layer's own context.
-    #[test]
-    fn feedback_rows_bind_toggle_and_layer_escape() {
-        let toggle = KEYMAP
-            .iter()
-            .find(|row| row.action == "ToggleFeedback")
-            .expect("KEYMAP carries ToggleFeedback");
-        assert_eq!(toggle.keystroke, "ctrl-alt-cmd-f");
-        assert_eq!(toggle.context, Some(aui::keys::ROOT_CONTEXT));
-        assert_eq!(toggle.category, "window");
-        assert!(
-            super::binding_for_action(toggle.action, toggle.keystroke, toggle.context).is_some(),
-            "ToggleFeedback builds a binding"
-        );
-        let escape = KEYMAP
-            .iter()
-            .find(|row| row.action == "FeedbackEscape")
-            .expect("KEYMAP carries FeedbackEscape");
-        assert_eq!(escape.keystroke, "escape");
-        assert_eq!(escape.context, Some(crate::app::feedback_ui::FEEDBACK_CONTEXT));
-        assert!(
-            super::binding_for_action(escape.action, escape.keystroke, escape.context).is_some(),
-            "FeedbackEscape builds a binding"
-        );
-    }
-
-    /// The note popover's own context (a sibling of the layer, never
-    /// inside it): `enter` saves, `escape` cancels — so typing shortcuts
-    /// and Escape reach the note instead of pausing the mode.
-    #[test]
-    fn feedback_note_rows_bind_save_and_cancel_in_their_own_context() {
-        let note = crate::app::feedback_ui::FEEDBACK_NOTE_CONTEXT;
-        assert_ne!(
-            note,
-            crate::app::feedback_ui::FEEDBACK_CONTEXT,
-            "the popover never lives inside the layer's context"
-        );
-        for (action, keystroke) in
-            [("FeedbackNoteSave", "enter"), ("FeedbackNoteCancel", "escape")]
-        {
-            let row =
-                KEYMAP.iter().find(|row| row.action == action).unwrap_or_else(|| panic!("KEYMAP carries {action}"));
-            assert_eq!(row.keystroke, keystroke);
-            assert_eq!(row.context, Some(note));
-            assert!(
-                super::binding_for_action(row.action, row.keystroke, row.context).is_some(),
-                "{action} builds a binding"
-            );
-        }
+        assert_eq!(bindings.len(), KEYMAP.len() + twins.len(), "the twins are the whole tail");
     }
 
     /// No two rows claim the same keystroke in the same context: that is

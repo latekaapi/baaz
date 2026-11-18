@@ -308,7 +308,7 @@ impl Harness {
 
     /// The windows Browse floats over the native page follow what is open
     /// and where: the overlay (menus, the Field, the hosted modal), the
-    /// corner (toasts, the feedback slot) and the Page float (the agent
+    /// corner (toasts) and the Page float (the agent
     /// line, the notes panel). Each opens, moves, repaints or closes only
     /// when what it shows moved; window changes are deferred past this
     /// update.

@@ -81,13 +81,6 @@ ALLOW = [
      "macOS window controls painted for a gallery card (`painted_lights`): the system's colours, not the theme's"),
     ("aui/src/transcript/syntax.rs", "HighlightStyle { color: Some(Hsla { h: index as f32 / 8.0",
      "a sentinel hue that encodes a capture index for gpui-kit's resolver and is decoded at once; never painted"),
-    ("baaz/src/feedback/ui.rs", "gpui::Hsla { h: 0.09",
-     "feedback mode's amber (an owner review tool under Settings > Advanced), held in the one function "
-     "`feedback_accent`; app-only, so not a library token"),
-    ("baaz/src/feedback/ui.rs", "gpui::Hsla { h: 0.1000",
-     "ink on that amber, beside it in `feedback_on_accent`"),
-    ("baaz/src/feedback/ui.rs", "gpui::Hsla { h: 0.0, s: 0.0, l: 1.0",
-     "ink on light's amber (white), beside it in `feedback_on_accent`"),
 ]
 
 PIXEL_SPEC = {

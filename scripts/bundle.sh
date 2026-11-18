@@ -84,8 +84,7 @@ fi
 
 # The probe (docs/82 4.10): the app a person runs ships without it — no
 # `--steps`, `--screenshot`, `--replay` or `--bench`, no step verbs, no gpui
-# test-support beyond Feedback Mode's window picture (`window-capture`) — so
-# the build turns the default features off and names the ones it wants. `--no-default-features` is load-bearing: the `probe` feature
+# test-support at all — so the build turns the default features off and names the ones it wants. `--no-default-features` is load-bearing: the `probe` feature
 # is on by default for every dev build, and `crates/baaz/tests/probe_ratchet.rs`
 # fails if a release build here stops passing it. The check build
 # (`scripts/baaz-check.sh build`) sets BAAZ_PROBE=1: it is driven by `--steps`.
@@ -102,14 +101,14 @@ CEF_DIR="${CEF_PATH:-$HOME/.local/share/cef}"
 if [ "${BAAZ_CEF:-1}" != "0" ] && [ -d "$CEF_DIR/Chromium Embedded Framework.framework" ]; then
     WITH_CEF=1
     export CEF_PATH="$CEF_DIR"
-    cargo build --release -p baaz -p mcp-bridge --no-default-features --features "baaz/cef,baaz/window-capture${PROBE_FEATURE:+,$PROBE_FEATURE}"
+    cargo build --release -p baaz -p mcp-bridge --no-default-features --features "baaz/cef${PROBE_FEATURE:+,$PROBE_FEATURE}"
     # The helper is its own workspace (CI never builds CEF); share the target
     # dir so the CEF wrapper compiles once.
     cargo build --release --manifest-path "$ROOT/crates/baaz-cef-helper/Cargo.toml" --target-dir "$ROOT/target"
 else
     WITH_CEF=0
     echo "bundle: no CEF at $CEF_DIR (or BAAZ_CEF=0): the browser pane stays on WKWebView"
-    cargo build --release -p baaz -p mcp-bridge --no-default-features --features "baaz/window-capture${PROBE_FEATURE:+,$PROBE_FEATURE}"
+    cargo build --release -p baaz -p mcp-bridge --no-default-features ${PROBE_FEATURE:+--features "$PROBE_FEATURE"}
 fi
 
 WORK="$(mktemp -d)"

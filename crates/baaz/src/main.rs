@@ -52,7 +52,6 @@ mod default_browser;
 mod details;
 mod dialogs;
 mod external_urls;
-mod feedback;
 use baaz_core::files;
 use baaz_core::git_ops;
 use baaz_core::full_output;

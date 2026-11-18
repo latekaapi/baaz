@@ -100,7 +100,6 @@ pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
         "auto_summary" => layout.auto_summary = on,
         "handoff_model_summary" => layout.handoff_model_summary = on,
         "fold_finished_turns" => layout.fold_finished_turns = on,
-        "feedback_mode" => layout.feedback_mode = on,
         "notify_needs_you" => layout.set_notify(|n| n.needs_you = on),
         "notify_done" => layout.set_notify(|n| n.done = on),
         "notify_failed" => layout.set_notify(|n| n.failed = on),
@@ -291,8 +290,7 @@ pub(crate) fn settings_crumb_target(section: &str, index: usize) -> Option<&'sta
 /// actually carries ([`shortcut_row_id`]); both live on Shortcuts.
 pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
     match id {
-        "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns"
-        | "feedback_mode" => Some("general"),
+        "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns" => Some("general"),
         "theme" | "summary_line" => Some("appearance"),
         "group_branch" => Some("sidebar"),
         "notify_needs_you" | "notify_done" | "notify_failed" | "notify_sound" | "notify_badge" => Some("notifications"),
@@ -343,18 +341,8 @@ pub(crate) fn general_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
             )),
             on: layout.fold_finished_turns,
         },
-        SettingsRow::Switch {
-            id: SharedString::from("feedback_mode"),
-            label: SharedString::from("Feedback mode"),
-            detail: Some(SharedString::from(FEEDBACK_MODE_DETAIL)),
-            on: layout.feedback_mode,
-        },
     ]
 }
-
-/// General › Advanced's feedback-mode line, shared by the row model and
-/// the page. Names no provider (docs/83 rule 14).
-const FEEDBACK_MODE_DETAIL: &str = "⌃⌥⌘F points at parts of Baaz to leave notes on them. Saves a report folder.";
 
 /// Settings › Appearance's summary-line switch (docs/83 §4; moved from
 /// Sidebar in task 2.9), shared by the row model and the page so the two
@@ -1286,17 +1274,9 @@ impl SettingsPage {
             crate::layout::Layout::get(cx).fold_finished_turns,
             cx,
         )];
-        let advanced = vec![self.settings_switch_row(
-            "feedback_mode",
-            "Feedback mode",
-            FEEDBACK_MODE_DETAIL,
-            crate::layout::Layout::get(cx).feedback_mode,
-            cx,
-        )];
         settings_sections_stack()
             .child(self.settings_group("Model housekeeping", rows, cx))
             .child(self.settings_group("Transcript", transcript, cx))
-            .child(self.settings_group("Advanced", advanced, cx))
             .into_any_element()
     }
 
@@ -2214,11 +2194,6 @@ impl Harness {
             return;
         }
         crate::layout::Layout::save(cx);
-        // Turning feedback mode off mid-session parks the shell Off but
-        // keeps the draft, so the next toggle resumes it.
-        if id == "feedback_mode" && !on {
-            self.feedback_setting_off(cx);
-        }
         self.invalidate_list(cx);
         // A Notifications switch applies now: the Dock badge follows its
         // switch without waiting for a session to move (task 3.5).
@@ -2410,6 +2385,8 @@ impl Harness {
     }
 
     /// The open page's id (`general`, `providers/codex`), empty while shut.
+    /// The probe's crumb verb and the tests read it.
+    #[cfg(feature = "probe")]
     pub(crate) fn settings_section(&self, cx: &App) -> String {
         self.settings_page.read(cx).state.section.clone()
     }
@@ -2870,9 +2847,7 @@ mod tests {
         assert!(!layout.auto_summary);
         assert!(apply_setting(&mut layout, "handoff_model_summary", false));
         assert!(!layout.handoff_model_summary);
-        assert!(!layout.feedback_mode, "feedback mode defaults off");
-        assert!(apply_setting(&mut layout, "feedback_mode", true));
-        assert!(layout.feedback_mode);
+        assert!(!apply_setting(&mut layout, "feedback_mode", true), "the retired feedback switch is no setting");
         assert!(!apply_setting(&mut layout, "nope", true));
     }
 
@@ -2937,14 +2912,6 @@ mod tests {
             })
             .collect();
         assert!(!sidebar.contains(&"summary_line".to_owned()), "the summary line lives on Appearance only");
-    }
-
-    /// No provider name in the feedback-mode line (docs/83 rule 14).
-    #[test]
-    fn the_feedback_mode_line_names_no_provider() {
-        for name in ["Claude", "Codex", "Muse"] {
-            assert!(!FEEDBACK_MODE_DETAIL.contains(name), "{name} in {FEEDBACK_MODE_DETAIL:?}");
-        }
     }
 
     /// A row id round-trips to the action and context the handler writes
@@ -3313,7 +3280,6 @@ mod tests {
             "auto_summary",
             "handoff_model_summary",
             "fold_finished_turns",
-            "feedback_mode",
             "summary_line",
             "group_branch",
         ] {

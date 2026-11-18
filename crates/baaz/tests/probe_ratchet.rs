@@ -194,13 +194,18 @@ fn test_support_comes_only_through_the_probe() {
     let features = section("features");
     assert!(features.contains("default = [\"probe\"]"), "the probe is on by default: every dev command keeps it");
     let probe = features.lines().find(|line| line.starts_with("probe = ")).expect("a probe feature");
-    for wanted in ["window-capture", "gpui_platform/test-support"] {
+    for wanted in ["gpui/test-support", "gpui_platform/test-support"] {
         assert!(probe.contains(wanted), "`probe` turns on {wanted}");
     }
-    // Feedback Mode's crop is the one shipped use of test-support: the
-    // feature carries exactly gpui's, nothing of the probe.
-    let capture = features.lines().find(|line| line.starts_with("window-capture = ")).expect("a window-capture feature");
-    assert_eq!(capture.trim(), "window-capture = [\"gpui/test-support\"]", "window-capture is gpui's test-support alone");
+    // The probe is the only way in: no other feature names test-support
+    // (Feedback Mode's `window-capture` went with it, plan 4.11b), so the
+    // shipped app carries none of it.
+    for line in features.lines().filter(|line| !line.trim_start().starts_with('#')) {
+        if line.contains("test-support") {
+            assert!(line.starts_with("probe = "), "test-support outside the probe: `{line}`");
+        }
+    }
+    assert!(!features.contains("window-capture"), "no `window-capture` feature exists");
     // The core crate's own probe (on by default for its tests) reaches the
     // app only through this crate's `probe`: the workspace pins it with no
     // default features (docs/82 4.11).
@@ -232,7 +237,9 @@ fn the_release_bundle_builds_without_the_probe() {
             build.contains("--no-default-features"),
             "every release build of baaz in bundle.sh drops the default probe: `{build}`"
         );
-        assert!(build.contains("baaz/window-capture"), "the shipped app keeps Feedback Mode's window picture: `{build}`");
+        for named in ["test-support", "window-capture", "baaz/probe"] {
+            assert!(!build.contains(named), "a release build names no test-support feature ({named}): `{build}`");
+        }
     }
     assert!(
         bundle.contains("PROBE_FEATURE=\"baaz/probe\"") && bundle.contains("BAAZ_PROBE"),

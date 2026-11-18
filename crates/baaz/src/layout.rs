@@ -249,7 +249,6 @@ mod tests {
             auto_summary: true,
             handoff_model_summary: true,
             fold_finished_turns: false,
-            feedback_mode: true,
             terminal_open: true,
             terminal_height: Some(300.0),
             right_open: true,
@@ -276,7 +275,6 @@ mod tests {
         assert!(text.contains("\"theme\":\"system\""));
         assert!(text.contains("\"groupBranch\":true"));
         assert!(text.contains("\"foldFinishedTurns\":false"));
-        assert!(text.contains("\"feedbackMode\":true"));
         assert!(text.contains("\"terminalOpen\":true"));
         assert!(text.contains("\"terminalHeight\":300.0"));
         assert!(text.contains("\"rightOpen\":true"));
@@ -298,7 +296,6 @@ mod tests {
         assert_eq!(back.theme, ThemePref::System);
         assert!(back.group_branch);
         assert!(!back.fold_finished_turns);
-        assert!(back.feedback_mode);
         assert!(back.terminal_open);
         assert_eq!(back.terminal_height, Some(300.0));
         assert!(back.right_open);
@@ -330,6 +327,8 @@ mod tests {
         // closed, with no switch.
         let retired: Layout = serde_json::from_str("{\"groupChevron\":true}").unwrap();
         assert!(!serde_json::to_string(&retired).unwrap().contains("groupChevron"));
+        // The retired `feedbackMode` key reads as nothing too
+        // (`baaz_core::layout`'s `a_stored_feedback_mode_key_still_loads`).
         assert!(!old.group_branch);
         // Both auto switches default ON, old files included: new behaviour
         // without a migration.
@@ -337,10 +336,6 @@ mod tests {
         assert!(Layout::default().auto_summary);
         assert!(Layout::default().handoff_model_summary);
         assert!(Layout::default().fold_finished_turns);
-        // Feedback mode defaults OFF, old files included: the gesture
-        // toasts until the person opts in.
-        assert!(!Layout::default().feedback_mode);
-        assert!(!old.feedback_mode);
         assert!(old.auto_title);
         assert!(old.auto_summary);
         assert!(old.handoff_model_summary);

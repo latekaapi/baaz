@@ -542,7 +542,7 @@ impl Harness {
     }
 
 
-    /// A session's name for the downloads credit and feedback notes: the
+    /// A session's name for the downloads credit: the
     /// collapsed head label the Sessions header wears.
     pub(crate) fn session_display_name(&self, session: &str, cx: &gpui::App) -> String {
         // A session with no title yet (a draft) reads "New session" — never

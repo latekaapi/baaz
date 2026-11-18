@@ -67,10 +67,6 @@ pub(crate) struct BrowserVisibility {
     /// The file-drop overlay covers the session's column. The pane's only:
     /// Browse mounts no drop target.
     pub drop_cover: bool,
-    /// The feedback capture layer covers the window: true only while
-    /// feedback is Active. Paused leaves the app usable, so pages stay
-    /// live; obscured pages paint their screenshot stand-in under it.
-    pub feedback_cover: bool,
     /// The Browse omnibox suggestion list stands open in the main window:
     /// the Field's rows draw there when it has no overlay window (the
     /// sidebar closed). The page shows its screenshot stand-in under them.
@@ -96,7 +92,6 @@ pub(crate) fn browser_visible(inputs: BrowserVisibility) -> bool {
         && !inputs.settings_open
         && !inputs.overlay_open
         && !inputs.drop_cover
-        && !inputs.feedback_cover
         && !inputs.omnibox_open
         && !inputs.chrome_popover_open
         && !inputs.page_error_open
@@ -576,9 +571,6 @@ impl crate::app::Harness {
             settings_open,
             overlay_open,
             drop_cover: false,
-            // F2 Active only: Paused leaves the app usable, so its pages
-            // stay live.
-            feedback_cover: self.feedback.read(cx).covers_app(),
             // The Field draws its rows in the overlay window, over the live
             // page: only the in-window dropdowns still cover it.
             omnibox_open: self.browse_omnibox_open(cx) && !self.field_overlay_wanted(cx),

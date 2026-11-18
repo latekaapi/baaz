@@ -92,8 +92,8 @@ pub(crate) enum OverlayKind {
     /// after the scrim had already dimmed the sidebar (owner recording
     /// 2026-10-11 5.23 PM); here the page stays live and dims with the rest.
     Modal,
-    /// The corner stack (D4, docs/41 §2.11) in Browse: the newest toast
-    /// over the feedback slot, 12 above the page's bottom and 12 from its
+    /// The corner stack (D4, docs/41 §2.11) in Browse: the newest toast,
+    /// 12 above the page's bottom and 12 from its
     /// right, over the live page. Its own window beside the one above —
     /// it coexists with a menu or the Field — and it never takes the
     /// keyboard, so it never closes on a resign: it lives while it has
@@ -614,23 +614,16 @@ impl Harness {
 
     /// Where the corner window should be, in screen space, while Browse
     /// has a stack to show: 12 above the page's bottom, 12 from its right,
-    /// the window reaching the shadow margin past the pills. Wide enough
-    /// for the widest toast; the pills sit at its bottom-right and the
+    /// the window reaching the shadow margin past the pill. Wide enough
+    /// for the widest toast; the pill sits at its bottom-right and the
     /// clear rest passes the pointer through to the page.
     fn wanted_corner(&self, window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
-        if !self.corner_in_overlay(cx) || self.feedback.read(cx).capturing {
-            return None;
-        }
-        let toast = !self.overlays.read(cx).toasts.is_empty();
-        let slot = self.feedback_slot_shown(cx);
-        let pills = usize::from(toast) + usize::from(slot);
-        if pills == 0 {
+        if !self.corner_in_overlay(cx) || self.overlays.read(cx).toasts.is_empty() {
             return None;
         }
         let sheet = self.browser.read(cx).centre_page_rect?;
         let pad = gpui::px(SHADOW_PAD);
-        let pill = aui::feedback::PILL_H;
-        let height = gpui::px(pill * pills as f32 + 8.0 * (pills as f32 - 1.0)) + pad * 2.0;
+        let height = gpui::px(aui::feedback::PILL_H) + pad * 2.0;
         let width = gpui::px(aui::feedback::TOAST_MAX_W) + pad * 2.0;
         let right = sheet.right() - gpui::px(12.0) + pad;
         let bottom = sheet.bottom() - gpui::px(12.0) + pad;
@@ -643,11 +636,6 @@ impl Harness {
     /// keyboard: the panel opens unfocused and nothing it does resigns it.
     pub(crate) fn sync_corner(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let wanted = self.wanted_corner(window, cx);
-        if wanted.is_some() {
-            // The slot draws in this window now: the main window's record
-            // of it would silence the capture layer at a stale spot.
-            self.feedback.update(cx, |feedback, _| feedback.slot_bounds = None);
-        }
         let current = self.browser.read(cx).corner.as_ref().map(|o| o.bounds);
         if wanted == current {
             let print = self.corner_print(cx);
@@ -1068,19 +1056,13 @@ impl Harness {
         Some(div().p(gpui::px(SHADOW_PAD)).size_full().flex().flex_col().justify_end().text_color(ink).child(div().flex_none().w_full().child(line)).into_any_element())
     }
 
-    /// A fingerprint of what the corner shows: the toasts, and the
-    /// feedback slot's phase, count, arm and flash.
+    /// A fingerprint of what the corner shows: the toasts.
     fn corner_print(&self, cx: &App) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for toast in &self.overlays.read(cx).toasts {
             toast.id.to_string().hash(&mut hasher);
         }
-        format!("{:?}", self.feedback.read(cx).phase).hash(&mut hasher);
-        self.feedback.read(cx).notes_label().hash(&mut hasher);
-        self.feedback.read(cx).discard_armed_live().hash(&mut hasher);
-        self.feedback.read(cx).done_enabled(cx).hash(&mut hasher);
-        self.feedback.read(cx).saved_flash.as_ref().is_some_and(|f| f.at.elapsed() < crate::app::feedback_ui::FEEDBACK_SAVED_FLASH).hash(&mut hasher);
         hasher.finish()
     }
 

@@ -48,12 +48,6 @@ const TURN_CEILING: Duration = Duration::from_secs(120);
 /// How often any of the above looks.
 const POLL: Duration = Duration::from_millis(100);
 
-/// How long a capture keeps drawing frames for feedback-mode steps still
-/// queued when the step list itself has returned. Each queued step fails
-/// on its own after `FEEDBACK_STEP_WAIT` (2 s), so this only bounds a
-/// pump that stopped making progress.
-const FEEDBACK_PUMP_CEILING: Duration = Duration::from_secs(20);
-
 /// Sleep `delay` as a loop of [`POLL`] timers so the foreground executor
 /// keeps draining background completions while the deadline runs down.
 /// See [`capture_and_quit`].
@@ -164,22 +158,6 @@ pub struct CaptureWaits {
     pub turns: bool,
 }
 
-/// Whether the feedback layer still has scripted steps to resolve (see the
-/// pump in [`capture_and_quit`]).
-fn feedback_steps_pending(handle: WindowHandle<Root>, cx: &mut AsyncApp) -> bool {
-    cx.update(|cx| {
-        handle
-            .update(cx, |root, _window, cx| {
-                root.view()
-                    .clone()
-                    .downcast::<crate::app::Harness>()
-                    .ok()
-                    .is_some_and(|baaz| baaz.read(cx).feedback.read(cx).has_pending_steps())
-            })
-            .unwrap_or(false)
-    })
-}
-
 /// Waits for every scripted step, captures the window and exits the process.
 ///
 /// The order matters, and used to be wrong: a capture used to apply the
@@ -253,26 +231,6 @@ pub fn capture_and_quit(
                 }
                 if capture.steps_running() {
                     eprintln!("baaz: steps still running after {STEPS_CEILING:?}; capturing anyway");
-                }
-                // `feedback-mode:` pointing and note steps return as soon as
-                // they are queued; the feedback layer resolves them on later
-                // frames (a capture, its popover, then the note). A capture
-                // window is not on screen, and gpui-pre 0.3.12 paints no
-                // frame for it on its own, so the queue used to sit still
-                // until the shot: `feedback-pins` captured mid-capture (the
-                // layer hidden) and exited 0 with three steps that then
-                // failed unseen (Gate 2, 16 Nov). Draw frames here until the
-                // queue drains, so every queued step lands or fails before
-                // the shot and the exit code.
-                let pump_deadline = std::time::Instant::now() + FEEDBACK_PUMP_CEILING;
-                while feedback_steps_pending(handle, cx) && std::time::Instant::now() < pump_deadline {
-                    cx.update(|cx| {
-                        let _ = gpui::AppContext::update_window(cx, handle.into(), |_, window, cx| window.draw(cx).clear(cx));
-                    });
-                    cx.background_executor().timer(POLL).await;
-                }
-                if feedback_steps_pending(handle, cx) {
-                    eprintln!("baaz: feedback steps still queued after {FEEDBACK_PUMP_CEILING:?}; capturing anyway");
                 }
             }
         }

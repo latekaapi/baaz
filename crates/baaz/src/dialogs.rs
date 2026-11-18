@@ -43,24 +43,17 @@ enum OverflowAction {
     Rename,
     Fork,
     Archive,
-    /// Feedback mode on or off (docs/83 §5: the feedback button lives here).
-    Feedback,
 }
 
 /// The header overflow menu's rows and their actions: Rename, Fork,
-/// Archive, then — only while the feedback setting is on — a "Feedback
-/// mode" row, checked while the mode is on (docs/83 §5, task 2.6).
-fn overflow_rows(feedback_shown: bool, feedback_on: bool) -> (Vec<MenuRow>, Vec<OverflowAction>) {
-    let mut rows = vec![
+/// Archive.
+fn overflow_rows() -> (Vec<MenuRow>, Vec<OverflowAction>) {
+    let rows = vec![
         MenuRow::Toggle { label: "Rename".into(), checked: false },
         MenuRow::Toggle { label: "Fork".into(), checked: false },
         MenuRow::Toggle { label: "Archive".into(), checked: false },
     ];
-    let mut actions = vec![OverflowAction::Rename, OverflowAction::Fork, OverflowAction::Archive];
-    if feedback_shown {
-        rows.push(MenuRow::Toggle { label: "Feedback mode".into(), checked: feedback_on });
-        actions.push(OverflowAction::Feedback);
-    }
+    let actions = vec![OverflowAction::Rename, OverflowAction::Fork, OverflowAction::Archive];
     (rows, actions)
 }
 
@@ -249,8 +242,7 @@ impl Harness {
     /// The quit confirmation (D52): names the running command. `others`
     /// counts the running commands past the named one, so a second tab is
     /// not a surprise after the first is confirmed. Pure, so the naming
-    /// has a test without a window. Tests and the feedback fixtures only;
-    /// the window asks through [`Self::quit_dialog`].
+    /// has a test without a window. Tests only; the window asks through [`Self::quit_dialog`].
     #[cfg(test)]
     pub(crate) fn quit_terminal_dialog(command: &str, others: usize) -> Dialog {
         Self::quit_dialog(&[], Some((command, others))).expect("a running command asks")
@@ -623,19 +615,12 @@ impl Harness {
 
     /// The header's overflow menu, anchored under the "…" button: Rename swaps
     /// the title for the dense inline field, Fork opens the fork picker, and
-    /// Archive asks first through the archive dialog. With the feedback
-    /// setting on, a fourth row toggles feedback mode exactly as ⌃⌥⌘F does
-    /// (docs/83 §5: the floating feedback button left the transcript; it is
-    /// this row, and a header icon only while the mode is on), checked while
-    /// the mode is on.
+    /// Archive asks first through the archive dialog.
     pub(crate) fn render_overflow_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::Overflow) {
             return None;
         }
-        let (rows, actions) = overflow_rows(
-            self.feedback_menu_row_shown(cx),
-            self.feedback.read(cx).phase != crate::app::feedback_ui::FeedbackPhase::Off,
-        );
+        let (rows, actions) = overflow_rows();
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
             let action = actions.get(*index).copied();
             this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
@@ -651,12 +636,6 @@ impl Harness {
                     }
                 }
                 Some(OverflowAction::Fork) => this.open_palette(PaletteKind::Fork, cx),
-                Some(OverflowAction::Feedback) => {
-                    if !this.feedback.read(cx).saving {
-                        this.toggle_feedback(window, cx);
-                    }
-                    cx.notify();
-                }
                 Some(OverflowAction::Archive) => {
                     if let Some(session_id) = this.active_id(cx) {
                         this.open_archive_dialog(session_id, cx);
@@ -1004,26 +983,15 @@ impl Harness {
         );
     }
 
-    /// The corner stack (D4, docs/41 §2.11): the newest toast — and in
-    /// Browse the feedback slot under it, 8 apart — right-aligned. The host places it — in
+    /// The corner stack (D4, docs/41 §2.11): the newest toast,
+    /// right-aligned. The host places it — in
     /// Sessions 12 from the sheet's right with its bottom 8 above the
     /// composer ([`Self::corner_above_band`]), with no composer 12 above
     /// the sheet's bottom ([`Self::corner_at_sheet_bottom`]); in Browse in
     /// the corner window over the page ([`Self::corner_in_overlay`]).
-    /// Nothing while a capture reads the window, which must read clean.
     pub(crate) fn render_corner_stack(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.feedback.read(cx).capturing {
-            return None;
-        }
-        let toast = self.render_toast_pill(cx);
-        // The feedback slot left the transcript for the centre header
-        // (docs/83 §5); only Browse, whose header has no actions, keeps it
-        // in the corner window over the page.
-        let slot = if self.corner_in_overlay(cx) { self.render_feedback_header_slot(cx) } else { None };
-        if toast.is_none() && slot.is_none() {
-            return None;
-        }
-        Some(v_flex().flex_none().items_end().gap(px(scale::SP_3)).children(toast).children(slot).into_any_element())
+        let toast = self.render_toast_pill(cx)?;
+        Some(v_flex().flex_none().items_end().child(toast).into_any_element())
     }
 
     /// The corner stack's inset from the sheet's right (and bottom) edge.
@@ -1110,24 +1078,17 @@ mod tests {
     use aui::nav::MenuRow;
     use crate::layout::LayoutGlobal as _;
 
-    /// The header ⋯ menu's "Feedback mode" row (docs/83 §5, task 2.6):
-    /// absent while the setting is off, last and checked while the mode is
-    /// on, and it toggles feedback mode.
+    /// The header ⋯ menu's rows: Rename, Fork, Archive, one action each.
     #[test]
-    fn overflow_menu_has_a_feedback_row_only_while_the_setting_is_on() {
+    fn overflow_menu_rows_are_rename_fork_archive() {
         let label = |row: &MenuRow| match row {
             MenuRow::Toggle { label, checked } => (label.to_string(), *checked),
             _ => panic!("overflow rows are toggles"),
         };
-        let (rows, actions) = super::overflow_rows(false, false);
+        let (rows, actions) = super::overflow_rows();
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Fork", "Archive"]);
-        assert!(!actions.contains(&super::OverflowAction::Feedback));
-        let (rows, actions) = super::overflow_rows(true, false);
-        assert_eq!(label(rows.last().unwrap()), ("Feedback mode".to_owned(), false));
-        assert_eq!(actions.last(), Some(&super::OverflowAction::Feedback));
-        assert_eq!(rows.len(), actions.len());
-        let (rows, _) = super::overflow_rows(true, true);
-        assert_eq!(label(rows.last().unwrap()), ("Feedback mode".to_owned(), true), "checked while the mode is on");
+        assert!(rows.iter().all(|r| !label(r).1), "no row is checked");
+        assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::Fork, super::OverflowAction::Archive]);
     }
 
     use crate::palette::{filter_commands, tilde_root};

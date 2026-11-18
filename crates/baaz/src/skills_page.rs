@@ -1868,7 +1868,7 @@ impl SkillsPage {
         // `min_w(0)` too: a row's unwrapped text otherwise sets the page's
         // min-content width, and the page ran ~480 px past the centre cell.
         let mut root = div().flex_1().min_h_0().min_w_0().w_full().overflow_hidden().relative().child(column);
-        // The test hook the feedback-mode layout test measures.
+        // The test hook the corner-stack layout test measures.
         root = root.debug_selector(|| "skills-page".into());
         if self.add_menu_open(cx) {
             root = root.child(self.render_add_menu(column_max, column_pad, cx));

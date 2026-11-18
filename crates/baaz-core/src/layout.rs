@@ -460,12 +460,6 @@ pub struct Layout {
     /// too) observes the app's `LayoutStore` global and re-folds when it flips.
     #[serde(rename = "foldFinishedTurns", default = "default_true")]
     pub fold_finished_turns: bool,
-    /// Whether ⌃⌥⌘F points at parts of Baaz to leave notes for Claude
-    /// (F2). OFF by default: an old file reads as disabled, and the
-    /// gesture toasts until the person opts in. The Settings page's
-    /// General section owns the switch.
-    #[serde(rename = "feedbackMode", default)]
-    pub feedback_mode: bool,
     /// Whether the terminal dock stands open in the centre column, under
     /// the composer (D42). Closed by default: the dock is asked for, never
     /// assumed.
@@ -646,7 +640,6 @@ impl Default for Layout {
             auto_summary: true,
             handoff_model_summary: true,
             fold_finished_turns: true,
-            feedback_mode: false,
             terminal_open: false,
             terminal_height: None,
             right_open: false,
@@ -715,6 +708,24 @@ pub fn right_kind(layout: &Layout) -> RightKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The retired Feedback Mode switch (removed in plan 4.11b): a stored
+    /// `feedbackMode` key — or either older spelling — reads as nothing,
+    /// never fails the file, and is gone after the next write. Unknown
+    /// keys are ignored (no `deny_unknown_fields` on [`Layout`]).
+    #[test]
+    fn a_stored_feedback_mode_key_still_loads() {
+        for key in ["feedbackMode", "feedback_mode", "feedback"] {
+            let text = format!("{{\"{key}\":true,\"summaryLine\":true,\"mode\":\"browse\",\"terminalOpen\":true}}");
+            let back: Layout =
+                serde_json::from_str(&text).unwrap_or_else(|err| panic!("{key} must not fail the read: {err}"));
+            assert!(back.summary_line, "the file's other keys still read beside {key}");
+            assert_eq!(back.mode, Mode::Browse);
+            assert!(back.terminal_open);
+            let written = serde_json::to_string(&back).unwrap();
+            assert!(!written.contains(key), "{key} is not written back: {written}");
+        }
+    }
 
     /// B2a-H2b: the mode reads tolerantly — `null`, a number, an object
     /// or an unknown slug all open Sessions, and none of them fails the
