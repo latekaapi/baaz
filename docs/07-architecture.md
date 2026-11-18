@@ -129,20 +129,20 @@ entities `RightPane` (`right_pane.rs`), `TerminalDock`
 
 ### `Harness` — the window root
 
-`Harness` (`app.rs`) has 118 fields. Its methods are spread over 62
+`Harness` (`app.rs`) has 109 fields. Its methods are spread over 62
 `impl Harness` blocks in 53 files (`app/*.rs`, `sidebar_view.rs`, the
 `browser/` seam files, `dialogs.rs`, `login.rs` and others). Roughly:
 
 | group | examples |
 |---|---|
-| providers, sign-in, onboarding | `muse_hub`, `muse_slot`, `provider_factory`, `wire`, `login`, `muse_sheet`, `tier`; `provider_model` (`ProviderStatusModel`, `provider_model.rs`, task 4.4: the statuses, the sign-out banners, the cards waiting on a press and the Codex sign-in, read and observed by every surface that shows them); `connect_screen` (a region entity, `connect.rs`) and `setup` (the setup sheet's entity, `setup.rs`) |
+| providers, sign-in, onboarding | `muse_hub`, `muse_slot`, `provider_factory`, `wire`, `login`, `tier`; `provider_model` (`ProviderStatusModel`, `provider_model.rs`, task 4.4: the statuses, the sign-out banners, the cards waiting on a press and the Codex sign-in, read and observed by every surface that shows them); `connect_screen` (a region entity, `connect.rs`) and `setup` (the setup sheet's entity, `setup.rs`) |
 | session list and its caches | `sessions`, `list_cache`, `chain_index`, `index`, `overrides`, `provider_sessions`, `projects`, `saved_list`, `branches` |
 | live session views | `active`, `registry`, `pending_id`, `drafts`, `unsent`, `starts_in_flight`, the switch/replace epochs and claims |
 | handoff | `handoffs`, `handoff_epoch`, `pending_handoff`, `handoff_confirm` |
-| sidebar view state | `sidebar_pane`, `sidebar_key`, `sidebar_list`, hover/reveal/rename fields, `sidebar_wheel` |
+| sidebar view state | `sidebar_pane`, `sidebar_key`, `sidebar_list`, hover/reveal fields, the `rename` field, `sidebar_wheel` |
 | right pane | `right_pane`: a region entity (`right_pane.rs`, task 4.3) that owns its cache, divider, refresh, watch, focus and menus |
-| browser and Browse mode | `browser`: the `BrowserView` region entity (`browser/view.rs`, task 4.5) holding the tabs and webviews, the Field and find inputs, the Browse sidebar's menus and drags, three of the four overlay windows (`overlay`, `corner`, `page_float`), `data` (the `browser.db` service), `occlusion` (the one `NativeOcclusion` owner) and `agent_window` (`AgentWindowState`, `app/agent_window.rs`: the agent line and card, the card's float and handoff picker) |
-| settings, skills, palettes | `settings_page` (a region entity, `settings.rs`, task 4.4, that owns its route, search, focus, the Shortcuts rows and recording), `skills_page` (a region entity, `skills_page.rs`, task 4.4), `import`, `chrome_import`, several `TextareaState` query fields |
+| browser and Browse mode | `browser`: the `BrowserView` region entity (`browser/view.rs`, task 4.5) holding the tabs and webviews, the Field and find inputs, the Browse sidebar's menus and drags, three of the four overlay windows (`overlay`, `corner`, `page_float`: one slot each, holding the window once its open task lands — no `*_pending` twin), `data` (the `browser.db` service), `occlusion` (the one `NativeOcclusion` owner) and `agent_window` (`AgentWindowState`, `app/agent_window.rs`: the agent line and card, the card's float and the handoff picker's query) |
+| settings, skills, palettes | `settings_page` (a region entity, `settings.rs`, task 4.4, that owns its route, search, focus, the Shortcuts rows and recording), `skills_page` (a region entity, `skills_page.rs`, task 4.4), `import`, several `TextareaState` query fields |
 | terminal | `terminal_dock`: a region entity (`terminal/dock.rs`, task 4.4) that owns the tab host, its focus, the resize drag and the bridge providers; `terminal_service`, the agent's terminal and browser tools socket |
 | focus, capture, plumbing | focus handles, `capture`, scroll sweeps, `args`, `tasks`, `main_window` |
 
@@ -196,12 +196,12 @@ running or starting, a pending approval or question) is never evicted.
 | owner | file | owns |
 |---|---|---|
 | `SidebarPane` | `sidebar_view.rs` | nothing: its render calls `Harness::render_sidebar`. It is invalidated by comparing a hand-built `SidebarKey` each frame |
-| `Overlays` | `overlays.rs` | state only: the dialog, the open menu, the palette, toasts, the `@`-picker walks. Rendered by `Harness` and by the composer |
-| `OverlayView` | `overlay.rs` | the borderless panel windows that float above the native page (the page draws above all gpui content) |
+| `Overlays` | `overlays.rs`, `overlay_stack.rs` | state only: the overlay stack (task 4.6a) — every dialog, palette, menu, popover, sheet and inline rename is one typed entry carrying `covers_page`, `takes_keyboard`, `host` (the main window, an overlay panel, or — the dialog and the palette — wherever the mode puts them), its owner and its Escape hook; Escape pops it (`Harness::pop_overlay`), `Covers` reads its `covers_page`, and closing an entry gives back the focus it took (applied in the root's frame) — plus toasts and the `@`-picker walks. Rendered by `Harness`, the composer, the right pane, the Settings page, the connect screen and the setup sheet, each reading its own entry |
+| `OverlayView` | `overlay.rs` | the borderless panel windows that float above the native page (the page draws above all gpui content); what they show follows the overlay stack's panel-hosted entries |
 | `SettingsPage` | `settings.rs`, `settings_providers.rs` | the Settings page as a region entity: its route (`SettingsPageState`), search and focus, the Shortcuts rows and recording, its menus and folds; the root pushes `SettingsFacts` and handles `SettingsEvent`s |
 | `BrowserData` | `browser/data.rs` | `browser.db` (task 4.5): the in-memory front (bookmarks, folders, excluded sites, history length, the Field's last history search) the UI reads, and the one worker task on the background executor that owns the connection; writes update the front at once and persist in order, landings notify; quit drains the queue, bounded (`drain_at_quit`); observed by `BrowserView` |
 | `ProviderStatusModel` | `provider_model.rs` | the window's provider facts: statuses (following the status cache), sign-out banners, busy cards, the Codex sign-in flow; observed by `ConnectScreen`, `SetupHost` and `SettingsPage` |
-| `ConnectScreen`, `SetupHost` | `connect.rs`, `setup.rs` | the first-run connect screen (a region entity: whether it stands, its footer menu) and the setup sheet (the open sheet, its terminals and focus) |
+| `ConnectScreen`, `SetupHost` | `connect.rs`, `setup.rs` | the first-run connect screen (a region entity: whether it stands; its footer menu is an overlay-stack entry) and the setup sheet (its terminals and focus; the open sheet is an overlay-stack entry) |
 | `SkillsPage` | `skills_page.rs` | the Skills page as a region entity: catalog, filter, selection, dialogs, its fields and CLI calls |
 | browser | `browser/` | `BrowserView` (`view.rs`: a region entity; one `WebviewState` per tab, CEF or WKWebView, a fake backend for captures; the Browse fields; it observes its pages, runs the page reconcile in `sync.rs` and emits `BrowserEvent`s the root maps; it draws the centre's loading line), `NativeOcclusion` (`occlusion.rs`: what covers the native page, which page shows, the holes, cover settling), the `impl Harness` seams (`tabs_actions.rs`, `pages.rs`, `sync.rs`, `occlusion.rs`, `omnibox.rs`, `find.rs`, `permissions.rs`, `downloads.rs`, `page_actions.rs`, `keys.rs`, `steps.rs`, `agent_tabs.rs`; `mod.rs` holds no `impl Harness`), tabs, `BrowserData` (`data.rs`: history and bookmarks in `browser.db`, run by one worker on the background executor behind an in-memory front; nothing else names SQLite, `tests/browser_data_ratchet.rs`), adblock, favicons, the agent tools in `browser/automation/` |
 | terminal | `terminal/` | `TerminalDock` (the dock region entity), `TerminalHost` (an entity the dock holds: tabs by project root over `aui_terminal` ptys) and `TerminalService` (the socket, on `Harness`) |

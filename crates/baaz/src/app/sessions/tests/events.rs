@@ -345,7 +345,7 @@ fn a_provider_draft_with_no_turns_opens_fresh_instead_of_resuming(
         let view = harness.active.clone().expect("the fresh lane is open");
         assert!(view.read(cx).provider_kind() != ProviderId::Muse, "a lane opens, not a muse view");
         assert!(
-            harness.overlays.read(cx).dialog.is_none(),
+            harness.overlays.read(cx).dialog().is_none(),
             "no failure dialog on a fresh open"
         );
         assert_eq!(
@@ -716,7 +716,7 @@ fn a_browser_chat_is_subscribed(cx: &mut gpui::TestAppContext) {
     });
     vc.run_until_parked();
     let title = vc.update(|_, cx| {
-        baaz.read(cx).overlays.read(cx).dialog.as_ref().map(|dialog| dialog.title.to_string())
+        baaz.read(cx).overlays.read(cx).dialog().map(|dialog| dialog.title.to_string())
     });
     assert_eq!(title.as_deref(), Some("From the chat"), "the chat's event reached on_session_event");
     lane_restore(state);
@@ -916,7 +916,7 @@ fn field_subscriptions_survive_opening_a_session(cx: &mut gpui::TestAppContext) 
             baaz.update(cx, |harness, cx| {
                 harness.open_palette(kind, cx);
                 harness.overlays.update(cx, |overlays, _| {
-                    overlays.palette.as_mut().expect("the palette opened").selected = 9_999;
+                    overlays.palette_mut().expect("the palette opened").selected = 9_999;
                 });
             });
             let field = match kind {
@@ -926,7 +926,7 @@ fn field_subscriptions_survive_opening_a_session(cx: &mut gpui::TestAppContext) 
             field.update(cx, |_, cx| cx.emit(InputEvent::Change));
         });
         let selected = vc.update(|_, cx| {
-            baaz.read(cx).overlays.read(cx).palette.as_ref().map(|palette| palette.selected)
+            baaz.read(cx).overlays.read(cx).palette().map(|palette| palette.selected)
         });
         assert_eq!(selected, Some(0), "{kind:?}: typing clamps the selection");
     }

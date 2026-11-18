@@ -950,9 +950,8 @@ impl Harness {
     /// Every session switch lands here — resume, reopen, draft, local
     /// draft, provider lane, fork, handoff destination — so this is where
     /// the Settings page exits for navigation (B11b): the destination owns
-    /// the next route, and nothing is restored. Opening the overlay closed
-    /// already keeps the frame's just-closed parking off the composer's
-    /// focus, which this same swap arms below.
+    /// the next route, and nothing is restored; the composer's focus is
+    /// armed by this same swap below.
     pub(crate) fn activate(
         &mut self,
         view: Entity<SessionView>,
@@ -975,7 +974,6 @@ impl Harness {
         // failure state through this same path.
         self.open_state.land();
         self.exit_settings_for_navigation(cx);
-        self.overlay_was_open = false;
         // Opening a session leaves the Skills page (D54, V1): "New session"
         // from the sidebar or ⌘N activates through here on every path
         // (draft reuse, local draft, provider lane), so the page never
@@ -1041,7 +1039,7 @@ impl Harness {
         // `set` without `notify`: a parked view reuses its retained subtree
         // unless it is dirty.
         view.update(cx, |_, cx| cx.notify());
-        self.right_pane.update(cx, |pane, _| pane.cache.page_menu = false);
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::PageMenu); });
         self.active = Some(view.clone());
         // Reopening a session that stands at its end reads it (task 3.1);
         // one still loading reads on its `HistoryReady`.

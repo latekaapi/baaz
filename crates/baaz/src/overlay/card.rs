@@ -61,23 +61,21 @@ impl Harness {
             self.browser.update(cx, |browser, cx| browser.agent_window.agent_card_input = Some(cx.new(|cx| aui::composer::composer_state_rows("Steer, or ⌘↩ to queue", 1, 4, window, cx))));
         }
         let wanted = self.wanted_card_float(window, cx);
-        let current = self.browser.read(cx).agent_window.card_float.as_ref().map(|o| o.bounds).or(self.browser.read(cx).agent_window.card_float_pending);
+        let current = self.browser.read(cx).agent_window.card_float.as_ref().map(|o| o.bounds);
         if wanted == current {
-            if let Some(float) = self.browser.read(cx).agent_window.card_float.as_ref() {
-                let handle = float.handle;
+            if let Some(handle) = self.browser.read(cx).agent_window.card_float.as_ref().and_then(|float| float.handle) {
                 cx.defer(move |cx| {
                     let _ = handle.update(cx, |_, window, _| window.refresh());
                 });
             }
             return;
         }
-        if let Some(old) = self.browser.update(cx, |browser, _| browser.agent_window.card_float.take()) {
-            let handle = old.handle;
-            cx.defer(move |cx| {
-                let _ = handle.update(cx, |_, window, _| window.remove_window());
-            });
+        let old = self.browser.update(cx, |browser, _| {
+            std::mem::replace(&mut browser.agent_window.card_float, wanted.map(|bounds| Overlay::opening(OverlayKind::AgentCard, bounds)))
+        });
+        if let Some(handle) = old.and_then(|old| old.handle) {
+            super::remove_window(handle, cx);
         }
-        self.browser.update(cx, |browser, _| browser.agent_window.card_float_pending = wanted);
         let Some(bounds) = wanted else {
             return;
         };
@@ -113,18 +111,10 @@ impl Harness {
                 })
             });
             let _ = this.update(cx, |this, cx| {
-                match opened {
-                    Ok(handle) if this.browser.read(cx).agent_window.card_float_pending == Some(bounds) => {
-                        this.browser.update(cx, |browser, _| browser.agent_window.card_float_pending = None);
-                        this.browser.update(cx, |browser, _| browser.agent_window.card_float = Some(Overlay { handle: handle.into(), kind: OverlayKind::AgentCard, bounds, print: 0 }));
-                    }
-                    Ok(handle) => {
-                        let handle: AnyWindowHandle = handle.into();
-                        cx.defer(move |cx| {
-                            let _ = handle.update(cx, |_, window, _| window.remove_window());
-                        });
-                    }
-                    Err(_) => this.browser.update(cx, |browser, _| browser.agent_window.card_float_pending = None),
+                let opened = opened.ok().map(AnyWindowHandle::from);
+                let unwanted = this.browser.update(cx, |browser, _| super::land(&mut browser.agent_window.card_float, OverlayKind::AgentCard, bounds, opened, 0));
+                if let Some(unwanted) = unwanted {
+                    super::remove_window(unwanted, cx);
                 }
                 cx.notify();
             });

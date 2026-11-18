@@ -19,34 +19,34 @@ impl SessionView {
         }
         let (draft, caret) = self.draft_and_caret(cx);
         let token = caret_token(&draft, caret);
+        let composer = self.composer_focus_handle(cx);
         self.overlays.update(cx, |overlays, _| {
             let caret_menu = matches!(
-                overlays.menu.as_ref().map(|m| m.kind),
+                overlays.menu().map(|m| m.kind),
                 Some(MenuKind::Command) | Some(MenuKind::Mention)
             );
             match token {
                 Some((kind, at, filter)) => {
-                    let same = overlays.menu.as_ref().is_some_and(|m| m.kind == kind && m.at == at);
+                    let same = overlays.menu().is_some_and(|m| m.kind == kind && m.at == at);
                     if same {
-                        if let Some(menu) = overlays.menu.as_mut() {
+                        if let Some(menu) = overlays.menu_mut() {
                             menu.filter = filter;
                             menu.selected = 0;
                         }
                     } else {
                         let mut menu = Menu::caret(kind, at);
                         menu.filter = filter;
-                        overlays.open(menu);
+                        overlays.open_composer_menu(menu, composer);
                     }
                 }
-                None if caret_menu => overlays.menu = None,
+                None if caret_menu => overlays.close_menu(),
                 None => {}
             }
         });
         if let Some(filter) = self
             .overlays
             .read(cx)
-            .menu
-            .as_ref()
+            .menu()
             .filter(|menu| menu.kind == MenuKind::Mention)
             .map(|menu| menu.filter.clone())
         {
@@ -60,15 +60,14 @@ impl SessionView {
         (state.value().to_string(), state.cursor())
     }
 
-    /// Toggle the composer's `+` menu. Opening it closes any overlay menu
-    /// first: the `+` menu is plain view state no overlay close ever sees,
-    /// so without this the two would stack.
+    /// Toggle the composer's `+` menu (a menu on the overlay stack, so
+    /// opening it replaces whatever menu stood open).
     pub fn toggle_plus_menu(&mut self, cx: &mut Context<Self>) {
-        if self.plus_open {
-            self.plus_open = false;
+        if self.plus_open(cx) {
+            self.overlays.update(cx, |overlays, _| overlays.close_menu());
         } else {
-            self.overlays.update(cx, |overlays, _| overlays.menu = None);
-            self.plus_open = true;
+            let composer = self.composer_focus_handle(cx);
+            self.overlays.update(cx, |overlays, _| overlays.open_composer_menu(Menu::picker(MenuKind::Plus, 0), composer));
         }
         cx.notify();
     }
@@ -77,13 +76,10 @@ impl SessionView {
     pub fn toggle_picker(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
         let open = self.overlays.read(cx).is_open(kind);
         if open {
-            self.overlays.update(cx, |overlays, _| overlays.menu = None);
+            self.overlays.update(cx, |overlays, _| overlays.close_menu());
             cx.notify();
             return;
         }
-        // One menu at a time: the `+` menu is view-local, so the overlay
-        // stack never saw it — close it before the picker opens.
-        self.plus_open = false;
         let selected = match kind {
             MenuKind::Model => {
                 self.load_models(cx);
@@ -107,7 +103,8 @@ impl SessionView {
                 .unwrap_or(0),
             _ => 0,
         };
-        self.overlays.update(cx, |overlays, _| overlays.open(Menu::picker(kind, selected)));
+        let composer = self.composer_focus_handle(cx);
+        self.overlays.update(cx, |overlays, _| overlays.open_composer_menu(Menu::picker(kind, selected), composer));
         cx.notify();
     }
 
@@ -116,7 +113,7 @@ impl SessionView {
     /// failure, not an empty state, and Enter must land somewhere that acts.
     pub fn menu_rows(&self, cx: &gpui::App) -> usize {
         let overlays = self.overlays.read(cx);
-        match overlays.menu.as_ref().map(|m| m.kind) {
+        match overlays.menu().map(|m| m.kind) {
             Some(MenuKind::Model) if self.models.is_empty() && self.models_error.is_some() => 1,
             Some(MenuKind::Model) => self.models.len(),
             Some(MenuKind::Effort) => match self.effort_options().options() {
@@ -130,12 +127,12 @@ impl SessionView {
                 Self::provider_rows(self.provider_kind(), self.has_turns()).len()
             }
             Some(MenuKind::Command) => {
-                let filter = overlays.menu.as_ref().map(|m| m.filter.clone()).unwrap_or_default();
+                let filter = overlays.menu().map(|m| m.filter.clone()).unwrap_or_default();
                 let (commands, skill_rows) = self.command_rows(&filter, cx);
                 commands.len() + skill_rows.len()
             }
             Some(MenuKind::Mention) => {
-                let filter = overlays.menu.as_ref().map(|m| m.filter.clone()).unwrap_or_default();
+                let filter = overlays.menu().map(|m| m.filter.clone()).unwrap_or_default();
                 self.mention_rows(&filter, cx).len()
             }
             // The shell's own menus are rendered and driven by the window,
@@ -147,7 +144,8 @@ impl SessionView {
                 | MenuKind::Project
                 | MenuKind::BackHistory
                 | MenuKind::SessionRow
-                | MenuKind::RightViews,
+                | MenuKind::RightViews
+                | MenuKind::Plus,
             ) => 0,
             None => 0,
         }
@@ -158,8 +156,7 @@ impl SessionView {
         let Some((kind, selected, filter)) = self
             .overlays
             .read(cx)
-            .menu
-            .as_ref()
+            .menu()
             .map(|m| (m.kind, m.selected, m.filter.clone()))
         else {
             return;
@@ -228,7 +225,8 @@ impl SessionView {
             | MenuKind::Project
             | MenuKind::BackHistory
                 | MenuKind::SessionRow
-                | MenuKind::RightViews => {}
+                | MenuKind::RightViews
+                | MenuKind::Plus => {}
         }
     }
 
@@ -464,7 +462,7 @@ impl SessionView {
 
     /// ← / → in the open menu (D4).
     pub fn step_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let kind = self.overlays.read(cx).menu.as_ref().map(|m| m.kind);
+        let kind = self.overlays.read(cx).menu().map(|m| m.kind);
         match kind {
             Some(MenuKind::Effort) => {
                 let levels = self.effort_levels();
@@ -483,7 +481,7 @@ impl SessionView {
             }
             Some(MenuKind::Model) => {
                 self.overlays.update(cx, |overlays, _| {
-                    if let Some(menu) = overlays.menu.as_mut() {
+                    if let Some(menu) = overlays.menu_mut() {
                         menu.sub_open = delta > 0;
                     }
                 });
@@ -658,7 +656,7 @@ impl SessionView {
     pub(super) fn sync_mode_menu_check(&mut self, cx: &mut Context<Self>) {
         let checked = MODES.iter().position(|mode| *mode == self.mode()).unwrap_or(0);
         self.overlays.update(cx, |overlays, _| {
-            if let Some(menu) = overlays.menu.as_mut().filter(|menu| menu.kind == MenuKind::Mode) {
+            if let Some(menu) = overlays.menu_mut().filter(|menu| menu.kind == MenuKind::Mode) {
                 menu.selected = checked;
             }
         });
@@ -779,28 +777,25 @@ impl SessionView {
     }
 
     pub(super) fn close_menu(&mut self, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |overlays, _| overlays.menu = None);
+        self.overlays.update(cx, |overlays, _| overlays.close_menu());
         cx.notify();
     }
 
-    /// Close the composer's view-local `+` menu, if open. The chip pickers
-    /// and caret popovers live in the shared overlay stack (closed by
-    /// `close_topmost`), but the `+` menu is plain view state no overlay
-    /// close ever sees — so Escape's `cancel` has to ask the view (V1).
-    /// Reports whether anything closed, like `close_topmost` does.
+    /// Close the composer's `+` menu, if open (its outside press). Reports
+    /// whether anything closed.
     pub fn close_plus_menu(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.plus_open {
+        if !self.plus_open(cx) {
             return false;
         }
-        self.plus_open = false;
+        self.overlays.update(cx, |overlays, _| overlays.close_menu());
         cx.notify();
         true
     }
 
-    /// Whether the `+` menu stands open: the Escape test, and the browser
-    /// pane's cover check (a native view cannot sit under a gpui popover).
-    pub(crate) fn plus_open(&self) -> bool {
-        self.plus_open
+    /// Whether the `+` menu stands open (the overlay stack's
+    /// [`MenuKind::Plus`]).
+    pub(crate) fn plus_open(&self, cx: &gpui::App) -> bool {
+        self.overlays.read(cx).is_open(MenuKind::Plus)
     }
 
     /// The provider menu's rows for a session on `current`.
@@ -882,7 +877,8 @@ impl SessionView {
                 cx.emit(SessionEvent::Status { detail });
             }
             Command::Help => {
-                self.overlays.update(cx, |overlays, _| overlays.open(Menu::caret(MenuKind::Command, 0)));
+                let composer = self.composer_focus_handle(cx);
+                self.overlays.update(cx, |overlays, _| overlays.open_composer_menu(Menu::caret(MenuKind::Command, 0), composer));
                 cx.notify();
             }
             // `/fork` with nothing named opens the turn picker; `/fork <n>`
@@ -955,7 +951,7 @@ impl SessionView {
 
     /// Replace the `/…` or `@…` token the caret is in with `insertion`.
     pub(super) fn replace_token(&mut self, insertion: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(at) = self.overlays.read(cx).menu.as_ref().map(|m| m.at) else { return };
+        let Some(at) = self.overlays.read(cx).menu().map(|m| m.at) else { return };
         let (draft, caret) = self.draft_and_caret(cx);
         if at > draft.len() || caret > draft.len() || at > caret {
             self.close_menu(cx);

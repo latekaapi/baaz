@@ -122,12 +122,14 @@ fn tilde_root(root: &str) -> String {
 }
 
 impl Harness {
-    /// Put a modal up. Only one at a time, which is what makes Escape's order
-    /// (menu, then modal) a single rule.
+    /// Put a modal up: an entry on the overlay stack, one at a time (a new
+    /// one replaces the one up). Escape pops the newest entry, so a menu
+    /// opened over it closes first.
     pub(crate) fn set_dialog(&mut self, cx: &mut Context<Self>, dialog: Dialog) {
-        self.overlays.update(cx, |overlays, _| {
-            overlays.dialog = Some(dialog);
-        });
+        // Escape off the stack dismisses it as `close_dialog` does: the
+        // handoff confirm's facts leave with it.
+        let dismissed = |_: crate::overlay_stack::Layer, this: &mut Harness, _: &mut Window, _: &mut Context<Harness>| this.handoff_state.confirm = None;
+        self.overlays.update(cx, |overlays, _| overlays.open_dialog(dialog, dismissed));
         cx.notify();
     }
 
@@ -135,7 +137,7 @@ impl Harness {
         // The handoff confirm's facts leave with it: dismissing any other
         // way confirms nothing afterwards.
         self.handoff_state.confirm = None;
-        self.overlays.update(cx, |overlays, _| overlays.dialog = None);
+        self.overlays.update(cx, |overlays, _| overlays.close_dialog());
         cx.notify();
     }
 
@@ -246,7 +248,7 @@ impl Harness {
     /// The close-tab dialog's primary button: the tab id rode the dialog,
     /// so dismissing it any other way already dropped the target.
     pub(crate) fn confirm_close_terminal_tab(&mut self, cx: &mut Context<Self>) {
-        let target = self.overlays.read(cx).dialog.as_ref().and_then(|d| {
+        let target = self.overlays.read(cx).dialog().and_then(|d| {
             (d.action == DialogAction::CloseTerminalTab).then(|| d.archive_target.clone()).flatten()
         });
         self.close_dialog(cx);
@@ -314,9 +316,13 @@ impl Harness {
     /// [`Self::run_palette_row`] — so opening and cancelling keeps the
     /// page exactly where it was.
     pub(crate) fn open_palette(&mut self, kind: PaletteKind, cx: &mut Context<Self>) {
-        let already = self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == kind);
+        let already = self.overlays.read(cx).palette().is_some_and(|p| p.kind == kind);
         self.overlays.update(cx, |overlays, _| {
-            overlays.palette = if already { None } else { Some(Palette { kind, selected: 0 }) };
+            if already {
+                overlays.close_palette();
+            } else {
+                overlays.open_palette(Palette { kind, selected: 0 });
+            }
         });
         cx.notify();
     }
@@ -330,9 +336,7 @@ impl Harness {
         self.projects_query.update(cx, |state, cx| state.set_value(String::new(), window, cx));
         let rows = self.projects_rows(cx);
         let selected = if focus_add { rows.iter().position(|row| row.add).unwrap_or(0) } else { 0 };
-        self.overlays.update(cx, |overlays, _| {
-            overlays.palette = Some(Palette { kind: PaletteKind::Projects, selected });
-        });
+        self.overlays.update(cx, |overlays, _| overlays.open_palette(Palette { kind: PaletteKind::Projects, selected }));
         window.focus(&self.projects_query.focus_handle(cx), cx);
         cx.notify();
     }
@@ -356,7 +360,7 @@ impl Harness {
     pub(crate) fn clamp_projects_selection(&mut self, cx: &mut Context<Self>) {
         let count = self.projects_rows(cx).len();
         self.overlays.update(cx, |overlays, _| {
-            if let Some(palette) = overlays.palette.as_mut() {
+            if let Some(palette) = overlays.palette_mut() {
                 if palette.kind == PaletteKind::Projects && palette.selected >= count {
                     palette.selected = 0;
                 }
@@ -376,7 +380,7 @@ impl Harness {
         let query = self.commands_query.read(cx).value().trim().to_owned();
         let count = filter_commands(&query, self.active_provider(cx)).len();
         self.overlays.update(cx, |overlays, _| {
-            if let Some(palette) = overlays.palette.as_mut() {
+            if let Some(palette) = overlays.palette_mut() {
                 if palette.kind == PaletteKind::Commands && palette.selected >= count {
                     palette.selected = 0;
                 }
@@ -569,7 +573,7 @@ impl Harness {
     /// Run the palette's selected row: the keyboard's path, which is the one
     /// that still has to resolve an index into a row.
     fn confirm_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((kind, selected)) = self.overlays.read(cx).palette.as_ref().map(|p| (p.kind, p.selected)) else {
+        let Some((kind, selected)) = self.overlays.read(cx).palette().map(|p| (p.kind, p.selected)) else {
             return;
         };
         let rows = self.palette_rows(kind, cx);
@@ -592,7 +596,7 @@ impl Harness {
     /// rather than rebuilding every row to turn the id back into an index and
     /// the index back into the same id (finding `performance-7`).
     fn run_palette_row(&mut self, kind: PaletteKind, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |overlays, _| overlays.palette = None);
+        self.overlays.update(cx, |overlays, _| overlays.close_palette());
         // A palette action executed leaves Settings (no restore: the
         // destination owns the next route) — except pane/terminal commands,
         // which are ignored with no state change while the page stands
@@ -724,15 +728,18 @@ impl Harness {
         if kind == MenuKind::Account {
             self.refresh_account_usage(cx);
         }
-        // One menu at a time: the composer's `+` menu is view-local state
-        // the overlay stack never sees, so close it before this menu opens
-        // — otherwise the two stack.
+        // One menu at a time (the stack holds one menu): an open `+` menu
+        // closes through the session view that draws it, so it redraws.
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, cx| view.close_plus_menu(cx));
         }
-        let already = self.overlays.read(cx).menu.as_ref().is_some_and(|m| m.kind == kind);
+        let already = self.overlays.read(cx).menu().is_some_and(|m| m.kind == kind);
         self.overlays.update(cx, |overlays, _| {
-            overlays.menu = if already { None } else { Some(Menu::picker(kind, 0)) };
+            if already {
+                overlays.close_menu();
+            } else {
+                overlays.open(Menu::picker(kind, 0));
+            }
         });
         cx.notify();
     }
@@ -754,7 +761,7 @@ impl Harness {
         );
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
             let action = actions.get(*index).copied();
-            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            this.overlays.update(cx, |overlays, _| overlays.close_menu());
             match action {
                 Some(OverflowAction::Rename) => {
                     if let Some(session_id) = this.active_id(cx) {
@@ -798,7 +805,7 @@ impl Harness {
         // A click anywhere outside closes it: the catcher is a sibling of
         // the menu inside the same draw.
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            this.overlays.update(cx, |overlays, _| overlays.close_menu());
             cx.notify();
         });
         let catcher = dismiss_layer("overflow-scrim", "Dismiss menu", move |w, cx| dismiss(&(), w, cx));
@@ -832,7 +839,7 @@ impl Harness {
             rows.push(MenuRow::Toggle { label: "Terminal".into(), checked: crate::layout::Layout::get(cx).terminal_open });
         }
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            this.overlays.update(cx, |overlays, _| overlays.close_menu());
             match RightKind::ALL.get(*index) {
                 Some(kind) => this.select_right(*kind, cx),
                 None if terminal => this.toggle_terminal(window, cx),
@@ -847,7 +854,7 @@ impl Harness {
             return None;
         };
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            this.overlays.update(cx, |overlays, _| overlays.close_menu());
             cx.notify();
         });
         let catcher = dismiss_layer("right-views-scrim", "Dismiss menu", move |w, cx| dismiss(&(), w, cx));
@@ -896,7 +903,7 @@ impl Harness {
         let rows: Vec<MenuRow> =
             past.iter().map(|url| MenuRow::Toggle { label: url.clone().into(), checked: false }).collect();
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            this.overlays.update(cx, |overlays, _| overlays.close_menu());
             this.ensure_tabs_loaded(cx);
             // Rows read newest-first, so row `i` steps back `i + 1`.
             if let Some(id) = this.browser.read(cx).browse_centre_shown(cx) {
@@ -908,7 +915,7 @@ impl Harness {
         });
         let trigger = self.browser.read(cx).back_bounds?;
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.menu = None);
+            this.overlays.update(cx, |overlays, _| overlays.close_menu());
             cx.notify();
         });
         let catcher = dismiss_layer("back-history-scrim", "Dismiss menu", move |w, cx| dismiss(&(), w, cx));
@@ -977,7 +984,7 @@ impl Harness {
     /// a list, an arrow key and a return — and a second picker would be a
     /// second set of keys to learn.
     pub(crate) fn render_palette(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (kind, selected) = self.overlays.read(cx).palette.as_ref().map(|p| (p.kind, p.selected))?;
+        let (kind, selected) = self.overlays.read(cx).palette().map(|p| (p.kind, p.selected))?;
         let rows = self.palette_rows(kind, cx);
         // The card's own query row mirrors the query for the picking lists;
         // the search palette edits through its own field above the card, so
@@ -1097,7 +1104,7 @@ impl Harness {
             this.run_palette_row(kind, id.clone(), window, cx);
         });
         let dismiss = self.main_listener(cx, |this: &mut Self, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.palette = None);
+            this.overlays.update(cx, |overlays, _| overlays.close_palette());
             cx.notify();
         });
         let count = rows.len();
@@ -1133,7 +1140,7 @@ impl Harness {
         // dismiss. The row's own click runs first on the way up and this
         // runs after it, idempotently.
         let close = self.main_listener(cx, |this, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.palette = None);
+            this.overlays.update(cx, |overlays, _| overlays.close_palette());
             cx.notify();
         });
         Some(
@@ -1156,7 +1163,7 @@ impl Harness {
                     }))
                     .on_action(self.main_listener(cx, |this, _: &Confirm, window, cx| this.confirm_palette(window, cx)))
                     .on_action(self.main_listener(cx, |this, _: &Cancel, _, cx| {
-                        this.overlays.update(cx, |overlays, _| overlays.palette = None);
+                        this.overlays.update(cx, |overlays, _| overlays.close_palette());
                         cx.notify();
                     }))
                     .bg(aui::overlay::scrim())
@@ -1205,7 +1212,11 @@ impl Harness {
                     .inset_0()
                     .key_context(aui::keys::MENU_CONTEXT)
                     .track_focus(&self.focus_dialog)
-                    .on_action(self.main_listener(cx, |this, _: &Cancel, _, cx| this.close_dialog(cx)))
+                    .on_action(self.main_listener(cx, |this, _: &Cancel, window, cx| {
+                        // Escape with the dialog focused pops the stack like
+                        // anywhere else: a menu opened over it closes first.
+                        this.pop_overlay(window, cx);
+                    }))
                     .child(card.into_any_element()),
             )
             .into_any_element(),
@@ -1215,11 +1226,11 @@ impl Harness {
     pub(crate) fn render_dialog(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Read the modal out whole before anything asks `cx` for a listener:
         // the entity's borrow and `cx.listener` cannot be alive at once.
-        if self.overlays.read(cx).dialog.as_ref().is_some_and(|m| m.action == DialogAction::HandoffConfirm) {
+        if self.overlays.read(cx).dialog().is_some_and(|m| m.action == DialogAction::HandoffConfirm) {
             return self.render_handoff_confirm(window, cx);
         }
         let (title, detail, kind, primary_label, action, target, danger) = {
-            let modal = self.overlays.read(cx).dialog.as_ref()?;
+            let modal = self.overlays.read(cx).dialog()?;
             let danger = modal.action == DialogAction::Archive
                 || modal.action == DialogAction::RemoveProject
                 || modal.action == DialogAction::QuitWithWorkRunning
@@ -1379,7 +1390,11 @@ impl Harness {
                     .inset_0()
                     .key_context(aui::keys::MENU_CONTEXT)
                     .track_focus(&self.focus_dialog)
-                    .on_action(self.main_listener(cx, |this, _: &Cancel, _, cx| this.close_dialog(cx)))
+                    .on_action(self.main_listener(cx, |this, _: &Cancel, window, cx| {
+                        // Escape with the dialog focused pops the stack like
+                        // anywhere else: a menu opened over it closes first.
+                        this.pop_overlay(window, cx);
+                    }))
                     .child(card),
             )
             .into_any_element(),
@@ -1785,7 +1800,7 @@ mod tests {
             Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
         });
         let is_open = |vc: &mut gpui::VisualTestContext| {
-            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.is_some())
+            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette().is_some())
         };
 
         let sidebar = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| crate::layout::Layout::get(cx).sidebar_open);
@@ -1830,7 +1845,7 @@ mod tests {
         vc.simulate_input("/");
         vc.run_until_parked();
         let selected = |vc: &mut gpui::VisualTestContext| {
-            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.as_ref().map(|m| m.selected))
+            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu().map(|m| m.selected))
         };
         assert_eq!(selected(vc), Some(0), "typing / opens the command menu");
         vc.simulate_keystrokes("down");
@@ -1910,10 +1925,10 @@ mod tests {
         for caret in ["/", "@"] {
             vc.simulate_input(caret);
             vc.run_until_parked();
-            assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.is_some()), "{caret} opens its menu");
+            assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu().is_some()), "{caret} opens its menu");
             vc.simulate_keystrokes("down down escape");
             vc.run_until_parked();
-            assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.is_none()), "escape closes the {caret} menu");
+            assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu().is_none()), "escape closes the {caret} menu");
             let focused = vc.update(|window, cx| view.update(cx, |view, cx| view.composer_focus_handle(cx).is_focused(window)));
             assert!(focused, "escape on the {caret} menu took the focus off the field");
             vc.simulate_input("x");
@@ -1933,10 +1948,10 @@ mod tests {
             });
             vc.simulate_keystrokes(keys);
             vc.run_until_parked();
-            assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.is_some()), "{keys} opens its picker");
+            assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu().is_some()), "{keys} opens its picker");
             vc.simulate_keystrokes("down escape");
             vc.run_until_parked();
-            assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.is_none()), "escape closes the {keys} picker");
+            assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu().is_none()), "escape closes the {keys} picker");
             vc.simulate_input("x");
             vc.run_until_parked();
             assert_eq!(vc.update(|_, cx| view.read(cx).draft_text(cx)), "x", "the key after the {keys} picker's escape reached the draft");
@@ -1964,12 +1979,12 @@ mod tests {
         vc.run_until_parked();
         vc.simulate_input("/");
         vc.run_until_parked();
-        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.is_some()), "/ opens its menu");
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu().is_some()), "/ opens its menu");
         // The click: another field takes the keyboard and the menu closes.
         let rename = vc.update(|_, cx| gpui::Focusable::focus_handle(&baaz.read(cx).rename, cx));
         vc.update(|window, cx| {
             window.focus(&rename, cx);
-            baaz.update(cx, |h, cx| h.overlays.update(cx, |overlays, _| overlays.menu = None));
+            baaz.update(cx, |h, cx| h.overlays.update(cx, |overlays, _| overlays.close_menu()));
         });
         vc.run_until_parked();
         assert!(vc.update(|window, _| rename.is_focused(window)), "the clicked field keeps the keyboard");
@@ -2005,7 +2020,7 @@ mod tests {
         vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
         vc.run_until_parked();
         let selected = |vc: &mut gpui::VisualTestContext| {
-            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.as_ref().map(|m| m.selected))
+            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu().map(|m| m.selected))
         };
         let size = vc.update(|window, _| window.viewport_size());
         for caret in ["/", "@"] {
@@ -2063,7 +2078,7 @@ mod tests {
             Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
         });
         let selected = |vc: &mut gpui::VisualTestContext| {
-            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.as_ref().map(|p| p.selected))
+            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette().map(|p| p.selected))
         };
         // Rows for the session-backed palettes: three visible sessions feed
         // both Search (empty query lists recents) and Resume.
@@ -2216,7 +2231,7 @@ mod tests {
         });
         vc.simulate_keystrokes("cmd-k");
         vc.simulate_keystrokes("down down");
-        let selected = vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.as_ref().map(|p| p.selected));
+        let selected = vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette().map(|p| p.selected));
         assert_eq!(selected, Some(2), "two downs must select the third row");
         // The row the palette would run, resolved the way `confirm_palette`
         // resolves it: index into the same ordered rows.
@@ -2224,7 +2239,7 @@ mod tests {
         assert!(rows > 2, "the Commands palette lists more than three rows");
         vc.simulate_keystrokes("enter");
         assert!(
-            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.is_none()),
+            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette().is_none()),
             "enter did not act on a row at all"
         );
         restore_state(state);
@@ -2250,7 +2265,7 @@ mod tests {
         if rows > 1 {
             vc.simulate_keystrokes("down");
             assert_eq!(
-                vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.as_ref().map(|p| p.selected)),
+                vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette().map(|p| p.selected)),
                 Some(1),
                 "down did not move in the Projects palette"
             );
@@ -2377,15 +2392,16 @@ mod tests {
         (baaz, view)
     }
 
-    /// Which menus stand open: the view-local `+` menu plus the shared
-    /// overlay menu. B6 leaves exactly one set after either opening order.
+    /// Which menus stand open: the `+` menu and any other menu on the
+    /// overlay stack. B6 leaves exactly one set after either opening order
+    /// (the stack holds one menu, `+` among them).
     fn open_menu_count(
         vc: &mut gpui::VisualTestContext,
         baaz: &gpui::Entity<Harness>,
         view: &gpui::Entity<SessionView>,
     ) -> (bool, bool) {
         vc.update(|_, cx| {
-            (view.read(cx).plus_open(), baaz.read(cx).overlays.read(cx).menu.is_some())
+            (view.read(cx).plus_open(cx), baaz.read(cx).overlays.read(cx).menu().is_some_and(|m| m.kind != MenuKind::Plus))
         })
     }
 
@@ -2399,7 +2415,7 @@ mod tests {
         let vc = cx.add_empty_window();
         let (baaz, view) = harness_with_lane(vc, &state.2);
         vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx))).expect("plus opens");
-        assert!(vc.update(|_, cx| view.read(cx).plus_open()), "the `+` menu opened");
+        assert!(vc.update(|_, cx| view.read(cx).plus_open(cx)), "the `+` menu opened");
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_menu(MenuKind::Overflow, cx)));
         let (plus, menu) = open_menu_count(vc, &baaz, &view);
         assert!(!plus, "the header menu closed the `+` menu");
@@ -2417,7 +2433,7 @@ mod tests {
         let vc = cx.add_empty_window();
         let (baaz, view) = harness_with_lane(vc, &state.2);
         vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx))).expect("plus opens");
-        assert!(vc.update(|_, cx| view.read(cx).plus_open()), "the `+` menu opened");
+        assert!(vc.update(|_, cx| view.read(cx).plus_open(cx)), "the `+` menu opened");
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_project_menu(None, true, cx)));
         let (plus, menu) = open_menu_count(vc, &baaz, &view);
         assert!(!plus, "the project menu closed the `+` menu");
@@ -2450,7 +2466,7 @@ mod tests {
         let vc = cx.add_empty_window();
         let (baaz, view) = harness_with_lane(vc, &state.2);
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.open_menu(MenuKind::Overflow, cx)));
-        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu.is_some()), "the header menu opened");
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu().is_some()), "the header menu opened");
         vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_plus_menu(cx)));
         let (plus, menu) = open_menu_count(vc, &baaz, &view);
         assert!(plus, "the `+` menu opened");
@@ -2502,7 +2518,7 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |_, cx| crate::layout::Layout::stage(cx, |layout| layout.mode = Mode::Browse)));
         assert!(wanted(vc), "Browse hosts the palette in the overlay window");
         vc.update(|_, cx| baaz.update(cx, |h, cx| {
-            h.overlays.update(cx, |o, _| o.palette = None);
+            h.overlays.update(cx, |o, _| o.close_palette());
         }));
         assert!(!wanted(vc), "Browse with neither palette nor dialog hosts nothing");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.set_dialog(cx, Harness::quit_terminal_dialog("cargo", 0))));
@@ -2528,12 +2544,166 @@ mod tests {
         });
         assert_eq!(focus, Some(query), "a Search palette is typed into its query field");
         vc.update(|_, cx| baaz.update(cx, |h, cx| {
-            h.overlays.update(cx, |o, _| o.palette = None);
+            h.overlays.update(cx, |o, _| o.close_palette());
             h.set_dialog(cx, Harness::quit_terminal_dialog("cargo", 0));
         }));
         assert_eq!(vc.update(|_, cx| baaz.read(cx).modal_focus(cx)), Some(dialog_focus), "a dialog takes focus_dialog");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.close_dialog(cx)));
         assert_eq!(vc.update(|_, cx| baaz.read(cx).modal_focus(cx)), None, "no modal, no handle");
+        restore_state(state);
+    }
+
+    /// A replayed session with its composer holding the keyboard: what the
+    /// overlay-stack tests open things over.
+    fn replay_with_composer_focused<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        dir: &std::path::Path,
+    ) -> (gpui::Entity<Harness>, gpui::Entity<SessionView>, &'a mut gpui::VisualTestContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(crate::app::bind_keys);
+        let mut args = test_args(dir);
+        args.replay = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp/synthetic-markdown.jsonl"));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        vc.run_until_parked();
+        let view = vc.update(|_, cx| baaz.read(cx).active.clone()).expect("the replay opens a session");
+        vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
+        vc.run_until_parked();
+        (baaz, view, vc)
+    }
+
+    fn composer_focused(vc: &mut gpui::VisualTestContext, view: &gpui::Entity<SessionView>) -> bool {
+        vc.update(|window, cx| view.update(cx, |view, cx| view.composer_focus_handle(cx).is_focused(window)))
+    }
+
+    /// Plan 4.6: Escape pops the newest entry and gives back the focus it
+    /// took — a menu opened over a dialog closes first and hands the
+    /// keyboard back to the dialog; the dialog then closes and hands it back
+    /// to the composer that held it when the dialog opened.
+    #[gpui::test]
+    fn escape_pops_a_menu_off_a_dialog_and_each_gives_back_its_focus(cx: &mut gpui::TestAppContext) {
+        use crate::overlay_stack::LayerKind;
+        let state = hermetic_state("stack-menu-over-dialog");
+        let (baaz, view, vc) = replay_with_composer_focused(cx, &state.2);
+        assert!(composer_focused(vc, &view), "the composer holds the keyboard");
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.set_dialog(
+                    cx,
+                    crate::overlays::Dialog {
+                        title: "Something happened".into(),
+                        detail: "Read this.".into(),
+                        kind: aui::overlay::DialogKind::Error,
+                        primary: "Dismiss",
+                        action: DialogAction::Dismiss,
+                        archive_target: None,
+                    },
+                )
+            })
+        });
+        vc.run_until_parked();
+        // The dialog takes the keyboard (a click on it does the same).
+        let dialog_focus = vc.update(|_, cx| baaz.read(cx).focus_dialog.clone());
+        vc.update(|window, cx| window.focus(&dialog_focus, cx));
+        vc.run_until_parked();
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_menu(MenuKind::Overflow, cx)));
+        vc.run_until_parked();
+        let top = vc.update(|_, cx| baaz.read(cx).overlays.read(cx).stack.top());
+        assert_eq!(top, Some(LayerKind::Menu), "the menu stands over the dialog");
+        vc.simulate_keystrokes("escape");
+        vc.run_until_parked();
+        let (menu, dialog) = vc.update(|_, cx| {
+            let overlays = baaz.read(cx).overlays.read(cx);
+            (overlays.menu().is_some(), overlays.dialog().is_some())
+        });
+        assert!(!menu && dialog, "the first Escape closed the menu only");
+        assert!(vc.update(|window, _| dialog_focus.is_focused(window)), "the menu gave the keyboard back to the dialog");
+        vc.simulate_keystrokes("escape");
+        vc.run_until_parked();
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).dialog().is_none()), "the second Escape closed the dialog");
+        assert!(composer_focused(vc, &view), "the dialog gave the keyboard back to the composer");
+        restore_state(state);
+    }
+
+    /// Plan 4.6: the ⌘K palette takes the keyboard into its query field,
+    /// and Escape gives it back to the composer that held it (the old edge
+    /// detector parked it on the root).
+    #[gpui::test]
+    fn escape_on_the_palette_gives_the_keyboard_back_to_the_composer(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("stack-palette-focus");
+        let (baaz, view, vc) = replay_with_composer_focused(cx, &state.2);
+        vc.simulate_keystrokes("cmd-k");
+        vc.run_until_parked();
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette().is_some()), "⌘K opened the palette");
+        assert!(!composer_focused(vc, &view), "the palette took the keyboard");
+        vc.simulate_keystrokes("escape");
+        vc.run_until_parked();
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette().is_none()), "Escape closed the palette");
+        assert!(composer_focused(vc, &view), "the palette gave the keyboard back to the composer");
+        // The keyboard is live there: typing lands in the draft.
+        vc.simulate_input("x");
+        vc.run_until_parked();
+        assert_eq!(vc.update(|_, cx| view.read(cx).draft_text(cx)), "x");
+        restore_state(state);
+    }
+
+    /// Plan 4.6: an entry that covers the page and draws in the main window
+    /// makes `Covers` report the page covered; the same modal hosted in the
+    /// overlay window (Browse) and a panel cover nothing.
+    #[gpui::test]
+    fn a_covering_entry_covers_the_page(cx: &mut gpui::TestAppContext) {
+        use crate::overlay_stack::{Entry, Layer};
+        let state = hermetic_state("stack-covers");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx));
+        vc.run_until_parked();
+        let covered = |vc: &mut gpui::VisualTestContext| vc.update(|window, cx| baaz.read(cx).page_covers(window, cx).base.overlay_open);
+        assert!(!covered(vc), "nothing open, nothing covers");
+        let dialog = || crate::overlays::Dialog {
+            title: "x".into(),
+            detail: "y".into(),
+            kind: aui::overlay::DialogKind::Error,
+            primary: "Dismiss",
+            action: DialogAction::Dismiss,
+            archive_target: None,
+        };
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.set_dialog(cx, dialog())));
+        assert!(covered(vc), "a dialog in the main window covers the page");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.close_dialog(cx)));
+        assert!(!covered(vc), "closing it uncovers the page");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_menu(MenuKind::Overflow, cx)));
+        assert!(covered(vc), "a menu covers the page");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_menu(MenuKind::Account, cx)));
+        assert!(!covered(vc), "the account menu stays inside the sidebar");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.overlays.update(cx, |o, _| o.close_menu())));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.overlays.update(cx, |o, _| o.stack.push(Entry::new(Layer::SiteInfo)))));
+        assert!(!covered(vc), "a panel over the live page covers nothing");
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(Mode::Browse, window, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.set_dialog(cx, dialog())));
+        assert!(!covered(vc), "Browse hosts the dialog in the overlay window, over the live page");
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(Mode::Sessions, window, cx)));
+        assert!(covered(vc), "back in Sessions the same dialog draws in the main window and covers");
+        restore_state(state);
+    }
+
+    /// Plan 4.6: a menu's own button toggles it — the second press closes
+    /// what the first opened, at once, with no timestamp in between.
+    #[gpui::test]
+    fn a_menus_button_toggles_it(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("stack-toggle");
+        let (baaz, view, vc) = replay_with_composer_focused(cx, &state.2);
+        let open = |vc: &mut gpui::VisualTestContext, kind: MenuKind| vc.update(|_, cx| baaz.read(cx).overlays.read(cx).is_open(kind));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_menu(MenuKind::Overflow, cx)));
+        assert!(open(vc, MenuKind::Overflow), "the first press opens the header menu");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_menu(MenuKind::Overflow, cx)));
+        assert!(!open(vc, MenuKind::Overflow), "the second press closes it");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_picker(MenuKind::Model, cx)));
+        assert!(open(vc, MenuKind::Model), "the chip opens its picker");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_picker(MenuKind::Model, cx)));
+        assert!(!open(vc, MenuKind::Model), "the chip closes its picker");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_plus_menu(cx)));
+        assert!(open(vc, MenuKind::Plus), "`+` opens its menu");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_plus_menu(cx)));
+        assert!(!open(vc, MenuKind::Plus), "`+` closes its menu");
         restore_state(state);
     }
 }

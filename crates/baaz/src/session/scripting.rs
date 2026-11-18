@@ -98,7 +98,7 @@ impl SessionView {
     /// `confirm`: Enter on the open composer menu. Fails when no menu is
     /// open (Enter on nothing).
     pub(crate) fn step_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) -> StepResult {
-        if self.overlays.read(cx).menu.is_none() {
+        if self.overlays.read(cx).menu().is_none() {
             return Err("no menu is open".into());
         }
         self.confirm_menu(window, cx);
@@ -264,7 +264,7 @@ impl SessionView {
     /// open).
     pub(crate) fn step_submenu(&mut self, cx: &mut Context<Self>) -> StepResult {
         let Some(selected) =
-            self.overlays.read(cx).menu.as_ref().filter(|menu| menu.kind == MenuKind::Model).map(|menu| menu.selected)
+            self.overlays.read(cx).menu().filter(|menu| menu.kind == MenuKind::Model).map(|menu| menu.selected)
         else {
             return Err("the model menu is not open".into());
         };
@@ -272,7 +272,7 @@ impl SessionView {
             return Err("the highlighted model row has no submenu".into());
         }
         self.overlays.update(cx, |overlays, _| {
-            if let Some(menu) = overlays.menu.as_mut() {
+            if let Some(menu) = overlays.menu_mut() {
                 menu.sub_open = true;
             }
         });

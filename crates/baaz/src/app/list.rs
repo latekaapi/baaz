@@ -144,7 +144,28 @@ impl Harness {
     pub(crate) fn rename_session(&mut self, session_id: String, name: Option<String>, cx: &mut Context<Self>) {
         let name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
         self.set_override(&session_id, |meta| meta.name = name, cx);
-        self.renaming = None;
+        self.overlays.update(cx, |o, _| {
+            o.stack.close(crate::overlay_stack::LayerKind::RenameSession);
+        });
+    }
+
+    /// The session whose row is being renamed in place (the overlay stack's
+    /// `RenameSession` entry).
+    pub(crate) fn renaming(&self, cx: &gpui::App) -> Option<String> {
+        self.overlays.read(cx).stack.renaming().cloned()
+    }
+
+    /// The project being renamed through the header's rename field: the
+    /// same `rename` field does it, and `ConfirmRename` commits the project
+    /// while this stands rather than the session row.
+    pub(crate) fn renaming_project(&self, cx: &gpui::App) -> Option<String> {
+        self.overlays.read(cx).stack.renaming_project().cloned()
+    }
+
+    /// An inline rename on the overlay stack: Escape drops it and hands
+    /// the keyboard to the composer.
+    pub(crate) fn rename_entry(layer: crate::overlay_stack::Layer) -> crate::overlay_stack::Entry {
+        crate::overlay_stack::Entry::new(layer).on_close(|_, baaz, _, _| baaz.focus_composer = true)
     }
 
     /// Open the inline field on a row, seeded with what the row says now.
@@ -156,7 +177,8 @@ impl Harness {
             .or_else(|| self.sessions.iter().find(|e| e.id == session_id).map(|e| e.label.clone()))
             .unwrap_or_default();
         self.rename.update(cx, |state, cx| state.set_value(current, window, cx));
-        self.renaming = Some(session_id);
+        let entry = Self::rename_entry(crate::overlay_stack::Layer::RenameSession(session_id));
+        self.overlays.update(cx, |o, _| o.stack.push(entry));
         window.focus(&self.rename.focus_handle(cx), cx);
         cx.notify();
     }
@@ -164,12 +186,12 @@ impl Harness {
     /// Commit whatever is in the rename field: the project when a project
     /// rename is active, else the session row.
     pub(crate) fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.renaming_project.is_some() {
+        if self.renaming_project(cx).is_some() {
             self.commit_project_rename(cx);
             let _ = window;
             return;
         }
-        let Some(session_id) = self.renaming.clone() else { return };
+        let Some(session_id) = self.renaming(cx) else { return };
         let text = self.rename.read(cx).value().to_string();
         self.rename_session(session_id, Some(text), cx);
         self.focus_composer = true;
@@ -266,7 +288,7 @@ impl Harness {
 
     /// The archive dialog's Archive button, or the `archive-confirm` step.
     pub(crate) fn confirm_archive_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let target = self.overlays.read(cx).dialog.as_ref().and_then(|d| {
+        let target = self.overlays.read(cx).dialog().and_then(|d| {
             (d.action == DialogAction::Archive).then(|| d.archive_target.clone()).flatten()
         });
         let Some(session_id) = target else { return };

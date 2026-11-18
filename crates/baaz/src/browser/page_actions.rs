@@ -7,10 +7,11 @@ use super::*;
 impl Harness {
 
     pub(crate) fn dismiss_browse_popovers(&mut self, cx: &mut Context<Self>) -> bool {
-        let open = self.browser.read(cx).downloads_open || self.browser.read(cx).extensions_open || self.browser.read(cx).more_open;
-        self.browser.update(cx, |browser, _| browser.downloads_open = false);
-        self.browser.update(cx, |browser, _| browser.extensions_open = false);
-        self.browser.update(cx, |browser, _| browser.more_open = false);
+        use crate::overlay_stack::LayerKind;
+        let open = self.overlays.update(cx, |o, _| {
+            // Close all three: no short circuit.
+            [LayerKind::Downloads, LayerKind::Extensions, LayerKind::More].map(|kind| o.stack.close(kind).is_some()).contains(&true)
+        });
         self.browser.update(cx, |browser, _| browser.downloads_rendered = false);
         if open {
             cx.notify();

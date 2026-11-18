@@ -175,14 +175,15 @@ fn scripted_terminal(command: &str) -> Vec<ScriptChunk> {
     vec![ScriptChunk::new(0, format!("~ % {command}"))]
 }
 
-/// The setup sheet's owner (task 4.4): the open sheet, its terminals and
-/// their focus. It follows the shared [`ProviderStatusModel`] itself — the
+/// The setup sheet's owner (task 4.4): its terminals and their focus; the
+/// open sheet itself is an entry on the window's overlay stack (plan 4.6). It follows the shared [`ProviderStatusModel`] itself — the
 /// status line redraws as probes land, and an Install sheet whose CLI has
 /// landed signed out moves on to signing in — and renders itself over
 /// whatever screen asked; the root seats it (`Harness::compose_setup_sheet`).
 pub(crate) struct SetupHost {
-    /// The sheet while it is up: which provider, what for.
-    pub(crate) sheet: Option<SetupSheet>,
+    /// The window's overlay stack: the sheet while it is up (which
+    /// provider, what for) is its `SetupSheet` entry.
+    overlays: Entity<crate::overlays::Overlays>,
     /// The sheet's terminals, one per provider, kept across Close.
     terminals: SetupTerminals,
     /// The sheet terminal's keyboard focus.
@@ -195,9 +196,9 @@ pub(crate) struct SetupHost {
 
 impl SetupHost {
     /// No sheet up, no terminal made yet.
-    pub(crate) fn new(model: Entity<ProviderStatusModel>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(model: Entity<ProviderStatusModel>, overlays: Entity<crate::overlays::Overlays>, cx: &mut Context<Self>) -> Self {
         let redraw = cx.observe(&model, |this, _, cx| {
-            if this.sheet.is_some() {
+            if this.sheet(cx).is_some() {
                 cx.notify();
             }
         });
@@ -205,7 +206,7 @@ impl SetupHost {
             ProviderModelEvent::Changed => this.advance(cx),
         });
         SetupHost {
-            sheet: None,
+            overlays,
             terminals: SetupTerminals::default(),
             focus: cx.focus_handle(),
             model,
@@ -213,9 +214,23 @@ impl SetupHost {
         }
     }
 
+    /// The sheet while it is up.
+    pub(crate) fn sheet(&self, cx: &gpui::App) -> Option<SetupSheet> {
+        self.overlays.read(cx).stack.setup_sheet().copied()
+    }
+
     /// Whether a sheet is up.
-    pub(crate) fn is_open(&self) -> bool {
-        self.sheet.is_some()
+    pub(crate) fn is_open(&self, cx: &gpui::App) -> bool {
+        self.sheet(cx).is_some()
+    }
+
+    /// Put the sheet up (or change what an open one is for).
+    fn show(&mut self, sheet: SetupSheet, cx: &mut Context<Self>) {
+        let owner = cx.entity_id();
+        self.overlays.update(cx, |o, _| match o.stack.setup_sheet_mut() {
+            Some(open) => *open = sheet,
+            None => o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::SetupSheet(sheet)).owner(owner)),
+        });
     }
 
     /// Open the setup sheet for `id`: the provider's terminal (made on first
@@ -234,7 +249,7 @@ impl SetupHost {
         if !crate::provider_status::deterministic() {
             self.type_when_ready(id, session, command, PROMPT_WAIT, cx);
         }
-        self.sheet = Some(SetupSheet { provider: id, kind });
+        self.show(SetupSheet { provider: id, kind }, cx);
         crate::provider_status::watch_setup(id);
         window.focus(&self.focus, cx);
         cx.notify();
@@ -297,7 +312,7 @@ impl SetupHost {
     /// in through its app-server, shows its next step instead (see
     /// the sheet's render).
     fn advance(&mut self, cx: &mut Context<Self>) {
-        let Some(sheet) = self.sheet else { return };
+        let Some(sheet) = self.sheet(cx) else { return };
         if sheet.kind != SetupKind::Install || sheet.provider != ProviderId::ClaudeCode {
             return;
         }
@@ -306,7 +321,7 @@ impl SetupHost {
             return;
         }
         let Some(command) = SetupKind::SignIn.command(sheet.provider) else { return };
-        self.sheet = Some(SetupSheet { provider: sheet.provider, kind: SetupKind::SignIn });
+        self.show(SetupSheet { provider: sheet.provider, kind: SetupKind::SignIn }, cx);
         if let Some(session) = self.terminals.sessions.get(&sheet.provider).cloned() {
             if !crate::provider_status::deterministic() {
                 // The installer may still be printing: wait for its prompt.
@@ -380,7 +395,7 @@ impl SetupHost {
     /// Close the sheet (Close, Done, ✕, Escape). The terminal and the watch
     /// keep going.
     pub(crate) fn close(&mut self, cx: &mut Context<Self>) -> bool {
-        let was = self.sheet.take().is_some();
+        let was = self.overlays.update(cx, |o, _| o.stack.close(crate::overlay_stack::LayerKind::SetupSheet)).is_some();
         if was {
             cx.notify();
         }
@@ -389,7 +404,7 @@ impl SetupHost {
 
     /// The sheet over whatever screen asked, or `None` while closed.
     fn render_sheet(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let sheet = self.sheet?;
+        let sheet = self.sheet(cx)?;
         let id = sheet.provider;
         let status = self.model.read(cx).status(id);
         let session = self.terminals.sessions.get(&id)?.clone();
@@ -444,14 +459,9 @@ impl Harness {
         self.setup.update(cx, |setup, cx| setup.open(id, kind, window, cx));
     }
 
-    /// Close the sheet; `false` when none was up.
-    pub(crate) fn close_setup_sheet(&mut self, cx: &mut Context<Self>) -> bool {
-        self.setup.update(cx, |setup, cx| setup.close(cx))
-    }
-
     /// Whether a setup sheet stands.
     pub(crate) fn setup_open(&self, cx: &gpui::App) -> bool {
-        self.setup.read(cx).is_open()
+        self.setup.read(cx).is_open(cx)
     }
 
     /// `setup:<provider>:<stage>` ([`SetupHost::step`]).

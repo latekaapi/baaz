@@ -15,10 +15,6 @@ use super::BrowserView;
 /// A folder's name until the person types one.
 const NEW_FOLDER: &str = "New folder";
 
-/// How long after the page menu closes a press on ⋯ still counts as the
-/// one that closed it (the sidebar menus' guard: 400 ms).
-const PAGE_MENU_REPRESS: std::time::Duration = std::time::Duration::from_millis(400);
-
 /// What a click on ⋯ does.
 #[derive(Debug, PartialEq, Eq)]
 enum PageMenuPress {
@@ -30,12 +26,12 @@ enum PageMenuPress {
     Open,
 }
 
-/// The ⋯ toggle as a pure rule: `open` now, and how long ago the page menu
-/// last closed.
+/// The ⋯ toggle as a pure rule: `open` now, and how long ago a press last
+/// closed the page menu (the overlay stack's guard, [`crate::overlay_stack::REPRESS`]).
 fn page_menu_press(open: bool, closed_ago: Option<std::time::Duration>) -> PageMenuPress {
     if open {
         PageMenuPress::Close
-    } else if closed_ago.is_some_and(|ago| ago < PAGE_MENU_REPRESS) {
+    } else if closed_ago.is_some_and(|ago| ago < crate::overlay_stack::REPRESS) {
         PageMenuPress::AlreadyClosed
     } else {
         PageMenuPress::Open
@@ -67,7 +63,7 @@ impl Harness {
     /// taking the next click.
     pub(crate) fn open_browse_menu(&mut self, menu: BrowseMenu, cx: &mut Context<Self>) {
         self.browser.update(cx, |browser, _| browser.browse_naming = None);
-        self.browser.update(cx, |browser, _| browser.browse_menu = Some(menu));
+        self.overlays.update(cx, |o, _| o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::BrowseMenu(menu))));
         cx.notify();
     }
 
@@ -80,13 +76,11 @@ impl Harness {
     /// 2026-10-12 1:21 AM: ⋯ never toggled, the menu jumped to the pointer).
     pub(crate) fn toggle_browse_page_menu(&mut self, anchor: Option<gpui::Bounds<gpui::Pixels>>, window: &mut Window, cx: &mut Context<Self>) {
         use aui::screens::sidebar::BrowseMenuTarget;
-        let open = self.browser.read(cx).browse_menu.as_ref().is_some_and(|m| matches!(m.target, BrowseMenuTarget::Page { .. }));
-        match page_menu_press(open, self.browser.read(cx).page_menu_closed.map(|at| at.elapsed())) {
+        let open = self.overlays.read(cx).stack.browse_menu().is_some_and(|m| matches!(m.target, BrowseMenuTarget::Page { .. }));
+        let closed_ago = self.overlays.update(cx, |o, _| o.stack.pressed_shut(crate::overlay_stack::Trigger::BrowsePageMenu));
+        match page_menu_press(open, closed_ago) {
             PageMenuPress::Close => return self.close_browse_menu(cx),
-            PageMenuPress::AlreadyClosed => {
-                self.browser.update(cx, |browser, _| browser.page_menu_closed = None);
-                return;
-            }
+            PageMenuPress::AlreadyClosed => return,
             PageMenuPress::Open => {}
         }
         let Some(state) = self.browse_centre_state(cx) else {
@@ -123,10 +117,16 @@ impl Harness {
 
     /// Close the right-click menu, if one is open.
     pub(crate) fn close_browse_menu(&mut self, cx: &mut Context<Self>) {
-        if let Some(menu) = self.browser.update(cx, |browser, _| browser.browse_menu.take()) {
-            if matches!(menu.target, aui::screens::sidebar::BrowseMenuTarget::Page { .. }) {
-                self.browser.update(cx, |browser, _| browser.page_menu_closed = Some(std::time::Instant::now()));
+        let closed = self.overlays.update(cx, |o, _| {
+            let entry = o.stack.close(crate::overlay_stack::LayerKind::BrowseMenu)?;
+            if let crate::overlay_stack::Layer::BrowseMenu(menu) = &entry.layer {
+                if matches!(menu.target, aui::screens::sidebar::BrowseMenuTarget::Page { .. }) {
+                    o.stack.note_pressed_shut(Some(crate::overlay_stack::Trigger::BrowsePageMenu));
+                }
             }
+            Some(())
+        });
+        if closed.is_some() {
             cx.notify();
         }
     }
@@ -134,8 +134,10 @@ impl Harness {
     /// Put a name field on `target`, seeded with `draft` and focused: the
     /// sidebar's one rename editor serves folders and spaces too.
     pub(crate) fn start_browse_naming(&mut self, target: BrowseNaming, draft: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.update(cx, |browser, _| browser.browse_menu = None);
-        self.renaming = None;
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::BrowseMenu); });
+        self.overlays.update(cx, |o, _| {
+            o.stack.close(crate::overlay_stack::LayerKind::RenameSession);
+        });
         self.rename.update(cx, |state, cx| state.set_value(draft.to_owned(), window, cx));
         self.browser.update(cx, |browser, _| browser.browse_naming = Some(target));
         window.focus(&self.rename.focus_handle(cx), cx);
@@ -225,7 +227,7 @@ impl Harness {
 
     /// A tab menu row.
     pub(crate) fn browse_tab_action(&mut self, tab: TabId, action: TabAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.update(cx, |browser, _| browser.browse_menu = None);
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::BrowseMenu); });
         self.ensure_tabs_loaded(cx);
         let Some(found) = self.browser.read(cx).tabs.get(tab).cloned() else {
             cx.notify();
@@ -268,7 +270,7 @@ impl Harness {
 
     /// A folder menu row.
     pub(crate) fn browse_folder_action(&mut self, folder: &str, action: FolderAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.update(cx, |browser, _| browser.browse_menu = None);
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::BrowseMenu); });
         match action {
             FolderAction::Rename => {
                 let name = self.browser.read(cx).tabs.folders.iter().find(|f| f.id == folder).map(|f| f.name.clone()).unwrap_or_default();
@@ -290,7 +292,7 @@ impl Harness {
 
     /// A task-folder menu row (and the head's click: Open chat).
     pub(crate) fn browse_task_folder_action(&mut self, session: &str, action: TaskFolderAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.update(cx, |browser, _| browser.browse_menu = None);
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::BrowseMenu); });
         match action {
             // A browser chat opens in its card, over the page (R3); a
             // project session opens in Sessions.
@@ -320,7 +322,7 @@ impl Harness {
     /// A space-chip menu row. Deleting a space closes the pages it held;
     /// the last space is never deleted (the row is disabled).
     pub(crate) fn browse_space_action(&mut self, space: &str, action: SpaceAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.update(cx, |browser, _| browser.browse_menu = None);
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::BrowseMenu); });
         match action {
             SpaceAction::Rename => {
                 let name = self.browser.read(cx).tabs.spaces.iter().find(|s| s.id == space).map(|s| s.name.clone()).unwrap_or_default();

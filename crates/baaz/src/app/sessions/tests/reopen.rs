@@ -62,7 +62,7 @@ fn z4_a_failed_reopen_lands_inline_on_the_clicked_session(cx: &mut gpui::TestApp
                 "the previous session parks exactly like a switch away"
             );
             assert!(
-                harness.overlays.read(cx).dialog.is_none(),
+                harness.overlays.read(cx).dialog().is_none(),
                 "no modal dialog for a failed reopen"
             );
             let failure = harness.open_state.provider_open_error.clone().expect("the inline failure stands");
@@ -148,7 +148,7 @@ fn z4_retry_after_a_failed_reopen_opens_the_real_session(cx: &mut gpui::TestAppC
                 harness.open_state.provider_open_error.is_none(),
                 "the real view replaces the failure state"
             );
-            assert!(harness.overlays.read(cx).dialog.is_none(), "still no dialog");
+            assert!(harness.overlays.read(cx).dialog().is_none(), "still no dialog");
             assert_eq!(harness.open_state.pending_id.as_deref(), Some("s-codex-old"));
             assert!(!harness.open_state.switch_pending, "the switch landed");
             let parked: Vec<String> =
@@ -451,7 +451,7 @@ fn a_provider_session_reopens_with_its_history_after_a_restart(cx: &mut gpui::Te
         assert_eq!(view.read(cx).session_id, open_id);
         assert!(!harness.open_state.switch_pending, "the switch landed");
         assert!(
-            harness.overlays.read(cx).dialog.is_none(),
+            harness.overlays.read(cx).dialog().is_none(),
             "no failure dialog on a clean resume"
         );
         let texts: Vec<String> = view
@@ -740,7 +740,7 @@ fn a_held_elsewhere_muse_reopen_lands_read_only_under_the_lease_notice(cx: &mut 
         assert_eq!(view.read(cx).session_id, "s-muse-old");
         assert_eq!(view.read(cx).banner_text(), Some(crate::app::LEASE_NOTICE));
         assert!(harness.open_state.provider_open_error.is_none(), "not a failed open");
-        assert!(harness.overlays.read(cx).dialog.is_none(), "no dialog");
+        assert!(harness.overlays.read(cx).dialog().is_none(), "no dialog");
     });
     assert!(pages_of(&commands) >= 1, "the history still pages in");
     lane_restore(state);

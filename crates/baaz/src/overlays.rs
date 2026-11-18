@@ -1,23 +1,28 @@
 //! `Overlays`: everything that floats above the window (spec §2.3).
 //!
-//! One entity, and it holds **state only**: which modal is up, which menu is
-//! open and where its selection is, the toasts waiting to be shown, and the two
-//! lists the menus are built from — the workspace's files and the CLI's skills,
-//! both walked once at boot and both window-wide rather than per-session. The
-//! elements themselves are rendered by whoever anchors them — the dialog and the
-//! toast stack by [`crate::app::Harness`], the composer's chip menus and caret
-//! popovers by [`crate::session::SessionView`], because the design rule is that
-//! a picker is anchored to the chip that opened it and only the composer knows
-//! where its chips are. Every one of them goes through
-//! `aui::overlay::popover_layer`, so the paint order is still the single one the
-//! library defines.
+//! One entity, and it holds **state only**: the overlay stack
+//! ([`crate::overlay_stack`] — the modal, the palette, the menu and where its
+//! selection is, the popovers, the sheets, the inline renames), the toasts
+//! waiting to be shown, and the two lists the menus are built from — the
+//! workspace's files and the CLI's skills, both walked once at boot and both
+//! window-wide rather than per-session. The elements themselves are rendered
+//! by whoever anchors them — the dialog and the toast stack by
+//! [`crate::app::Harness`], the composer's chip menus, caret popovers and `+`
+//! menu by [`crate::session::SessionView`], because the design rule is that a
+//! picker is anchored to the chip that opened it and only the composer knows
+//! where its chips are; the right pane, the Settings page, the connect screen
+//! and the setup sheet draw their own entries. The main window's ones go
+//! through `aui::overlay::popover_layer`, so the paint order is still the
+//! single one the library defines.
 //!
-//! Keeping the state here rather than in the two views is what makes "Escape
-//! closes whatever is open, in order" one function instead of a negotiation.
+//! Keeping the state here rather than in the views is what makes "Escape
+//! closes the newest overlay" one pop instead of a negotiation.
 
 use aui::feedback::{ToastAction, ToastData, ToastKind};
 use aui::overlay::DialogKind;
 use aui_protocol::{PermissionMode, ReasoningEffort};
+
+use crate::overlay_stack::{Entry, Layer, LayerKind, OverlayStack};
 
 /// One modal on screen. Only one at a time.
 pub struct Dialog {
@@ -113,6 +118,9 @@ pub enum MenuKind {
     /// Changes, Files, Page and (in Sessions) Terminal, the ones showing
     /// checked.
     RightViews,
+    /// The composer's `+` menu: attach, mention, slash commands. A menu like
+    /// the chip pickers, so one menu stands at a time with no extra rule.
+    Plus,
 }
 
 /// An open menu: which one, where the keyboard is, and what has been typed.
@@ -134,8 +142,9 @@ pub struct Menu {
     /// group row, so the menu anchors under the crumb instead of the
     /// sidebar's content edge.
     pub project_header: bool,
-    /// The model picker: the selected row's effort submenu is open (→ opens
-    /// it, ← closes it; D4).
+    /// The menu's submenu is open: the model picker's effort submenu on
+    /// the selected row (→ opens it, ← closes it; D4), the project menu's
+    /// Colour submenu.
     pub sub_open: bool,
     /// For [`MenuKind::SessionRow`]: whose row menu it is. Meaningless for
     /// every other kind.
@@ -198,12 +207,9 @@ pub(crate) const MAX_CACHED_ROOTS: usize = 8;
 /// The floating state of the window.
 #[derive(Default)]
 pub struct Overlays {
-    /// The modal, if any.
-    pub dialog: Option<Dialog>,
-    /// The open popover, if any.
-    pub menu: Option<Menu>,
-    /// The open command palette, if any.
-    pub palette: Option<Palette>,
+    /// Every open overlay, oldest first: the dialog, the palette, the menus,
+    /// the popovers, the sheets ([`crate::overlay_stack`]).
+    pub(crate) stack: OverlayStack,
     /// Toasts, oldest first.
     pub toasts: Vec<ToastData>,
     /// The `@` picker's candidates per root: the root's files, relative to
@@ -219,22 +225,64 @@ pub struct Overlays {
 }
 
 impl Overlays {
-    /// Close whatever Escape should close, innermost first. Returns `true` when
-    /// something was closed, which is what tells the caller not to interrupt the
-    /// turn as well.
-    pub fn close_topmost(&mut self) -> bool {
-        if self.menu.take().is_some() {
-            return true;
-        }
-        if self.palette.take().is_some() {
-            return true;
-        }
-        self.dialog.take().is_some()
+    /// The modal, if any.
+    pub fn dialog(&self) -> Option<&Dialog> {
+        self.stack.dialog()
+    }
+
+    /// Show `dialog`, replacing the one up; Escape off the stack runs
+    /// `dismissed`.
+    pub(crate) fn open_dialog(
+        &mut self,
+        dialog: Dialog,
+        dismissed: impl Fn(Layer, &mut crate::app::Harness, &mut gpui::Window, &mut gpui::Context<crate::app::Harness>) + 'static,
+    ) {
+        self.stack.push(Entry::new(Layer::Dialog(dialog)).on_close(dismissed));
+    }
+
+    /// Dismiss the modal.
+    pub fn close_dialog(&mut self) {
+        self.stack.close(LayerKind::Dialog);
+    }
+
+    /// The open command palette, if any.
+    pub fn palette(&self) -> Option<&Palette> {
+        self.stack.palette()
+    }
+
+    /// The open command palette, to move its selection.
+    pub fn palette_mut(&mut self) -> Option<&mut Palette> {
+        self.stack.palette_mut()
+    }
+
+    /// Open the palette on `kind`, replacing whatever list it showed.
+    pub fn open_palette(&mut self, palette: Palette) {
+        self.stack.push(Entry::new(Layer::Palette(palette)));
+    }
+
+    /// Close the palette.
+    pub fn close_palette(&mut self) {
+        self.stack.close(LayerKind::Palette);
+    }
+
+    /// The open popover, if any.
+    pub fn menu(&self) -> Option<&Menu> {
+        self.stack.menu()
+    }
+
+    /// The open popover, to move its selection or filter.
+    pub fn menu_mut(&mut self) -> Option<&mut Menu> {
+        self.stack.menu_mut()
+    }
+
+    /// Close the open popover.
+    pub fn close_menu(&mut self) {
+        self.stack.close(LayerKind::Menu);
     }
 
     /// Move the palette's selection by `delta` within `count`, wrapping.
     pub fn move_palette(&mut self, delta: isize, count: usize) {
-        let Some(palette) = self.palette.as_mut() else { return };
+        let Some(palette) = self.palette_mut() else { return };
         if count == 0 {
             palette.selected = 0;
             return;
@@ -243,19 +291,26 @@ impl Overlays {
         palette.selected = (((palette.selected as isize + delta) % count + count) % count) as usize;
     }
 
-    /// Open a menu, replacing whatever was open.
+    /// Open a menu, replacing whatever menu was open.
     pub fn open(&mut self, menu: Menu) {
-        self.menu = Some(menu);
+        self.stack.push(Entry::new(Layer::Menu(menu)));
+    }
+
+    /// Open one of the composer's own menus (a caret menu or a chip picker),
+    /// replacing whatever menu was open: closing it hands the keyboard to
+    /// the composer (`composer`) unless another field took it.
+    pub(crate) fn open_composer_menu(&mut self, menu: Menu, composer: gpui::FocusHandle) {
+        self.stack.push(Entry::new(Layer::Menu(menu)).restore_to(composer));
     }
 
     /// Whether `kind` is the open menu.
     pub fn is_open(&self, kind: MenuKind) -> bool {
-        self.menu.as_ref().is_some_and(|m| m.kind == kind)
+        self.menu().is_some_and(|m| m.kind == kind)
     }
 
     /// Move the selection by `delta` rows within `count`, wrapping.
     pub fn move_selection(&mut self, delta: isize, count: usize) {
-        let Some(menu) = self.menu.as_mut() else { return };
+        let Some(menu) = self.menu_mut() else { return };
         if count == 0 {
             menu.selected = 0;
             return;
@@ -699,23 +754,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn escape_closes_the_menu_before_the_dialog() {
-        let mut overlays = Overlays {
-            dialog: Some(Dialog {
-                title: "x".into(),
-                detail: "y".into(),
-                kind: DialogKind::Error,
-                primary: "Dismiss",
-                action: DialogAction::Dismiss,
-                archive_target: None,
-            }),
-            ..Default::default()
-        };
+    fn escape_closes_the_newest_overlay_first() {
+        let mut overlays = Overlays::default();
+        overlays.stack.push(Entry::new(Layer::Dialog(Dialog {
+            title: "x".into(),
+            detail: "y".into(),
+            kind: DialogKind::Error,
+            primary: "Dismiss",
+            action: DialogAction::Dismiss,
+            archive_target: None,
+        })));
         overlays.open(Menu::picker(MenuKind::Model, 0));
-        assert!(overlays.close_topmost());
-        assert!(overlays.menu.is_none() && overlays.dialog.is_some());
-        assert!(overlays.close_topmost());
-        assert!(!overlays.close_topmost());
+        assert!(overlays.stack.pop().is_some());
+        assert!(overlays.menu().is_none() && overlays.dialog().is_some());
+        assert!(overlays.stack.pop().is_some());
+        assert!(overlays.stack.pop().is_none());
     }
 
     #[test]
@@ -723,9 +776,9 @@ mod tests {
         let mut overlays = Overlays::default();
         overlays.open(Menu::picker(MenuKind::Effort, 0));
         overlays.move_selection(-1, 3);
-        assert_eq!(overlays.menu.as_ref().unwrap().selected, 2);
+        assert_eq!(overlays.menu().unwrap().selected, 2);
         overlays.move_selection(1, 3);
-        assert_eq!(overlays.menu.as_ref().unwrap().selected, 0);
+        assert_eq!(overlays.menu().unwrap().selected, 0);
     }
 
     #[test]
@@ -733,7 +786,7 @@ mod tests {
         let mut overlays = Overlays::default();
         overlays.open(Menu::caret(MenuKind::Command, 0));
         overlays.move_selection(1, 0);
-        assert_eq!(overlays.menu.as_ref().unwrap().selected, 0);
+        assert_eq!(overlays.menu().unwrap().selected, 0);
     }
 
     #[test]

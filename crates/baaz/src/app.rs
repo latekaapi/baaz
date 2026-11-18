@@ -710,11 +710,6 @@ pub struct Harness {
     /// The setup sheet (D5 B2): an entity that owns the open sheet, its
     /// terminals and their focus (`setup.rs`).
     pub(crate) setup: Entity<crate::setup::SetupHost>,
-    /// Today's Muse login flow, presented as a sheet over the connect
-    /// screen (or over the shell from the account menu) — never the app's
-    /// first screen. Drawn from `login`/`auth` (Stage 5's), so it stays on
-    /// the root with them.
-    pub(crate) muse_sheet: bool,
     /// Rows from `session/list`, joined with the local index.
     pub(crate) sessions: Vec<SessionEntry>,
     /// Bumped by [`Harness::invalidate_list`] whenever anything the sidebar
@@ -781,9 +776,10 @@ pub struct Harness {
     /// (docs/27 §6, R3), and one event subscription per live view. Every
     /// enumeration of views goes through it (docs/82 1.6).
     pub(crate) registry: registry::SessionRegistry,
-    /// Everything that floats: the modal, the open menu and the toasts. One
-    /// entity, shared with the session view, which renders the halves that hang
-    /// off the composer's own chips (spec §2.3).
+    /// Everything that floats: the overlay stack (dialog, palette, menus,
+    /// popovers, sheets, renames — [`crate::overlay_stack`]) and the toasts.
+    /// One entity, shared with the views that draw an entry (the session
+    /// view's composer menus, the right pane's, the Browse view's).
     pub(crate) overlays: Entity<Overlays>,
     /// F2 feedback mode shell: phase, draft, probe, discard arm.
     pub(crate) feedback: feedback_ui::FeedbackUi,
@@ -879,19 +875,6 @@ pub struct Harness {
     /// `session/resume` only on the grant.
     session_mcp: bool,
     pub(crate) focus_root: FocusHandle,
-    /// Whether an overlay stood open on the previous frame. The edge from
-    /// true to false is when focus has to be parked back on the root; see
-    /// the comment at that check in `render`. Settings open/close and
-    /// session activation manage it directly (see `close_settings` and
-    /// `activate`), because both park focus somewhere deliberate instead.
-    pub(crate) overlay_was_open: bool,
-    /// Whether that overlay was one of the composer's own menus, whose
-    /// close hands the keyboard back to the composer instead.
-    pub(crate) composer_menu_was_open: bool,
-    /// What held the keyboard while that menu was up: its close hands the
-    /// keyboard back only when the focus is still there (or nowhere), so
-    /// a click that closed it by focusing another field keeps that field.
-    pub(crate) composer_menu_focus: Option<FocusHandle>,
     pub(crate) focus_dialog: FocusHandle,
     pub(crate) focus_palette: FocusHandle,
     /// True only while the overlay window draws content the main window
@@ -929,8 +912,6 @@ pub struct Harness {
     /// P7 import (docs/72): the cached scan plan, the open sheet, the run in
     /// flight and the journal Undo reads ([`crate::import_ui`]).
     pub(crate) import: crate::import_ui::ImportUi,
-    /// R4: the Import from Chrome sheet, while open.
-    pub(crate) chrome_import: Option<crate::chrome_import_ui::ChromeImportSheet>,
     /// The adopted workspaces (design `docs/12-projects.md` §4).
     pub(crate) projects: Projects,
     /// The current project: the open session's project, else the last used.
@@ -970,9 +951,6 @@ pub struct Harness {
     /// When the last mode switch happened: the sidebar's new rows fade in
     /// over 80 ms from it (FF's swap arrival), see `render_sidebar`.
     pub(crate) mode_fade_since: Option<std::time::Instant>,
-    /// The sidebar menu an outside press just closed, and when: its
-    /// trigger's click right after must not reopen it.
-    pub(crate) menu_dismissed: Option<(crate::overlays::MenuKind, std::time::Instant)>,
     /// This window's handle: overlay intents run against it.
     pub(crate) main_window: Option<gpui::AnyWindowHandle>,
     /// The terminal dock under the composer: its tabs (keyed by project
@@ -1016,8 +994,9 @@ pub struct Harness {
     search_files: Vec<FileHit>,
     /// Monotonic id for palette queries; only the latest result is applied.
     search_epoch: u64,
-    /// The session whose row is being renamed in place, and the field doing it.
-    pub(crate) renaming: Option<String>,
+    /// The field an inline rename types in: a session row's or the
+    /// project's (which one stands is the overlay stack's `RenameSession` /
+    /// `RenameProject` entry).
     pub(crate) rename: Entity<TextareaState>,
     /// The Settings page (`Route::Settings`, B11): a region entity that
     /// owns its route, search, focus, Shortcuts rows and recording, and its
@@ -1027,12 +1006,6 @@ pub struct Harness {
     /// open flag, catalog, filter, search, selection, dialogs and CLI calls
     /// (`skills_page.rs`, task 4.4).
     pub(crate) skills_page: Entity<crate::skills_page::SkillsPage>,
-    /// The project being renamed through the header's rename field: the same
-    /// `rename` field does it, and `ConfirmRename` commits the project when
-    /// this is set rather than the session row.
-    pub(crate) renaming_project: Option<String>,
-    /// Whether the project menu's Colour submenu hangs open.
-    pub(crate) project_colour_open: bool,
     /// Shell trigger bounds in window coordinates, recorded once per frame
     /// by `on_children_prepainted` wrappers on the triggers themselves — what
     /// every shell menu seats at through `aui::overlay::anchored_menu`
@@ -1167,9 +1140,9 @@ impl Harness {
         // The Skills page, closed: it lists for the launch workspace until
         // the root pushes the current project.
         let provider_model = cx.new(|_| crate::provider_model::ProviderStatusModel::new(overlays.clone()));
-        let connect_screen = cx.new(|cx| crate::connect::ConnectScreen::new(provider_model.clone(), cx));
-        let setup = cx.new(|cx| crate::setup::SetupHost::new(provider_model.clone(), cx));
-        let settings_page = cx.new(|cx| crate::settings::SettingsPage::new(provider_model.clone(), window, cx));
+        let connect_screen = cx.new(|cx| crate::connect::ConnectScreen::new(provider_model.clone(), overlays.clone(), cx));
+        let setup = cx.new(|cx| crate::setup::SetupHost::new(provider_model.clone(), overlays.clone(), cx));
+        let settings_page = cx.new(|cx| crate::settings::SettingsPage::new(provider_model.clone(), overlays.clone(), window, cx));
         let skills_page = {
             let program = args.program.clone();
             let root = args.workspace.to_string_lossy().into_owned();
@@ -1222,6 +1195,7 @@ impl Harness {
         // screenshot, and captures must be deterministic — while the app runs
         // WKWebView. Never sniffed in render.
         let browser_fake = args.screenshot.is_some();
+        let browser = cx.new(|cx| crate::browser::BrowserView::new(browser_fake, overlays.clone(), cx));
         let muse_slot = crate::providers::MuseSlot::default();
         let mut this = Self {
             new_provider,
@@ -1238,7 +1212,6 @@ impl Harness {
             provider_model,
             connect_screen,
             setup,
-            muse_sheet: false,
             sessions: Vec::new(),
             list_epoch: 0,
             list_cache: RefCell::new(ListCache::default()),
@@ -1257,7 +1230,7 @@ impl Harness {
             feedback: feedback_ui::FeedbackUi::new(feedback_ui::FeedbackUi::probe_for(), cx),
             resize: ResizeDrag::restored(restored),
             right_pane,
-            browser: cx.new(|cx| crate::browser::BrowserView::new(browser_fake, cx)),
+            browser,
             peek_pinned: false,
             lights_hidden: false,
             sidebar_scroll_sweep: None,
@@ -1277,9 +1250,6 @@ impl Harness {
             user_shell: true,
             session_mcp: false,
             focus_root: cx.focus_handle(),
-            overlay_was_open: false,
-            composer_menu_was_open: false,
-            composer_menu_focus: None,
             focus_dialog: cx.focus_handle(),
             focus_palette: cx.focus_handle(),
             hosting_overlay: false,
@@ -1293,7 +1263,6 @@ impl Harness {
             migration_cache: None,
             migration_refresh_in_flight: false,
             import: crate::import_ui::ImportUi::boot(),
-            chrome_import: None,
             projects: Projects::default(),
             current_project: None,
             branches: HashMap::new(),
@@ -1315,12 +1284,9 @@ impl Harness {
             search_sessions: Vec::new(),
             search_files: Vec::new(),
             search_epoch: 0,
-            renaming: None,
             rename: rename.clone(),
             settings_page,
             skills_page,
-            renaming_project: None,
-            project_colour_open: false,
             overflow_bounds: None,
             project_menu_bounds: None,
             group_menu_bounds: HashMap::new(),
@@ -1343,7 +1309,6 @@ impl Harness {
             tasks: Vec::new(),
             field_subscriptions: Vec::new(),
             mode_fade_since: None,
-            menu_dismissed: None,
             main_window: None,
         };
         // Every window preference lives in the layout global (task 4.1): a
@@ -2182,10 +2147,8 @@ impl Harness {
         }
         // A user toggle always animates, even when a restore armed the
         // snap and no frame has consumed it yet.
-        self.right_pane.update(cx, |pane, _| {
-            pane.snap = false;
-            pane.cache.page_menu = false;
-        });
+        self.right_pane.update(cx, |pane, _| pane.snap = false);
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::PageMenu); });
         crate::layout::Layout::stage(cx, |layout| layout.right_open = !layout.right_open);
         crate::baaz_log!("toggle right pane: open={}", crate::layout::Layout::get(cx).right_open);
         self.arm_browser_url_focus(cx);
@@ -2244,8 +2207,9 @@ impl Harness {
         // `leave_browse_address` skips its refocus off Browse.
         self.browser.update(cx, |browser, _| browser.browse_last_holds = false);
         self.leave_browse_address(window, cx);
-        // A menu belongs to the mode it opened in; left open it would hide a page.
-        self.overlays.update(cx, |overlays, _| overlays.menu = None);
+        // A menu belongs to the mode it opened in; left open it would hide a
+        // page. (A modal follows the mode: its entry's host is `Modal`.)
+        self.overlays.update(cx, |overlays, _| overlays.close_menu());
         // The CEF claim check filters `BaazBrowse` rows by this flag, set
         // here (never read from gpui state inside the router callback).
         crate::keymap::set_claim_live_browse(mode == layout::Mode::Browse);
@@ -2311,10 +2275,8 @@ impl Harness {
     /// open and never touches [`Self::active`].
     pub(crate) fn select_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
         // A user pick always animates (see `toggle_right`).
-        self.right_pane.update(cx, |pane, _| {
-            pane.snap = false;
-            pane.cache.page_menu = false;
-        });
+        self.right_pane.update(cx, |pane, _| pane.snap = false);
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::PageMenu); });
         self.open_right_on(kind, cx);
         self.arm_browser_url_focus(cx);
     }
@@ -3050,7 +3012,7 @@ impl Harness {
     /// downloads for `~/Downloads`.
     pub(crate) fn render_browse_downloads(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::browser::chrome::{download_line, download_owner_label};
-        if !self.browser.read(cx).downloads_open {
+        if !self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Downloads) {
             return None;
         }
         let p = cx.aui().colors;
@@ -3187,7 +3149,7 @@ impl Harness {
     /// list, so a fixed message — Manage opens chrome://extensions, the
     /// Store opens the Chrome Web Store, each in a new tab.
     pub(crate) fn render_browse_extensions(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.browser.read(cx).extensions_open {
+        if !self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Extensions) {
             return None;
         }
         let p = cx.aui().colors;
@@ -3226,7 +3188,7 @@ impl Harness {
     /// reachable here since it hides the library's nav row. No
     /// Print/History/Bookmarks: none of those exist yet.
     fn render_browse_more(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.browser.read(cx).more_open {
+        if !self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::More) {
             return None;
         }
         let state = self.browse_centre_state(cx)?;
@@ -3451,7 +3413,7 @@ impl Harness {
         // same dense field the sidebar row uses; the commit path is the
         // same `ConfirmRename`, Escape the same `cancel`.
         let renaming_project_here =
-            self.current_project.as_deref().is_some_and(|id| self.renaming_project.as_deref() == Some(id));
+            self.current_project.as_deref().is_some_and(|id| self.renaming_project(cx).as_deref() == Some(id));
         if renaming_project_here {
             title = title.child(
                 div().flex_1().min_w_0().overflow_hidden().child(self.rename_field(window, cx)),
@@ -3464,7 +3426,7 @@ impl Harness {
                 .active
                 .as_ref()
                 .map(|view| view.read(cx).session_id.clone())
-                .is_some_and(|id| self.renaming.as_deref() == Some(id.as_str()));
+                .is_some_and(|id| self.renaming(cx).as_deref() == Some(id.as_str()));
             if renaming_here {
                 // The field's own root is `w_full`, so the flex item clips:
                 // the overflow button keeps its slot instead of being pushed
@@ -3678,7 +3640,7 @@ impl Harness {
         self.load_index(cx);
         let tier_banner = self.tier_banner();
         view.update(cx, |view, cx| view.set_tier_banner(tier_banner, cx));
-        self.right_pane.update(cx, |pane, _| pane.cache.page_menu = false);
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::PageMenu); });
         self.active = Some(view);
         // The replayed session is current, so its agent routes may drive
         // the terminal (D53): register it for this window's project root.
@@ -4534,7 +4496,7 @@ impl Harness {
                 // otherwise the key belongs to whoever is above us — an open
                 // menu closing, the palette, settings. Swallowing it here
                 // broke Esc on every caret menu (owner 2026-10-15).
-                let menu_open = this.overlays.read(cx).menu.is_some();
+                let menu_open = this.overlays.read(cx).menu().is_some();
                 let denied = !menu_open
                     && this.active.clone().is_some_and(|view| view.update(cx, |view, cx| view.card_has_keys(cx) && view.deny_pending(window, cx)));
                 if !denied {
@@ -4557,7 +4519,7 @@ impl Harness {
     /// the history or the editor without any of the three being guessed at.
     fn composer_context(&self, cx: &gpui::App) -> String {
         let mut context = String::from(COMPOSER_CONTEXT);
-        if self.overlays.read(cx).menu.is_some() {
+        if self.overlays.read(cx).menu().is_some() {
             context.push_str(" menu");
         }
         if let Some(view) = &self.active {
@@ -5535,11 +5497,11 @@ impl Render for Harness {
         // arrows and the return reach the list through the overlay's own menu
         // context. The Projects and Commands palettes are the same, each with
         // its own field.
-        let searching = self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Search);
+        let searching = self.overlays.read(cx).palette().is_some_and(|p| p.kind == PaletteKind::Search);
         let projecting =
-            self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Projects);
+            self.overlays.read(cx).palette().is_some_and(|p| p.kind == PaletteKind::Projects);
         let commanding =
-            self.overlays.read(cx).palette.as_ref().is_some_and(|p| p.kind == PaletteKind::Commands);
+            self.overlays.read(cx).palette().is_some_and(|p| p.kind == PaletteKind::Commands);
         if modal_hosted {
             // The overlay window focuses the hosted modal's field itself.
         } else if searching {
@@ -5573,59 +5535,32 @@ impl Render for Harness {
         // ⌘B dead too, because both handlers hang off the same div. It is
         // why "it works once, then it doesn't".
         //
-        // So the trigger is the *transition* — an overlay was up last frame
-        // and is gone now — rather than "nothing is focused", which is never
-        // true here, or "nothing on screen wants the keyboard", which cannot
-        // be told from the window. Parking focus on the root only on that
-        // edge leaves the composer's own focus alone the rest of the time.
-        let overlay_now = self.overlays.read(cx).palette.is_some()
-            || self.overlays.read(cx).dialog.is_some()
-            || self.overlays.read(cx).menu.is_some()
-            || self.settings_open(cx)
-            || self.feedback.is_open();
-        let overlay_just_closed = self.overlay_was_open && !overlay_now;
-        // Two triggers, and both are needed. The first frame has nothing
-        // focused at all, so without the `is_none` arm the very first
-        // shortcut never fires either.
-        // The composer's own menus (the caret menus and the chip pickers)
-        // never take the keyboard from the field, and their ⎋ must leave
-        // the caret in it: parking those on the root left the next key
-        // going nowhere (live, 2026-10-16).
-        let composer_menu_now = self.overlays.read(cx).menu.as_ref().is_some_and(|m| {
-            matches!(
-                m.kind,
-                MenuKind::Command | MenuKind::Mention | MenuKind::Model | MenuKind::Effort | MenuKind::Mode | MenuKind::Provider
-            )
-        });
-        // Only when nothing else took the keyboard as the menu closed: a
-        // click on the sidebar search, a rename field or the URL bar both
-        // closes the menu and focuses that field, and the composer must
-        // not take it back (the field keeps what was clicked).
+        // So the overlay stack hands the keyboard back itself (plan 4.6): an
+        // entry that took the keyboard remembers what held it in the frame it
+        // opened, and closing it — Escape, a picked row, a click outside —
+        // queues that handle for this frame. A modal or a menu always gives
+        // it back (whatever the window reports focused may be unmounted);
+        // the rest only while it is free — still on what the overlay held,
+        // on the root, or nowhere — so a composer menu closed by a click
+        // that focused another field (the sidebar search, a rename, the URL
+        // bar) leaves the keyboard in that field.
+        // Captures park on the root, as they always did, so a capture never
+        // depends on where the keyboard was. The first frame has nothing
+        // focused at all, so it parks on the root too.
+        let restore = self.overlays.update(cx, |overlays, _| overlays.stack.take_restore());
         let focused = window.focused(cx);
-        let keyboard_free = focused.is_none()
-            || focused == self.composer_menu_focus
-            || focused.as_ref() == Some(&self.focus_root);
-        let composer_view = (overlay_just_closed
-            && self.composer_menu_was_open
-            && keyboard_free
-            && !crate::clock::deterministic()
-            && self.pending_switch_dest(cx).is_none())
-        .then(|| self.active.clone())
-        .flatten();
-        let taken_elsewhere = overlay_just_closed && self.composer_menu_was_open && !keyboard_free;
-        if !self.terminal_dock.focus_handle(cx).is_focused(window) {
-            if let Some(view) = composer_view {
-                view.update(cx, |view, cx| view.focus_composer(window, cx));
-            } else if taken_elsewhere {
-                // The field that was clicked is mounted and holds the
-                // keyboard: parking it on the root would steal it too.
-            } else if window.focused(cx).is_none() || overlay_just_closed {
-                window.focus(&self.focus_root, cx);
+        if let Some(restore) = restore {
+            let free = focused.is_none() || focused == restore.held || focused.as_ref() == Some(&self.focus_root);
+            if free || restore.force {
+                let to = restore.to.filter(|_| !crate::clock::deterministic()).unwrap_or_else(|| self.focus_root.clone());
+                window.focus(&to, cx);
             }
+        } else if focused.is_none() {
+            window.focus(&self.focus_root, cx);
         }
-        self.overlay_was_open = overlay_now;
-        self.composer_menu_was_open = composer_menu_now;
-        self.composer_menu_focus = if composer_menu_now { window.focused(cx) } else { None };
+        // What the next overlay to open gives the keyboard back to.
+        let focused = window.focused(cx);
+        self.overlays.update(cx, |overlays, _| overlays.stack.note_focus(focused));
         let root = aui::keys::track_pointer(
             div()
                 .size_full()
@@ -5974,6 +5909,26 @@ impl Harness {
         self.with_session(cx, |view, cx| view.toggle_picker(kind, cx));
     }
 
+    /// Escape's first act (plan 4.6): close the newest overlay on the stack,
+    /// tell the view that draws it, and run its own close. The stack queues
+    /// the keyboard's way back for the next frame. `false` when nothing was
+    /// open.
+    pub(crate) fn pop_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(entry) = self.overlays.update(cx, |overlays, _| overlays.stack.pop()) else {
+            return false;
+        };
+        let crate::overlay_stack::Entry { layer, owner, on_close, .. } = entry;
+        if let Some(owner) = owner {
+            let app: &mut gpui::App = cx;
+            app.notify(owner);
+        }
+        if let Some(on_close) = on_close {
+            on_close(layer, self, window, cx);
+        }
+        cx.notify();
+        true
+    }
+
     /// ⌃C, and Escape on an empty composer: stop and retract.
     /// Q4b: a no-op while a provider switch is pending — the running turn,
     /// if any, belongs to the hidden session, and ⌃C must not reach it.
@@ -5986,40 +5941,15 @@ impl Harness {
         }
     }
 
-    /// Escape: close whatever is open, and otherwise stop the running turn if
-    /// the composer is empty (spec §3.9). On the login screen there is no
-    /// session stack: Escape walks the login states instead — `Cancel` in
-    /// `Starting` / `Device`, `Back` in `ApiKey`, `ChooseAnother` in `Error`,
-    /// nothing in the other states.
+    /// Escape: close the newest overlay (plan 4.6: every dialog, palette,
+    /// menu, popover, sheet and inline rename is an entry on the overlay
+    /// stack, so this function names none of them), and otherwise go back
+    /// one step on what stands: the Settings and Skills pages, the right
+    /// pane's view stack, the transcript's selection and a card's field —
+    /// and last, stop the running turn if the composer is empty (spec §3.9).
+    /// The ratchet in `tests/overlay_stack.rs` pins what it may call.
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let closed = self.overlays.update(cx, |overlays, _| overlays.close_topmost());
-        if closed {
-            cx.notify();
-            return;
-        }
-        if self.right_pane.update(cx, |pane, cx| pane.close_files_menu(cx)) {
-            return;
-        }
-        // The Browse tab menu is pane state, never the overlay stack:
-        // Escape closes it here, before the Settings and Skills pages.
-        if self.close_tab_menu(cx) {
-            return;
-        }
-        // The Browse chrome popovers (downloads, extensions, ⋯) are
-        // centre state, never the overlay stack either: Escape dismisses
-        // them here, one layer per press.
-        if self.dismiss_browse_popovers(cx) {
-            return;
-        }
-        // Escape belongs to a login only while one is on screen — the
-        // capture-only login screen or the Muse sign-in sheet. A signed-out
-        // Muse used to take every press, so nothing else ever got Escape
-        // on a machine that does not use Muse (docs/50 P1).
-        if self.close_setup_sheet(cx) {
-            return;
-        }
-        if self.muse_sheet {
-            self.close_muse_sheet(window, cx);
+        if self.pop_overlay(window, cx) {
             return;
         }
         // The Settings page is the first thing Escape takes back:
@@ -6039,18 +5969,6 @@ impl Harness {
             self.close_skills(cx);
             return;
         }
-        // The composer's `+` menu is view-local, so the overlay stack
-        // above never saw it: Escape closes it here, before edits (V1).
-        if let Some(view) = self.active.clone() {
-            if view.update(cx, |view, cx| view.close_plus_menu(cx)) {
-                return;
-            }
-        }
-        // The Page row's Recent pages menu closes first (D6, 2026-10-18).
-        if self.right_pane.read(cx).cache.page_menu {
-            self.right_pane.update(cx, |pane, cx| pane.set_page_menu(false, cx));
-            return;
-        }
         // An open file preview is the next thing Escape takes back: back
         // to the tree, keeping the selected marker and the scroll offset.
         if let Some((root, _)) = self.right_project() {
@@ -6068,20 +5986,6 @@ impl Harness {
                 return;
             }
         }
-        // An open rename is the next thing Escape takes back — a project
-        // rename first, then a session row's. (There is no sidebar search
-        // field left to clear: ⌘⇧F owns search now, and its palette closes
-        // through the overlay stack above.)
-        if self.renaming_project.take().is_some() {
-            self.focus_composer = true;
-            cx.notify();
-            return;
-        }
-        if self.renaming.take().is_some() {
-            self.focus_composer = true;
-            cx.notify();
-            return;
-        }
         // A transcript text selection is the next thing Escape takes back.
         if let Some(view) = self.active.clone() {
             if view.update(cx, |view, cx| view.clear_selection(cx)) {
@@ -6089,7 +5993,9 @@ impl Harness {
             }
         }
         // A card's open field is the next thing Escape takes back, before it
-        // reaches for the running turn.
+        // reaches for the running turn. It is no overlay: the field is part
+        // of the card in the transcript, and closing it is the card's own
+        // state, like the selection above.
         let field = self
             .active
             .clone()
@@ -6200,7 +6106,7 @@ mod tests {
         assert!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_open));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_palette(PaletteKind::Commands, cx)));
         vc.update(|_, cx| baaz.update(cx, |h, cx| {
-            h.overlays.update(cx, |o, _| o.palette = None);
+            h.overlays.update(cx, |o, _| o.close_palette());
         }));
         vc.draw(
             gpui::point(gpui::px(0.), gpui::px(0.)),
@@ -6675,7 +6581,7 @@ mod tests {
             assert!(shown.recording.is_none(), "Escape disarmed the row");
             assert!(shown.details_open.contains(&crate::providers::ProviderId::Codex), "Details opened on the page");
             assert!(shown.migration_paths_expanded, "the path list unfolded on the page");
-            assert!(shown.default_menu_open, "the picker's menu opened on the page");
+            assert!(shown.default_menu_open(cx), "the picker's menu opened on the page");
             assert!(baaz.read(cx).settings_open(cx), "the page itself stays open");
             assert!(crate::region::Region::covers_page(shown, cx), "an open page covers Browse's page");
             assert_eq!(crate::region::Region::title(shown, cx).as_ref(), "Shortcuts");
@@ -6783,10 +6689,10 @@ mod tests {
             assert!(h.settings_open(cx), "opening the palette exited Settings");
             assert_eq!(h.settings_section(cx), "sidebar");
         });
-        // Cancelling (Escape's path: close the topmost overlay) keeps it.
-        vc.update(|_, cx| {
+        // Cancelling (Escape's path: pop the overlay stack) keeps it.
+        vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                h.overlays.update(cx, |overlays, _| overlays.close_topmost());
+                h.pop_overlay(window, cx);
             })
         });
         vc.update(|_, cx| {
@@ -7732,7 +7638,7 @@ mod tests {
         // The picker's menu is the page's own; a pick reaches the root as
         // an event, delivered when the update that emitted it ends.
         let page = vc.update(|_, cx| baaz.read(cx).settings_page.clone());
-        let menu_open = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| page.read(cx).default_menu_open);
+        let menu_open = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| page.read(cx).default_menu_open(cx));
         vc.update(|_, cx| page.update(cx, |page, cx| page.default_provider_intent(ConnectIntent::ToggleDefaultMenu, cx)));
         assert!(menu_open(vc), "the chip opens its menu");
         vc.update(|_, cx| page.update(cx, |page, cx| page.default_provider_intent(ConnectIntent::SetDefault(aui_icons::Provider::Codex), cx)));

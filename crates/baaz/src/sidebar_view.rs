@@ -306,7 +306,6 @@ pub(crate) struct SidebarKey {
     browse_flags: Vec<(u64, bool, bool, bool, bool, bool)>,
     browse_groups: Vec<BrowseGroupPrint>,
     browse_session_tab: Option<u64>,
-    tab_menu: Option<u64>,
     /// Bumped as favicons land, so the column repaints with them.
     favicons: u64,
     /// Bumped as bookmarks change or land from `browser.db` (task 4.5:
@@ -490,13 +489,12 @@ impl SidebarKey {
             (Vec::new(), 0, Vec::new(), Vec::new())
         };
         let browse_session_tab = baaz.browser.read(cx).browse_session_tab.map(|id| id.0);
-        let tab_menu = baaz.browser.read(cx).tab_menu.map(|id| id.0);
         let account_menu_open = baaz.overlays.read(cx).is_open(MenuKind::Account);
         Self {
             visible: Rc::as_ptr(&visible) as usize,
             grouping: Rc::as_ptr(&grouping) as usize,
             selected,
-            renaming: baaz.renaming.clone(),
+            renaming: baaz.renaming(cx),
             reveal: baaz.reveal.clone(),
             auth,
             current_project,
@@ -505,7 +503,6 @@ impl SidebarKey {
             browse_flags,
             browse_groups,
             browse_session_tab,
-            tab_menu,
             favicons: baaz.browser.read(cx).favicons.generation,
             bookmarks: baaz.browser.read(cx).data.read(cx).generation(),
             pinned: Rc::as_ptr(&baaz.sidebar_pinned(cx)) as usize,
@@ -523,7 +520,7 @@ impl SidebarKey {
                 baaz.show_archived,
                 baaz.hidden_count(),
             ),
-            browse_menu: baaz.browser.read(cx).browse_menu.clone(),
+            browse_menu: baaz.overlays.read(cx).stack.browse_menu().cloned(),
             browse_naming: baaz.browser.read(cx).browse_naming.clone(),
             current_space: baaz.browser.read(cx).tabs.current_space.clone(),
             loading: baaz.sidebar_loading(),
@@ -893,7 +890,7 @@ impl Harness {
             .clone()
             .or_else(|| self.active.as_ref().map(|a| a.read(cx).session_id.clone()))
             .map(|id| self.chain_head(&id));
-        let editing = self.renaming.clone().map(|session| EditingState {
+        let editing = self.renaming(cx).map(|session| EditingState {
             session: session.into(),
             draft: self.rename.read(cx).value().to_string().into(),
         });
@@ -937,7 +934,7 @@ impl Harness {
             selected: selected.map(SharedString::from),
             // The row a right-click menu belongs to stays lit while it is open
             // (canvas Menus board).
-            hovered: match self.browser.read(cx).browse_menu.as_ref().map(|menu| &menu.target) {
+            hovered: match self.overlays.read(cx).stack.browse_menu().map(|menu| &menu.target) {
                 Some(aui::screens::sidebar::BrowseMenuTarget::Tab { id, .. }) if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse => Some(id.clone()),
                 Some(aui::screens::sidebar::BrowseMenuTarget::Folder(id)) if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse => Some(format!("folder-{id}").into()),
                 Some(aui::screens::sidebar::BrowseMenuTarget::TaskFolder { session, .. }) if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse => {
@@ -1142,7 +1139,7 @@ impl Harness {
             space: current,
             hovered_today_header: self.hovered_today_header,
             editing,
-            menu: self.browser.read(cx).browse_menu.clone(),
+            menu: self.overlays.read(cx).stack.browse_menu().cloned(),
         }
     }
 
@@ -1170,7 +1167,7 @@ impl Harness {
                 || self.overlays.read(cx).is_open(MenuKind::Account)
                 || self.overlays.read(cx).is_open(MenuKind::SessionRow);
             if open {
-                self.overlays.update(cx, |overlays, _| overlays.menu = None);
+                self.overlays.update(cx, |overlays, _| overlays.close_menu());
             }
         }
         match intent {
@@ -1193,7 +1190,7 @@ impl Harness {
             SidebarIntent::Toggle(id) => self.toggle_group(id.to_string(), cx),
             SidebarIntent::TogglePinned => self.pinned_open = !self.pinned_open,
             SidebarIntent::ViewOptions => {
-                if !self.just_dismissed(MenuKind::ViewOptions) {
+                if !self.just_dismissed(MenuKind::ViewOptions, cx) {
                     self.open_menu(MenuKind::ViewOptions, cx);
                 }
             }
@@ -1202,9 +1199,11 @@ impl Harness {
             SidebarIntent::DismissMenus => {
                 // Remember what the press closed: when the press was on the
                 // menu's own trigger, the click that follows must not reopen it.
-                let closed = self.overlays.read(cx).menu.as_ref().map(|menu| menu.kind);
-                self.menu_dismissed = closed.map(|kind| (kind, std::time::Instant::now()));
-                self.overlays.update(cx, |overlays, _| overlays.menu = None);
+                let closed = self.overlays.read(cx).menu().map(|menu| menu.kind);
+                self.overlays.update(cx, |overlays, _| {
+                    overlays.stack.note_pressed_shut(closed.map(crate::overlay_stack::Trigger::Menu));
+                    overlays.close_menu();
+                });
             }
             SidebarIntent::AddProject => self.open_projects(false, window, cx),
             // A group row's actions: `+` starts a session in that project
@@ -1239,10 +1238,10 @@ impl Harness {
                 self.close_row_detail();
                 self.forced_detail = None;
                 let open = self.open_row_menu(cx).as_deref() == Some(id.as_ref());
-                if !open && !self.just_dismissed(MenuKind::SessionRow) {
+                if !open && !self.just_dismissed(MenuKind::SessionRow, cx) {
                     self.open_row_menu_for(id.to_string(), cx);
                 } else {
-                    self.overlays.update(cx, |overlays, _| overlays.menu = None);
+                    self.overlays.update(cx, |overlays, _| overlays.close_menu());
                 }
             }
             SidebarIntent::RowAction(id, action) => {
@@ -1270,16 +1269,18 @@ impl Harness {
                 self.focus_composer = true;
             }
             SidebarIntent::RenameCancel => {
-                self.renaming = None;
+                self.overlays.update(cx, |o, _| {
+                    o.stack.close(crate::overlay_stack::LayerKind::RenameSession);
+                });
                 self.focus_composer = true;
             }
             SidebarIntent::Account => {
-                if !self.just_dismissed(MenuKind::Account) {
+                if !self.just_dismissed(MenuKind::Account, cx) {
                     self.open_menu(MenuKind::Account, cx);
                 }
             }
             SidebarIntent::AccountAction(action) => {
-                self.overlays.update(cx, |overlays, _| overlays.menu = None);
+                self.overlays.update(cx, |overlays, _| overlays.close_menu());
                 match action {
                     AccountAction::Settings => self.open_settings(0, cx),
                     AccountAction::Providers => self.open_providers(cx),
@@ -1355,7 +1356,7 @@ impl Harness {
 
     /// The session whose row menu (`⋯`) stands open, if one does.
     pub(crate) fn open_row_menu(&self, cx: &gpui::App) -> Option<String> {
-        self.overlays.read(cx).menu.as_ref().filter(|menu| menu.kind == MenuKind::SessionRow).and_then(|menu| menu.session.clone())
+        self.overlays.read(cx).menu().filter(|menu| menu.kind == MenuKind::SessionRow).and_then(|menu| menu.session.clone())
     }
 
     /// Open `session`'s row menu, replacing whatever menu was open.
@@ -1368,11 +1369,12 @@ impl Harness {
         cx.notify();
     }
 
-    fn just_dismissed(&mut self, kind: MenuKind) -> bool {
-        match self.menu_dismissed.take() {
-            Some((closed, at)) => closed == kind && at.elapsed() < std::time::Duration::from_millis(400),
-            None => false,
-        }
+    /// Whether this click on `kind`'s trigger is the tail of the press that
+    /// just closed `kind`'s menu ([`crate::overlay_stack::OverlayStack::note_pressed_shut`]).
+    fn just_dismissed(&mut self, kind: MenuKind, cx: &mut Context<Self>) -> bool {
+        self.overlays
+            .update(cx, |overlays, _| overlays.stack.pressed_shut(crate::overlay_stack::Trigger::Menu(kind)))
+            .is_some_and(|ago| ago < crate::overlay_stack::REPRESS)
     }
 
     /// One row of the view-options menu (or its Group by / Sort by
@@ -1388,7 +1390,7 @@ impl Harness {
                     },
                     cx,
                 );
-                self.overlays.update(cx, |overlays, _| overlays.menu = None);
+                self.overlays.update(cx, |overlays, _| overlays.close_menu());
             }
             ViewOption::SortBy(key) => {
                 self.set_sort_by(
@@ -1399,7 +1401,7 @@ impl Harness {
                     },
                     cx,
                 );
-                self.overlays.update(cx, |overlays, _| overlays.menu = None);
+                self.overlays.update(cx, |overlays, _| overlays.close_menu());
             }
             ViewOption::ToggleEmpty => {
                 self.show_empty = !self.show_empty;
@@ -1417,7 +1419,7 @@ impl Harness {
             ViewOption::TogglePrStatus => {}
             ViewOption::ToggleSearchAll => self.toggle_search_scope(cx),
             ViewOption::ClearEmpty => {
-                self.overlays.update(cx, |overlays, _| overlays.menu = None);
+                self.overlays.update(cx, |overlays, _| overlays.close_menu());
                 self.clear_empty(cx);
             }
         }
@@ -1432,7 +1434,7 @@ impl Harness {
             }
             BrowseIntent::SiteInfo => {
                 let open = self.browse_centre_state(cx).is_some();
-                self.browser.update(cx, |browser, _| browser.site_info_open = open);
+                self.overlays.update(cx, |o, _| o.stack.set(crate::overlay_stack::Layer::SiteInfo, open));
                 cx.notify();
             }
             BrowseIntent::Bookmark => self.edit_shown_bookmark(window, cx),
@@ -1964,11 +1966,10 @@ impl Harness {
         if self
             .overlays
             .read(cx)
-            .menu
-            .as_ref()
+            .menu()
             .is_some_and(|menu| menu.kind == MenuKind::Project && !menu.project_header)
         {
-            self.overlays.update(cx, |overlays, _| overlays.menu = None);
+            self.overlays.update(cx, |overlays, _| overlays.close_menu());
         }
     }
 
@@ -2617,10 +2618,18 @@ mod tests {
         });
         let closed = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));
         assert!(pinned != closed, "a close re-arms the cached pane");
-        // The open tab menu is keyed too.
+        // The open tab menu (Browse's right-click menu on a tab, an entry
+        // on the overlay stack) is keyed too.
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
-                h.browser.update(cx, |browser, _| browser.tab_menu = browser.tabs.tabs.first().map(|tab| tab.id));
+                let id = h.browser.read(cx).tabs.tabs.first().map(|tab| tab.id).expect("a tab");
+                h.open_browse_menu(
+                    aui::screens::sidebar::BrowseMenu {
+                        target: aui::screens::sidebar::BrowseMenuTarget::Tab { id: format!("tab-{}", id.0).into(), pinned: false, in_folder: false },
+                        at: gpui::point(gpui::px(10.0), gpui::px(10.0)),
+                    },
+                    cx,
+                );
             })
         });
         let menu = vc.update(|_, cx| SidebarKey::current(baaz.read(cx), cx));

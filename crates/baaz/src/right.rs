@@ -248,8 +248,6 @@ pub(crate) struct RightCache {
     pub changes: crate::right_changes::ChangesUi,
     /// D6: the Page screen's "Search or enter an address" field.
     pub page_address: Option<gpui::Entity<gpui_kit::base::input::InputState>>,
-    /// The Page row's Recent pages menu is open (owner 2026-10-18).
-    pub page_menu: bool,
     /// D6: Files' filter and keyboard state.
     pub files_ui: crate::right_files::FilesUi,
     /// D6: an image file previewed at 100 % instead of fitted.
@@ -663,6 +661,7 @@ pub(crate) fn render_screen(
     width: f32,
     agent: &str,
     files_focus: &gpui::FocusHandle,
+    page_menu: bool,
     cx: &mut Context<RightPane>,
 ) -> AnyElement {
     let slug = kind.slug();
@@ -706,10 +705,10 @@ pub(crate) fn render_screen(
                 let merged = crate::right_page::shows_page(browser.state, cx);
                 // Over a native page the menu sits in its own window: a press
                 // anywhere else in this one closes it (live 2026-10-19).
-                let overlay_menu = cache.page_menu
+                let overlay_menu = page_menu
                     && browser.state.is_some_and(|st| st.read(cx).is_native() && !crate::right_page::page_covered(st.read(cx), cache));
-                let menu = crate::right_page::page_menu_in_window(cache.page_menu, browser.state, cache, width, merged, cx);
-                let body = crate::right_page::page_body(browser, pane_open, agent, cache.page_address.clone(), cache.page_menu, cx);
+                let menu = crate::right_page::page_menu_in_window(page_menu, browser.state, cache, width, merged, cx);
+                let body = crate::right_page::page_body(browser, pane_open, agent, cache.page_address.clone(), page_menu, cx);
                 let body = match menu {
                     Some(menu) => div().relative().size_full().child(body).child(menu).into_any_element(),
                     None if merged && overlay_menu => div()

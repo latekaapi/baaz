@@ -726,8 +726,9 @@ pub(crate) struct ConnectScreen {
     /// Muse's `account/read` never gates the window); afterwards only the
     /// person opens it, from Settings → Providers → "Set up providers…".
     pub(crate) open: bool,
-    /// The footer's "New sessions start in" menu stands open.
-    pub(crate) menu_open: bool,
+    /// The window's overlay stack: the footer's "New sessions start in"
+    /// menu is an entry on it.
+    overlays: Entity<crate::overlays::Overlays>,
     /// The window's provider facts, observed: a probe that lands redraws
     /// the rows without the root.
     model: Entity<ProviderStatusModel>,
@@ -744,9 +745,27 @@ impl EventEmitter<ConnectEvent> for ConnectScreen {}
 
 impl ConnectScreen {
     /// The screen, shut, over `model`.
-    pub(crate) fn new(model: Entity<ProviderStatusModel>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(model: Entity<ProviderStatusModel>, overlays: Entity<crate::overlays::Overlays>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&model, |_, _, cx| cx.notify());
-        ConnectScreen { open: false, menu_open: false, model, facts: ConnectFacts::default(), focus: cx.focus_handle(), _observe: observe }
+        ConnectScreen { open: false, overlays, model, facts: ConnectFacts::default(), focus: cx.focus_handle(), _observe: observe }
+    }
+
+    /// Whether the footer's menu stands open (an entry on the overlay stack).
+    pub(crate) fn menu_open(&self, cx: &gpui::App) -> bool {
+        self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::ConnectMenu)
+    }
+
+    /// Open or close the footer's menu; Escape pops it and redraws the
+    /// screen.
+    fn set_menu(&mut self, open: bool, cx: &mut Context<Self>) {
+        let owner = cx.entity_id();
+        self.overlays.update(cx, |o, _| {
+            if open {
+                o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::ConnectMenu).owner(owner));
+            } else {
+                o.stack.close(crate::overlay_stack::LayerKind::ConnectMenu);
+            }
+        });
     }
 
     /// Stand the screen up over the shell (or at boot). The root re-reads
@@ -756,9 +775,9 @@ impl ConnectScreen {
     }
 
     /// Leave it: Continue/Skip. The menu never outlives the screen.
-    pub(crate) fn dismiss(&mut self) {
+    pub(crate) fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.open = false;
-        self.menu_open = false;
+        self.set_menu(false, cx);
     }
 
     /// Open the footer's menu (the `connect-menu` step verb). `false` while
@@ -767,7 +786,7 @@ impl ConnectScreen {
         if !self.open {
             return false;
         }
-        self.menu_open = true;
+        self.set_menu(true, cx);
         cx.notify();
         true
     }
@@ -779,19 +798,20 @@ impl ConnectScreen {
             ConnectIntent::Continue | ConnectIntent::Skip => cx.emit(ConnectEvent::Finish),
             // The root redraws for the two that reach it.
             ConnectIntent::Provider(ProviderIntent { id, action }) => {
-                self.menu_open = false;
+                self.set_menu(false, cx);
                 cx.emit(ConnectEvent::ProviderAction { id: ProviderId::parse(&id), action });
             }
             ConnectIntent::ToggleDefaultMenu => {
-                self.menu_open = !self.menu_open;
+                let open = !self.menu_open(cx);
+                self.set_menu(open, cx);
                 cx.notify();
             }
             ConnectIntent::CloseDefaultMenu => {
-                self.menu_open = false;
+                self.set_menu(false, cx);
                 cx.notify();
             }
             ConnectIntent::SetDefault(provider) => {
-                self.menu_open = false;
+                self.set_menu(false, cx);
                 cx.emit(ConnectEvent::SetDefault(ProviderId::from_icon(provider)));
             }
             ConnectIntent::Assist(key) if key.as_ref() == crate::import_ui::IMPORT_ASSIST_KEY => {
@@ -835,7 +855,7 @@ impl Render for ConnectScreen {
         let model = self.model.read(cx);
         let rows = build_rows(&model.statuses, &model.codex_login);
         let current = self.facts.new_provider.unwrap_or(ProviderId::Muse);
-        let picker = default_picker_for(&model.statuses, current, self.menu_open);
+        let picker = default_picker_for(&model.statuses, current, self.menu_open(cx));
         // Codex's sign-in owns the line while it runs; otherwise the P7
         // offer may stand there (first run only).
         let codex = model.codex_assist();
@@ -870,7 +890,7 @@ impl Harness {
         let facts = self.connect_facts(cx);
         self.connect_screen.update(cx, |screen, _| screen.facts = facts);
         let mut stack = gpui::div().size_full().relative().child(self.connect_screen.clone());
-        if self.muse_sheet {
+        if self.muse_sheet_open(cx) {
             stack = stack.child(self.muse_sheet_layer(window, cx));
         }
         stack = stack.children(self.compose_setup_sheet(cx));
@@ -906,7 +926,7 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.muse_sheet || self.connect_open(cx) {
+        if !self.muse_sheet_open(cx) || self.connect_open(cx) {
             return None;
         }
         Some(self.muse_sheet_layer(window, cx))
@@ -938,8 +958,20 @@ impl Harness {
         if self.login.flow_running() {
             self.cancel_login_flow(cx);
         }
-        self.muse_sheet = false;
+        self.close_muse_sheet_entry(cx);
         cx.notify();
+    }
+
+    /// Whether Muse's sign-in sheet stands (an entry on the overlay stack).
+    pub(crate) fn muse_sheet_open(&self, cx: &gpui::App) -> bool {
+        self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::MuseSheet)
+    }
+
+    /// Take Muse's sign-in sheet off the overlay stack, nothing else.
+    pub(crate) fn close_muse_sheet_entry(&mut self, cx: &mut Context<Self>) {
+        self.overlays.update(cx, |o, _| {
+            o.stack.close(crate::overlay_stack::LayerKind::MuseSheet);
+        });
     }
 
     /// Raise Muse's sign-in sheet from its first step, over whatever is on
@@ -947,17 +979,20 @@ impl Harness {
     /// "Signed out of Muse" dialog used to reset the login and drop the open
     /// session without ever raising the sheet, so nothing appeared
     /// (docs/65 §1). The open session stays; it waits on the sign-in.
-    pub(crate) fn open_muse_sheet(&mut self) {
+    pub(crate) fn open_muse_sheet(&mut self, cx: &mut Context<Self>) {
         self.login.reset_to_choose();
-        self.muse_sheet = true;
+        // Escape off the stack closes it as ✕ does: the flow it started
+        // is cancelled with it.
+        let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::MuseSheet).on_close(|_, baaz, window, cx| baaz.close_muse_sheet(window, cx));
+        self.overlays.update(cx, |o, _| o.stack.push(entry));
     }
 
     /// Leave the connect screen: Continue and Skip both set
     /// `onboarding_completed`, so this launch and the next open the shell.
     pub(crate) fn finish_connect(&mut self, cx: &mut Context<Self>) {
         complete_onboarding();
-        self.connect_screen.update(cx, |screen, _| screen.dismiss());
-        self.muse_sheet = false;
+        self.connect_screen.update(cx, |screen, cx| screen.dismiss(cx));
+        self.close_muse_sheet_entry(cx);
         // New sessions start where the footer said: the stored pick while it
         // is Connected, else the first Connected in the board's order.
         let statuses = crate::provider_status::live_statuses();
@@ -983,7 +1018,7 @@ impl Harness {
     /// while it is up; the Settings page underneath keeps its section, so
     /// closing the screen lands back on it.
     pub(crate) fn open_connect_screen(&mut self, cx: &mut Context<Self>) {
-        self.muse_sheet = false;
+        self.close_muse_sheet_entry(cx);
         self.provider_model.update(cx, |model, _| model.reload());
         self.connect_screen.update(cx, |screen, _| screen.show());
         cx.notify();
@@ -1014,7 +1049,7 @@ impl Harness {
         match action {
             ProviderAction::SignIn => match id {
                 ProviderId::Muse => {
-                    self.open_muse_sheet();
+                    self.open_muse_sheet(cx);
                 }
                 ProviderId::Codex => self.provider_model.update(cx, |model, cx| model.begin_codex_signin(cx)),
                 ProviderId::ClaudeCode => self.open_setup_sheet(id, SetupKind::SignIn, window, cx),
@@ -1137,7 +1172,7 @@ impl Harness {
         let action = ProviderAction::SignIn;
         match id {
             ProviderId::Muse => {
-                self.open_muse_sheet();
+                self.open_muse_sheet(cx);
             }
             ProviderId::Codex => self.connect_provider_action(id, action, window, cx),
             ProviderId::ClaudeCode => self.connect_provider_action(id, action, window, cx),
@@ -1675,7 +1710,7 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let shown = screen.read(cx);
-            assert!(shown.menu_open, "the footer menu opened on the screen");
+            assert!(shown.menu_open(cx), "the footer menu opened on the screen");
             assert!(baaz.read(cx).connect_open(cx), "the screen still owns the window");
             assert!(crate::region::Region::covers_page(shown, cx), "an open screen covers Browse's page");
             assert!(

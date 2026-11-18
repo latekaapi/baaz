@@ -90,21 +90,17 @@ pub(crate) struct BrowserView {
     /// Each live tab's last seen origin: navigating to another origin (or
     /// closing) revokes that origin's "while visiting" grants.
     pub permission_origins: HashMap<TabId, String>,
-    /// Which Browse chrome popover stands open (B2a-H5): downloads (the
-    /// toolbar button exists only while downloads list), extensions, ⋯.
-    /// They drop over the page; see [`BrowserVisibility`].
-    pub downloads_open: bool,
+    /// The window's overlay stack ([`crate::overlay_stack`]): which Browse
+    /// chrome popover (downloads, extensions, ⋯), Browse menu, site
+    /// information or bookmark popover stands open lives there, not here.
+    pub(crate) overlays: gpui::Entity<crate::overlays::Overlays>,
     /// Where the sidebar's downloads button is (D4), in window
     /// coordinates: the popover opens under it.
     pub downloads_anchor: Option<gpui::Bounds<gpui::Pixels>>,
-    /// The extensions popover stands open.
-    pub extensions_open: bool,
     /// Whether the downloads popover has rendered since it opened: an
-    /// emptied list clears the flag only after it rendered once, so a
+    /// emptied list clears the popover only after it rendered once, so a
     /// scripted download's first frame never closes its own capture.
     pub downloads_rendered: bool,
-    /// The ⋯ page-actions menu stands open.
-    pub more_open: bool,
     /// Scripted fake-backend events, queued by `--steps` verbs and consumed
     /// when the next scripted page builds (captures only; production never
     /// queues). The events drain through the real poll path, so captures
@@ -206,11 +202,8 @@ pub(crate) struct BrowserView {
     /// the file the page paints. `newtab_ground_asked` keeps it to one bake
     /// per launch.
     pub(crate) newtab_ground: Option<std::path::PathBuf>,
-    /// The site-information panel (the address row's shield) stands open
-    /// over the page ([`crate::overlay`]).
-    pub(crate) site_info_open: bool,
-    /// R4: the bookmark popover's bookmark, while it stands open.
-    pub(crate) bookmark_edit: Option<crate::overlay::BookmarkEdit>,
+    /// R4: the bookmark popover's name-field subscription, while the
+    /// popover (an entry on the overlay stack) stands open.
     pub(crate) bookmark_edit_sub: Option<gpui::Subscription>,
     pub(crate) newtab_ground_asked: bool,
     /// Whether the highlight moved off the top Ask row (B2a-H4): Enter
@@ -287,34 +280,16 @@ pub(crate) struct BrowserView {
     /// slot when a tab drag rests past every row (drops append at the
     /// end). Transient like the row target, never keyed.
     pub(crate) browse_drop_at_end: bool,
-    /// The tab whose right-click menu stands open in the Browse sidebar
-    /// (`None` while none does). Part of the sidebar key.
-    pub(crate) tab_menu: Option<crate::browser::TabId>,
-    /// The Browse sidebar's open right-click menu (tab, folder, task
-    /// folder or space) at the pointer; drawn in the overlay window.
-    pub(crate) browse_menu: Option<aui::screens::sidebar::BrowseMenu>,
-    /// When the page menu last closed: the press on ⋯ that closes it (by
-    /// taking the keyboard from its overlay window) must not reopen it on
-    /// the same click's release.
-    pub(crate) page_menu_closed: Option<std::time::Instant>,
     /// The Browse name field in flight (a folder or a space), edited in
     /// the shared `rename` textarea.
     pub(crate) browse_naming: Option<aui::screens::sidebar::BrowseNaming>,
-    /// The overlay window over the native page (Browse menus), when open.
+    /// The overlay window over the native page (Browse menus, the Field,
+    /// the hosted modal), while it is open or opening.
     pub(crate) overlay: Option<crate::overlay::Overlay>,
-    /// An overlay being opened (its task is in flight), as (kind, bounds).
-    pub(crate) overlay_pending: Option<(crate::overlay::OverlayKind, gpui::Bounds<gpui::Pixels>)>,
     /// The corner window (Browse's corner stack), beside the overlay.
     pub(crate) corner: Option<crate::overlay::Overlay>,
-    /// The corner window being opened, until it lands.
-    pub(crate) corner_pending: Option<gpui::Bounds<gpui::Pixels>>,
     /// D6: the Page screen's float (pill, notes panel) over its native page.
     pub(crate) page_float: Option<crate::overlay::Overlay>,
-    pub(crate) page_float_pending: Option<gpui::Bounds<gpui::Pixels>>,
-    /// The open tab menu's anchor: the clicked row's bounds, reported by
-    /// the row's own prepaint. The popup seats at this rect; cleared with
-    /// the menu, refilled on the next pane repaint.
-    pub(crate) tab_menu_bounds: Option<(u64, Bounds<Pixels>)>,
     /// A session-owned tab the Browse centre shows: a task-folder row, or
     /// the session's page carried over from the pane. It stays owned by its
     /// session and survives a mode switch. Cleared by any person-tab select,
@@ -352,7 +327,7 @@ pub(crate) struct BrowserView {
 impl BrowserView {
     /// Empty: no tab and no webview exists until the Browser kind first
     /// shows. Tabs load lazily on first use (see `ensure_tabs_loaded`).
-    pub(crate) fn new(fake: bool, cx: &mut gpui::Context<Self>) -> Self {
+    pub(crate) fn new(fake: bool, overlays: gpui::Entity<crate::overlays::Overlays>, cx: &mut gpui::Context<Self>) -> Self {
         let data = cx.new(super::data::BrowserData::new);
         // A `browser.db` landing (hits, history length, bookmarks) changes
         // what the Field, the ★ and the sidebar draw: redraw the view, never
@@ -372,11 +347,9 @@ impl BrowserView {
             find_strips: chrome::FindStrips::default(),
             visit_allows: chrome::VisitAllows::default(),
             permission_origins: HashMap::new(),
-            downloads_open: false,
+            overlays,
             downloads_anchor: None,
-            extensions_open: false,
             downloads_rendered: false,
-            more_open: false,
             fake_scripts: Vec::new(),
             download_started: HashMap::new(),
             last_centre_shown: None,
@@ -410,8 +383,6 @@ impl BrowserView {
             browse_omnibox_selected: 0,
             browse_pickup_hover: None,
             newtab_ground: None,
-            site_info_open: false,
-            bookmark_edit: None,
             bookmark_edit_sub: None,
             newtab_ground_asked: false,
             browse_omnibox_moved: false,
@@ -429,17 +400,10 @@ impl BrowserView {
             default_browser_recheck: None,
             browse_drop_target: None,
             browse_drop_at_end: false,
-            tab_menu: None,
-            browse_menu: None,
-            page_menu_closed: None,
             browse_naming: None,
             overlay: None,
-            overlay_pending: None,
             corner: None,
-            corner_pending: None,
             page_float: None,
-            page_float_pending: None,
-            tab_menu_bounds: None,
             browse_session_tab: None,
             agent_window: crate::app::agent_window::AgentWindowState::default(),
             occlusion: NativeOcclusion::default(),

@@ -766,7 +766,7 @@ impl SessionView {
     pub(super) fn sync_model_menu_check(&mut self, cx: &mut Context<Self>) {
         let checked = self.model_menu_checked().unwrap_or(self.models.len());
         self.overlays.update(cx, |overlays, _| {
-            if let Some(menu) = overlays.menu.as_mut().filter(|menu| menu.kind == MenuKind::Model) {
+            if let Some(menu) = overlays.menu_mut().filter(|menu| menu.kind == MenuKind::Model) {
                 menu.selected = checked;
             }
         });
@@ -1886,7 +1886,7 @@ mod tests {
             view.update(cx, |view, cx| view.toggle_picker(MenuKind::Effort, cx));
             view.update(cx, |view, cx| {
                 use crate::overlays::EffortOptions;
-                let selected = view.overlays.read(cx).menu.as_ref().map(|m| m.selected);
+                let selected = view.overlays.read(cx).menu().map(|m| m.selected);
                 let EffortOptions::Available(options) = view.effort_options() else {
                     panic!("the picked row lists while turns are in");
                 };
@@ -1995,7 +1995,7 @@ mod tests {
             assert_eq!(rows, 1, "the reason row, never zero rows");
             view.update(cx, |view, cx| view.confirm_menu(window, cx));
             view.update(cx, |view, cx| {
-                assert!(view.overlays.read(cx).menu.is_none(), "the row acted and closed");
+                assert!(view.overlays.read(cx).menu().is_none(), "the row acted and closed");
             });
         });
     }

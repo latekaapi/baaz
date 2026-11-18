@@ -410,11 +410,6 @@ impl FeedbackUi {
         self.capturing = false;
     }
 
-    /// Whether anything is shown.
-    pub fn is_open(&self) -> bool {
-        self.phase != FeedbackPhase::Off
-    }
-
     /// Whether the capture layer covers the window (Active only — a
     /// paused shell leaves pages live).
     pub fn covers_app(&self) -> bool {
@@ -915,10 +910,13 @@ impl crate::app::Harness {
             });
         }
         self.overlays.update(cx, |overlays, _| {
-            overlays.palette = None;
-            overlays.menu = None;
+            overlays.close_palette();
+            overlays.close_menu();
         });
         self.close_dialog(cx);
+        // The layer takes the keyboard below: what the closed overlays held
+        // is not given back over it.
+        self.overlays.update(cx, |overlays, _| overlays.stack.take_restore());
         self.feedback.probe.activate(window);
         // A note-in-progress survived the pause: hand the keyboard back to
         // its field, otherwise to the layer.
@@ -3975,11 +3973,11 @@ mod tests {
                 h.set_dialog(cx, crate::app::Harness::quit_terminal_dialog("sleep 10", 0));
             })
         });
-        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.is_some()));
-        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).dialog.is_some()));
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette().is_some()));
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).dialog().is_some()));
         enter_active(&baaz, vc);
-        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette.is_none()));
-        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).dialog.is_none()));
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette().is_none()));
+        assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).dialog().is_none()));
         restore_state(state);
     }
 
@@ -5268,7 +5266,7 @@ mod tests {
             assert_eq!(harness.sessions.len(), sessions_before, "⌘N opens no session while Active");
             assert!(harness.active.is_none(), "⌘N opens no draft while Active");
             assert!(!harness.settings_open(cx), "Settings… stays closed while Active");
-            assert!(harness.overlays.read(cx).palette.is_none(), "the palette stays closed while Active");
+            assert!(harness.overlays.read(cx).palette().is_none(), "the palette stays closed while Active");
             assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));

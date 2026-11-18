@@ -469,9 +469,9 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     } },
     WindowVerb { verb: "site-info", run: |this, _, _, cx| {
         let open = this.browse_centre_state(cx).is_some();
-        this.browser.update(cx, |browser, _| browser.site_info_open = open);
+        this.overlays.update(cx, |o, _| o.stack.set(crate::overlay_stack::Layer::SiteInfo, open));
         cx.notify();
-        if this.browser.read(cx).site_info_open { Ok(()) } else { Err("no page is open".into()) }
+        if this.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::SiteInfo) { Ok(()) } else { Err("no page is open".into()) }
     } },
     WindowVerb { verb: "centre", run: |this, _, _, _| this.step_centre() },
     WindowVerb { verb: "skills", run: |this, rest, window, cx| this.step_skills(rest, window, cx) },
@@ -490,7 +490,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "agent-card", run: |this, _, _, cx| { this.toggle_agent_card(cx); Ok(()) } },
     WindowVerb { verb: "agent-column", run: |this, _, _, cx| { this.toggle_agent_column(cx); Ok(()) } },
     WindowVerb { verb: "browser-chat-fixture", run: |this, rest, window, cx| this.step_browser_chat_fixture(rest, window, cx) },
-    WindowVerb { verb: "handoff-picker", run: |this, _, _, cx| { this.browser.update(cx, |browser, _| browser.agent_window.handoff_picker_open = true); cx.notify(); Ok(()) } },
+    WindowVerb { verb: "handoff-picker", run: |this, _, _, cx| { this.overlays.update(cx, |o, _| o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::HandoffPicker))); cx.notify(); Ok(()) } },
     // Chromium's theme-change notification on every page window, as macOS
     // sends on an appearance or display change: the page ground must stay
     // white through it (owner 9 Nov: dark margins on Hacker News). Free.
@@ -505,7 +505,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "setup", run: |this, rest, window, cx| this.step_setup(rest, window, cx) },
     WindowVerb { verb: "connect-menu", run: |this, _, _, cx| this.step_connect_menu(cx) },
     WindowVerb { verb: "codex-login", run: |this, rest, _, cx| this.provider_model.update(cx, |model, cx| model.step_codex_login(rest, cx)) },
-    WindowVerb { verb: "muse-sheet", run: |this, _, _, cx| { this.open_muse_sheet(); cx.notify(); Ok(()) } },
+    WindowVerb { verb: "muse-sheet", run: |this, _, _, cx| { this.open_muse_sheet(cx); cx.notify(); Ok(()) } },
     WindowVerb { verb: "launch-failed", run: |this, rest, _, cx| this.step_launch_failed(rest, cx) },
     // P7 import (docs/72): the sheet, a folder's box, the run, the Undo.
     WindowVerb { verb: "import-open", run: |this, _, _, cx| this.step_import_open(cx) },
@@ -566,8 +566,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
             let target = this
                 .overlays
                 .read(cx)
-                .dialog
-                .as_ref()
+                .dialog()
                 .filter(|dialog| dialog.action == crate::overlays::DialogAction::ProviderSignOut)
                 .and_then(|dialog| dialog.archive_target.clone());
             let wire = target.ok_or("no sign-out confirm is open")?;

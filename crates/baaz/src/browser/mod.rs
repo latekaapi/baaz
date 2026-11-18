@@ -507,10 +507,7 @@ mod tests {
             centre_browse: false,
             session_active: true,
             settings_open: false,
-            palette_open: false,
-            menu_open: false,
-            plus_open: false,
-            dialog_open: false,
+            overlay_open: false,
             drop_cover: false,
             feedback_cover: false,
             omnibox_open: false,
@@ -528,10 +525,7 @@ mod tests {
             centre_browse: true,
             session_active: true,
             settings_open: false,
-            palette_open: false,
-            menu_open: false,
-            plus_open: false,
-            dialog_open: false,
+            overlay_open: false,
             drop_cover: false,
             feedback_cover: false,
             omnibox_open: false,
@@ -569,17 +563,16 @@ mod tests {
     #[test]
     fn stale_sessions_covers_never_reach_the_browse_centre() {
         let mut base = all_clear();
-        base.plus_open = true;
         base.drop_cover = true;
-        assert!(!browser_visible(base), "both still cover the pane's page");
+        assert!(!browser_visible(base), "it still covers the pane's page");
         assert!(
             browser_visible(super::centre_visibility(base, true, true, false)),
-            "Browse draws neither, so neither freezes its page"
+            "Browse draws no drop target, so it never freezes its page"
         );
         // What the main window really draws over the centre still covers.
-        base.menu_open = true;
+        base.overlay_open = true;
         assert!(!browser_visible(super::centre_visibility(base, true, true, false)));
-        base.menu_open = false;
+        base.overlay_open = false;
         assert!(!browser_visible(super::centre_visibility(base, true, true, true)), "a chrome popover");
     }
 
@@ -599,8 +592,8 @@ mod tests {
         // exactly as they obscure the pane's: the same covering rules,
         // not a second set.
         let mut palette = centre_clear();
-        palette.palette_open = true;
-        assert!(!browser_visible(palette), "the palette obscures the centre page");
+        palette.overlay_open = true;
+        assert!(!browser_visible(palette), "an overlay (the palette) obscures the centre page");
         let mut settings = centre_clear();
         settings.settings_open = true;
         assert!(!browser_visible(settings), "settings obscure the centre page");
@@ -685,7 +678,7 @@ mod tests {
 
     #[test]
     fn every_covering_input_hides_the_native_view() {
-        let cases: [(&str, VisibilityFlip); 9] = [
+        let cases: [(&str, VisibilityFlip); 6] = [
             ("closed pane", |mut inputs| {
                 inputs.pane_open = false;
                 inputs
@@ -702,20 +695,8 @@ mod tests {
                 inputs.settings_open = true;
                 inputs
             }),
-            ("palette", |mut inputs| {
-                inputs.palette_open = true;
-                inputs
-            }),
-            ("menu", |mut inputs| {
-                inputs.menu_open = true;
-                inputs
-            }),
-            ("plus menu", |mut inputs| {
-                inputs.plus_open = true;
-                inputs
-            }),
-            ("dialog", |mut inputs| {
-                inputs.dialog_open = true;
+            ("overlay", |mut inputs| {
+                inputs.overlay_open = true;
                 inputs
             }),
             ("drop overlay", |mut inputs| {

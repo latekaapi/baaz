@@ -66,8 +66,15 @@ impl RightPane {
 
     /// Open or close the Page row's Recent pages menu.
     pub(crate) fn set_page_menu(&mut self, open: bool, cx: &mut Context<Self>) {
-        if self.cache.page_menu != open {
-            self.cache.page_menu = open;
+        if self.page_menu_open(cx) != open {
+            let owner = cx.entity_id();
+            self.overlays.update(cx, |o, _| {
+                if open {
+                    o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::PageMenu).owner(owner));
+                } else {
+                    o.stack.close(crate::overlay_stack::LayerKind::PageMenu);
+                }
+            });
             cx.notify();
         }
     }
@@ -200,7 +207,7 @@ pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, 
         let weak = cx.weak_entity();
         pane = pane.recent_pages(menu_open, move |_, cx| {
             let _ = weak.update(cx, |this, cx| {
-                let open = !this.cache.page_menu;
+                let open = !this.page_menu_open(cx);
                 this.set_page_menu(open, cx);
             });
         });

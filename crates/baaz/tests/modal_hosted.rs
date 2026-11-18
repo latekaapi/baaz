@@ -31,9 +31,15 @@ fn browser_source() -> String {
 /// Owner recording 2026-10-11 5.23 PM: the ⌘K scrim dimmed the sidebar before the page; in Browse the overlay window hosts the modal over the live page.
 #[test]
 fn a_hosted_modal_does_not_hide_the_page() {
+    // Plan 4.6: the page's overlay cover is the stack's answer, and only an
+    // entry drawn in the main window covers; in Browse the modals' host
+    // resolves to the overlay window.
     let browser = browser_source();
-    assert!(browser.contains("overlays.palette.is_some() && !modal_hosted"), "a hosted palette leaves the page up");
-    assert!(browser.contains("overlays.dialog.is_some() && !modal_hosted"), "a hosted dialog leaves the page up");
+    assert!(browser.contains("self.overlays.read(cx).stack.covers_page(cx)"), "the page's overlay cover is the stack's");
+    let stack = source("overlay_stack.rs");
+    assert!(stack.contains("open.covers_page && open.host.resolve(browse) == Host::Main"), "an entry in the overlay window covers nothing");
+    assert!(stack.contains("Layer::Dialog(_) | Layer::Palette(_) => Host::Modal"), "the dialog and the palette follow the mode");
+    assert!(stack.contains("Host::Modal if browse => Host::Panel"), "Browse hosts a modal in the overlay window");
 }
 
 /// Owner recording 2026-10-11 5.23 PM: the ⌘K scrim dimmed the sidebar before the page; in Browse the overlay window hosts the modal over the live page.

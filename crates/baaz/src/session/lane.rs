@@ -3183,7 +3183,7 @@ mod tests {
         vc.update(|_, cx| {
             let view = view.read(cx);
             assert_eq!(view.model().as_ref(), "Default (recommended)");
-            let selected = view.overlays.read(cx).menu.as_ref().map(|menu| menu.selected).expect("open");
+            let selected = view.overlays.read(cx).menu().map(|menu| menu.selected).expect("open");
             assert_eq!(view.models.get(selected).map(|m| m.model_id.as_str()), Some("default"));
         });
     }
@@ -3195,7 +3195,7 @@ mod tests {
             view.update(cx, |view, cx| {
                 view.toggle_picker(kind, cx);
                 let rows = view.menu_rows(cx);
-                let from = view.overlays.read(cx).menu.as_ref().map_or(0, |menu| menu.selected);
+                let from = view.overlays.read(cx).menu().map_or(0, |menu| menu.selected);
                 view.overlays.update(cx, |overlays, _| overlays.move_selection(row as isize - from as isize, rows));
                 view.confirm_menu(window, cx);
             })
@@ -3243,7 +3243,7 @@ mod tests {
         });
         vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_picker(MenuKind::Mode, cx)));
         vc.update(|_, cx| {
-            let checked = view.read(cx).overlays.read(cx).menu.as_ref().map(|menu| menu.selected);
+            let checked = view.read(cx).overlays.read(cx).menu().map(|menu| menu.selected);
             assert_eq!(checked, MODES.iter().position(|mode| *mode == PermissionMode::PromptUnmatched));
         });
         vc.update(|_, cx| view.update(cx, |view, cx| view.close_menu(cx)));
@@ -4003,7 +4003,7 @@ mod tests {
         vc.update(|_, cx| {
             let view = view.read(cx);
             assert_eq!(view.mode_label(), "Full access");
-            let selected = view.overlays.read(cx).menu.as_ref().map(|menu| menu.selected);
+            let selected = view.overlays.read(cx).menu().map(|menu| menu.selected);
             assert_eq!(selected, MODES.iter().position(|mode| *mode == aui_protocol::PermissionMode::AllowAll));
         });
     }

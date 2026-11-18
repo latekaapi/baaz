@@ -11,18 +11,18 @@ impl Harness {
     /// The sidebar's downloads button (D4): opens the downloads popover
     /// under it, or closes it.
     pub(crate) fn toggle_browse_downloads(&mut self, anchor: Option<gpui::Bounds<gpui::Pixels>>, cx: &mut Context<Self>) {
-        let open = !self.browser.read(cx).downloads_open;
+        let open = !self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Downloads);
         self.dismiss_browse_popovers(cx);
-        self.browser.update(cx, |browser, _| browser.downloads_open = open);
+        self.overlays.update(cx, |o, _| o.stack.set(crate::overlay_stack::Layer::Downloads, open));
         self.browser.update(cx, |browser, _| browser.downloads_anchor = anchor);
         cx.notify();
     }
 
     /// The footer's extensions button (R4): its popover above it.
     pub(crate) fn toggle_browse_extensions(&mut self, anchor: Option<gpui::Bounds<gpui::Pixels>>, cx: &mut Context<Self>) {
-        let open = !self.browser.read(cx).extensions_open;
+        let open = !self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Extensions);
         self.dismiss_browse_popovers(cx);
-        self.browser.update(cx, |browser, _| browser.extensions_open = open);
+        self.overlays.update(cx, |o, _| o.stack.set(crate::overlay_stack::Layer::Extensions, open));
         self.browser.update(cx, |browser, _| browser.downloads_anchor = anchor);
         cx.notify();
     }
@@ -108,7 +108,7 @@ impl BrowserView {
     /// still opens (it says so).
     pub(crate) fn downloads_overlay_wanted(&self, cx: &gpui::App) -> bool {
         crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse
-            && (self.downloads_open || self.extensions_open)
+            && (self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Downloads) || self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Extensions))
             && self.downloads_anchor.is_some()
     }
 }

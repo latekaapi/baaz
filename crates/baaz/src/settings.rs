@@ -626,13 +626,12 @@ pub(crate) struct SettingsPage {
     /// The last refused write per Shortcuts row, by row id: shown as the
     /// row's detail until the next edit on that row.
     pub(crate) shortcut_errors: HashMap<String, String>,
-    /// Browser › Assistant's model menu stands open.
-    assistant_menu_open: bool,
     /// The provider cards whose Details are open (closed by default).
     pub(crate) details_open: HashSet<ProviderId>,
-    /// The "New sessions start in" menu stands open (it never outlives
-    /// its page).
-    pub(crate) default_menu_open: bool,
+    /// The window's overlay stack: the page's two menus (Browser ›
+    /// Assistant's model menu, the "New sessions start in" menu) are
+    /// entries on it.
+    overlays: Entity<crate::overlays::Overlays>,
     /// Whether the move row shows its dry-run path list (B4M): view
     /// state, never persisted, shut by default.
     pub(crate) migration_paths_expanded: bool,
@@ -651,7 +650,12 @@ impl EventEmitter<SettingsEvent> for SettingsPage {}
 
 impl SettingsPage {
     /// The page at boot, closed.
-    pub(crate) fn new(model: Entity<crate::provider_model::ProviderStatusModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        model: Entity<crate::provider_model::ProviderStatusModel>,
+        overlays: Entity<crate::overlays::Overlays>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let observe = cx.observe(&model, |this, _, cx| {
             if this.state.open {
                 cx.notify();
@@ -665,9 +669,8 @@ impl SettingsPage {
             shortcuts: crate::keymap::effective_bindings(),
             recording: None,
             shortcut_errors: HashMap::new(),
-            assistant_menu_open: false,
             details_open: HashSet::new(),
-            default_menu_open: false,
+            overlays,
             migration_paths_expanded: false,
             facts: SettingsFacts::default(),
             model,
@@ -686,12 +689,42 @@ impl SettingsPage {
     /// disarmed, the "New sessions" menu shut, the surface's focus armed.
     /// Idempotent: open, never toggle. Only the root calls it, and the
     /// root redraws (the page's view is composed in the root's frame).
-    pub(crate) fn open(&mut self, target: &str, active: Option<String>) {
+    pub(crate) fn open(&mut self, target: &str, active: Option<String>, cx: &mut Context<Self>) {
         self.refresh_shortcuts();
         self.recording = None;
         self.state.open(target, active);
         self.focus_armed = true;
-        self.default_menu_open = false;
+        self.set_default_menu(false, cx);
+    }
+
+    /// Whether the "New sessions start in" menu stands open (an entry on the
+    /// overlay stack).
+    pub(crate) fn default_menu_open(&self, cx: &gpui::App) -> bool {
+        self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::DefaultProviderMenu)
+    }
+
+    /// Open or close the "New sessions start in" menu.
+    fn set_default_menu(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.set_menu(crate::overlay_stack::Layer::DefaultProviderMenu, open, cx);
+    }
+
+    /// Whether Browser › Assistant's model menu stands open (an entry on the
+    /// overlay stack).
+    fn assistant_menu_open(&self, cx: &gpui::App) -> bool {
+        self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::AssistantMenu)
+    }
+
+    /// Open or close one of the page's menus on the overlay stack; Escape
+    /// pops it and redraws the page.
+    fn set_menu(&mut self, layer: crate::overlay_stack::Layer, open: bool, cx: &mut Context<Self>) {
+        let owner = cx.entity_id();
+        self.overlays.update(cx, |o, _| {
+            if open {
+                o.stack.push(crate::overlay_stack::Entry::new(layer).owner(owner));
+            } else {
+                o.stack.close(layer.kind());
+            }
+        });
     }
 
     /// Close: the route shuts and a recording disarms. The root restores
@@ -746,7 +779,7 @@ impl SettingsPage {
         if !self.state.open {
             return false;
         }
-        self.default_menu_open = true;
+        self.set_default_menu(true, cx);
         cx.notify();
         true
     }
@@ -759,10 +792,13 @@ impl SettingsPage {
     pub(crate) fn default_provider_intent(&mut self, intent: aui::screens::ConnectIntent, cx: &mut Context<Self>) {
         use aui::screens::ConnectIntent;
         match intent {
-            ConnectIntent::ToggleDefaultMenu => self.default_menu_open = !self.default_menu_open,
-            ConnectIntent::CloseDefaultMenu => self.default_menu_open = false,
+            ConnectIntent::ToggleDefaultMenu => {
+                let open = !self.default_menu_open(cx);
+                self.set_default_menu(open, cx);
+            }
+            ConnectIntent::CloseDefaultMenu => self.set_default_menu(false, cx),
             ConnectIntent::SetDefault(provider) => {
-                self.default_menu_open = false;
+                self.set_default_menu(false, cx);
                 cx.emit(SettingsEvent::SetDefaultProvider(ProviderId::from_icon(provider)));
             }
             _ => return,
@@ -1361,10 +1397,11 @@ impl SettingsPage {
         let chip_label = current.as_ref().map(|c| c.label).unwrap_or("No provider connected");
         let mut chip = button("settings-assistant-model", chip_label)
             .trailing(aui_icons::icon(IconName::ChevronDown).size(px(scale::ICON_SM)).color(p.fg_muted))
-            .menu_open(self.assistant_menu_open)
+            .menu_open(self.assistant_menu_open(cx))
             .accessibility_label(format!("Assistant model, {chip_label}. Change"))
             .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.assistant_menu_open = !this.assistant_menu_open;
+                let open = !this.assistant_menu_open(cx);
+                this.set_menu(crate::overlay_stack::Layer::AssistantMenu, open, cx);
                 cx.notify();
             }));
         if let Some(choice) = current.as_ref() {
@@ -1372,7 +1409,7 @@ impl SettingsPage {
         }
         let chip = div().debug_selector(|| "settings-assistant-model".into()).child(chip);
         anchor = anchor.child(chip);
-        if self.assistant_menu_open {
+        if self.assistant_menu_open(cx) {
             let choices: Vec<crate::browser::assistant::ModelChoice> = ProviderId::all()
                 .into_iter()
                 .filter(|id| crate::settings_providers::usable_provider(&statuses, *id))
@@ -1401,14 +1438,14 @@ impl SettingsPage {
                         let (provider, model) = (provider.to_owned(), model.to_owned());
                         let _ = pick.update(cx, |this, cx| {
                             crate::layout::Layout::stage(cx, |layout| layout.assistant = crate::browser::assistant::AssistantPrefs { provider: Some(provider), model: Some(model) });
-                            this.assistant_menu_open = false;
+                            this.set_menu(crate::overlay_stack::Layer::AssistantMenu, false, cx);
                             crate::layout::Layout::save(cx);
                             cx.notify();
                         });
                     })
                     .on_close(move |_, cx| {
                         let _ = close.update(cx, |this, cx| {
-                            this.assistant_menu_open = false;
+                            this.set_menu(crate::overlay_stack::Layer::AssistantMenu, false, cx);
                             cx.notify();
                         });
                     }),
@@ -1813,7 +1850,7 @@ impl SettingsPage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let current = self.facts.new_provider.unwrap_or(ProviderId::Muse);
-        let row: AnyElement = match crate::connect::default_picker_for(statuses, current, self.default_menu_open) {
+        let row: AnyElement = match crate::connect::default_picker_for(statuses, current, self.default_menu_open(cx)) {
             Some(picker) => {
                 let weak = cx.entity().downgrade();
                 let control = aui::screens::default_provider_picker(
@@ -2086,13 +2123,13 @@ impl Harness {
     /// focus, so keyboard nav and ⌘F work without a click first.
     pub(crate) fn open_settings_page(&mut self, target: &str, cx: &mut Context<Self>) {
         let active = self.settings_active_id(cx);
-        self.settings_page.update(cx, |page, _| page.open(target, active));
+        self.settings_page.update(cx, |page, cx| page.open(target, active, cx));
         // Settings replaces the Skills page as it does the transcript.
         self.leave_skills(cx);
         self.overlays.update(cx, |overlays, _| {
-            overlays.menu = None;
-            overlays.palette = None;
-            overlays.dialog = None;
+            overlays.close_menu();
+            overlays.close_palette();
+            overlays.close_dialog();
         });
         // Settings → Providers recomputes the B4M plan off the UI thread:
         // the row renders the cache (never the walker) and follows when
@@ -2109,14 +2146,11 @@ impl Harness {
 
     /// Close the Settings page, restoring the saved session. Scroll,
     /// draft, focus, right pane and terminal come back exactly: the page
-    /// never wrote their state, it only hid them. Closing parks the
-    /// composer next frame, and marks the overlay closed already, so the
-    /// frame's just-closed parking does not steal the composer back to
-    /// the root.
+    /// never wrote their state, it only hid them. Closing hands the
+    /// keyboard to the composer next frame.
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_page.update(cx, |page, _| page.close());
         self.focus_composer = true;
-        self.overlay_was_open = false;
         cx.notify();
     }
 

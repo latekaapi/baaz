@@ -74,6 +74,7 @@ mod mascot;
 mod native_lights;
 mod newtab_ground;
 mod overlay;
+mod overlay_stack;
 mod overlays;
 mod perf_budget;
 mod perf_turn;

@@ -130,7 +130,7 @@ impl Harness {
     /// The picker over the card, while it is open: anchored under the
     /// card's ↗, right-aligned to it.
     pub(crate) fn render_handoff_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if !self.browser.read(cx).agent_window.handoff_picker_open {
+        if !self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::HandoffPicker) {
             return None;
         }
         let query = match self.browser.read(cx).agent_window.handoff_query.clone() {
@@ -161,7 +161,7 @@ impl Harness {
                     cx.notify();
                 }
                 HandoffIntent::Close => {
-                    this.browser.update(cx, |browser, _| browser.agent_window.handoff_picker_open = false);
+                    this.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::HandoffPicker); });
                     cx.notify();
                 }
             });
@@ -184,7 +184,7 @@ impl Harness {
                 }
             }
             "escape" => {
-                this.browser.update(cx, |browser, _| browser.agent_window.handoff_picker_open = false);
+                this.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::HandoffPicker); });
                 cx.notify();
             }
             _ => {}
@@ -198,7 +198,7 @@ impl Harness {
     /// task folder, the target opens in Sessions with the chat's context as
     /// an unsent draft, and the chat records the handoff (board 3b).
     pub(crate) fn hand_off_browser_chat(&mut self, target: HandoffTarget, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser.update(cx, |browser, _| browser.agent_window.handoff_picker_open = false);
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::HandoffPicker); });
         let Some(chat) = self.registry.browser_chat().cloned() else { return };
         let (chat_id, answer) = {
             let view = chat.read(cx);

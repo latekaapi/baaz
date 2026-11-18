@@ -221,7 +221,7 @@ impl Harness {
                 // A Muse sign-in lands wherever it started: it closes the
                 // sheet, clears Muse's quiet banner, and marks Muse seen
                 // so a later sign-out earns the banner instead of a gate.
-                self.muse_sheet = false;
+                self.close_muse_sheet_entry(cx);
                 self.provider_model.update(cx, |model, _| model.muse_signed_in());
                 self.load_sessions(cx);
                 // `--tier` fakes the probe for a screenshot, and nothing else:
@@ -658,7 +658,7 @@ impl Harness {
             // rows from the scripted statuses, all Checking when unset.
             LoginSample::Connect => {
                 self.connect_screen.update(cx, |screen, _| screen.show());
-                self.muse_sheet = false;
+                self.close_muse_sheet_entry(cx);
                 self.provider_model.update(cx, |model, _| model.reload());
                 // The sample is a first run: the import offer may stand
                 // under the rows (a capture scans only a fixture home).

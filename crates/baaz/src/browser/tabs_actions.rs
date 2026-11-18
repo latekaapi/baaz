@@ -137,8 +137,6 @@ impl Harness {
             self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         }
         self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
-        self.browser.update(cx, |browser, _| browser.tab_menu = None);
-        self.browser.update(cx, |browser, _| browser.tab_menu_bounds = None);
         self.browser.update(cx, |browser, _| browser.browse_drop_target = None);
         self.browser.update(cx, |browser, _| browser.browse_drop_at_end = false);
         self.ensure_tab_page(HOME_KEY, id, window, cx);
@@ -254,8 +252,6 @@ impl Harness {
         if self.browser.read(cx).tabs.get(id).is_none_or(|tab| tab.owner != Owner::Person) {
             return;
         }
-        self.browser.update(cx, |browser, _| browser.tab_menu = None);
-        self.browser.update(cx, |browser, _| browser.tab_menu_bounds = None);
         self.browser.update(cx, |browser, _| browser.browse_drop_target = None);
         self.browser.update(cx, |browser, _| browser.browse_drop_at_end = false);
         self.close_tab(HOME_KEY, id, window, cx);
@@ -268,8 +264,6 @@ impl Harness {
         self.ensure_tabs_loaded(cx);
         let pinned = !self.browser.read(cx).tabs.get(id).filter(|tab| tab.owner == Owner::Person)?.pinned;
         self.browser.update(cx, |browser, _| browser.tabs.set_pinned(id, pinned)).then_some(pinned)?;
-        self.browser.update(cx, |browser, _| browser.tab_menu = None);
-        self.browser.update(cx, |browser, _| browser.tab_menu_bounds = None);
         self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
         cx.notify();
         Some(pinned)
@@ -298,22 +292,8 @@ impl Harness {
         if !url.is_empty() {
             state.update(cx, |state, _cx| state.navigate(&url));
         }
-        self.browser.update(cx, |browser, _| browser.tab_menu = None);
-        self.browser.update(cx, |browser, _| browser.tab_menu_bounds = None);
         self.browser.update(cx, |browser, _| browser.browse_drop_target = None);
         cx.notify();
-    }
-
-    /// Close the open tab menu, if any: Escape and click-outside share
-    /// this one path. Answers whether one stood open.
-    pub(crate) fn close_tab_menu(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.browser.update(cx, |browser, _| browser.tab_menu.take().is_some()) {
-            self.browser.update(cx, |browser, _| browser.tab_menu_bounds = None);
-            cx.notify();
-            true
-        } else {
-            false
-        }
     }
 
     /// Show a session-owned tab in the Browse centre (a task-folder row):

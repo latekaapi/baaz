@@ -396,10 +396,10 @@ impl Harness {
         if !self.rebuild_shown_browse_page(window, cx) {
             return Err("no tab is shown in Browse".into());
         }
-        self.browser.update(cx, |browser, _| browser.downloads_open = true);
+        self.overlays.update(cx, |o, _| o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Downloads)));
         self.browser.update(cx, |browser, _| browser.downloads_rendered = false);
-        self.browser.update(cx, |browser, _| browser.extensions_open = false);
-        self.browser.update(cx, |browser, _| browser.more_open = false);
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::Extensions); });
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::More); });
         cx.notify();
         Ok(())
     }
@@ -426,9 +426,9 @@ impl Harness {
         if self.browse_centre_page(window, cx).is_none() {
             return Err("no page is open in Browse".into());
         }
-        self.browser.update(cx, |browser, _| browser.more_open = true);
-        self.browser.update(cx, |browser, _| browser.downloads_open = false);
-        self.browser.update(cx, |browser, _| browser.extensions_open = false);
+        self.overlays.update(cx, |o, _| o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::More)));
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::Downloads); });
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::Extensions); });
         cx.notify();
         Ok(())
     }
@@ -440,9 +440,9 @@ impl Harness {
         if self.browse_centre_page(window, cx).is_none() {
             return Err("no page is open in Browse".into());
         }
-        self.browser.update(cx, |browser, _| browser.extensions_open = true);
-        self.browser.update(cx, |browser, _| browser.downloads_open = false);
-        self.browser.update(cx, |browser, _| browser.more_open = false);
+        self.overlays.update(cx, |o, _| o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Extensions)));
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::Downloads); });
+        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::More); });
         cx.notify();
         Ok(())
     }

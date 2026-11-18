@@ -67,7 +67,7 @@ pub(crate) enum SheetStage {
     Done,
 }
 
-/// The open sheet.
+/// The open sheet: the content of the overlay stack's `ImportSheet` entry.
 #[derive(Clone, Debug)]
 pub(crate) struct ImportSheet {
     pub stage: SheetStage,
@@ -112,7 +112,6 @@ pub(crate) struct ImportUi {
     /// A refresh was asked for while one ran (an import or Undo changed
     /// what is in Baaz since it started): run once more when it lands.
     pub rescan_owed: bool,
-    pub sheet: Option<ImportSheet>,
     pub journal: import::Journal,
     pub run: Option<ImportRun>,
     /// This launch opened on the first-run connect screen: the only time
@@ -318,7 +317,7 @@ impl Harness {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.import.scanning = false;
-                this.land_import_plan(plan);
+                this.land_import_plan(plan, cx);
                 if std::mem::take(&mut this.import.rescan_owed) {
                     this.refresh_import_scan(cx);
                 }
@@ -346,27 +345,37 @@ impl Harness {
 
     /// A plan landed: cache it, and give an open sheet still waiting on one
     /// its defaults.
-    fn land_import_plan(&mut self, plan: Plan) {
-        if let Some(sheet) = self.import.sheet.as_mut() {
+    fn land_import_plan(&mut self, plan: Plan, cx: &mut Context<Self>) {
+        self.with_import_sheet(cx, |sheet| {
             if sheet.choice.is_none() {
                 sheet.choice = Some(Choice::defaults(&plan));
             }
-        }
+        });
         self.import.cache = Some(ImportCache { plan, computed_at: std::time::Instant::now() });
     }
 
     /// The scan, synchronously: the `--steps` verbs only (fixture homes),
     /// so a scripted capture never races the background scan.
-    fn scan_import_now(&mut self) {
+    fn scan_import_now(&mut self, cx: &mut Context<Self>) {
         if !import::scan_allowed() {
             return;
         }
         let (home, known, projects) = self.import_inputs();
         let plan = import::plan(&import::scan_home(&home), &known, &projects, Some(&home));
-        self.land_import_plan(plan);
+        self.land_import_plan(plan, cx);
     }
 
     // ------------------------------------------------------------ the sheet
+
+    /// The open import sheet (an entry on the overlay stack).
+    pub(crate) fn import_sheet(&self, cx: &gpui::App) -> Option<ImportSheet> {
+        self.overlays.read(cx).stack.import_sheet().cloned()
+    }
+
+    /// Change the open import sheet, if one stands.
+    fn with_import_sheet<R>(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut ImportSheet) -> R) -> Option<R> {
+        self.overlays.update(cx, |o, _| o.stack.import_sheet_mut().map(change))
+    }
 
     /// Open the import sheet: on the folders, defaulted from the cached
     /// plan (or as soon as one lands), or on the run when one is going.
@@ -381,13 +390,23 @@ impl Harness {
             self.refresh_import_scan(cx);
         }
         let choice = self.import.plan().map(Choice::defaults);
-        self.import.sheet = Some(ImportSheet { stage, choice, show_unreadable: false });
+        let sheet = ImportSheet { stage, choice, show_unreadable: false };
+        // Escape off the stack closes it as ✕ does.
+        let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::ImportSheet(sheet)).on_close(|_, baaz, _, cx| baaz.import_sheet_closed(cx));
+        self.overlays.update(cx, |o, _| o.stack.push(entry));
         cx.notify();
     }
 
     /// Close the sheet (✕, Cancel, Close, Done, Escape). A run keeps going.
     pub(crate) fn close_import_sheet(&mut self, cx: &mut Context<Self>) {
-        self.import.sheet = None;
+        self.overlays.update(cx, |o, _| {
+            o.stack.close(crate::overlay_stack::LayerKind::ImportSheet);
+        });
+        self.import_sheet_closed(cx);
+    }
+
+    /// After the sheet closed: a finished run is done with.
+    fn import_sheet_closed(&mut self, cx: &mut Context<Self>) {
         if self.import.run.as_ref().is_some_and(|run| run.finished) {
             self.import.run = None;
         }
@@ -396,38 +415,44 @@ impl Harness {
 
     /// Tick or untick one folder (by cwd).
     pub(crate) fn toggle_import_folder(&mut self, cwd: &str, on: bool, cx: &mut Context<Self>) {
-        if let Some(choice) = self.import.sheet.as_mut().and_then(|s| s.choice.as_mut()) {
-            if on {
-                choice.ticked.insert(cwd.to_owned());
-            } else {
-                choice.ticked.remove(cwd);
+        self.with_import_sheet(cx, |sheet| {
+            if let Some(choice) = sheet.choice.as_mut() {
+                if on {
+                    choice.ticked.insert(cwd.to_owned());
+                } else {
+                    choice.ticked.remove(cwd);
+                }
             }
-        }
+        });
         cx.notify();
     }
 
     /// Tick or untick the folded folders together.
     fn toggle_import_rest(&mut self, on: bool, cx: &mut Context<Self>) {
         let Some(plan) = self.import.plan().cloned() else { return };
-        if let Some(choice) = self.import.sheet.as_mut().and_then(|s| s.choice.as_mut()) {
-            let (_, rest) = visible_folders(&plan, choice);
-            let rest: Vec<String> = rest.iter().map(|f| f.cwd.clone()).collect();
-            for cwd in rest {
-                if on {
-                    choice.ticked.insert(cwd);
-                } else {
-                    choice.ticked.remove(&cwd);
+        self.with_import_sheet(cx, |sheet| {
+            if let Some(choice) = sheet.choice.as_mut() {
+                let (_, rest) = visible_folders(&plan, choice);
+                let rest: Vec<String> = rest.iter().map(|f| f.cwd.clone()).collect();
+                for cwd in rest {
+                    if on {
+                        choice.ticked.insert(cwd);
+                    } else {
+                        choice.ticked.remove(&cwd);
+                    }
                 }
             }
-        }
+        });
         cx.notify();
     }
 
     /// The "Skip scripted runs" box.
     pub(crate) fn set_import_skip_scripted(&mut self, on: bool, cx: &mut Context<Self>) {
-        if let Some(choice) = self.import.sheet.as_mut().and_then(|s| s.choice.as_mut()) {
-            choice.skip_scripted = on;
-        }
+        self.with_import_sheet(cx, |sheet| {
+            if let Some(choice) = sheet.choice.as_mut() {
+                choice.skip_scripted = on;
+            }
+        });
         cx.notify();
     }
 
@@ -440,7 +465,7 @@ impl Harness {
             return;
         }
         let Some(plan) = self.import.plan().cloned() else { return };
-        let Some(choice) = self.import.sheet.as_ref().and_then(|s| s.choice.clone()) else { return };
+        let Some(choice) = self.import_sheet(cx).and_then(|s| s.choice) else { return };
         let queue: VecDeque<(Found, Option<String>)> = import::chosen(&plan, &choice)
             .into_iter()
             .filter(|found| !self.provider_sessions.contains_key(&found.session_id))
@@ -475,9 +500,7 @@ impl Harness {
             in_flight: false,
             finished: false,
         });
-        if let Some(sheet) = self.import.sheet.as_mut() {
-            sheet.stage = SheetStage::Progress;
-        }
+        self.with_import_sheet(cx, |sheet| sheet.stage = SheetStage::Progress);
         self.next_import_batch(cx);
         cx.notify();
     }
@@ -570,9 +593,7 @@ impl Harness {
         let (id, added) = (run.id.clone(), run.added.len());
         self.import.journal.drop_empty();
         self.write_import_journal();
-        if let Some(sheet) = self.import.sheet.as_mut() {
-            sheet.stage = SheetStage::Done;
-        } else {
+        if self.with_import_sheet(cx, |sheet| sheet.stage = SheetStage::Done).is_none() {
             // Closed mid-run: nothing waits on the result.
             self.import.run = None;
         }
@@ -603,7 +624,9 @@ impl Harness {
         }
         if self.import.run.as_ref().is_some_and(|run| run.id == id) {
             self.import.run = None;
-            self.import.sheet = None;
+            self.overlays.update(cx, |o, _| {
+                o.stack.close(crate::overlay_stack::LayerKind::ImportSheet);
+            });
         }
         self.refresh_import_scan(cx);
         cx.notify();
@@ -636,16 +659,18 @@ impl Harness {
     /// `import-open`: the sheet, on a plan scanned now (fixture homes). A
     /// sheet that did not open with a choice is an `Err`.
     pub(crate) fn step_import_open(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        self.scan_import_now();
+        self.scan_import_now(cx);
         self.open_import_sheet(cx);
         // The background refresh `open` kicked is redundant here; the
         // synchronous plan is already the defaults.
-        if let (Some(sheet), Some(plan)) = (self.import.sheet.as_mut(), self.import.cache.as_ref()) {
-            if sheet.choice.is_none() {
-                sheet.choice = Some(Choice::defaults(&plan.plan));
-            }
+        if let Some(defaults) = self.import.cache.as_ref().map(|plan| Choice::defaults(&plan.plan)) {
+            self.with_import_sheet(cx, |sheet| {
+                if sheet.choice.is_none() {
+                    sheet.choice = Some(defaults);
+                }
+            });
         }
-        if self.import.sheet.as_ref().is_none_or(|s| s.choice.is_none()) {
+        if self.import_sheet(cx).is_none_or(|s| s.choice.is_none()) {
             return Err("the import sheet did not open on a plan".into());
         }
         Ok(())
@@ -657,10 +682,8 @@ impl Harness {
     pub(crate) fn step_import_toggle(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let rest = rest.trim();
         let choice = self
-            .import
-            .sheet
-            .as_ref()
-            .and_then(|s| s.choice.clone())
+            .import_sheet(cx)
+            .and_then(|s| s.choice)
             .ok_or("the import sheet is not open")?;
         if rest == "scripted" {
             self.set_import_skip_scripted(!choice.skip_scripted, cx);
@@ -753,7 +776,8 @@ impl Harness {
 
     /// The sheet over the scrim, or `None` while it is shut.
     pub(crate) fn render_import_sheet(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let sheet = self.import.sheet.as_ref()?;
+        let sheet = self.import_sheet(cx)?;
+        let sheet = &sheet;
         let escape = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
             if event.keystroke.key == "escape" {
                 this.close_import_sheet(cx);
@@ -1050,9 +1074,7 @@ impl Harness {
             .text_color(p.ink_4);
         if unreadable > 0 {
             let toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                if let Some(sheet) = this.import.sheet.as_mut() {
-                    sheet.show_unreadable = !sheet.show_unreadable;
-                }
+                this.with_import_sheet(cx, |sheet| sheet.show_unreadable = !sheet.show_unreadable);
                 cx.notify();
             });
             let label = if sheet.show_unreadable {

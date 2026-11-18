@@ -278,7 +278,7 @@ fn a_new_session_opens_on_the_click_and_its_row_needs_no_list(cx: &mut gpui::Tes
         assert_eq!(row.project.as_deref(), Some(project.as_str()), "it files under its project");
         assert_eq!(row.turns, 0, "zero turns: out of view until its first send");
         assert!(!row.running, "opened, not started: a draft that shows the row must not read Working");
-        assert!(harness.overlays.read(cx).dialog.is_none(), "no failure dialog");
+        assert!(harness.overlays.read(cx).dialog().is_none(), "no failure dialog");
     });
     let requests = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(requests.contains("\"session/start\""), "the start was sent: {requests}");
@@ -390,7 +390,7 @@ fn quit_asks_when_a_turn_is_running(cx: &mut gpui::TestAppContext) {
     let asked = vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.maybe_confirm_quit(cx)));
     assert!(asked, "a running turn asks first");
     let (action, title) = vc
-        .update(|_, cx| baaz.read(cx).overlays.read(cx).dialog.as_ref().map(|d| (d.action, d.title.to_string())))
+        .update(|_, cx| baaz.read(cx).overlays.read(cx).dialog().map(|d| (d.action, d.title.to_string())))
         .expect("a dialog");
     assert_eq!(action, crate::overlays::DialogAction::QuitWithWorkRunning);
     assert_eq!(title, "Quit while an agent is working?");
@@ -740,7 +740,7 @@ fn escape_closes_the_composer_provider_menu(cx: &mut gpui::TestAppContext) {
         let view = baaz.read(cx).active.clone().expect("the lane opened");
         view.update(cx, |view, cx| view.toggle_picker(crate::overlays::MenuKind::Provider, cx));
         assert!(
-            baaz.read(cx).overlays.read(cx).menu.is_some(),
+            baaz.read(cx).overlays.read(cx).menu().is_some(),
             "the provider menu opened"
         );
     });
@@ -749,16 +749,16 @@ fn escape_closes_the_composer_provider_menu(cx: &mut gpui::TestAppContext) {
     });
     vc.update(|_, cx| {
         assert!(
-            baaz.read(cx).overlays.read(cx).menu.is_none(),
+            baaz.read(cx).overlays.read(cx).menu().is_none(),
             "Escape closes the composer's provider menu"
         );
     });
     lane_restore(state);
 }
 
-/// V1: Escape closes the composer's view-local `+` menu. The overlay
-/// stack never saw it (plain view state), so `cancel` passed it by
-/// and the menu stranded. Drop the `cancel` arm and it stays open.
+/// V1: Escape closes the composer's `+` menu. It once was plain view
+/// state the overlay stack never saw, so `cancel` passed it by and the menu
+/// stranded; it is a menu on the stack now, so Escape's pop takes it.
 #[gpui::test]
 fn escape_closes_the_composer_plus_menu(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -787,14 +787,14 @@ fn escape_closes_the_composer_plus_menu(cx: &mut gpui::TestAppContext) {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the lane opened");
         view.update(cx, |view, cx| view.step_plus(cx)).expect("the `+` step runs");
-        assert!(view.read(cx).plus_open(), "the `+` menu opened");
+        assert!(view.read(cx).plus_open(cx), "the `+` menu opened");
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| harness.cancel(window, cx));
     });
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
-        let open = harness.active.clone().expect("the lane opened").read(cx).plus_open();
+        let open = harness.active.clone().expect("the lane opened").read(cx).plus_open(cx);
         assert!(!open, "Escape closes the composer's `+` menu");
     });
     lane_restore(state);

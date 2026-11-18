@@ -63,12 +63,11 @@ pub(crate) struct AgentWindowState {
     pub(crate) line_notice: Option<String>,
     /// The card's steering input.
     pub(crate) agent_card_input: Option<gpui::Entity<gpui_kit::base::input::TextareaState>>,
-    /// The card's float window, and the bounds it is opening at.
+    /// The card's float window, while it is open or opening.
     pub(crate) card_float: Option<crate::overlay::Overlay>,
-    pub(crate) card_float_pending: Option<gpui::Bounds<gpui::Pixels>>,
-    /// The handoff picker over the card (R3 board 3a): open, its query and
-    /// its highlighted row.
-    pub(crate) handoff_picker_open: bool,
+    /// The handoff picker over the card (R3 board 3a): its query and its
+    /// highlighted row (whether it stands open is the overlay stack's
+    /// `HandoffPicker` entry).
     pub(crate) handoff_query: Option<gpui::Entity<gpui_kit::base::input::TextareaState>>,
     pub(crate) handoff_selected: usize,
     /// Browser chats handed off (R3 board 3b), by chat id: the target
@@ -94,8 +93,6 @@ impl Default for AgentWindowState {
             line_notice: None,
             agent_card_input: None,
             card_float: None,
-            card_float_pending: None,
-            handoff_picker_open: false,
             handoff_query: None,
             handoff_selected: 0,
             browser_handoffs: std::collections::HashMap::new(),
@@ -334,8 +331,8 @@ impl Harness {
     /// the approval answer with their own buttons).
     pub(crate) fn escape_agent_window(&mut self, kind: crate::overlay::OverlayKind, cx: &mut Context<Self>) {
         if kind == crate::overlay::OverlayKind::AgentCard {
-            if self.browser.read(cx).agent_window.handoff_picker_open {
-                self.browser.update(cx, |browser, _| browser.agent_window.handoff_picker_open = false);
+            if self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::HandoffPicker) {
+                self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::HandoffPicker); });
             } else if self.browser.read(cx).agent_window.card_ui == CardUi::Card {
                 self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Closed);
             }
@@ -620,12 +617,13 @@ impl Harness {
             CardIntent::Undock => self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Card),
             CardIntent::Close => {
                 self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Closed);
-                self.browser.update(cx, |browser, _| browser.agent_window.handoff_picker_open = false);
+                self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::HandoffPicker); });
             }
             CardIntent::ChipRemove(_) => self.browser.update(cx, |browser, _| browser.agent_window.line_page_chip = false),
             CardIntent::Model => self.open_settings_page("browser", cx),
             CardIntent::Handoff => {
-                self.browser.update(cx, |browser, _| browser.agent_window.handoff_picker_open = !browser.agent_window.handoff_picker_open);
+                let open = !self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::HandoffPicker);
+                self.overlays.update(cx, |o, _| o.stack.set(crate::overlay_stack::Layer::HandoffPicker, open));
                 self.browser.update(cx, |browser, _| browser.agent_window.handoff_selected = 0);
                 if let Some(query) = self.browser.read(cx).agent_window.handoff_query.clone() {
                     query.update(cx, |query, cx| query.set_value("", window, cx));

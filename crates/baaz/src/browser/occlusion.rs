@@ -22,9 +22,8 @@
 //!   waits for its picture, so the root holds its covering UI back.
 //!
 //! [`browser_visible`] stays the one pure predicate behind every answer.
-//! The overlay stack (plan 4.6) plugs in at [`Covers`]: it replaces the
-//! root's hand-built [`BrowserVisibility`] inputs with its entries'
-//! `covers_page`.
+//! The overlay stack (plan 4.6) plugs in at [`Covers`]: its entries'
+//! `covers_page` is the one overlay input ([`BrowserVisibility::overlay_open`]).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -33,6 +32,7 @@ use aui_webview::WebviewState;
 use gpui::{Bounds, Context, Entity, Pixels, WeakEntity};
 
 use super::peek_split::{self, CLOSE, CLOSE_INSET};
+use crate::overlay_stack::LayerKind;
 use super::{chrome, tabs, BrowserView, TabId, BLANK};
 
 /// Everything that decides whether one session's native view may show.
@@ -58,19 +58,11 @@ pub(crate) struct BrowserVisibility {
     pub session_active: bool,
     /// The Settings page stands open.
     pub settings_open: bool,
-    /// The ⌘K palette (any list) stands open in the main window: Sessions
-    /// only, Browse hosts it in an overlay window.
-    pub palette_open: bool,
-    /// A menu on the shared overlay stack stands open: composer/chip pickers,
-    /// caret popovers, overflow, view options, project menus.
-    pub menu_open: bool,
-    /// The composer's view-local `+` menu stands open. Plain view state,
-    /// never the shared overlay stack, so it gets its own input. The pane's
-    /// only: Browse draws no composer.
-    pub plus_open: bool,
-    /// A modal dialog stands open in the main window: Sessions only, like
-    /// the palette.
-    pub dialog_open: bool,
+    /// An entry on the overlay stack covers the page: one that draws in the
+    /// main window and says it covers ([`crate::overlay_stack::OverlayStack::covers_page`]) —
+    /// the dialog and palette in Sessions (Browse hosts them in an overlay
+    /// window), the menus, the composer's `+` menu, the sign-in sheets.
+    pub overlay_open: bool,
     /// The file-drop overlay covers the session's column. The pane's only:
     /// Browse mounts no drop target.
     pub drop_cover: bool,
@@ -101,10 +93,7 @@ pub(crate) fn browser_visible(inputs: BrowserVisibility) -> bool {
     (inputs.pane_open && inputs.kind_browser || inputs.centre_browse)
         && inputs.session_active
         && !inputs.settings_open
-        && !inputs.palette_open
-        && !inputs.menu_open
-        && !inputs.plus_open
-        && !inputs.dialog_open
+        && !inputs.overlay_open
         && !inputs.drop_cover
         && !inputs.feedback_cover
         && !inputs.omnibox_open
@@ -113,16 +102,16 @@ pub(crate) fn browser_visible(inputs: BrowserVisibility) -> bool {
 }
 
 /// `base` as the Browse centre page reads it: its tab and liveness, its own
-/// chrome popovers, and neither the composer's `+` menu nor the file-drop
-/// overlay, which Browse never draws. Either flag can stand stale from
-/// Sessions (a drag that left the window, a switch with the menu open), and
-/// a stale cover would freeze the page under nothing.
+/// chrome popovers, and not the file-drop overlay, which Browse never draws:
+/// the flag can stand stale from Sessions (a drag that left the window), and
+/// a stale cover would freeze the page under nothing. (The composer's `+`
+/// menu cannot stand stale: a mode switch closes the menus on the overlay
+/// stack, `Harness::set_mode`.)
 pub(super) fn centre_visibility(base: BrowserVisibility, shown: bool, live: bool, chrome_popover_open: bool) -> BrowserVisibility {
     BrowserVisibility {
         centre_browse: shown,
         session_active: live,
         chrome_popover_open,
-        plus_open: false,
         drop_cover: false,
         ..base
     }
@@ -286,10 +275,13 @@ impl BrowserView {
             self.find_resync = Some((self.last_centre_shown, centre_shown));
         }
         if switched || !in_browse {
-            self.downloads_open = false;
-            self.extensions_open = false;
+            self.overlays.update(cx, |o, _| o.stack.close_all(&[LayerKind::Downloads, LayerKind::Extensions, LayerKind::More]));
+        }
+        // However the downloads popover closed (a switch, its toggle,
+        // Escape off the overlay stack), it has not rendered for its next
+        // opening.
+        if !self.overlays.read(cx).stack.is_open(LayerKind::Downloads) {
             self.downloads_rendered = false;
-            self.more_open = false;
         }
         self.last_centre_shown = centre_shown;
         // B2a-H5: covering is honest — a popover covers the page only while
@@ -300,27 +292,27 @@ impl BrowserView {
         // its own capture.
         let centre_has_state = centre_shown.is_some_and(|id| self.states.contains_key(&id));
         let downloads_empty = self.browse_downloads(cx).is_empty();
-        if self.downloads_open && centre_shown.is_some() && !downloads_empty {
+        if self.overlays.read(cx).stack.is_open(LayerKind::Downloads) && centre_shown.is_some() && !downloads_empty {
             self.downloads_rendered = true;
         }
         // The footer's popover (anchored) shows an empty list as such.
-        if self.downloads_open
+        if self.overlays.read(cx).stack.is_open(LayerKind::Downloads)
             && self.downloads_anchor.is_none()
             && chrome::downloads_flag_clears(centre_shown.is_some(), downloads_empty, self.downloads_rendered)
         {
-            self.downloads_open = false;
+            self.overlays.update(cx, |o, _| { o.stack.close(LayerKind::Downloads); });
             self.downloads_rendered = false;
         }
-        if self.extensions_open && centre_shown.is_none() {
-            self.extensions_open = false;
+        if self.overlays.read(cx).stack.is_open(LayerKind::Extensions) && centre_shown.is_none() {
+            self.overlays.update(cx, |o, _| { o.stack.close(LayerKind::Extensions); });
         }
-        if self.more_open && !centre_has_state {
-            self.more_open = false;
+        if self.overlays.read(cx).stack.is_open(LayerKind::More) && !centre_has_state {
+            self.overlays.update(cx, |o, _| { o.stack.close(LayerKind::More); });
         }
         let chrome_popover_open = in_browse
-            && ((self.downloads_open && !self.downloads_overlay_wanted(cx) && centre_shown.is_some() && !self.browse_downloads(cx).is_empty())
-                || (self.extensions_open && centre_shown.is_some() && !self.downloads_overlay_wanted(cx))
-                || (self.more_open && centre_has_state));
+            && ((self.overlays.read(cx).stack.is_open(LayerKind::Downloads) && !self.downloads_overlay_wanted(cx) && centre_shown.is_some() && !self.browse_downloads(cx).is_empty())
+                || (self.overlays.read(cx).stack.is_open(LayerKind::Extensions) && centre_shown.is_some() && !self.downloads_overlay_wanted(cx))
+                || (self.overlays.read(cx).stack.is_open(LayerKind::More) && centre_has_state));
         // A crashed page hides the find strip: the highlight stops and the
         // strip closes, so the error page owns the rect alone. First, so
         // the stored rect below never reserves a row for a strip that just
@@ -528,29 +520,15 @@ impl crate::app::Harness {
     /// `covers_page` answers. The one place the root computes it.
     pub(crate) fn page_covers(&self, window: &gpui::Window, cx: &gpui::App) -> Covers {
         use crate::layout::{right_kind, Layout, RightKind};
-        use crate::overlays::MenuKind;
         use crate::region::Region as _;
-        let overlays = self.overlays.read(cx);
-        let menu_kind = overlays.menu.as_ref().map(|menu| menu.kind);
         // The Settings page covers the page while it stands (the region
-        // contract's `covers_page`), as the two sheets do.
-        let settings_open = self.settings_page.read(cx).covers_page(cx) || self.muse_sheet || self.setup_open(cx);
-        // A modal the overlay window hosts sits above the live page: it
-        // covers nothing (`OverlayKind::Modal`).
-        let modal_hosted = self.modal_overlay_wanted(cx);
-        let palette_open = overlays.palette.is_some() && !modal_hosted;
-        // Every menu on the stack draws in the main window, so it covers the
-        // page; the account menu stays inside the sidebar column. Browse's
-        // right-click menus live apart (`browse_menu`), in an overlay window.
-        let menu_open = menu_kind.is_some_and(|kind| kind != MenuKind::Account);
-        let dialog_open = overlays.dialog.is_some() && !modal_hosted;
-        // The composer's `+` menu is plain view state, never the overlay
-        // stack — read it off the active view. Audit: caret popovers and
-        // chip pickers ride `overlays.menu` above; the row-detail card hangs
-        // beside the sidebar, tooltips seat on the header, and the
-        // queue/steer strips render inline in the composer — none of them
-        // covers the right pane, so the `+` menu is the only extra input.
-        let plus_open = self.active.as_ref().is_some_and(|view| view.read(cx).plus_open());
+        // contract's `covers_page`).
+        let settings_open = self.settings_page.read(cx).covers_page(cx);
+        // Every overlay answers for itself (plan 4.6): an entry covers the
+        // page when it draws in the main window and says it covers. A modal
+        // the overlay window hosts (Browse) sits above the live page and
+        // covers nothing; so does every panel.
+        let overlay_open = self.overlays.read(cx).stack.covers_page(cx);
         let kind = right_kind(Layout::get(cx));
         // Q4c: while a provider switch is pending no session's page shows —
         // `browser_key` still names the previous session, and its webview
@@ -579,10 +557,7 @@ impl crate::app::Harness {
             centre_browse: false,
             session_active: false,
             settings_open,
-            palette_open,
-            menu_open,
-            plus_open,
-            dialog_open,
+            overlay_open,
             drop_cover: false,
             // F2 Active only: Paused leaves the app usable, so its pages
             // stay live.

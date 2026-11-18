@@ -1129,8 +1129,6 @@ pub struct SessionView {
     created_files_through: Option<usize>,
     /// A drag is over the window, so the drop overlay is up.
     dragging: bool,
-    /// The `+` menu.
-    plus_open: bool,
     /// Whether the composer's draft trims to nothing.
     ///
     /// Maintained rather than read, because reading it meant copying the whole
@@ -1446,7 +1444,6 @@ impl SessionView {
             ts_prefix: Vec::new(),
             created_files_through: None,
             dragging: false,
-            plus_open: false,
             draft_empty: true,
             history: history::Cursor::new(Vec::new()),
             workspace_key,
@@ -2642,8 +2639,8 @@ impl SessionView {
         self.composer.focus_handle(cx).is_focused(window)
     }
 
-    /// The composer's focus handle, for the browser-focus tests.
-    #[cfg(test)]
+    /// The composer's focus handle: where closing one of its menus hands the
+    /// keyboard back (and what the browser-focus tests check).
     pub(crate) fn composer_focus_handle(&self, cx: &mut Context<Self>) -> FocusHandle {
         self.composer.focus_handle(cx).clone()
     }
@@ -3627,8 +3624,7 @@ mod tests {
                 .read(cx)
                 .overlays
                 .read(cx)
-                .menu
-                .as_ref()
+                .menu()
                 .filter(|m| m.kind == MenuKind::Model)
                 .map(|m| m.selected);
             assert_eq!(selected, Some(1), "the menu checks the row the chip names");
@@ -3651,8 +3647,7 @@ mod tests {
                 .read(cx)
                 .overlays
                 .read(cx)
-                .menu
-                .as_ref()
+                .menu()
                 .filter(|m| m.kind == MenuKind::Model)
                 .map(|m| m.selected);
             assert_eq!(selected, Some(2), "with no match no row is checked");

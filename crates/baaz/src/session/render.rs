@@ -2272,7 +2272,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// The `/` menu and the `@` picker, floating above the composer.
     pub(super) fn render_caret_menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let overlays = self.overlays.read(cx);
-        let menu = overlays.menu.as_ref()?;
+        let menu = overlays.menu()?;
         let (kind, selected, filter) = (menu.kind, menu.selected, menu.filter.clone());
         // The rows' cap: the room above the composer, under the centre
         // header, less the panel's padding and footer — so the whole
@@ -2289,7 +2289,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         let overlays = self.overlays.clone();
         let hover = move |index: usize, _: &mut Window, cx: &mut gpui::App| {
             overlays.update(cx, |overlays, cx| {
-                if let Some(menu) = overlays.menu.as_mut().filter(|m| m.kind == kind && m.selected != index) {
+                if let Some(menu) = overlays.menu_mut().filter(|m| m.kind == kind && m.selected != index) {
                     menu.selected = index;
                     cx.notify();
                 }
@@ -2371,7 +2371,8 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             | MenuKind::Project
             | MenuKind::BackHistory
                 | MenuKind::SessionRow
-                | MenuKind::RightViews => return None,
+                | MenuKind::RightViews
+                | MenuKind::Plus => return None,
         };
         Some(
             popover_layer(
@@ -2515,7 +2516,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             }
         });
         let plus = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
-            this.plus_open = false;
+            this.close_plus_menu(cx);
             match id.as_ref() {
                 "attach" => this.prompt_for_image(cx),
                 "mention" => this.insert_sigil("@", window, cx),
@@ -2525,11 +2526,12 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             cx.notify();
         });
         // An outside press reports here through the menu's occluding
-        // catcher — the same `close_plus_menu` Escape's `cancel` calls —
-        // so a click on `+` while open closes instead of close-then-reopen.
+        // catcher, so a click on `+` while open closes instead of
+        // close-then-reopen.
         let plus_close = cx.listener(|this: &mut Self, _: &(), _, cx| {
             this.close_plus_menu(cx);
         });
+        let plus_open = self.plus_open(cx);
         let plus_item = plus_menu(
             "plus",
             vec![
@@ -2537,7 +2539,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 PlusMenuItem::new("mention", IconName::At, "Mention file").key("@"),
                 PlusMenuItem::new("commands", IconName::Slash, "Slash commands").key("/"),
             ],
-            self.plus_open,
+            plus_open,
         )
         .on_activate(move |id, window, cx| plus(id, window, cx))
         .on_close(move |window, cx| plus_close(&(), window, cx));
@@ -2608,7 +2610,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     && !self.attachments_pending()
                     && (!self.draft_empty || !self.images.is_empty() || !self.files.is_empty()),
             )
-            .plus_menu(self.plus_open, Some(plus_item))
+            .plus_menu(plus_open, Some(plus_item))
             .on_intent(move |i, window, cx| intent(&i, window, cx));
         for (anchor, menu) in self.render_pickers(cx) {
             element = element.chip_menu(anchor, menu);
@@ -2625,13 +2627,13 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// value, would wander with the mouse. The keyboard owns `selected`; the
     /// pointer owns its own highlight and reports only a click.
     pub(super) fn render_pickers(&self, cx: &mut Context<Self>) -> Vec<(ComposerChipAnchor, AnyElement)> {
-        let Some((kind, selected)) = self.overlays.read(cx).menu.as_ref().map(|m| (m.kind, m.selected)) else {
+        let Some((kind, selected)) = self.overlays.read(cx).menu().map(|m| (m.kind, m.selected)) else {
             return Vec::new();
         };
         let close = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_menu(cx));
         match kind {
             MenuKind::Model => {
-                let sub_open = self.overlays.read(cx).menu.as_ref().is_some_and(|m| m.sub_open);
+                let sub_open = self.overlays.read(cx).menu().is_some_and(|m| m.sub_open);
                 let mut rows: Vec<PickerRow> = self
                     .models
                     .iter()
@@ -2867,7 +2869,8 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             | MenuKind::Project
             | MenuKind::BackHistory
                 | MenuKind::SessionRow
-                | MenuKind::RightViews => Vec::new(),
+                | MenuKind::RightViews
+                | MenuKind::Plus => Vec::new(),
         }
     }
 }
@@ -4475,14 +4478,13 @@ mod tests {
                 .read(cx)
                 .overlays
                 .read(cx)
-                .menu
-                .as_ref()
+                .menu()
                 .is_some_and(|m| m.kind == MenuKind::Mode)),
             "the mode picker opened"
         );
         vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_plus_menu(cx)));
         let (plus, menu) =
-            vc.update(|_, cx| (view.read(cx).plus_open(), view.read(cx).overlays.read(cx).menu.is_some()));
+            vc.update(|_, cx| (view.read(cx).plus_open(cx), view.read(cx).overlays.read(cx).menu().is_some_and(|m| m.kind != MenuKind::Plus)));
         assert!(plus, "the `+` menu opened");
         assert!(!menu, "opening `+` closed the overlay menu");
     }
@@ -4495,11 +4497,11 @@ mod tests {
         let vc = cx.add_empty_window();
         let view = handoff_destination(vc, "picker-over-plus", "codex");
         vc.update(|_, cx| view.update(cx, |view, cx| view.step_plus(cx))).expect("plus toggles");
-        assert!(vc.update(|_, cx| view.read(cx).plus_open()), "the `+` menu opened");
+        assert!(vc.update(|_, cx| view.read(cx).plus_open(cx)), "the `+` menu opened");
         vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_picker(MenuKind::Mode, cx)));
         let (plus, mode) = vc.update(|_, cx| {
             let view = view.read(cx);
-            (view.plus_open(), view.overlays.read(cx).menu.as_ref().is_some_and(|m| m.kind == MenuKind::Mode))
+            (view.plus_open(cx), view.overlays.read(cx).menu().is_some_and(|m| m.kind == MenuKind::Mode))
         });
         assert!(!plus, "opening the picker closed the `+` menu");
         assert!(mode, "the picker still opened");

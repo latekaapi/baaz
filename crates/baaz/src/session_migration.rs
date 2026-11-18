@@ -1071,7 +1071,7 @@ impl BaazHarness {
         if is_dismissed(&state) {
             return;
         }
-        if self.overlays.read(cx).dialog.is_some() {
+        if self.overlays.read(cx).dialog().is_some() {
             return;
         }
         let fresh = self.migration_cache.as_ref().is_some_and(|cache| cache.age_secs() < CACHE_STALE_SECS);

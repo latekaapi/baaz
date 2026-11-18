@@ -752,7 +752,7 @@ impl Harness {
         match signin_plan(id) {
             // Over the Settings page, like every other sign-in (D5 B3).
             SignInPlan::MuseSheet => {
-                self.open_muse_sheet();
+                self.open_muse_sheet(cx);
                 cx.notify();
             }
             SignInPlan::ClaudeSheet => self.open_setup_sheet(id, crate::setup::SetupKind::SignIn, window, cx),

@@ -17,7 +17,8 @@ use crate::browser::bookmarks;
 /// The popover's width (the board's 300).
 pub(crate) const BOOKMARK_W: f32 = 300.0;
 
-/// The bookmark being edited.
+/// The bookmark being edited: the content of the overlay stack's
+/// `Bookmark` entry.
 pub(crate) struct BookmarkEdit {
     pub id: i64,
     pub name: Entity<InputState>,
@@ -30,7 +31,7 @@ impl Harness {
     /// ⌘D: bookmark the shown page into the Bookmarks bar (if it is not
     /// yet) and open the popover on it. Again while open: Done.
     pub(crate) fn bookmark_shown_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.browser.read(cx).bookmark_edit.is_some() {
+        if self.overlays.read(cx).stack.bookmark().is_some() {
             self.close_bookmark_popover(cx);
             return;
         }
@@ -66,13 +67,34 @@ impl Harness {
             }
         });
         self.browser.update(cx, |browser, _| browser.bookmark_edit_sub = Some(subscription));
-        self.browser.update(cx, |browser, _| browser.bookmark_edit = Some(BookmarkEdit { id: mark.id, name, folder: mark.folder, folders_open: false }));
+        // Escape (wherever the keyboard is) keeps what is typed, like Done.
+        let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Bookmark(BookmarkEdit { id: mark.id, name, folder: mark.folder, folders_open: false }))
+            .on_close(|layer, baaz, _, cx| {
+                if let crate::overlay_stack::Layer::Bookmark(edit) = layer {
+                    baaz.keep_bookmark_edit(edit, cx);
+                }
+            });
+        self.overlays.update(cx, |o, _| o.stack.push(entry));
         cx.notify();
     }
 
     /// Keep what is typed and close (Done, ↩, Escape, a click away).
     pub(crate) fn close_bookmark_popover(&mut self, cx: &mut Context<Self>) {
-        let Some(edit) = self.browser.update(cx, |browser, _| browser.bookmark_edit.take()) else { return };
+        let Some(edit) = self.take_bookmark_edit(cx) else { return };
+        self.keep_bookmark_edit(edit, cx);
+    }
+
+    /// The open popover's bookmark, closing its entry.
+    fn take_bookmark_edit(&mut self, cx: &mut Context<Self>) -> Option<BookmarkEdit> {
+        let entry = self.overlays.update(cx, |o, _| o.stack.close(crate::overlay_stack::LayerKind::Bookmark))?;
+        match entry.layer {
+            crate::overlay_stack::Layer::Bookmark(edit) => Some(edit),
+            _ => None,
+        }
+    }
+
+    /// Save what the closed popover holds: its name and folder.
+    fn keep_bookmark_edit(&mut self, edit: BookmarkEdit, cx: &mut Context<Self>) {
         self.browser.update(cx, |browser, _| browser.bookmark_edit_sub = None);
         let name = edit.name.read(cx).value().trim().to_owned();
         self.browser.read(cx).data.clone().update(cx, |data, cx| {
@@ -87,7 +109,7 @@ impl Harness {
 
     /// Remove: the bookmark goes and the popover closes.
     pub(crate) fn remove_bookmark_from_popover(&mut self, cx: &mut Context<Self>) {
-        let Some(edit) = self.browser.update(cx, |browser, _| browser.bookmark_edit.take()) else { return };
+        let Some(edit) = self.take_bookmark_edit(cx) else { return };
         self.browser.update(cx, |browser, _| browser.bookmark_edit_sub = None);
         self.browser.read(cx).data.clone().update(cx, |data, cx| data.remove_bookmark(edit.id, cx));
         cx.notify();
@@ -97,7 +119,7 @@ impl Harness {
     pub(crate) fn render_bookmark_popover(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let p = cx.aui().colors;
         let metrics = cx.aui().metrics;
-        let edit = self.browser.read(cx).bookmark_edit.as_ref()?;
+        let edit = self.overlays.read(cx).stack.bookmark()?;
         let name = edit.name.clone();
         let folder = edit.folder;
         let folders_open = edit.folders_open;
@@ -120,7 +142,7 @@ impl Harness {
                 .child(inner)
         };
         let toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            if this.browser.update(cx, |browser, _| browser.bookmark_edit.as_mut().map(|edit| edit.folders_open = !edit.folders_open).is_some()) {
+            if this.overlays.update(cx, |o, _| o.stack.bookmark_mut().map(|edit| edit.folders_open = !edit.folders_open).is_some()) {
                 cx.notify();
             }
         });
@@ -167,8 +189,8 @@ impl Harness {
                 let id = f.id;
                 let path = bookmarks::folder_path(&all, id);
                 let pick = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                    let picked = this.browser.update(cx, |browser, _| {
-                        browser.bookmark_edit.as_mut().map(|edit| {
+                    let picked = this.overlays.update(cx, |o, _| {
+                        o.stack.bookmark_mut().map(|edit| {
                             edit.folder = id;
                             edit.folders_open = false;
                         })

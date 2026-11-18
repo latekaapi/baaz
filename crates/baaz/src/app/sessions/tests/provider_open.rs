@@ -92,7 +92,7 @@ fn picking_a_non_muse_provider_opens_a_lane_and_starts_no_muse_session(
         assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex);
         assert!(!harness.open_state.switch_pending, "the switch landed");
         assert!(
-            harness.overlays.read(cx).dialog.is_none(),
+            harness.overlays.read(cx).dialog().is_none(),
             "no failure dialog: no muse session/start was ever issued at the dead child"
         );
         let open_id = view.read(cx).session_id.clone();
@@ -171,7 +171,7 @@ fn a_failed_provider_connect_surfaces_an_error_and_opens_no_view(cx: &mut gpui::
         assert!(harness.active.is_none(), "a failed connect opens no view");
         assert!(!harness.open_state.switch_pending, "the verbs waiting on the switch are released");
         assert!(
-            harness.overlays.read(cx).dialog.is_none(),
+            harness.overlays.read(cx).dialog().is_none(),
             "no failure dialog: a fresh open fails inline instead"
         );
         let failure = harness.open_state.provider_open_error.clone().expect("the inline failure stands");
@@ -222,7 +222,7 @@ fn a_new_provider_session_opens_on_the_click_and_sends_once_it_lands(cx: &mut gp
     type_unparked(vc, &["/"]);
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
-        assert!(harness.overlays.read(cx).menu.is_some(), "`/` opens the command menu before the child answers");
+        assert!(harness.overlays.read(cx).menu().is_some(), "`/` opens the command menu before the child answers");
         assert!(harness.active.clone().expect("the draft").read(cx).is_starting(), "still opening");
     });
     type_unparked(vc, &["backspace", "h", "e", "l", "l", "o", "enter"]);
@@ -292,7 +292,7 @@ fn a_failed_provider_open_lands_the_typed_failure_and_retry_keeps_the_send(cx: &
         assert!(harness.open_state.starts_in_flight.is_empty(), "scripted verbs are released");
         assert!(!harness.open_state.drafts.contains_key(&project), "the next New session starts fresh");
         assert!(harness.provider_sessions.is_empty(), "no record for a session that never was");
-        assert!(harness.overlays.read(cx).dialog.is_none(), "inline, not a dialog");
+        assert!(harness.overlays.read(cx).dialog().is_none(), "inline, not a dialog");
     });
     // Retry on a child that answers: a new draft, the words back in it.
     let (factory, _commands) = recording_resumable_factory();
@@ -518,7 +518,7 @@ fn opening_a_fork_resumes_it_on_a_new_lane_of_the_same_provider(cx: &mut gpui::T
         assert_eq!(view.read(cx).session_id, "s-fork", "resuming the fork, not a fresh session");
         assert!(!harness.open_state.switch_pending, "the switch landed");
         assert!(
-            harness.overlays.read(cx).dialog.is_none(),
+            harness.overlays.read(cx).dialog().is_none(),
             "no failure dialog: the resume answered a session"
         );
     });

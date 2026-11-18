@@ -3,10 +3,14 @@
 //! menus today, the Field (⌘L) next (owner decision 2026-10-11; the aui-cef
 //! spike 3e91eb3 proved a gpui `PopUp` orders above the CEF child window).
 //!
-//! One overlay at a time. [`Harness::sync_overlay`] runs every frame from
-//! `on_frame`: it opens the window when something wants one, moves it when
-//! the anchor moves, and closes it when nothing does. A `PopUp` does not
-//! follow its parent, so the main window's frame is part of the anchor.
+//! One overlay at a time. What it shows is the overlay stack's
+//! ([`crate::overlay_stack`]): the entries hosted in the panel (Browse's
+//! menu, site information, the bookmark popover, a modal in Browse) and the
+//! footer popovers, plus the Field while the address is edited.
+//! [`Harness::sync_overlay`] runs every frame from `on_frame`: it opens the
+//! window when something wants one, moves it when the anchor moves, and
+//! closes it when nothing does. A `PopUp` does not follow its parent, so the
+//! main window's frame is part of the anchor.
 //!
 //! The panel takes the keyboard when it opens, so a click anywhere else (the
 //! window, the page, another app) resigns it and closes the menu, and Escape
@@ -66,7 +70,7 @@ pub(crate) fn key_window_desc() -> String {
 /// What an overlay window shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlayKind {
-    /// Browse's open right-click menu (`BrowserView::browse_menu`).
+    /// Browse's open right-click menu (the overlay stack's `BrowseMenu`).
     BrowseMenu,
     /// The Field (⌘L, a click on the address line): the address input and
     /// its rows, anchored on the sidebar's address line, over the live page.
@@ -252,13 +256,64 @@ fn never_main_panels() {
 #[cfg(not(target_os = "macos"))]
 fn drop_native_chrome(_: &Window, _: OverlayKind) {}
 
-/// The open overlay: its window, what it shows, and where (screen space).
+/// One overlay window's slot: what it shows and where (screen space), and
+/// its window once the open task has made it. One value for "wanted" and
+/// "open": a slot whose window is still opening has no handle yet, so there
+/// is no second "pending" record to keep in step with it.
 pub(crate) struct Overlay {
-    handle: AnyWindowHandle,
+    /// The window, once its open task landed; `None` while it opens.
+    handle: Option<AnyWindowHandle>,
     kind: OverlayKind,
     bounds: Bounds<Pixels>,
     /// What the content showed at its last refresh ([`Harness::overlay_print`]).
     print: u64,
+}
+
+impl Overlay {
+    /// A slot whose window is opening for `kind` at `bounds`.
+    fn opening(kind: OverlayKind, bounds: Bounds<Pixels>) -> Self {
+        Overlay { handle: None, kind, bounds, print: 0 }
+    }
+
+    /// The window to repaint when the content's fingerprint moved off
+    /// `print` (recording it), or `None` when nothing changed or the window
+    /// is still opening.
+    fn stale(&mut self, print: u64) -> Option<AnyWindowHandle> {
+        let handle = self.handle.filter(|_| self.print != print)?;
+        self.print = print;
+        Some(handle)
+    }
+}
+
+/// Settle `slot` after the open task for `(kind, bounds)` finished. A slot
+/// still waiting on exactly that window takes it; a window nobody waits for
+/// any more (closed, moved or replaced while it opened) comes back to be
+/// removed. A failed open empties the slot that waited on it.
+fn land(slot: &mut Option<Overlay>, kind: OverlayKind, bounds: Bounds<Pixels>, opened: Option<AnyWindowHandle>, print: u64) -> Option<AnyWindowHandle> {
+    let waiting = slot.as_ref().is_some_and(|open| open.handle.is_none() && open.kind == kind && open.bounds == bounds);
+    match opened {
+        Some(handle) if waiting => {
+            if let Some(open) = slot.as_mut() {
+                open.handle = Some(handle);
+                open.print = print;
+            }
+            None
+        }
+        Some(handle) => Some(handle),
+        None => {
+            if waiting {
+                *slot = None;
+            }
+            None
+        }
+    }
+}
+
+/// Remove an overlay window, past the current update.
+fn remove_window(handle: AnyWindowHandle, cx: &mut App) {
+    cx.defer(move |cx| {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+    });
 }
 
 /// The overlay's root view: draws the Harness-built content for its kind.
@@ -300,7 +355,7 @@ impl Render for OverlayView {
         // the panel on every render, as the modal's query field is.
         // The bookmark popover's keyboard: its name input.
         if kind == OverlayKind::Bookmark {
-            let input = self.baaz.read_with(cx, |baaz, _| baaz.browser.read(cx).bookmark_edit.as_ref().map(|e| e.name.clone())).ok().flatten();
+            let input = self.baaz.read_with(cx, |baaz, _| baaz.overlays.read(cx).stack.bookmark().map(|e| e.name.clone())).ok().flatten();
             if let Some(input) = input {
                 let handle = gpui::Focusable::focus_handle(input.read(cx), cx);
                 if !handle.is_focused(window) {
@@ -323,7 +378,7 @@ impl Render for OverlayView {
         if kind == OverlayKind::Corner {
             return div().size_full().p(gpui::px(SHADOW_PAD)).flex().flex_col().justify_end().items_end().children(content);
         }
-        if kind == OverlayKind::PageFloat && self.baaz.read_with(cx, |baaz, cx| baaz.right_pane.read(cx).cache.page_menu && !baaz.pane_page_covered(cx)).unwrap_or(false) {
+        if kind == OverlayKind::PageFloat && self.baaz.read_with(cx, |baaz, cx| baaz.right_pane.read(cx).page_menu_open(cx) && !baaz.pane_page_covered(cx)).unwrap_or(false) {
             return div().size_full().children(content);
         }
         // The agent window's keys work while its own float holds the
@@ -391,7 +446,7 @@ impl Harness {
             let height = (win.height - top - gpui::px(16.0)).min(gpui::px(FIELD_MAX_H)) + pad;
             return Some((OverlayKind::Field, Bounds::new(origin, gpui::size(width, height))));
         }
-        if self.browser.read(cx).bookmark_edit.is_some() && crate::layout::Layout::get(cx).sidebar_open && self.browse_centre_state(cx).is_some() {
+        if self.overlays.read(cx).stack.bookmark().is_some() && crate::layout::Layout::get(cx).sidebar_open && self.browse_centre_state(cx).is_some() {
             let metrics = cx.aui().metrics;
             let pad = gpui::px(SHADOW_PAD);
             let top = metrics.header + metrics.item_px / 2.0 + metrics.control_lg + gpui::px(scale::SP_1);
@@ -399,7 +454,7 @@ impl Harness {
             let height = (window.bounds().size.height - top - metrics.item_px).min(gpui::px(460.0)) + pad;
             return Some((OverlayKind::Bookmark, Bounds::new(origin, gpui::size(gpui::px(bookmark::BOOKMARK_W) + pad * 2.0, height))));
         }
-        if self.browser.read(cx).site_info_open && crate::layout::Layout::get(cx).sidebar_open && self.browse_centre_state(cx).is_some() {
+        if self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::SiteInfo) && crate::layout::Layout::get(cx).sidebar_open && self.browse_centre_state(cx).is_some() {
             // Under the address line, inside a clear rect like the Field's.
             let metrics = cx.aui().metrics;
             let pad = gpui::px(SHADOW_PAD);
@@ -428,7 +483,7 @@ impl Harness {
             let size = gpui::size(width + pad * 2.0, room + pad * 2.0);
             return Some((OverlayKind::Downloads, Bounds::new(origin, size)));
         }
-        let menu = self.browser.read(cx).browse_menu.as_ref()?;
+        let menu = self.overlays.read(cx).stack.browse_menu()?;
         let space = self.browser.read(cx).browse_space().unwrap_or_default();
         let folders = self.browser.read(cx).tabs.folders_in(&space).len();
         let size = browse_menu_size(menu, folders, cx);
@@ -454,19 +509,14 @@ impl Harness {
     pub(crate) fn sync_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.main_window.get_or_insert_with(|| window.window_handle());
         let wanted = self.wanted_overlay(window, cx);
-        let current = self.browser.read(cx).overlay.as_ref().map(|o| (o.kind, o.bounds)).or(self.browser.read(cx).overlay_pending);
+        let current = self.browser.read(cx).overlay.as_ref().map(|o| (o.kind, o.bounds));
         if wanted == current {
             // The content reads Harness state: repaint the panel only when what
             // it shows changed (a blind refresh per main frame looped — the
             // panel's render dirtied the main window again). Its own hover and
             // typing repaint it through the entities it reads.
             let print = self.overlay_print(cx);
-            let stale = self.browser.update(cx, |browser, _| {
-                browser.overlay.as_mut().filter(|o| o.print != print).map(|overlay| {
-                    overlay.print = print;
-                    overlay.handle
-                })
-            });
+            let stale = self.browser.update(cx, |browser, _| browser.overlay.as_mut().and_then(|overlay| overlay.stale(print)));
             if let Some(handle) = stale {
                 cx.defer(move |cx| {
                     let _ = handle.update(cx, |_, window, _| window.refresh());
@@ -474,13 +524,10 @@ impl Harness {
             }
             return;
         }
-        if let Some(old) = self.browser.update(cx, |browser, _| browser.overlay.take()) {
-            let handle = old.handle;
-            cx.defer(move |cx| {
-                let _ = handle.update(cx, |_, window, _| window.remove_window());
-            });
+        let old = self.browser.update(cx, |browser, _| std::mem::replace(&mut browser.overlay, wanted.map(|(kind, bounds)| Overlay::opening(kind, bounds))));
+        if let Some(handle) = old.and_then(|old| old.handle) {
+            remove_window(handle, cx);
         }
-        self.browser.update(cx, |browser, _| browser.overlay_pending = wanted);
         trace(format_args!("want {wanted:?} (had {current:?})"));
         let Some((kind, bounds)) = wanted else {
             return;
@@ -538,19 +585,10 @@ impl Harness {
             trace(format_args!("opened {kind:?}: {}", if opened.is_ok() { "ok" } else { "failed" }));
             let _ = this.update(cx, |this, cx| {
                 // Still wanted? Keep it; otherwise it goes straight away.
-                match opened {
-                    Ok(handle) if this.browser.read(cx).overlay_pending == Some((kind, bounds)) => {
-                        this.browser.update(cx, |browser, _| browser.overlay_pending = None);
-                        let print = this.overlay_print(cx);
-                        this.browser.update(cx, |browser, _| browser.overlay = Some(Overlay { handle: handle.into(), kind, bounds, print }));
-                    }
-                    Ok(handle) => {
-                        let handle: AnyWindowHandle = handle.into();
-                        cx.defer(move |cx| {
-                            let _ = handle.update(cx, |_, window, _| window.remove_window());
-                        });
-                    }
-                    Err(_) => this.browser.update(cx, |browser, _| browser.overlay_pending = None),
+                let print = this.overlay_print(cx);
+                let opened = opened.ok().map(AnyWindowHandle::from);
+                if let Some(unwanted) = this.browser.update(cx, |browser, _| land(&mut browser.overlay, kind, bounds, opened, print)) {
+                    remove_window(unwanted, cx);
                 }
                 cx.notify();
             });
@@ -594,15 +632,10 @@ impl Harness {
             // of it would silence the capture layer at a stale spot.
             self.feedback.slot_bounds = None;
         }
-        let current = self.browser.read(cx).corner.as_ref().map(|o| o.bounds).or(self.browser.read(cx).corner_pending);
+        let current = self.browser.read(cx).corner.as_ref().map(|o| o.bounds);
         if wanted == current {
             let print = self.corner_print(cx);
-            let stale = self.browser.update(cx, |browser, _| {
-                browser.corner.as_mut().filter(|o| o.print != print).map(|corner| {
-                    corner.print = print;
-                    corner.handle
-                })
-            });
+            let stale = self.browser.update(cx, |browser, _| browser.corner.as_mut().and_then(|corner| corner.stale(print)));
             if let Some(handle) = stale {
                 cx.defer(move |cx| {
                     let _ = handle.update(cx, |_, window, _| window.refresh());
@@ -610,13 +643,10 @@ impl Harness {
             }
             return;
         }
-        if let Some(old) = self.browser.update(cx, |browser, _| browser.corner.take()) {
-            let handle = old.handle;
-            cx.defer(move |cx| {
-                let _ = handle.update(cx, |_, window, _| window.remove_window());
-            });
+        let old = self.browser.update(cx, |browser, _| std::mem::replace(&mut browser.corner, wanted.map(|bounds| Overlay::opening(OverlayKind::Corner, bounds))));
+        if let Some(handle) = old.and_then(|old| old.handle) {
+            remove_window(handle, cx);
         }
-        self.browser.update(cx, |browser, _| browser.corner_pending = wanted);
         trace(format_args!("corner want {wanted:?} (had {current:?})"));
         let Some(bounds) = wanted else {
             return;
@@ -643,19 +673,10 @@ impl Harness {
             });
             trace(format_args!("opened Corner: {}", if opened.is_ok() { "ok" } else { "failed" }));
             let _ = this.update(cx, |this, cx| {
-                match opened {
-                    Ok(handle) if this.browser.read(cx).corner_pending == Some(bounds) => {
-                        this.browser.update(cx, |browser, _| browser.corner_pending = None);
-                        let print = this.corner_print(cx);
-                        this.browser.update(cx, |browser, _| browser.corner = Some(Overlay { handle: handle.into(), kind: OverlayKind::Corner, bounds, print }));
-                    }
-                    Ok(handle) => {
-                        let handle: AnyWindowHandle = handle.into();
-                        cx.defer(move |cx| {
-                            let _ = handle.update(cx, |_, window, _| window.remove_window());
-                        });
-                    }
-                    Err(_) => this.browser.update(cx, |browser, _| browser.corner_pending = None),
+                let print = this.corner_print(cx);
+                let opened = opened.ok().map(AnyWindowHandle::from);
+                if let Some(unwanted) = this.browser.update(cx, |browser, _| land(&mut browser.corner, OverlayKind::Corner, bounds, opened, print)) {
+                    remove_window(unwanted, cx);
                 }
                 cx.notify();
             });
@@ -690,7 +711,7 @@ impl Harness {
         let rect = page.page_rect()?;
         let pad = gpui::px(SHADOW_PAD);
         let origin = window.bounds().origin;
-        if pane.cache.page_menu && !pane.page_covered(page) {
+        if pane.page_menu_open(cx) && !pane.page_covered(page) {
             // The Recent pages menu: the window covers the nav row and the
             // page, so a click anywhere over them outside the menu closes it.
             use std::hash::{Hash, Hasher};
@@ -794,7 +815,7 @@ impl Harness {
     /// The top of the line's float in screen space, without its shadow pad,
     /// while it shows (or is opening).
     pub(crate) fn page_float_top(&self, cx: &gpui::App) -> Option<Pixels> {
-        let bounds = self.browser.read(cx).page_float.as_ref().map(|o| o.bounds).or(self.browser.read(cx).page_float_pending)?;
+        let bounds = self.browser.read(cx).page_float.as_ref().map(|o| o.bounds)?;
         Some(bounds.top() + gpui::px(SHADOW_PAD))
     }
 
@@ -861,15 +882,10 @@ impl Harness {
     /// The line's (and the right pane's page) float window.
     fn sync_line_float(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let wanted = self.wanted_page_float(window, cx);
-        let current = self.browser.read(cx).page_float.as_ref().map(|o| o.bounds).or(self.browser.read(cx).page_float_pending);
+        let current = self.browser.read(cx).page_float.as_ref().map(|o| o.bounds);
         if wanted.map(|w| w.0) == current {
             if let Some((_, print)) = wanted {
-                let stale = self.browser.update(cx, |browser, _| {
-                    browser.page_float.as_mut().filter(|float| float.print != print).map(|float| {
-                        float.print = print;
-                        float.handle
-                    })
-                });
+                let stale = self.browser.update(cx, |browser, _| browser.page_float.as_mut().and_then(|float| float.stale(print)));
                 if let Some(handle) = stale {
                     cx.defer(move |cx| {
                         let _ = handle.update(cx, |_, window, _| window.refresh());
@@ -878,13 +894,10 @@ impl Harness {
             }
             return;
         }
-        if let Some(old) = self.browser.update(cx, |browser, _| browser.page_float.take()) {
-            let handle = old.handle;
-            cx.defer(move |cx| {
-                let _ = handle.update(cx, |_, window, _| window.remove_window());
-            });
+        let old = self.browser.update(cx, |browser, _| std::mem::replace(&mut browser.page_float, wanted.map(|(bounds, _)| Overlay::opening(OverlayKind::PageFloat, bounds))));
+        if let Some(handle) = old.and_then(|old| old.handle) {
+            remove_window(handle, cx);
         }
-        self.browser.update(cx, |browser, _| browser.page_float_pending = wanted.map(|w| w.0));
         let Some((bounds, print)) = wanted else {
             return;
         };
@@ -920,18 +933,9 @@ impl Harness {
                 })
             });
             let _ = this.update(cx, |this, cx| {
-                match opened {
-                    Ok(handle) if this.browser.read(cx).page_float_pending == Some(bounds) => {
-                        this.browser.update(cx, |browser, _| browser.page_float_pending = None);
-                        this.browser.update(cx, |browser, _| browser.page_float = Some(Overlay { handle: handle.into(), kind: OverlayKind::PageFloat, bounds, print }));
-                    }
-                    Ok(handle) => {
-                        let handle: AnyWindowHandle = handle.into();
-                        cx.defer(move |cx| {
-                            let _ = handle.update(cx, |_, window, _| window.remove_window());
-                        });
-                    }
-                    Err(_) => this.browser.update(cx, |browser, _| browser.page_float_pending = None),
+                let opened = opened.ok().map(AnyWindowHandle::from);
+                if let Some(unwanted) = this.browser.update(cx, |browser, _| land(&mut browser.page_float, OverlayKind::PageFloat, bounds, opened, print)) {
+                    remove_window(unwanted, cx);
                 }
                 cx.notify();
             });
@@ -951,7 +955,7 @@ impl Harness {
         let name = agent.map(|p| p.label()).unwrap_or("Muse");
         let menu_open = {
             let pane = self.right_pane.read(cx);
-            pane.cache.page_menu && !pane.page_covered(page)
+            pane.page_menu_open(cx) && !pane.page_covered(page)
         };
         if menu_open {
             let rows = crate::right_page::recent_rows(page);
@@ -1070,10 +1074,10 @@ impl Harness {
     fn overlay_print(&self, cx: &App) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        format!("{:?}", self.browser.read(cx).browse_menu).hash(&mut hasher);
+        format!("{:?}", self.overlays.read(cx).stack.browse_menu()).hash(&mut hasher);
         self.browser.read(cx).tabs.generation.hash(&mut hasher);
-        self.browser.read(cx).site_info_open.hash(&mut hasher);
-        if let Some(edit) = self.browser.read(cx).bookmark_edit.as_ref() {
+        self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::SiteInfo).hash(&mut hasher);
+        if let Some(edit) = self.overlays.read(cx).stack.bookmark() {
             (edit.id, edit.folder, edit.folders_open).hash(&mut hasher);
         }
         self.browser.read(cx).browse_centre_shown(cx).hash(&mut hasher);
@@ -1085,7 +1089,7 @@ impl Harness {
         // rows the query found (results land later than the keystroke), and
         // which dialog.
         let overlays = self.overlays.read(cx);
-        if let Some(palette) = overlays.palette.as_ref() {
+        if let Some(palette) = overlays.palette() {
             format!("{:?}", palette.kind).hash(&mut hasher);
             palette.selected.hash(&mut hasher);
             self.palette_rows(palette.kind, cx).len().hash(&mut hasher);
@@ -1094,7 +1098,7 @@ impl Harness {
                 query.read(cx).value().hash(&mut hasher);
             }
         }
-        if let Some(dialog) = overlays.dialog.as_ref() {
+        if let Some(dialog) = overlays.dialog() {
             dialog.title.hash(&mut hasher);
             dialog.detail.hash(&mut hasher);
         }
@@ -1102,11 +1106,14 @@ impl Harness {
     }
 
     /// Whether Browse's modal (a palette or a dialog) draws in the overlay
-    /// window rather than the main one: always, in Browse — one host per
-    /// mode, so a page loading under an open palette never moves it.
+    /// window rather than the main one: its entry on the overlay stack is a
+    /// `Modal`, which the panel hosts in Browse (one host per mode, so a page
+    /// loading under an open palette never moves it).
     pub(crate) fn modal_overlay_wanted(&self, cx: &App) -> bool {
-        let overlays = self.overlays.read(cx);
-        crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse && (overlays.palette.is_some() || overlays.dialog.is_some())
+        use crate::overlay_stack::LayerKind;
+        let browse = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
+        let stack = &self.overlays.read(cx).stack;
+        [LayerKind::Palette, LayerKind::Dialog].into_iter().any(|kind| stack.hosted_in_panel(kind, browse))
     }
 
     /// The handle the hosted modal's keyboard belongs to: the palette's own
@@ -1115,7 +1122,7 @@ impl Harness {
         use crate::overlays::PaletteKind;
         use gpui::Focusable as _;
         let overlays = self.overlays.read(cx);
-        if let Some(palette) = overlays.palette.as_ref() {
+        if let Some(palette) = overlays.palette() {
             return Some(match palette.kind {
                 PaletteKind::Search => self.search_query.focus_handle(cx),
                 PaletteKind::Projects => self.projects_query.focus_handle(cx),
@@ -1123,7 +1130,7 @@ impl Harness {
                 _ => self.focus_palette.clone(),
             });
         }
-        overlays.dialog.is_some().then(|| self.focus_dialog.clone())
+        overlays.dialog().is_some().then(|| self.focus_dialog.clone())
     }
 
     /// Whether the Field shows as an overlay: the address is being edited in
@@ -1157,7 +1164,7 @@ impl Harness {
             OverlayKind::Bookmark => self.render_bookmark_popover(cx),
             OverlayKind::Downloads => {
                 self.hosting_overlay = true;
-                let list = if self.browser.read(cx).extensions_open {
+                let list = if self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Extensions) {
                     self.render_browse_extensions(window, cx)
                 } else {
                     self.render_browse_downloads(window, cx)
@@ -1466,7 +1473,7 @@ impl Harness {
             }
         }
         let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
-            this.browser.update(cx, |browser, _| browser.site_info_open = false);
+            this.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::SiteInfo); });
             cx.notify();
         });
         div()
@@ -1525,7 +1532,7 @@ impl Harness {
             // Leaving the Field also hands focus back: on the main window.
             OverlayKind::Field => self.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
             OverlayKind::SiteInfo => {
-                self.browser.update(cx, |browser, _| browser.site_info_open = false);
+                self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::SiteInfo); });
                 cx.notify();
             }
             OverlayKind::Bookmark => self.close_bookmark_popover(cx),
@@ -1533,8 +1540,8 @@ impl Harness {
                 self.dismiss_browse_popovers(cx);
             }
             OverlayKind::Modal => {
-                self.overlays.update(cx, |overlays, _| overlays.palette = None);
-                if self.overlays.read(cx).dialog.is_some() {
+                self.overlays.update(cx, |overlays, _| overlays.close_palette());
+                if self.overlays.read(cx).dialog().is_some() {
                     self.close_dialog(cx);
                 }
                 cx.notify();

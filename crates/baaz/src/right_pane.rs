@@ -167,9 +167,9 @@ pub(crate) struct RightPane {
     /// D6: a drafted PR description waiting for a frame with the window to
     /// land in its editor.
     pub(crate) pending_pr_body: Option<(Entity<TextareaState>, String)>,
-    /// The Files pane's open context menu (owner 2026-10-21).
-    pub(crate) files_menu: Option<crate::right_files::FilesMenu>,
-    /// The window's floating layer, shared with the root: the pane's toasts.
+    /// The window's floating layer, shared with the root: the pane's toasts,
+    /// and its two menus (the Files context menu, the Page row's Recent
+    /// pages) as entries on the overlay stack.
     pub(crate) overlays: Entity<Overlays>,
     /// What the root told the pane (see [`RightFacts`]).
     pub(crate) facts: RightFacts,
@@ -203,7 +203,6 @@ impl RightPane {
             strip_moving: false,
             focus: cx.focus_handle(),
             pending_pr_body: None,
-            files_menu: None,
             overlays,
             facts: RightFacts::default(),
             _layout: layout,
@@ -476,6 +475,12 @@ impl RightPane {
         }
     }
 
+    /// Whether the Page row's Recent pages menu stands open (an entry on the
+    /// overlay stack).
+    pub(crate) fn page_menu_open(&self, cx: &gpui::App) -> bool {
+        self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::PageMenu)
+    }
+
     /// Whether the Page screen draws its own state over `state`, so the
     /// native view hides (see [`crate::right_page::page_covered`]).
     pub(crate) fn page_covered(&self, state: &aui_webview::WebviewState) -> bool {
@@ -604,6 +609,7 @@ impl Render for RightPane {
         }
         let agent = self.facts.agent();
         let page = self.facts.page.clone();
+        let page_menu = self.page_menu_open(cx);
         let mut screens: Vec<Option<AnyElement>> = Vec::with_capacity(3);
         for (i, screen_kind) in RightKind::ALL.into_iter().enumerate() {
             if !visible(i) {
@@ -622,6 +628,7 @@ impl Render for RightPane {
                 width,
                 agent,
                 &self.focus,
+                page_menu,
                 cx,
             )));
         }

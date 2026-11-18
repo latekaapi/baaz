@@ -63,19 +63,20 @@ impl Harness {
         let already = self
             .overlays
             .read(cx)
-            .menu
-            .as_ref()
+            .menu()
             .is_some_and(|m| m.kind == MenuKind::Project && m.project == project && m.project_header == from_header);
-        // One menu at a time, as `open_menu`: the view-local `+` menu closes.
+        // One menu at a time, as `open_menu`: an open `+` menu closes in the
+        // session view that draws it.
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, cx| view.close_plus_menu(cx));
         }
         self.overlays.update(cx, |overlays, _| {
-            overlays.menu = if already { None } else { Some(Menu::project(project, from_header)) };
+            if already {
+                overlays.close_menu();
+            } else {
+                overlays.open(Menu::project(project, from_header));
+            }
         });
-        if !already {
-            self.project_colour_open = false;
-        }
         cx.notify();
     }
 
@@ -187,7 +188,8 @@ impl Harness {
         projects::write(&self.projects);
         self.note_project_changed(cx);
         self.rename.update(cx, |state, cx| state.set_value(project.name, window, cx));
-        self.renaming_project = Some(id);
+        let entry = Self::rename_entry(crate::overlay_stack::Layer::RenameProject(id));
+        self.overlays.update(cx, |o, _| o.stack.push(entry));
         window.focus(&self.rename.focus_handle(cx), cx);
         cx.notify();
     }
@@ -222,7 +224,7 @@ impl Harness {
     /// re-add resolves them by root), hand current to the most recently
     /// opened remaining adoption whose root is on disk, and regroup.
     pub(crate) fn confirm_remove_project(&mut self, cx: &mut Context<Self>) {
-        let target = self.overlays.read(cx).dialog.as_ref().and_then(|d| {
+        let target = self.overlays.read(cx).dialog().and_then(|d| {
             (d.action == crate::overlays::DialogAction::RemoveProject)
                 .then(|| d.archive_target.clone())
                 .flatten()
@@ -255,8 +257,10 @@ impl Harness {
     /// empty name reverts to the folder name (a project is always called
     /// something), and a rename never touches the folder.
     pub(crate) fn commit_project_rename(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.renaming_project.clone() else { return };
-        self.renaming_project = None;
+        let Some(id) = self.renaming_project(cx) else { return };
+        self.overlays.update(cx, |o, _| {
+            o.stack.close(crate::overlay_stack::LayerKind::RenameProject);
+        });
         let text = self.rename.read(cx).value().to_string();
         let text = text.trim().to_owned();
         if let Some(project) = self.projects.projects.iter_mut().find(|p| p.id == id) {
@@ -354,7 +358,11 @@ impl Harness {
                 let id = self.current_project_id().ok_or("no project menu is open and no current project")?;
                 self.open_project_menu(Some(id), true, cx);
             }
-            self.project_colour_open = true;
+            self.overlays.update(cx, |overlays, _| {
+                if let Some(menu) = overlays.menu_mut().filter(|menu| menu.kind == MenuKind::Project) {
+                    menu.sub_open = true;
+                }
+            });
             cx.notify();
             return Ok(());
         }
@@ -422,7 +430,7 @@ impl Harness {
     /// dialog open, or one whose project is no longer adopted, fails the
     /// step.
     pub(crate) fn step_remove_confirm(&mut self, cx: &mut Context<Self>) -> StepResult {
-        let target = self.overlays.read(cx).dialog.as_ref().and_then(|d| {
+        let target = self.overlays.read(cx).dialog().and_then(|d| {
             (d.action == crate::overlays::DialogAction::RemoveProject)
                 .then(|| d.archive_target.clone())
                 .flatten()
@@ -442,13 +450,13 @@ impl Harness {
     /// view menu does it.
     pub(crate) fn render_project_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (target, from_header) = {
-            let menu = self.overlays.read(cx).menu.as_ref()?;
+            let menu = self.overlays.read(cx).menu()?;
             if menu.kind != MenuKind::Project {
                 return None;
             }
             (menu.project.clone(), menu.project_header)
         };
-        let colour_open = self.project_colour_open;
+        let colour_open = self.overlays.read(cx).menu().is_some_and(|menu| menu.kind == MenuKind::Project && menu.sub_open);
         let mut rows: Vec<MenuRow> = Vec::new();
         let mut actions: Vec<Option<ProjectMenuAction>> = Vec::new();
         let mut push = |row: MenuRow, action: Option<ProjectMenuAction>| {
@@ -507,7 +515,7 @@ impl Harness {
             // dismisses the menu before acting.
             let keep = matches!(action, Some(ProjectMenuAction::Colour));
             if !keep {
-                this.overlays.update(cx, |overlays, _| overlays.menu = None);
+                this.overlays.update(cx, |overlays, _| overlays.close_menu());
             }
             match action {
                 Some(ProjectMenuAction::Pick(id)) => this.pick_project(id, window, cx),
@@ -522,7 +530,11 @@ impl Harness {
                     }
                 }
                 Some(ProjectMenuAction::Colour) => {
-                    this.project_colour_open = !this.project_colour_open;
+                    this.overlays.update(cx, |overlays, _| {
+                        if let Some(menu) = overlays.menu_mut().filter(|menu| menu.kind == MenuKind::Project) {
+                            menu.sub_open = !menu.sub_open;
+                        }
+                    });
                     cx.notify();
                 }
                 Some(ProjectMenuAction::Pin) => {
@@ -575,8 +587,7 @@ impl Harness {
         // draw, so it covers the window without covering the menu — the same
         // shape the composer's chip pickers use.
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.menu = None);
-            this.project_colour_open = false;
+            this.overlays.update(cx, |overlays, _| overlays.close_menu());
             cx.notify();
         });
         let catcher = div()
