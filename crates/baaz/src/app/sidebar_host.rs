@@ -437,7 +437,7 @@ impl Harness {
                 || self.overlays.read(cx).is_open(MenuKind::Account)
                 || self.overlays.read(cx).is_open(MenuKind::SessionRow);
             if open {
-                self.overlays.update(cx, |overlays, _| overlays.close_menu());
+                self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
             }
         }
         match intent {
@@ -469,9 +469,9 @@ impl Harness {
                 // Remember what the press closed: when the press was on the
                 // menu's own trigger, the click that follows must not reopen it.
                 let closed = self.overlays.read(cx).menu().map(|menu| menu.kind);
-                self.overlays.update(cx, |overlays, _| {
+                self.overlays.update(cx, |overlays, cx| {
                     overlays.stack.note_pressed_shut(closed.map(crate::overlay_stack::Trigger::Menu));
-                    overlays.close_menu();
+                    overlays.close_menu(cx);
                 });
             }
             SidebarIntent::AddProject => self.open_projects(false, window, cx),
@@ -505,7 +505,7 @@ impl Harness {
                 if !open && !self.just_dismissed(MenuKind::SessionRow, cx) {
                     self.open_row_menu_for(id.to_string(), cx);
                 } else {
-                    self.overlays.update(cx, |overlays, _| overlays.close_menu());
+                    self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
                 }
             }
             SidebarIntent::RowAction(id, action) => {
@@ -531,8 +531,8 @@ impl Harness {
                 self.arm_composer_focus(cx);
             }
             SidebarIntent::RenameCancel => {
-                self.overlays.update(cx, |o, _| {
-                    o.stack.close(crate::overlay_stack::LayerKind::RenameSession);
+                self.overlays.update(cx, |o, cx| {
+                    o.close(crate::overlay_stack::LayerKind::RenameSession, cx);
                 });
                 self.arm_composer_focus(cx);
             }
@@ -542,7 +542,7 @@ impl Harness {
                 }
             }
             SidebarIntent::AccountAction(action) => {
-                self.overlays.update(cx, |overlays, _| overlays.close_menu());
+                self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
                 match action {
                     AccountAction::Settings => self.open_settings(0, cx),
                     AccountAction::Providers => self.open_providers(cx),
@@ -595,10 +595,9 @@ impl Harness {
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, cx| view.close_plus_menu(cx));
         }
-        self.overlays.update(cx, |overlays, _| overlays.open(crate::overlays::Menu::session_row(session)));
+        self.overlays.update(cx, |overlays, cx| overlays.open(crate::overlays::Menu::session_row(session), cx));
         // Outside the draw: the column takes the open menu on this frame.
         self.push_sidebar_facts(cx);
-        cx.notify();
     }
 
     /// Whether this click on `kind`'s trigger is the tail of the press that
@@ -622,7 +621,7 @@ impl Harness {
                     },
                     cx,
                 );
-                self.overlays.update(cx, |overlays, _| overlays.close_menu());
+                self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
             }
             ViewOption::SortBy(key) => {
                 self.set_sort_by(
@@ -633,7 +632,7 @@ impl Harness {
                     },
                     cx,
                 );
-                self.overlays.update(cx, |overlays, _| overlays.close_menu());
+                self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
             }
             ViewOption::ToggleEmpty => {
                 self.session_list.update(cx, |list, _| list.show_empty = !list.show_empty);
@@ -651,7 +650,7 @@ impl Harness {
             ViewOption::TogglePrStatus => {}
             ViewOption::ToggleSearchAll => self.toggle_search_scope(cx),
             ViewOption::ClearEmpty => {
-                self.overlays.update(cx, |overlays, _| overlays.close_menu());
+                self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
                 self.clear_empty(cx);
             }
         }
@@ -666,8 +665,7 @@ impl Harness {
             }
             BrowseIntent::SiteInfo => {
                 let open = self.browse_centre_state(cx).is_some();
-                self.overlays.update(cx, |o, _| o.stack.set(crate::overlay_stack::Layer::SiteInfo, open));
-                cx.notify();
+                self.overlays.update(cx, |o, cx| o.set(crate::overlay_stack::Layer::SiteInfo, open, cx));
             }
             BrowseIntent::Bookmark => self.edit_shown_bookmark(window, cx),
             BrowseIntent::Back => self.browse_go_back(window, cx),
@@ -694,7 +692,7 @@ impl Harness {
             }
             BrowseIntent::ToggleFolder(id) => {
                 if self.browser.update(cx, |browser, _| browser.tabs.toggle_folder(&id)) {
-                    self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+                    self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
                 }
             }
             BrowseIntent::OpenTaskChat(session) => self.browse_task_folder_action(&session, TaskFolderAction::OpenChat, window, cx),
@@ -886,7 +884,7 @@ impl Harness {
             .menu()
             .is_some_and(|menu| menu.kind == MenuKind::Project && !menu.project_header)
         {
-            self.overlays.update(cx, |overlays, _| overlays.close_menu());
+            self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
         }
     }
 

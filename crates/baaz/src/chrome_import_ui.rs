@@ -54,45 +54,51 @@ impl Harness {
         let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::ChromeImport(sheet)).keep(asked);
         self.push_overlay_view(entry, &view, cx);
         self.count_chrome_profile(cx);
-        cx.notify();
     }
 
     pub(crate) fn close_chrome_import(&mut self, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |o, _| {
-            o.stack.close(crate::overlay_stack::LayerKind::ChromeImport);
+        self.overlays.update(cx, |o, cx| {
+            o.close(crate::overlay_stack::LayerKind::ChromeImport, cx);
         });
-        cx.notify();
     }
 
     fn count_chrome_profile(&mut self, cx: &mut Context<Self>) {
-        let asked = self.overlays.update(cx, |o, _| {
-            let sheet = o.stack.chrome_import_mut()?;
-            sheet.counts = None;
-            sheet.epoch += 1;
-            Some((sheet.epoch, sheet.profiles.get(sheet.selected).map(|p| p.dir.clone())))
+        let asked = self.overlays.update(cx, |o, cx| {
+            o.edit_chrome_import(
+                |sheet| {
+                    sheet.counts = None;
+                    sheet.epoch += 1;
+                    Some((sheet.epoch, sheet.profiles.get(sheet.selected).map(|p| p.dir.clone())))
+                },
+                cx,
+            )
         });
         let Some((epoch, Some(dir))) = asked else { return };
         let now = crate::browser::tabs::now_ms();
         cx.spawn(async move |this, cx| {
             let counts = cx.background_executor().spawn(async move { chrome_import::count(&dir, now) }).await;
             let _ = this.update(cx, |this, cx| {
-                let landed = this.overlays.update(cx, |o, _| {
-                    o.stack.chrome_import_mut().filter(|s| s.epoch == epoch).map(|sheet| sheet.counts = Some(counts))
+                this.overlays.update(cx, |o, cx| {
+                    o.edit_chrome_import(|sheet| (sheet.epoch == epoch).then(|| sheet.counts = Some(counts)), cx)
                 });
-                if landed.is_some() {
-                    cx.notify();
-                }
             });
         })
         .detach();
     }
 
     fn run_chrome_import(&mut self, cx: &mut Context<Self>) {
-        let chosen = self.overlays.update(cx, |o, _| {
-            let sheet = o.stack.chrome_import_mut().filter(|sheet| !sheet.importing)?;
-            let dir: PathBuf = sheet.profiles.get(sheet.selected).map(|p| p.dir.clone())?;
-            sheet.importing = true;
-            Some((dir, sheet.bookmarks, sheet.history))
+        let chosen = self.overlays.update(cx, |o, cx| {
+            o.edit_chrome_import(
+                |sheet| {
+                    if sheet.importing {
+                        return None;
+                    }
+                    let dir: PathBuf = sheet.profiles.get(sheet.selected).map(|p| p.dir.clone())?;
+                    sheet.importing = true;
+                    Some((dir, sheet.bookmarks, sheet.history))
+                },
+                cx,
+            )
         });
         let Some((dir, b, h)) = chosen else { return };
         let started = std::time::Instant::now();
@@ -108,13 +114,16 @@ impl Harness {
                 done.source
             );
             let _ = this.update(cx, |this, cx| {
-                this.overlays.update(cx, |o, _| {
-                    if let Some(sheet) = o.stack.chrome_import_mut() {
-                        sheet.importing = false;
-                        sheet.stage = Stage::Done(done);
-                    }
+                this.overlays.update(cx, |o, cx| {
+                    o.edit_chrome_import(
+                        |sheet| {
+                            sheet.importing = false;
+                            sheet.stage = Stage::Done(done);
+                            Some(())
+                        },
+                        cx,
+                    )
                 });
-                cx.notify();
             });
         })
         .detach();
@@ -127,7 +136,7 @@ impl Harness {
         };
         if let Some(source) = source {
             self.browser.read(cx).data.clone().update(cx, |data, _| data.undo_import(&source));
-            self.overlays.update(cx, |o, _| o.toast("Import undone", "What it added is gone; your own bookmarks and history stay."));
+            self.overlays.update(cx, |o, cx| o.toast("Import undone", "What it added is gone; your own bookmarks and history stay.", cx));
         }
         self.close_chrome_import(cx);
     }
@@ -145,28 +154,23 @@ impl Harness {
     fn on_chrome_import_event(&mut self, event: ChromeImportEvent, cx: &mut Context<Self>) {
         match event {
             ChromeImportEvent::Profile(i) => {
-                self.overlays.update(cx, |o, _| {
-                    if let Some(sheet) = o.stack.chrome_import_mut() {
-                        sheet.selected = i;
-                    }
-                });
+                self.overlays.update(cx, |o, cx| o.edit_chrome_import(|sheet| (sheet.selected != i).then(|| sheet.selected = i), cx));
                 self.count_chrome_profile(cx);
             }
             ChromeImportEvent::Tick { history, on } => {
-                self.overlays.update(cx, |o, _| {
-                    if let Some(sheet) = o.stack.chrome_import_mut() {
-                        if history {
-                            sheet.history = on;
-                        } else {
-                            sheet.bookmarks = on;
-                        }
-                    }
+                self.overlays.update(cx, |o, cx| {
+                    o.edit_chrome_import(
+                        |sheet| {
+                            let tick = if history { &mut sheet.history } else { &mut sheet.bookmarks };
+                            (*tick != on).then(|| *tick = on)
+                        },
+                        cx,
+                    )
                 });
             }
             ChromeImportEvent::Run => self.run_chrome_import(cx),
             ChromeImportEvent::Undo => self.undo_chrome_import(cx),
         }
-        cx.notify();
     }
 }
 

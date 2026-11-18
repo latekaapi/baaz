@@ -283,7 +283,7 @@ impl BrowserView {
             cx.emit(BrowserEvent::CentreSwitched { left: self.last_centre_shown, shown: centre_shown });
         }
         if switched || !in_browse {
-            self.overlays.update(cx, |o, _| o.stack.close_all(&[LayerKind::Downloads, LayerKind::Extensions, LayerKind::More]));
+            self.overlays.update(cx, |o, cx| o.close_all(&[LayerKind::Downloads, LayerKind::Extensions, LayerKind::More], cx));
         }
         // However the downloads popover closed (a switch, its toggle,
         // Escape off the overlay stack), it has not rendered for its next
@@ -308,14 +308,14 @@ impl BrowserView {
             && self.downloads_anchor.is_none()
             && chrome::downloads_flag_clears(centre_shown.is_some(), downloads_empty, self.downloads_rendered)
         {
-            self.overlays.update(cx, |o, _| { o.stack.close(LayerKind::Downloads); });
+            self.overlays.update(cx, |o, cx| { o.close(LayerKind::Downloads, cx); });
             self.downloads_rendered = false;
         }
         if self.overlays.read(cx).stack.is_open(LayerKind::Extensions) && centre_shown.is_none() {
-            self.overlays.update(cx, |o, _| { o.stack.close(LayerKind::Extensions); });
+            self.overlays.update(cx, |o, cx| { o.close(LayerKind::Extensions, cx); });
         }
         if self.overlays.read(cx).stack.is_open(LayerKind::More) && !centre_has_state {
-            self.overlays.update(cx, |o, _| { o.stack.close(LayerKind::More); });
+            self.overlays.update(cx, |o, cx| { o.close(LayerKind::More, cx); });
         }
         let chrome_popover_open = in_browse
             && ((self.overlays.read(cx).stack.is_open(LayerKind::Downloads) && !self.downloads_overlay_wanted(cx) && centre_shown.is_some() && !self.browse_downloads(cx).is_empty())
@@ -577,7 +577,7 @@ impl crate::app::Harness {
             drop_cover: false,
             // F2 Active only: Paused leaves the app usable, so its pages
             // stay live.
-            feedback_cover: self.feedback.covers_app(),
+            feedback_cover: self.feedback.read(cx).covers_app(),
             // The Field draws its rows in the overlay window, over the live
             // page: only the in-window dropdowns still cover it.
             omnibox_open: self.browse_omnibox_open(cx) && !self.field_overlay_wanted(cx),

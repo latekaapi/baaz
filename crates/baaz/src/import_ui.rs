@@ -374,7 +374,7 @@ impl Harness {
 
     /// Change the open import sheet, if one stands.
     fn with_import_sheet<R>(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut ImportSheet) -> R) -> Option<R> {
-        self.overlays.update(cx, |o, _| o.stack.import_sheet_mut().map(change))
+        self.overlays.update(cx, |o, cx| o.edit_import_sheet(|sheet| Some(change(sheet)), cx))
     }
 
     /// Open the import sheet: on the folders, defaulted from the cached
@@ -396,25 +396,29 @@ impl Harness {
         // Dismissing it (✕, Escape, Cancel, Close, Done) closes it as
         // `close_import_sheet` does: a finished run is done with.
         let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::ImportSheet(sheet))
-            .on_close(|_, baaz, cx| baaz.import_sheet_closed(cx))
+            .on_close(|_, baaz, _| {
+                baaz.import_sheet_closed();
+            })
             .keep(asked);
         self.push_overlay_view(entry, &view, cx);
     }
 
     /// Close the sheet (✕, Cancel, Close, Done, Escape). A run keeps going.
     pub(crate) fn close_import_sheet(&mut self, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |o, _| {
-            o.stack.close(crate::overlay_stack::LayerKind::ImportSheet);
-        });
-        self.import_sheet_closed(cx);
+        let closed = self.overlays.update(cx, |o, cx| o.close(crate::overlay_stack::LayerKind::ImportSheet, cx)).is_some();
+        // A closing sheet redrew the window already (the stack notified).
+        if self.import_sheet_closed() && !closed {
+            cx.notify();
+        }
     }
 
-    /// After the sheet closed: a finished run is done with.
-    fn import_sheet_closed(&mut self, cx: &mut Context<Self>) {
-        if self.import.run.as_ref().is_some_and(|run| run.finished) {
+    /// After the sheet closed: a finished run is done with. Whether it was.
+    fn import_sheet_closed(&mut self) -> bool {
+        let finished = self.import.run.as_ref().is_some_and(|run| run.finished);
+        if finished {
             self.import.run = None;
         }
-        cx.notify();
+        finished
     }
 
     /// Tick or untick one folder (by cwd).
@@ -428,7 +432,6 @@ impl Harness {
                 }
             }
         });
-        cx.notify();
     }
 
     /// Tick or untick the folded folders together.
@@ -447,7 +450,6 @@ impl Harness {
                 }
             }
         });
-        cx.notify();
     }
 
     /// The "Skip scripted runs" box.
@@ -457,7 +459,6 @@ impl Harness {
                 choice.skip_scripted = on;
             }
         });
-        cx.notify();
     }
 
     // -------------------------------------------------------------- the run
@@ -581,9 +582,8 @@ impl Harness {
         if !added.is_empty() {
             self.persist_provider_sessions(cx);
             self.write_import_journal();
-            if self.merge_provider_rows(cx) {
-                cx.notify();
-            }
+            // The merged rows draw with the one redraw below.
+            self.merge_provider_rows(cx);
         }
         self.next_import_batch(cx);
         cx.notify();
@@ -628,8 +628,8 @@ impl Harness {
         }
         if self.import.run.as_ref().is_some_and(|run| run.id == id) {
             self.import.run = None;
-            self.overlays.update(cx, |o, _| {
-                o.stack.close(crate::overlay_stack::LayerKind::ImportSheet);
+            self.overlays.update(cx, |o, cx| {
+                o.close(crate::overlay_stack::LayerKind::ImportSheet, cx);
             });
         }
         self.refresh_import_scan(cx);
@@ -851,7 +851,6 @@ impl Harness {
             ImportSheetEvent::Start => self.start_import(None, cx),
             ImportSheetEvent::ToggleUnreadable => {
                 self.with_import_sheet(cx, |sheet| sheet.show_unreadable = !sheet.show_unreadable);
-                cx.notify();
             }
             ImportSheetEvent::ShowImported => self.show_imported_in_sidebar(cx),
         }

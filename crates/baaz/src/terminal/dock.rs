@@ -345,10 +345,9 @@ impl TerminalDock {
     /// and stay there unsent. With no open session a toast says so.
     fn ask_about_block(&mut self, tab_id: &str, block: usize, cx: &mut Context<Self>) {
         if self.facts.origin.is_none() {
-            self.overlays.update(cx, |overlays, _| {
-                overlays.toast("No open session", "Open a session to ask about this terminal output.");
+            self.overlays.update(cx, |overlays, cx| {
+                overlays.toast("No open session", "Open a session to ask about this terminal output.", cx);
             });
-            cx.notify();
             return;
         }
         let payload = self.host.read(cx).get(tab_id).and_then(|tab| {

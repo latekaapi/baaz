@@ -1132,10 +1132,9 @@ impl BaazHarness {
                         report.errors.first().cloned().unwrap_or_default(),
                     )
                 };
-                this.overlays.update(cx, |overlays, _| {
-                    overlays.toast("Sessions moved", body);
+                this.overlays.update(cx, |overlays, cx| {
+                    overlays.toast("Sessions moved", body, cx);
                 });
-                cx.notify();
             });
         })
         .detach();

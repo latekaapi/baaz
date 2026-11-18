@@ -130,7 +130,7 @@ entities `RightPane` (`right_pane.rs`), `TerminalDock`
 
 ### `Harness` — the window root
 
-`Harness` (`app.rs`) has 52 fields. Its methods are spread over 62
+`Harness` (`app.rs`) has 50 fields. Its methods are spread over 62
 `impl Harness` blocks in 53 files (`app/*.rs` — the sidebar's root half is
 `app/sidebar_host.rs` — the
 `browser/` seam files, `dialogs.rs`, `login.rs` and others). Roughly:
@@ -183,6 +183,19 @@ own hover and scroll, and the facts the root pushes as it composes the shell
 (`Harness::compose_sidebar`: the open session, the footer, the open menus,
 Browse's rows — a notify only when they moved). The window's lifecycle does
 not touch it (`tests/sidebar_view_ratchet.rs`).
+
+**Who notifies (task 4.9b).** A state change redraws through the entity
+that owns it: the owner's mutation method changes the state and notifies
+once, and callers do not notify after it. gpui-pre invalidates every window
+whose last frame read a notified entity, and the root is never cached, so a
+notify of anything the root reads each frame — the overlay stack, the
+browser, the right pane, the Settings and Skills pages, the session list,
+the connect screen, the provider model, the terminal dock, the feedback
+shell — re-renders the root without the root being told
+(`sidebar_view::an_owner_the_root_draws_redraws_it_without_a_root_notify`).
+The root notifies only for its own fields. `tests/notify_ratchet.rs` refuses
+a notify hidden behind a helper, a macro or another spelling, and holds the
+count to a ceiling that only falls.
 
 ### `SessionRuntime` and `SessionView` — one session (task 4.8)
 
@@ -246,7 +259,8 @@ shuts runtimes down, not views.
 |---|---|---|
 | `SidebarPane` | `sidebar_view.rs` | the sidebar column (task 4.7): the virtual list's state and its sync, hover and the hover card's arm, the one-shot reveal, the wheel accumulator and scripted sweep, the mode-switch fade, the Pinned disclosure, the group menus' seats. It subscribes to `SessionList`, observes the layout global, takes `SidebarFacts` from the root and emits `SidebarEvent`s the root maps (`app/sidebar_host.rs`); it holds no handle to the root |
 | `SessionList` | `session_list.rs` | the session list as a model (task 4.7): rows, stores, filters, fetch state, title bookkeeping, the visible/grouping/chain caches keyed on the root's `ListFacts`, and the joins (`rejoin_scoped`, `merge_provider_rows`, `install_provisional_rows`) |
-| `Overlays` | `overlays.rs`, `overlay_stack.rs` | state only: the overlay stack (task 4.6a) — every dialog, palette, menu, popover, sheet and inline rename is one typed entry carrying `covers_page`, `takes_keyboard`, `host` (the main window, an overlay panel, or — the dialog and the palette — wherever the mode puts them), its owner and its close hook; Escape pops it (`Harness::pop_overlay`), `Covers` reads its `covers_page`, and closing an entry gives back the focus it took (applied in the root's frame) — plus toasts and the `@`-picker walks. Since task 4.6b an entry may hold the view that draws it: the dialog (`DialogView`, `dialogs.rs`), the Muse sheet (`MuseSheetView`, `login.rs`), the setup sheet (`SetupHost`), the import and Chrome-import sheets (`ImportSheetView`, `ChromeImportView`), the bookmark popover (`BookmarkView`, `overlay/bookmark.rs`) and the pickers; each emits `DismissEvent`, which pops the stack newest-first (`Harness::dismiss_overlay_view`). The root pushes their facts in each frame and maps their typed events. The rest are drawn by `Harness`, the composer, the right pane, the Settings and Skills pages and the connect screen, each reading its own entry |
+| `Overlays` | `overlays.rs`, `overlay_stack.rs` | its mutations notify (task 4.9b): `push`/`close`/`pop`/`set`, the menu, sheet and toast methods each change the stack and notify once when something changed, so no caller notifies after them; it also keeps the shell menus' anchors (`note_anchor`: the header `…` and the project menu). State: the overlay stack (task 4.6a) — every dialog, palette, menu, popover, sheet and inline rename is one typed entry carrying `covers_page`, `takes_keyboard`, `host` (the main window, an overlay panel, or — the dialog and the palette — wherever the mode puts them), its owner and its close hook; Escape pops it (`Harness::pop_overlay`), `Covers` reads its `covers_page`, and closing an entry gives back the focus it took (applied in the root's frame) — plus toasts and the `@`-picker walks. Since task 4.6b an entry may hold the view that draws it: the dialog (`DialogView`, `dialogs.rs`), the Muse sheet (`MuseSheetView`, `login.rs`), the setup sheet (`SetupHost`), the import and Chrome-import sheets (`ImportSheetView`, `ChromeImportView`), the bookmark popover (`BookmarkView`, `overlay/bookmark.rs`) and the pickers; each emits `DismissEvent`, which pops the stack newest-first (`Harness::dismiss_overlay_view`). The root pushes their facts in each frame and maps their typed events. The rest are drawn by `Harness`, the composer, the right pane, the Settings and Skills pages and the connect screen, each reading its own entry |
+| `FeedbackUi` | `feedback/ui.rs` | the F2 feedback shell (task 4.9b, was a plain struct on `Harness`): phase, draft, probe, hover/press/drag, the capture and the note popover, the step queue and its pump, the Done write; it runs the whole flow on its own entity and notifies itself — the root draws the layer and the header slot from it and keeps thin entry points (`toggle_feedback`, `step_feedback`, the layer's pointer handlers) that pass in the screen context (`Harness::feedback_context`); `FeedbackEvent::ClosedDialog` hands the root its half of closing a dialog |
 | `Picker<D>` | `picker.rs` | the one list picker (task 4.6b, Zed's `picker` read for the shape): query (its own field, a borrowed one, or typed elsewhere), selection, ↑ ↓ ↩ Escape, hover; a `PickerDelegate` gives the rows, the narrowing, the pick and the look (the library's own component). Delegates: the palette (`palette.rs`: ⌘K, `/resume`, `/fork`, search, Projects), the model picker and the `@` mention (`session/pickers.rs`), the hand-off picker (`app/browser_handoff.rs`) |
 | `OverlayView` | `overlay.rs` | the borderless panel windows that float above the native page (the page draws above all gpui content); what they show follows the overlay stack's panel-hosted entries |
 | `SettingsPage` | `settings.rs`, `settings_providers.rs` | the Settings page as a region entity: its route (`SettingsPageState`), search and focus, the Shortcuts rows and recording, its menus and folds; the root pushes `SettingsFacts` and handles `SettingsEvent`s |
@@ -329,7 +343,10 @@ sessions with no project default to `~/baaz-sessions`
    channel; the runtime's lane task awaits it on the UI thread.
 6. **Fold.** The runtime's `on_provider_event` handles taps (approvals,
    questions, banners) and passes `Deltas` to `SessionStore::apply_deltas`,
-   then says which entry moved (`RuntimeEvent`) and `cx.notify()`s itself.
+   then says which entry moved (`RuntimeEvent`). The view's handler redraws
+   the view, so an event needs no notify of its own; a change no event
+   names (a banner, a chip, a clock) `cx.notify()`s the runtime, which the
+   view observes.
 7. **Render.** The view over it (if any) maps the event to one list
    operation and its cached subtree re-renders; the root is not notified.
    `transcript.rs` maps turns to `aui` elements on a virtual list.

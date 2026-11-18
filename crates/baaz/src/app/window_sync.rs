@@ -529,7 +529,7 @@ mod tests {
                     target: aui::screens::sidebar::BrowseMenuTarget::Folder("f1".into()),
                     at: gpui::point(px(40.0), px(40.0)),
                 };
-                overlays.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::BrowseMenu(menu)));
+                overlays.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::BrowseMenu(menu)), cx);
                 cx.notify();
             });
         });

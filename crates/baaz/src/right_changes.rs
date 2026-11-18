@@ -175,6 +175,12 @@ fn default_of(ui: &ChangesUi) -> &str {
 }
 
 impl RightPane {
+    /// Back from the PR form to the changes list (Back, Cancel).
+    fn close_pr_form(&mut self, root: &Path, cx: &mut Context<Self>) {
+        self.changes_ui(root).form = None;
+        cx.notify();
+    }
+
     /// The Changes state for `root`, reset when the root moved.
     pub(crate) fn changes_ui(&mut self, root: &Path) -> &mut ChangesUi {
         if self.cache.changes.root.as_deref() != Some(root) {
@@ -1077,8 +1083,7 @@ fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, menu: bool, window:
     let row = pushed_row("right-pr-row", "Create pull request")
         .back_label("Back to changes")
         .on_back(cx.listener(move |this, _, _, cx| {
-            this.changes_ui(&back_root).form = None;
-            cx.notify();
+            this.close_pr_form(&back_root, cx);
         }))
         .into_any_element();
     let title_focused = gpui::Focusable::focus_handle(title.read(cx), cx).is_focused(window);
@@ -1140,8 +1145,7 @@ fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, menu: bool, window:
         .gap(px(scale::SP_2))
         .px(px(scale::SP_2))
         .child(text_action("right-pr-cancel", "Cancel", None, 28.0, cx).on_click(cx.listener(move |this, _, _, cx| {
-            this.changes_ui(&cancel_root).form = None;
-            cx.notify();
+            this.close_pr_form(&cancel_root, cx);
         })))
         .child(
             primary_action("right-pr-create", "Create PR", Some(IconName::PullRequest), busy == Some(GitBusy::CreatingPr), busy.is_some(), cx)

@@ -285,12 +285,9 @@ impl SessionView {
         if self.runtime.read(cx).models.get(selected).is_none_or(|row| row.efforts.is_empty()) {
             return Err("the highlighted model row has no submenu".into());
         }
-        self.overlays.update(cx, |overlays, _| {
-            if let Some(menu) = overlays.menu_mut() {
-                menu.sub_open = true;
-            }
+        self.overlays.update(cx, |overlays, cx| {
+            overlays.edit_menu(None, |menu| !std::mem::replace(&mut menu.sub_open, true), cx);
         });
-        cx.notify();
         Ok(())
     }
 
@@ -298,9 +295,9 @@ impl SessionView {
     pub(crate) fn step_meter(&mut self, cx: &mut Context<Self>) -> StepResult {
         // An entry on the overlay stack, drawn by this view's composer.
         let owner = cx.entity_id();
-        self.overlays.update(cx, |o, _| {
+        self.overlays.update(cx, |o, cx| {
             if !o.stack.is_open(crate::overlay_stack::LayerKind::Meter) {
-                o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Meter).owner(owner));
+                o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Meter).owner(owner), cx);
             }
         });
         cx.notify();

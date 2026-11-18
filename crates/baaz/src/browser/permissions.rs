@@ -45,7 +45,7 @@ impl BrowserView {
     /// shown — in Browse only, where the rows live. The strip itself reads
     /// the shown tab's live asks, so a page dismissal drops it with no
     /// Baaz state to clear.
-    pub(super) fn route_browse_permissions(&mut self, shown: Option<TabId>, mark_background: bool, cx: &mut gpui::App) {
+    pub(super) fn route_browse_permissions(&mut self, shown: Option<TabId>, mark_background: bool, cx: &mut gpui::Context<Self>) {
         let live: Vec<(TabId, Vec<LiveAsk>)> = self
             .states
             .iter()
@@ -90,7 +90,7 @@ impl BrowserView {
             }
         }
         if dirty {
-            self.schedule_tabs_write();
+            self.tabs_changed(cx);
         }
     }
 

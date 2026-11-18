@@ -28,15 +28,11 @@ impl SessionRuntime {
         {
             let reason = crate::providers::gate(self.provider_kind(), provider::Capability::SessionShell)
                 .unwrap_or_else(|| "Shell commands are not available on this provider.".into());
-            self.banner = Some(reason);
-            self.banner_action = None;
-            cx.notify();
+            self.plain_banner(reason, cx);
             return;
         }
         if let Some(notice) = self.lease_notice.clone() {
-            self.banner = Some(notice);
-            self.banner_action = None;
-            cx.notify();
+            self.plain_banner(notice, cx);
             return;
         }
         self.banner = None;
@@ -77,9 +73,7 @@ impl SessionRuntime {
                 provider::Capability::ForkSession,
             )
             .unwrap_or_else(|| "Forking is not available on this provider.".into());
-            self.banner = Some(reason);
-            self.banner_action = None;
-            cx.notify();
+            self.plain_banner(reason, cx);
             return;
         }
         let through_turn =

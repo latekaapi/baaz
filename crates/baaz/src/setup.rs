@@ -224,14 +224,14 @@ impl SetupHost {
     fn show(&mut self, sheet: SetupSheet, cx: &mut Context<Self>) {
         let owner = cx.entity_id();
         let view: gpui::AnyView = cx.entity().into();
-        self.overlays.update(cx, |o, _| match o.stack.setup_sheet_mut() {
+        self.overlays.update(cx, |o, cx| match o.stack.setup_sheet_mut() {
             Some(open) => *open = sheet,
             // Drawn by this host; its `DismissEvent` reaches the root
             // through the root's own subscription (the host outlives its
             // sheets).
-            None => o.stack.push(
+            None => o.push(
                 crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::SetupSheet(sheet)).owner(owner).view(view),
-            ),
+             cx),
         });
     }
 
@@ -397,11 +397,7 @@ impl SetupHost {
     /// Close the sheet (Close, Done, ✕, Escape). The terminal and the watch
     /// keep going.
     pub(crate) fn close(&mut self, cx: &mut Context<Self>) -> bool {
-        let was = self.overlays.update(cx, |o, _| o.stack.close(crate::overlay_stack::LayerKind::SetupSheet)).is_some();
-        if was {
-            cx.notify();
-        }
-        was
+        self.overlays.update(cx, |o, cx| o.close(crate::overlay_stack::LayerKind::SetupSheet, cx)).is_some()
     }
 
     /// The sheet over whatever screen asked, or `None` while closed.

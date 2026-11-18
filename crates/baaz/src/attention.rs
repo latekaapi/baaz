@@ -232,7 +232,6 @@ impl Harness {
         let notifier = cx.default_global::<Notifier>();
         notifier.filter = !notifier.filter;
         self.invalidate_list(cx);
-        cx.notify();
     }
 
     /// `needs-you-filter:<on|off>`: the filter set, not toggled, so a
@@ -271,7 +270,6 @@ impl Harness {
         })?;
         self.invalidate_list(cx);
         self.check_attention(cx);
-        cx.notify();
         Ok(())
     }
 

@@ -121,7 +121,7 @@ impl Harness {
 
     /// The open popover's bookmark, closing its entry.
     fn take_bookmark_edit(&mut self, cx: &mut Context<Self>) -> Option<Entity<BookmarkView>> {
-        let entry = self.overlays.update(cx, |o, _| o.stack.close(crate::overlay_stack::LayerKind::Bookmark))?;
+        let entry = self.overlays.update(cx, |o, cx| o.close(crate::overlay_stack::LayerKind::Bookmark, cx))?;
         match entry.layer {
             crate::overlay_stack::Layer::Bookmark(edit) => Some(edit),
             _ => None,
@@ -141,7 +141,6 @@ impl Harness {
                 data.update_bookmark(id, &title, folder, cx);
             }
         });
-        cx.notify();
     }
 
     /// Remove: the bookmark goes and the popover closes.
@@ -149,7 +148,6 @@ impl Harness {
         let Some(edit) = self.take_bookmark_edit(cx) else { return };
         let id = edit.read(cx).id;
         self.browser.read(cx).data.clone().update(cx, |data, cx| data.remove_bookmark(id, cx));
-        cx.notify();
     }
 
     /// The popover inside its float, its folders pushed first (it draws

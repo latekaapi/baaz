@@ -4,7 +4,9 @@
 //! The F1 [`crate::feedback`] module owns the data ([`Draft`](crate::feedback::Draft),
 //! [`ElementProbe`](crate::feedback::ElementProbe), [`write_report`](crate::feedback::write_report));
 //! this module owns the UI state machine on top of it. One [`FeedbackUi`]
-//! lives on [`Harness`](crate::app::Harness) as `feedback`.
+//! entity per window, held by [`Harness`](crate::app::Harness) as
+//! `feedback`: it runs the flow and redraws itself; the root draws the
+//! layer and the header slot from it (plan 4.9b).
 //!
 //! Phases: `Off` (nothing shown) → `Active` (the capture layer blocks the
 //! app; the header icon reads tinted) → `Paused` (the app is usable, the
@@ -15,7 +17,7 @@
 //! nothing, not even the menu row.
 //!
 //! F3 hook: hover/click/drag note-taking attaches to the capture layer
-//! built by [`FeedbackUi::layer_base`] — add handlers there, next to the
+//! built by `Harness::render_feedback_layer` — add handlers there, next to the
 //! swallowing ones, so every pointer trap stays in one place.
 
 use std::collections::VecDeque;
@@ -37,7 +39,6 @@ use crate::feedback::{
     crop_with_outline, human_role, render_window, Draft, ElementHit, ElementProbe, MacProbe, Rect, ScreenContext,
     Target,
 };
-use crate::wire::WireCall as _;
 
 /// The key context the capture layer carries while Active, so Escape
 /// reaches [`crate::app::FeedbackEscape`] instead of the composer and
@@ -144,7 +145,7 @@ pub struct PendingNote {
     /// The field holding the owner's words.
     pub field: Entity<TextareaState>,
     /// Where the app was when the note was captured (taken in
-    /// [`crate::app::Harness::begin_note_capture`], never refreshed): a
+    /// [`FeedbackUi::begin_note_capture`], never refreshed): a
     /// Pause or mode switch before Save must not rewrite it.
     pub context: ScreenContext,
 }
@@ -237,7 +238,8 @@ impl QueuedStep {
     }
 }
 
-/// The feedback shell's state: one per window, on `Harness`.
+/// The feedback shell: one per window, its own entity (`Harness::feedback`),
+/// which runs the flow and redraws itself (plan 4.9b).
 pub struct FeedbackUi {
     /// What the shell shows.
     pub phase: FeedbackPhase,
@@ -333,11 +335,24 @@ pub struct FeedbackUi {
     pub forced_on: bool,
     /// The capture layer's focus, taken on entering Active.
     pub focus: FocusHandle,
+    /// The window's floating state: the shell's toasts, and the palette,
+    /// menu and dialog that entering Active closes.
+    overlays: Entity<crate::overlays::Overlays>,
+    /// The root's focus: where Pause and Escape park the keyboard.
+    focus_root: FocusHandle,
+    /// The shell's own work in flight (the Done write).
+    tasks: Vec<gpui::Task<()>>,
 }
 
 impl FeedbackUi {
-    /// Blank shell in `Off` with `probe`. The focus handle needs the app.
-    pub fn new(probe: Box<dyn ElementProbe>, cx: &mut gpui::App) -> Self {
+    /// Blank shell in `Off` with `probe`, over the window's `overlays`,
+    /// parking the keyboard on `focus_root`. The focus handle needs the app.
+    pub(crate) fn new(
+        probe: Box<dyn ElementProbe>,
+        overlays: Entity<crate::overlays::Overlays>,
+        focus_root: FocusHandle,
+        cx: &mut gpui::App,
+    ) -> Self {
         Self {
             phase: FeedbackPhase::Off,
             draft: Draft::new(),
@@ -369,6 +384,9 @@ impl FeedbackUi {
             discard_bounds: None,
             forced_on: false,
             focus: cx.focus_handle(),
+            overlays,
+            focus_root,
+            tasks: Vec::new(),
         }
     }
 
@@ -497,7 +515,7 @@ impl FeedbackUi {
     /// Paused → Active. Pure — the caller runs the side effects the
     /// outcome names (toasts, probe activation, focus). The run-only
     /// [`Self::forced_on`] counts as the setting being on. While
-    /// [`Self::saving`] the Harness guards the toggle outright (there is
+    /// [`Self::saving`] [`Self::toggle_feedback`] guards the toggle outright (there is
     /// no stay-put outcome to return here). Moving between Active and
     /// Paused keeps the open popover (a note-in-progress survives the
     /// round-trip); only the transient pointer and capture state parks.
@@ -870,21 +888,75 @@ fn parse_feedback_drag(payload: &str) -> Option<(Point<Pixels>, Point<Pixels>)> 
     ))
 }
 
-impl crate::app::Harness {
+/// What the shell tells the root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FeedbackEvent {
+    /// Entering Active closed the dialog: the root drops the facts that
+    /// rode it (`Harness::close_dialog`'s half).
+    ClosedDialog,
+}
+
+impl gpui::EventEmitter<FeedbackEvent> for FeedbackUi {}
+
+/// One painted part of the header slot whose window bounds the shell keeps
+/// ([`FeedbackUi::note_bounds`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SlotPart {
+    /// The whole slot: the floating copy seats here.
+    Slot,
+    /// The toggle icon.
+    Toggle,
+    /// The Done icon.
+    Done,
+    /// The Discard icon.
+    Discard,
+}
+
+/// Where the app is, for a note's [`ScreenContext`]: the root reads its own
+/// state (`Harness::feedback_context`) when a note begins.
+pub(crate) type Screen<'a> = &'a dyn Fn(&mut Window, &gpui::App) -> ScreenContext;
+
+/// The shell's own flow (plan 4.9b): every change here is this entity's,
+/// and it redraws itself — the root draws the layer and the slot from it,
+/// so its notify re-renders the root without the root being told.
+impl FeedbackUi {
+    /// Record a slot part's window bounds as it paints. The slot's redraw
+    /// whenever they first arrive or CHANGE: entering Active widens the slot
+    /// leftwards (and resizes, mode switches and sidebar toggles move it),
+    /// and the floating copy must reseat instead of ghosting at the old
+    /// origin. An icon's only on its first arrival: tests click through
+    /// them, and nothing seats at them. Steady bounds never schedule work.
+    pub(crate) fn note_bounds(&mut self, part: SlotPart, bounds: gpui::Bounds<Pixels>, cx: &mut Context<Self>) {
+        let slot = match part {
+            SlotPart::Slot => &mut self.slot_bounds,
+            SlotPart::Toggle => &mut self.toggle_bounds,
+            SlotPart::Done => &mut self.done_bounds,
+            SlotPart::Discard => &mut self.discard_bounds,
+        };
+        let redraw = match part {
+            SlotPart::Slot => *slot != Some(bounds),
+            _ => slot.is_none(),
+        };
+        *slot = Some(bounds);
+        if redraw {
+            cx.notify();
+        }
+    }
+
     /// ⌃⌥⌘F / Help → Feedback Mode: setting off toasts and stays Off;
     /// otherwise the toggle outcome, focusing the layer and priming the
     /// probe on the way into Active.
     pub(crate) fn toggle_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.feedback.saving {
+        if self.saving {
             return;
         }
-        match self.feedback.toggle(crate::layout::Layout::get(cx).feedback_mode) {
+        match self.toggle(crate::layout::Layout::get(cx).feedback_mode) {
             ToggleOutcome::NeedsSetting => {
-                let id = self.overlays.update(cx, |o, _| {
-                    o.toast("Feedback mode is off", "Turn it on in Settings → General.")
+                let id = self.overlays.update(cx, |o, cx| {
+                    o.toast("Feedback mode is off", "Turn it on in Settings → General.", cx)
                 });
-                self.feedback.off_toast = Some(id);
-                cx.notify();
+                // Nothing of the shell's moved: the toast redraws the window.
+                self.off_toast = Some(id);
             }
             ToggleOutcome::EnteredActive | ToggleOutcome::Resumed => {
                 self.enter_feedback_active(window, cx);
@@ -904,27 +976,29 @@ impl crate::app::Harness {
     pub(crate) fn enter_feedback_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The "mode is off" toast goes stale the moment the mode is on:
         // dismiss it by id on the way in.
-        if let Some(id) = self.feedback.off_toast.take() {
-            self.overlays.update(cx, |overlays, _| {
-                overlays.dismiss_toast(&id);
+        if let Some(id) = self.off_toast.take() {
+            self.overlays.update(cx, |overlays, cx| {
+                overlays.dismiss_toast(&id, cx);
             });
         }
-        self.overlays.update(cx, |overlays, _| {
-            overlays.close_palette();
-            overlays.close_menu();
+        self.overlays.update(cx, |overlays, cx| {
+            overlays.close_palette(cx);
+            overlays.close_menu(cx);
         });
-        self.close_dialog(cx);
+        self.overlays.update(cx, |overlays, cx| overlays.close_dialog(cx));
+        // The root's half of closing a dialog (the handoff confirm's facts).
+        cx.emit(FeedbackEvent::ClosedDialog);
         // The layer takes the keyboard below: what the closed overlays held
         // is not given back over it.
         self.overlays.update(cx, |overlays, _| overlays.stack.take_restore());
-        self.feedback.probe.activate(window);
+        self.probe.activate(window);
         // A note-in-progress survived the pause: hand the keyboard back to
         // its field, otherwise to the layer.
-        if let Some(note) = self.feedback.popover.as_ref() {
+        if let Some(note) = self.popover.as_ref() {
             let focus = note.field.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
         } else {
-            window.focus(&self.feedback.focus, cx);
+            window.focus(&self.focus, cx);
         }
         window.refresh();
         cx.notify();
@@ -933,8 +1007,8 @@ impl crate::app::Harness {
     /// Escape while Active → Paused, parking focus on the root. Anywhere
     /// else a no-op (the binding only exists on the Active layer).
     pub(crate) fn escape_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.feedback.phase == FeedbackPhase::Active {
-            self.feedback.pause();
+        if self.phase == FeedbackPhase::Active {
+            self.pause();
             window.focus(&self.focus_root, cx);
             cx.notify();
         }
@@ -946,28 +1020,26 @@ impl crate::app::Harness {
     /// A no-op while saving. Afterwards the layer keeps the keyboard when
     /// still Active, so Escape keeps working after the click.
     pub(crate) fn discard_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.feedback.saving {
+        if self.saving {
             return;
         }
-        match self.feedback.discard_press() {
-            DiscardOutcome::Disabled => {}
-            DiscardOutcome::Armed => {
-                let task = cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(DISCARD_ARM).await;
-                    let _ = this.update(cx, |this: &mut Self, cx| {
-                        this.feedback.expire_discard();
-                        cx.notify();
-                    });
+        let outcome = self.discard_press();
+        if matches!(outcome, DiscardOutcome::Armed) {
+            let task = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(DISCARD_ARM).await;
+                let _ = this.update(cx, |this: &mut Self, cx| {
+                    this.expire_discard();
+                    cx.notify();
                 });
-                self.feedback.discard_task = Some(task);
-                cx.notify();
-            }
-            DiscardOutcome::Cleared => {
-                cx.notify();
-            }
+            });
+            self.discard_task = Some(task);
         }
-        if self.feedback.phase == FeedbackPhase::Active {
-            window.focus(&self.feedback.focus, cx);
+        // Armed (the label renames) or cleared (the draft empties).
+        if !matches!(outcome, DiscardOutcome::Disabled) {
+            cx.notify();
+        }
+        if self.phase == FeedbackPhase::Active {
+            window.focus(&self.focus, cx);
         }
     }
 
@@ -986,28 +1058,28 @@ impl crate::app::Harness {
     pub(crate) fn finish_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A Done while a report is still being written must not file the
         // open note into the draft the write is about to clear.
-        if self.feedback.saving {
+        if self.saving {
             return;
         }
         // Done first files the open note when it holds text: a
         // note-in-progress is a note, not chrome. An in-flight capture has
         // no popover to file yet, so it is dropped instead.
-        if self.feedback.popover.is_some() {
+        if self.popover.is_some() {
             self.save_feedback_note(window, cx);
         }
-        if self.feedback.capture_pending.is_some() {
-            self.feedback.cancel_note();
+        if self.capture_pending.is_some() {
+            self.cancel_note();
         }
-        if !self.feedback.done_enabled(cx) {
+        if !self.done_enabled(cx) {
             return;
         }
-        self.feedback.saving = true;
-        let note_count = self.feedback.note_count();
+        self.saving = true;
+        let note_count = self.note_count();
         // The draft moves out below, emptying it: hold the count for the
         // header (never a `0 notes` flash) and drop the Discard arm with it.
-        self.feedback.saving_count = Some(note_count);
-        self.feedback.disarm_discard();
-        let draft = std::mem::take(&mut self.feedback.draft);
+        self.saving_count = Some(note_count);
+        self.disarm_discard();
+        let draft = std::mem::take(&mut self.draft);
         let root = crate::feedback::feedback_root();
         let build = feedback_build_string();
         let task = cx.spawn(async move |this, cx| {
@@ -1024,8 +1096,8 @@ impl crate::app::Harness {
                     Ok(dir) => {
                         let path = dir.display().to_string();
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone()));
-                        this.feedback.done_applied();
-                        this.feedback.saved_flash =
+                        this.done_applied();
+                        this.saved_flash =
                             Some(SavedFlash { at: Instant::now(), notes: note_count, path: path.clone() });
                         // The flash is checked only at render: repaint once it
                         // has expired, or an idle window keeps it up forever.
@@ -1033,12 +1105,11 @@ impl crate::app::Harness {
                             cx.background_executor().timer(FEEDBACK_SAVED_FLASH).await;
                             let _ = this.update(cx, |this: &mut Self, cx| {
                                 if this
-                                    .feedback
                                     .saved_flash
                                     .as_ref()
                                     .is_some_and(|flash| flash.at.elapsed() >= FEEDBACK_SAVED_FLASH)
                                 {
-                                    this.feedback.saved_flash = None;
+                                    this.saved_flash = None;
                                 }
                                 cx.notify();
                             });
@@ -1050,20 +1121,20 @@ impl crate::app::Harness {
                         // (seen live).
                     }
                     Err(err) => {
-                        this.feedback.draft = draft;
-                        this.feedback.saving = false;
-                        this.feedback.saving_count = None;
-                        this.overlays.update(cx, |o, _| {
-                            o.toast("Couldn't save feedback", format!("{err:#}"))
+                        this.draft = draft;
+                        this.saving = false;
+                        this.saving_count = None;
+                        this.overlays.update(cx, |o, cx| {
+                            o.toast("Couldn't save feedback", format!("{err:#}"), cx)
                         });
                     }
                 }
                 cx.notify();
             });
         });
-        self.wire_tasks().push(task);
-        if self.feedback.phase == FeedbackPhase::Active {
-            window.focus(&self.feedback.focus, cx);
+        self.tasks.push(task);
+        if self.phase == FeedbackPhase::Active {
+            window.focus(&self.focus, cx);
         }
         cx.notify();
     }
@@ -1071,11 +1142,11 @@ impl crate::app::Harness {
     /// The setting flipped off mid-session: the shell goes Off but keeps
     /// the draft, so the next toggle resumes it.
     pub(crate) fn feedback_setting_off(&mut self, cx: &mut Context<Self>) {
-        self.feedback.setting_off();
+        self.setting_off();
         cx.notify();
     }
 
-    /// `feedback-mode:<sub>`: `on` parks the run-only [`FeedbackUi::forced_on`]
+    /// `feedback-mode:<sub>`: `on` parks the run-only [`Self::forced_on`]
     /// flag (never `layout.feedback_mode`) and enters Active; `pause` /
     /// `resume` move between Active and Paused; `off` clears the run's
     /// flag and parks Off keeping the draft; `discard` clears the draft
@@ -1106,8 +1177,23 @@ impl crate::app::Harness {
     /// a `cancel` with no popover, capture or queued step; `on` while
     /// Paused (it stays Paused); `pause`/`resume` while Off; and a `done`
     /// with nothing to save.
-    pub(crate) fn step_feedback(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        if self.feedback.saving {
+    pub(crate) fn step_feedback(
+        &mut self,
+        screen: Screen<'_>,
+        rest: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> crate::steps::StepResult {
+        // One redraw per step, whatever it moved (a refused step redraws
+        // nothing new, harmlessly).
+        let result = self.run_step(screen, rest, window, cx);
+        cx.notify();
+        result
+    }
+
+    /// [`Self::step_feedback`]'s body: what the sub does, before its redraw.
+    fn run_step(&mut self, screen: Screen<'_>, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if self.saving {
             return Err("a feedback report is still saving".to_owned());
         }
         let rest = rest.trim();
@@ -1116,58 +1202,55 @@ impl crate::app::Harness {
             let Some(point) = parse_feedback_point(payload) else {
                 return Err(format!("unparseable point {payload:?} (expected x,y)"));
             };
-            if self.feedback.phase != FeedbackPhase::Active {
-                return Err(not_active(self.feedback.phase));
+            if self.phase != FeedbackPhase::Active {
+                return Err(not_active(self.phase));
             }
-            if !self.feedback.slot_contains(point)
-                && (self.feedback.popover.is_some()
-                    || self.feedback.capture_pending.is_some()
-                    || self.feedback.press.is_some())
+            if !self.slot_contains(point)
+                && (self.popover.is_some()
+                    || self.capture_pending.is_some()
+                    || self.press.is_some())
             {
                 return Err("nothing hovers: a popover, capture or press is in the way".to_owned());
             }
             self.feedback_hover_at(point, window, cx);
-            cx.notify();
             return Ok(());
         }
         if let Some(payload) = rest.strip_prefix("click:") {
             let Some(point) = parse_feedback_point(payload) else {
                 return Err(format!("unparseable point {payload:?} (expected x,y)"));
             };
-            if self.feedback.phase != FeedbackPhase::Active {
-                return Err(not_active(self.feedback.phase));
+            if self.phase != FeedbackPhase::Active {
+                return Err(not_active(self.phase));
             }
             let step = QueuedStep::Click { step: format!("feedback-mode:{rest}"), point };
-            self.run_or_queue_step(step, window, cx);
-            cx.notify();
+            self.run_or_queue_step(screen, step, window, cx);
             return Ok(());
         }
         if let Some(payload) = rest.strip_prefix("drag:") {
             let Some((start, end)) = parse_feedback_drag(payload) else {
                 return Err(format!("unparseable drag {payload:?} (expected x1,y1,x2,y2)"));
             };
-            if self.feedback.phase != FeedbackPhase::Active {
-                return Err(not_active(self.feedback.phase));
+            if self.phase != FeedbackPhase::Active {
+                return Err(not_active(self.phase));
             }
             let step = QueuedStep::Drag { step: format!("feedback-mode:{rest}"), start, end };
-            self.run_or_queue_step(step, window, cx);
-            cx.notify();
+            self.run_or_queue_step(screen, step, window, cx);
             return Ok(());
         }
         if let Some(text) = rest.strip_prefix("note:") {
-            if self.feedback.phase != FeedbackPhase::Active {
-                return Err(not_active(self.feedback.phase));
+            if self.phase != FeedbackPhase::Active {
+                return Err(not_active(self.phase));
             }
             if text.trim().is_empty() {
                 return Err("a note needs text (`note:<text>`)".to_owned());
             }
-            if self.feedback.popover.is_some() && self.feedback.step_queue.is_empty() {
+            if self.popover.is_some() && self.step_queue.is_empty() {
                 self.fill_feedback_note(text, window, cx);
                 self.save_feedback_note(window, cx);
-            } else if self.feedback.popover.is_some()
-                || self.feedback.capture_pending.is_some()
-                || self.feedback.pending_click.is_some()
-                || !self.feedback.step_queue.is_empty()
+            } else if self.popover.is_some()
+                || self.capture_pending.is_some()
+                || self.pending_click.is_some()
+                || !self.step_queue.is_empty()
             {
                 // The popover is not open yet (or an earlier step is still
                 // queued): wait behind the capture across frames instead of
@@ -1178,34 +1261,31 @@ impl crate::app::Harness {
             } else {
                 return Err("no note popover is open and nothing is pending to open one".to_owned());
             }
-            cx.notify();
             return Ok(());
         }
         if rest == "cancel" {
-            if self.feedback.popover.is_none()
-                && self.feedback.capture_pending.is_none()
-                && self.feedback.step_queue.is_empty()
+            if self.popover.is_none()
+                && self.capture_pending.is_none()
+                && self.step_queue.is_empty()
             {
                 return Err("nothing to cancel: no popover, capture or queued step".to_owned());
             }
             // A cancel supersedes queued steps: their popovers will never
             // open, so drop them rather than failing each on expiry.
-            self.feedback.step_queue.clear();
+            self.step_queue.clear();
             self.cancel_feedback_note(window, cx);
-            cx.notify();
             return Ok(());
         }
         match rest {
             "on" => {
-                self.feedback.forced_on = true;
-                match self.feedback.phase {
+                self.forced_on = true;
+                match self.phase {
                     FeedbackPhase::Off => {
-                        self.feedback.toggle(true);
+                        self.toggle(true);
                         self.enter_feedback_active(window, cx);
                     }
-                    FeedbackPhase::Active => cx.notify(),
+                    FeedbackPhase::Active => {}
                     FeedbackPhase::Paused => {
-                        cx.notify();
                         return Err("feedback mode is Paused; `on` does not resume it (use `resume`)".to_owned());
                     }
                 }
@@ -1220,12 +1300,11 @@ impl crate::app::Harness {
                         QueuedStep::Pause { step: format!("feedback-mode:{rest}") },
                         cx,
                     );
-                } else if self.feedback.phase == FeedbackPhase::Off {
-                    return Err(not_active(self.feedback.phase));
+                } else if self.phase == FeedbackPhase::Off {
+                    return Err(not_active(self.phase));
                 } else {
-                    self.feedback.pause();
+                    self.pause();
                 }
-                cx.notify();
                 Ok(())
             }
             "resume" => {
@@ -1235,9 +1314,9 @@ impl crate::app::Harness {
                         cx,
                     );
                 } else {
-                    match self.feedback.phase {
+                    match self.phase {
                         FeedbackPhase::Paused => {
-                            self.feedback.resume();
+                            self.resume();
                             self.enter_feedback_active(window, cx);
                         }
                         FeedbackPhase::Active => {}
@@ -1246,13 +1325,11 @@ impl crate::app::Harness {
                         }
                     }
                 }
-                cx.notify();
                 Ok(())
             }
             "off" => {
-                self.feedback.forced_on = false;
-                self.feedback.setting_off();
-                cx.notify();
+                self.forced_on = false;
+                self.setting_off();
                 Ok(())
             }
             "discard" => {
@@ -1262,9 +1339,8 @@ impl crate::app::Harness {
                         cx,
                     );
                 } else {
-                    self.feedback.discard_all();
+                    self.discard_all();
                 }
-                cx.notify();
                 Ok(())
             }
             "done" => {
@@ -1273,18 +1349,16 @@ impl crate::app::Harness {
                         QueuedStep::Done { step: format!("feedback-mode:{rest}") },
                         cx,
                     );
-                    cx.notify();
                     return Ok(());
                 }
                 self.finish_feedback(window, cx);
-                if self.feedback.saving {
+                if self.saving {
                     Ok(())
                 } else {
                     Err("nothing to save: no notes and no filled popover (or feedback mode is Off)".to_owned())
                 }
             }
             other => {
-                cx.notify();
                 Err(format!("unknown feedback-mode sub {other:?}"))
             }
         }
@@ -1294,9 +1368,9 @@ impl crate::app::Harness {
     /// its turn: anything is still resolving — an in-flight capture, a
     /// parked cold-tree retry, or an earlier queued step.
     pub(crate) fn has_pending_steps(&self) -> bool {
-        self.feedback.capture_pending.is_some()
-            || self.feedback.pending_click.is_some()
-            || !self.feedback.step_queue.is_empty()
+        self.capture_pending.is_some()
+            || self.pending_click.is_some()
+            || !self.step_queue.is_empty()
     }
 
     /// Run a step `click:`/`drag:` now when the shell is idle, or queue it
@@ -1304,6 +1378,7 @@ impl crate::app::Harness {
     /// of cancelling them the way an interactive press would.
     pub(crate) fn run_or_queue_step(
         &mut self,
+        screen: Screen<'_>,
         step: QueuedStep,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1316,12 +1391,12 @@ impl crate::app::Harness {
         match step {
             QueuedStep::Click { point, .. } => {
                 self.feedback_press_at(point, window, cx);
-                self.feedback_release_at(point, window, cx);
+                self.feedback_release_at(screen, point, window, cx);
             }
             QueuedStep::Drag { start, end, .. } => {
                 self.feedback_press_at(start, window, cx);
                 self.feedback_drag_at(end, cx);
-                self.feedback_release_at(end, window, cx);
+                self.feedback_release_at(screen, end, window, cx);
             }
             QueuedStep::Note { .. }
             | QueuedStep::Pause { .. }
@@ -1334,28 +1409,28 @@ impl crate::app::Harness {
     /// Push a step onto the queue: the frame loop's poll drains it from
     /// there, so no task is ever spawned for it.
     pub(crate) fn queue_step(&mut self, step: QueuedStep, cx: &mut Context<Self>) {
-        self.feedback.step_queue.push_back((step, Instant::now()));
+        self.step_queue.push_back((step, Instant::now()));
         cx.notify();
     }
 
     /// Run one queued control sub (`pause`/`resume`/`done`/`discard`) with
     /// the same effect as its immediate step verb. Unlike the interrupting
-    /// [`FeedbackUi::pause`], this never fails the steps queued behind it:
+    /// [`Self::pause`], this never fails the steps queued behind it:
     /// they were filed after it and run in order on later ticks (a note
     /// filed after a pause fails on the next tick instead, when the Paused
     /// branch below sees it).
     fn run_queued_control(&mut self, queued: QueuedStep, window: &mut Window, cx: &mut Context<Self>) {
         match queued {
             QueuedStep::Pause { .. } => {
-                if self.feedback.phase == FeedbackPhase::Active && !self.feedback.saving {
-                    self.feedback.clear_transient();
-                    self.feedback.disarm_discard();
-                    self.feedback.phase = FeedbackPhase::Paused;
+                if self.phase == FeedbackPhase::Active && !self.saving {
+                    self.clear_transient();
+                    self.disarm_discard();
+                    self.phase = FeedbackPhase::Paused;
                 }
             }
             QueuedStep::Resume { .. } => {
-                if self.feedback.phase == FeedbackPhase::Paused {
-                    self.feedback.resume();
+                if self.phase == FeedbackPhase::Paused {
+                    self.resume();
                     self.enter_feedback_active(window, cx);
                 }
             }
@@ -1364,7 +1439,7 @@ impl crate::app::Harness {
                 return;
             }
             QueuedStep::Discard { .. } => {
-                self.feedback.discard_all();
+                self.discard_all();
             }
             QueuedStep::Click { .. } | QueuedStep::Drag { .. } | QueuedStep::Note { .. } => {}
         }
@@ -1374,7 +1449,7 @@ impl crate::app::Harness {
     /// Whether the queue's front is a control sub.
     fn front_is_control(&self) -> bool {
         matches!(
-            self.feedback.step_queue.front(),
+            self.step_queue.front(),
             Some((
                 QueuedStep::Pause { .. }
                 | QueuedStep::Resume { .. }
@@ -1392,79 +1467,79 @@ impl crate::app::Harness {
     /// idle; a queued control sub runs with its verb's effect once the
     /// steps ahead of it have drained; anything still waiting past
     /// [`FEEDBACK_STEP_WAIT`] fails loudly under its own step name.
-    pub(crate) fn step_pump_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.feedback.phase != FeedbackPhase::Active {
+    pub(crate) fn step_pump_tick(&mut self, screen: Screen<'_>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.phase != FeedbackPhase::Active {
             // Paused still runs a queued control's own effect in order (a
             // `resume` climbs back to Active, a `done` saves); pointing
             // steps and notes can never resolve off Active, so they fail.
             // Off fails everything.
-            if self.feedback.phase == FeedbackPhase::Paused && self.front_is_control() {
-                let (queued, _) = self.feedback.step_queue.pop_front().expect("front checked");
+            if self.phase == FeedbackPhase::Paused && self.front_is_control() {
+                let (queued, _) = self.step_queue.pop_front().expect("front checked");
                 self.run_queued_control(queued, window, cx);
                 return;
             }
-            while let Some((queued, _)) = self.feedback.step_queue.pop_front() {
+            while let Some((queued, _)) = self.step_queue.pop_front() {
                 crate::steps::record_step_failure(queued.step());
             }
             cx.notify();
             return;
         }
-        let Some((_, since)) = self.feedback.step_queue.front() else {
+        let Some((_, since)) = self.step_queue.front() else {
             return;
         };
         if since.elapsed() >= FEEDBACK_STEP_WAIT {
-            let (queued, _) = self.feedback.step_queue.pop_front().expect("front checked");
+            let (queued, _) = self.step_queue.pop_front().expect("front checked");
             crate::steps::record_step_failure(queued.step());
             cx.notify();
             return;
         }
         if self.front_is_control() {
-            if self.feedback.capture_pending.is_some() || self.feedback.pending_click.is_some() {
+            if self.capture_pending.is_some() || self.pending_click.is_some() {
                 // An earlier pointing step is still resolving: the control
                 // waits behind it rather than dropping its capture.
                 return;
             }
-            let (queued, _) = self.feedback.step_queue.pop_front().expect("front checked");
+            let (queued, _) = self.step_queue.pop_front().expect("front checked");
             self.run_queued_control(queued, window, cx);
             return;
         }
-        if self.feedback.popover.is_some() {
+        if self.popover.is_some() {
             // A click or drag behind an open popover waits for the popover
             // to close: cancelling it here would eat the note the script is
             // about to file. It stays at the front with its timestamp, so
             // the expiry above still bounds the wait.
             let front_is_note =
-                matches!(self.feedback.step_queue.front(), Some((QueuedStep::Note { .. }, _)));
+                matches!(self.step_queue.front(), Some((QueuedStep::Note { .. }, _)));
             if !front_is_note {
                 return;
             }
-            let (queued, _) = self.feedback.step_queue.pop_front().expect("front checked");
+            let (queued, _) = self.step_queue.pop_front().expect("front checked");
             let QueuedStep::Note { text, .. } = queued else { unreachable!("front checked") };
+            // Filling redraws the popover; saving redraws the draft.
             self.fill_feedback_note(&text, window, cx);
             self.save_feedback_note(window, cx);
-            cx.notify();
             return;
         }
-        if self.feedback.capture_pending.is_some() || self.feedback.pending_click.is_some() {
+        if self.capture_pending.is_some() || self.pending_click.is_some() {
             // Still resolving: wait for the capture (or the cold retry the
             // poll runs right after this) to land.
             return;
         }
         // Idle with no popover: a note has nothing to fill — fail it — and
         // a click or drag runs through the real handlers now.
-        let (queued, _) = self.feedback.step_queue.pop_front().expect("front checked");
+        let (queued, _) = self.step_queue.pop_front().expect("front checked");
         match queued {
             QueuedStep::Note { step, .. } => {
                 crate::steps::record_step_failure(&step);
             }
             QueuedStep::Click { point, .. } => {
                 self.feedback_press_at(point, window, cx);
-                self.feedback_release_at(point, window, cx);
+                self.feedback_release_at(screen, point, window, cx);
             }
             QueuedStep::Drag { start, end, .. } => {
                 self.feedback_press_at(start, window, cx);
                 self.feedback_drag_at(end, cx);
-                self.feedback_release_at(end, window, cx);
+                self.feedback_release_at(screen, end, window, cx);
             }
             control @ (QueuedStep::Pause { .. }
             | QueuedStep::Resume { .. }
@@ -1475,6 +1550,516 @@ impl crate::app::Harness {
             }
         }
         cx.notify();
+    }
+
+    /// The pointer moved while Active with the left button up: refresh the
+    /// hover outline. The mouse-move handler and the `hover:` step verb
+    /// both land here. Moves under 2 px skip the hit-test, and moves
+    /// inside ~30 ms of the last one park the position as the trailing
+    /// edge instead of hit-testing: the per-frame poll runs it once the
+    /// window has passed, so the outline settles on the last position
+    /// after the pointer stops. While a popover is open, while capturing,
+    /// or with the button down, hovers stay off. The hit-test never
+    /// enriches (that serialises the whole debug tree) — enrichment waits
+    /// for [`Self::begin_note_capture`].
+    pub(crate) fn feedback_hover_at(
+        &mut self,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Over the header slot the floating copy owns the point: no outline —
+        // and any live one clears, so it never freezes over the slot.
+        if self.slot_contains(point) {
+            if self.hover.is_some() {
+                self.hover = None;
+                cx.notify();
+            }
+            return;
+        }
+        if self.phase != FeedbackPhase::Active
+            || self.capturing
+            || self.popover.is_some()
+            || self.capture_pending.is_some()
+            || self.press.is_some()
+        {
+            return;
+        }
+        if let Some(last) = self.hover_point {
+            if !Self::hover_moved(last, point) {
+                return;
+            }
+        }
+        if let Some(tested) = self.hover_tested_at {
+            if tested.elapsed() < FEEDBACK_HOVER_THROTTLE {
+                // Park the trailing edge; the notify repaints, and the
+                // layer requests the next frame while dirty is set (a
+                // frame request is only legal during paint, never here).
+                self.hover_dirty = Some(point);
+                cx.notify();
+                return;
+            }
+        }
+        self.hover_hit_test(point, window, cx);
+    }
+
+    /// Run the hover hit-test at `point` now: probe (never enriching),
+    /// record the position and the time, and settle the outline — or park
+    /// the cold-tree retry when nothing hit. The move handler calls this
+    /// past the throttle; the per-frame poll calls it for the trailing
+    /// edge once the window has passed.
+    pub(crate) fn hover_hit_test(
+        &mut self,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The per-frame poll lands here for the throttled trailing edge:
+        // a parked slot point never outlines, like the direct path above.
+        if self.slot_contains(point) {
+            self.hover = None;
+            self.hover_dirty = None;
+            cx.notify();
+            return;
+        }
+        let hit = self.probe.hit(window, point);
+        self.hover_point = Some(point);
+        self.hover_tested_at = Some(Instant::now());
+        self.hover_dirty = None;
+        if hit.is_some() {
+            self.hover_since = None;
+            self.hover = hit;
+        } else {
+            // The tree may still be cold (it warms on a later frame after
+            // `activate`): remember when the wait started so the layer's
+            // per-frame poll can retry for up to a second.
+            if self.hover_since.is_none() {
+                self.hover_since = Some(Instant::now());
+            }
+            self.hover = None;
+        }
+        cx.notify();
+    }
+
+    /// The left button went down while Active: arm a press. With a popover
+    /// open (or a capture in flight) the press lands outside it — the
+    /// popover consumes its own events — so it cancels the note instead of
+    /// starting a new one, and stays Active.
+    pub(crate) fn feedback_press_at(
+        &mut self,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.phase != FeedbackPhase::Active || self.capturing {
+            return;
+        }
+        // Inside the header slot the floating copy owns the click: arm no
+        // press (and cancel no note), so the press never becomes one.
+        if self.slot_contains(point) {
+            return;
+        }
+        if self.popover.is_some() || self.capture_pending.is_some() {
+            self.cancel_note();
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
+        self.press = Some(point);
+        self.drag = None;
+        self.pending_click = None;
+        cx.notify();
+    }
+
+    /// The pointer moved with the left button down: past 6 px it is a
+    /// drag, and the layer draws the live box until release.
+    pub(crate) fn feedback_drag_at(&mut self, point: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.phase != FeedbackPhase::Active
+            || self.capturing
+            || self.popover.is_some()
+            || self.capture_pending.is_some()
+        {
+            return;
+        }
+        let Some(press) = self.press else {
+            return;
+        };
+        if Self::is_drag(press, point) {
+            self.drag = Some(point);
+            self.hover = None;
+            cx.notify();
+        }
+    }
+
+    /// The pointer moved while Active: with the left button down it is a
+    /// drag, otherwise a hover. When a press is armed but the button is no
+    /// longer down, the mouse-up landed on the header, the popover or outside
+    /// the window and never reached the layer: clear the stale press and
+    /// drag without filing a note, then hover on so the outline revives.
+    /// The layer's mouse-move handler lands here.
+    pub(crate) fn feedback_move_at(
+        &mut self,
+        point: Point<Pixels>,
+        pressed_button: Option<gpui::MouseButton>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.phase != FeedbackPhase::Active {
+            return;
+        }
+        if pressed_button == Some(gpui::MouseButton::Left) {
+            self.feedback_drag_at(point, cx);
+            return;
+        }
+        if self.press.is_some() {
+            self.press = None;
+            self.drag = None;
+            self.feedback_hover_at(point, window, cx);
+            cx.notify();
+            return;
+        }
+        self.feedback_hover_at(point, window, cx);
+    }
+
+    /// The left button came up while Active: a ≥ 6×6 box becomes an area
+    /// note (named after the centre hit when there is one), anything else
+    /// a click — an element note on a hit, a parked retry on a miss while
+    /// the tree may still be cold. Both capture first, then open the
+    /// popover; the 60×40 area fallback only runs when the retry expires.
+    pub(crate) fn feedback_release_at(
+        &mut self,
+        screen: Screen<'_>,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.phase != FeedbackPhase::Active || self.capturing {
+            self.press = None;
+            self.drag = None;
+            return;
+        }
+        // A release inside the header slot is the floating copy's click, not
+        // a note: drop the press without filing, like the popover path below.
+        if self.slot_contains(point) {
+            self.press = None;
+            self.drag = None;
+            return;
+        }
+        if self.popover.is_some() || self.capture_pending.is_some() {
+            self.press = None;
+            self.drag = None;
+            return;
+        }
+        let press = self.press.take();
+        self.drag.take();
+        let Some(start) = press else {
+            return;
+        };
+        if Self::is_drag(start, point) {
+            if let Some(rect) = Self::drag_rect(start, point) {
+                let centre = gpui::point(
+                    gpui::px(rect.x + rect.w / 2.0),
+                    gpui::px(rect.y + rect.h / 2.0),
+                );
+                let region = self
+                    .probe
+                    .hit(window, centre)
+                    .and_then(|hit| {
+                        if hit.label.is_empty() { None } else { Some(format!("near {}", hit.label)) }
+                    });
+                self.begin_note_capture(screen, Target::Area { rect, region }, window, cx);
+                return;
+            }
+        }
+        match self.probe.hit(window, point) {
+            Some(hit) => {
+                let win = window.viewport_size();
+                let in_browse = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
+                let target = Self::note_target_for_hit(hit, point, win, in_browse);
+                self.begin_note_capture(screen, target, window, cx);
+            }
+            None => {
+                self.pending_click =
+                    Some(PendingClick { point, since: Instant::now() });
+                cx.notify();
+            }
+        }
+    }
+
+    /// The layer's per-frame poll (it renders every frame while Active):
+    /// first drain queued steps (a `note:` waiting for its popover, a
+    /// `click:`/`drag:` waiting for the idle shell), then run the hover
+    /// trailing edge once its throttle window has passed, then retry a
+    /// parked click's hit-test while the tree may still be cold, falling
+    /// back to the 60×40 area; and retry a cleared hover the same way so
+    /// the outline appears when the tree warms.
+    pub(crate) fn feedback_poll(&mut self, screen: Screen<'_>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.phase != FeedbackPhase::Active {
+            return;
+        }
+        if !self.step_queue.is_empty() {
+            self.step_pump_tick(screen, window, cx);
+        }
+        if self.capturing
+            || self.popover.is_some()
+            || self.capture_pending.is_some()
+        {
+            return;
+        }
+        if let Some(point) = self.hover_dirty {
+            if self.press.is_none() {
+                match self.hover_tested_at {
+                    Some(tested) if tested.elapsed() < FEEDBACK_HOVER_THROTTLE => {
+                        aui_motion::request_frame(window);
+                    }
+                    _ => {
+                        self.hover_hit_test(point, window, cx);
+                        return;
+                    }
+                }
+            }
+        }
+        if let Some(pending) = self.pending_click {
+            if let Some(hit) = self.probe.hit(window, pending.point) {
+                self.pending_click = None;
+                let win = window.viewport_size();
+                let in_browse = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
+                let target = Self::note_target_for_hit(hit, pending.point, win, in_browse);
+                self.begin_note_capture(screen, target, window, cx);
+                return;
+            }
+            if pending.since.elapsed() >= FEEDBACK_PROBE_WARM {
+                self.pending_click = None;
+                let win = window.viewport_size();
+                let target = Self::click_target(None, pending.point, win);
+                self.begin_note_capture(screen, target, window, cx);
+                return;
+            }
+        }
+        if self.hover.is_none() {
+            if let (Some(point), Some(since)) =
+                (self.hover_point, self.hover_since)
+            {
+                if since.elapsed() < FEEDBACK_PROBE_WARM {
+                    if let Some(hit) = self.probe.hit(window, point) {
+                        self.hover = Some(hit);
+                        self.hover_since = None;
+                        cx.notify();
+                    }
+                } else {
+                    self.hover_since = None;
+                }
+            }
+        }
+    }
+
+    /// Start the capture for `target`: hide every overlay pixel, repaint,
+    /// then read the window after two painted frames (a 120 ms timer bounds
+    /// the wait). The note field is built now, so opening the popover is
+    /// synchronous when the capture lands — or when it fails, in which
+    /// case the popover still opens, with no images. A no-op while a Done
+    /// write is in flight. An element target is enriched once here (its
+    /// gpui provenance), never on the hover path.
+    pub(crate) fn begin_note_capture(
+        &mut self,
+        screen: Screen<'_>,
+        target: Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.saving {
+            return;
+        }
+        self.hover = None;
+        self.hover_point = None;
+        self.hover_since = None;
+        self.hover_dirty = None;
+        self.press = None;
+        self.drag = None;
+        self.pending_click = None;
+        let mut target = target;
+        if let Target::Element(hit) = &mut target {
+            self.probe.enrich(window, hit);
+        }
+        let field = cx.new(|cx| {
+            aui::composer::composer_state_rows("What should change?", 3, 8, window, cx)
+        });
+        // The note carries the screen it was captured on: anything the
+        // owner does before Save (Pause, a mode switch, a session switch)
+        // must not rewrite it.
+        let context = screen(window, cx);
+        self.capturing = true;
+        // While capturing the slot row does not render, so its recorded
+        // bounds go stale the moment the capture starts: drop them here (a
+        // place with `&mut self`), and the next paint after the capture
+        // re-records them. The overlay and `slot_contains` never reuse them.
+        self.slot_bounds = None;
+        self.capture_seq = self.capture_seq.wrapping_add(1);
+        let seq = self.capture_seq;
+        self.capture_pending = Some((target, field, context));
+        window.refresh();
+        cx.notify();
+        let weak = cx.entity().downgrade();
+        window.on_next_frame(move |window, _cx| {
+            let weak = weak.clone();
+            window.on_next_frame(move |window, cx| {
+                let _ = weak.update(cx, |this, cx| this.finish_note_capture(window, cx, seq));
+            });
+        });
+        let timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FEEDBACK_CAPTURE_TIMEOUT).await;
+            let _ = this.update_in(cx, |this, window, cx| this.finish_note_capture(window, cx, seq));
+        });
+        self.capture_task = Some(timer);
+    }
+
+    /// Finish the capture `seq` started: read the window, cut the outlined
+    /// crop, and open the popover (imageless when the render fails). A
+    /// no-op for a stale generation or an already-finished capture, so the
+    /// frame path and the timer bound never open the popover twice.
+    pub(crate) fn finish_note_capture(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        seq: u64,
+    ) {
+        if seq != self.capture_seq || self.capture_pending.is_none() {
+            return;
+        }
+        self.capture_seq = self.capture_seq.wrapping_add(1);
+        self.capture_task = None;
+        let (target, field, context) =
+            self.capture_pending.take().expect("pending checked");
+        self.capturing = false;
+        let rect = Self::target_rect(&target);
+        let scale = window.scale_factor();
+        let (crop, full) = match render_window(window) {
+            Ok(full) => (Some(crop_with_outline(&full, scale, rect, 24.0)), Some(full)),
+            Err(err) => {
+                crate::baaz_log!("feedback capture failed: {err:#}");
+                (None, None)
+            }
+        };
+        self.popover = Some(PendingNote { target, crop, full, field, context });
+        if let Some(note) = &self.popover {
+            let focus = note.field.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// Save the open popover's text as a note. Empty text keeps the
+    /// popover open; afterwards focus returns to the layer. The note keeps
+    /// the context captured when it began — never a fresh one, which would
+    /// name whatever screen the owner has since moved to.
+    pub(crate) fn save_feedback_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(note) = self.popover.as_ref() else {
+            return;
+        };
+        let text = note.field.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let note = self.popover.take().expect("popover checked");
+        self.draft.add(note.target, text, note.context, note.crop, note.full);
+        self.hover = None;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Fill the open popover's field without saving, for the `note:` step.
+    pub(crate) fn fill_feedback_note(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(note) = self.popover.as_ref() else {
+            return;
+        };
+        note.field.update(cx, |field, cx| field.set_value(text.to_owned(), window, cx));
+        cx.notify();
+    }
+
+    /// Close the open popover (or drop its in-flight capture) without
+    /// saving, staying Active. Escape and Cancel land here. Queued steps
+    /// die with it — their popovers will never open.
+    pub(crate) fn cancel_feedback_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_queue.clear();
+        if self.popover.is_none() && self.capture_pending.is_none() {
+            return;
+        }
+        self.cancel_note();
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+}
+
+impl crate::app::Harness {
+    // The shell's entry points from the root's keys, menus, steps and the
+    // layer's pointer listeners: each runs on the shell's own entity, which
+    // redraws itself. The ones that can begin a note carry the root's
+    // screen context (`feedback_context`) in.
+
+    pub(crate) fn toggle_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.feedback.update(cx, |feedback, cx| feedback.toggle_feedback(window, cx));
+    }
+
+    pub(crate) fn escape_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.feedback.update(cx, |feedback, cx| feedback.escape_feedback(window, cx));
+    }
+
+    pub(crate) fn discard_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.feedback.update(cx, |feedback, cx| feedback.discard_feedback(window, cx));
+    }
+
+    pub(crate) fn finish_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.feedback.update(cx, |feedback, cx| feedback.finish_feedback(window, cx));
+    }
+
+    pub(crate) fn feedback_setting_off(&mut self, cx: &mut Context<Self>) {
+        self.feedback.update(cx, |feedback, cx| feedback.feedback_setting_off(cx));
+    }
+
+    pub(crate) fn step_feedback(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let feedback = self.feedback.clone();
+        let screen = |window: &mut Window, cx: &gpui::App| self.feedback_context(window, cx);
+        feedback.update(cx, |feedback, cx| feedback.step_feedback(&screen, rest, window, cx))
+    }
+
+    pub(crate) fn feedback_press_at(&mut self, point: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.feedback.update(cx, |feedback, cx| feedback.feedback_press_at(point, window, cx));
+    }
+
+    pub(crate) fn feedback_move_at(
+        &mut self,
+        point: Point<Pixels>,
+        pressed_button: Option<gpui::MouseButton>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.feedback.update(cx, |feedback, cx| feedback.feedback_move_at(point, pressed_button, window, cx));
+    }
+
+    pub(crate) fn feedback_release_at(&mut self, point: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let feedback = self.feedback.clone();
+        let screen = |window: &mut Window, cx: &gpui::App| self.feedback_context(window, cx);
+        feedback.update(cx, |feedback, cx| feedback.feedback_release_at(&screen, point, window, cx));
+    }
+
+    /// The layer's per-frame poll (see [`FeedbackUi::feedback_poll`]); a
+    /// stale Discard arm falls back first.
+    pub(crate) fn feedback_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let feedback = self.feedback.clone();
+        let screen = |window: &mut Window, cx: &gpui::App| self.feedback_context(window, cx);
+        feedback.update(cx, |feedback, cx| {
+            feedback.expire_discard();
+            feedback.feedback_poll(&screen, window, cx)
+        });
+    }
+
+    pub(crate) fn save_feedback_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.feedback.update(cx, |feedback, cx| feedback.save_feedback_note(window, cx));
+    }
+
+    pub(crate) fn cancel_feedback_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.feedback.update(cx, |feedback, cx| feedback.cancel_feedback_note(window, cx));
     }
 
     /// The mode name the report prints verbatim: `Sessions` / `Browse`.
@@ -1579,442 +2164,6 @@ impl crate::app::Harness {
         }
     }
 
-    /// The pointer moved while Active with the left button up: refresh the
-    /// hover outline. The mouse-move handler and the `hover:` step verb
-    /// both land here. Moves under 2 px skip the hit-test, and moves
-    /// inside ~30 ms of the last one park the position as the trailing
-    /// edge instead of hit-testing: the per-frame poll runs it once the
-    /// window has passed, so the outline settles on the last position
-    /// after the pointer stops. While a popover is open, while capturing,
-    /// or with the button down, hovers stay off. The hit-test never
-    /// enriches (that serialises the whole debug tree) — enrichment waits
-    /// for [`Self::begin_note_capture`].
-    pub(crate) fn feedback_hover_at(
-        &mut self,
-        point: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Over the header slot the floating copy owns the point: no outline —
-        // and any live one clears, so it never freezes over the slot.
-        if self.feedback.slot_contains(point) {
-            if self.feedback.hover.is_some() {
-                self.feedback.hover = None;
-                cx.notify();
-            }
-            return;
-        }
-        if self.feedback.phase != FeedbackPhase::Active
-            || self.feedback.capturing
-            || self.feedback.popover.is_some()
-            || self.feedback.capture_pending.is_some()
-            || self.feedback.press.is_some()
-        {
-            return;
-        }
-        if let Some(last) = self.feedback.hover_point {
-            if !FeedbackUi::hover_moved(last, point) {
-                return;
-            }
-        }
-        if let Some(tested) = self.feedback.hover_tested_at {
-            if tested.elapsed() < FEEDBACK_HOVER_THROTTLE {
-                // Park the trailing edge; the notify repaints, and the
-                // layer requests the next frame while dirty is set (a
-                // frame request is only legal during paint, never here).
-                self.feedback.hover_dirty = Some(point);
-                cx.notify();
-                return;
-            }
-        }
-        self.hover_hit_test(point, window, cx);
-    }
-
-    /// Run the hover hit-test at `point` now: probe (never enriching),
-    /// record the position and the time, and settle the outline — or park
-    /// the cold-tree retry when nothing hit. The move handler calls this
-    /// past the throttle; the per-frame poll calls it for the trailing
-    /// edge once the window has passed.
-    pub(crate) fn hover_hit_test(
-        &mut self,
-        point: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // The per-frame poll lands here for the throttled trailing edge:
-        // a parked slot point never outlines, like the direct path above.
-        if self.feedback.slot_contains(point) {
-            self.feedback.hover = None;
-            self.feedback.hover_dirty = None;
-            cx.notify();
-            return;
-        }
-        let hit = self.feedback.probe.hit(window, point);
-        self.feedback.hover_point = Some(point);
-        self.feedback.hover_tested_at = Some(Instant::now());
-        self.feedback.hover_dirty = None;
-        if hit.is_some() {
-            self.feedback.hover_since = None;
-            self.feedback.hover = hit;
-        } else {
-            // The tree may still be cold (it warms on a later frame after
-            // `activate`): remember when the wait started so the layer's
-            // per-frame poll can retry for up to a second.
-            if self.feedback.hover_since.is_none() {
-                self.feedback.hover_since = Some(Instant::now());
-            }
-            self.feedback.hover = None;
-        }
-        cx.notify();
-    }
-
-    /// The left button went down while Active: arm a press. With a popover
-    /// open (or a capture in flight) the press lands outside it — the
-    /// popover consumes its own events — so it cancels the note instead of
-    /// starting a new one, and stays Active.
-    pub(crate) fn feedback_press_at(
-        &mut self,
-        point: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.feedback.phase != FeedbackPhase::Active || self.feedback.capturing {
-            return;
-        }
-        // Inside the header slot the floating copy owns the click: arm no
-        // press (and cancel no note), so the press never becomes one.
-        if self.feedback.slot_contains(point) {
-            return;
-        }
-        if self.feedback.popover.is_some() || self.feedback.capture_pending.is_some() {
-            self.feedback.cancel_note();
-            window.focus(&self.feedback.focus, cx);
-            cx.notify();
-            return;
-        }
-        self.feedback.press = Some(point);
-        self.feedback.drag = None;
-        self.feedback.pending_click = None;
-        cx.notify();
-    }
-
-    /// The pointer moved with the left button down: past 6 px it is a
-    /// drag, and the layer draws the live box until release.
-    pub(crate) fn feedback_drag_at(&mut self, point: Point<Pixels>, cx: &mut Context<Self>) {
-        if self.feedback.phase != FeedbackPhase::Active
-            || self.feedback.capturing
-            || self.feedback.popover.is_some()
-            || self.feedback.capture_pending.is_some()
-        {
-            return;
-        }
-        let Some(press) = self.feedback.press else {
-            return;
-        };
-        if FeedbackUi::is_drag(press, point) {
-            self.feedback.drag = Some(point);
-            self.feedback.hover = None;
-            cx.notify();
-        }
-    }
-
-    /// The pointer moved while Active: with the left button down it is a
-    /// drag, otherwise a hover. When a press is armed but the button is no
-    /// longer down, the mouse-up landed on the header, the popover or outside
-    /// the window and never reached the layer: clear the stale press and
-    /// drag without filing a note, then hover on so the outline revives.
-    /// The layer's mouse-move handler lands here.
-    pub(crate) fn feedback_move_at(
-        &mut self,
-        point: Point<Pixels>,
-        pressed_button: Option<gpui::MouseButton>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.feedback.phase != FeedbackPhase::Active {
-            return;
-        }
-        if pressed_button == Some(gpui::MouseButton::Left) {
-            self.feedback_drag_at(point, cx);
-            return;
-        }
-        if self.feedback.press.is_some() {
-            self.feedback.press = None;
-            self.feedback.drag = None;
-            self.feedback_hover_at(point, window, cx);
-            cx.notify();
-            return;
-        }
-        self.feedback_hover_at(point, window, cx);
-    }
-
-    /// The left button came up while Active: a ≥ 6×6 box becomes an area
-    /// note (named after the centre hit when there is one), anything else
-    /// a click — an element note on a hit, a parked retry on a miss while
-    /// the tree may still be cold. Both capture first, then open the
-    /// popover; the 60×40 area fallback only runs when the retry expires.
-    pub(crate) fn feedback_release_at(
-        &mut self,
-        point: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.feedback.phase != FeedbackPhase::Active || self.feedback.capturing {
-            self.feedback.press = None;
-            self.feedback.drag = None;
-            return;
-        }
-        // A release inside the header slot is the floating copy's click, not
-        // a note: drop the press without filing, like the popover path below.
-        if self.feedback.slot_contains(point) {
-            self.feedback.press = None;
-            self.feedback.drag = None;
-            return;
-        }
-        if self.feedback.popover.is_some() || self.feedback.capture_pending.is_some() {
-            self.feedback.press = None;
-            self.feedback.drag = None;
-            return;
-        }
-        let press = self.feedback.press.take();
-        self.feedback.drag.take();
-        let Some(start) = press else {
-            return;
-        };
-        if FeedbackUi::is_drag(start, point) {
-            if let Some(rect) = FeedbackUi::drag_rect(start, point) {
-                let centre = gpui::point(
-                    gpui::px(rect.x + rect.w / 2.0),
-                    gpui::px(rect.y + rect.h / 2.0),
-                );
-                let region = self
-                    .feedback
-                    .probe
-                    .hit(window, centre)
-                    .and_then(|hit| {
-                        if hit.label.is_empty() { None } else { Some(format!("near {}", hit.label)) }
-                    });
-                self.begin_note_capture(Target::Area { rect, region }, window, cx);
-                return;
-            }
-        }
-        match self.feedback.probe.hit(window, point) {
-            Some(hit) => {
-                let win = window.viewport_size();
-                let in_browse = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
-                let target = FeedbackUi::note_target_for_hit(hit, point, win, in_browse);
-                self.begin_note_capture(target, window, cx);
-            }
-            None => {
-                self.feedback.pending_click =
-                    Some(PendingClick { point, since: Instant::now() });
-                cx.notify();
-            }
-        }
-    }
-
-    /// The layer's per-frame poll (it renders every frame while Active):
-    /// first drain queued steps (a `note:` waiting for its popover, a
-    /// `click:`/`drag:` waiting for the idle shell), then run the hover
-    /// trailing edge once its throttle window has passed, then retry a
-    /// parked click's hit-test while the tree may still be cold, falling
-    /// back to the 60×40 area; and retry a cleared hover the same way so
-    /// the outline appears when the tree warms.
-    pub(crate) fn feedback_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.feedback.phase != FeedbackPhase::Active {
-            return;
-        }
-        if !self.feedback.step_queue.is_empty() {
-            self.step_pump_tick(window, cx);
-        }
-        if self.feedback.capturing
-            || self.feedback.popover.is_some()
-            || self.feedback.capture_pending.is_some()
-        {
-            return;
-        }
-        if let Some(point) = self.feedback.hover_dirty {
-            if self.feedback.press.is_none() {
-                match self.feedback.hover_tested_at {
-                    Some(tested) if tested.elapsed() < FEEDBACK_HOVER_THROTTLE => {
-                        aui_motion::request_frame(window);
-                    }
-                    _ => {
-                        self.hover_hit_test(point, window, cx);
-                        return;
-                    }
-                }
-            }
-        }
-        if let Some(pending) = self.feedback.pending_click {
-            if let Some(hit) = self.feedback.probe.hit(window, pending.point) {
-                self.feedback.pending_click = None;
-                let win = window.viewport_size();
-                let in_browse = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
-                let target = FeedbackUi::note_target_for_hit(hit, pending.point, win, in_browse);
-                self.begin_note_capture(target, window, cx);
-                return;
-            }
-            if pending.since.elapsed() >= FEEDBACK_PROBE_WARM {
-                self.feedback.pending_click = None;
-                let win = window.viewport_size();
-                let target = FeedbackUi::click_target(None, pending.point, win);
-                self.begin_note_capture(target, window, cx);
-                return;
-            }
-        }
-        if self.feedback.hover.is_none() {
-            if let (Some(point), Some(since)) =
-                (self.feedback.hover_point, self.feedback.hover_since)
-            {
-                if since.elapsed() < FEEDBACK_PROBE_WARM {
-                    if let Some(hit) = self.feedback.probe.hit(window, point) {
-                        self.feedback.hover = Some(hit);
-                        self.feedback.hover_since = None;
-                        cx.notify();
-                    }
-                } else {
-                    self.feedback.hover_since = None;
-                }
-            }
-        }
-    }
-
-    /// Start the capture for `target`: hide every overlay pixel, repaint,
-    /// then read the window after two painted frames (a 120 ms timer bounds
-    /// the wait). The note field is built now, so opening the popover is
-    /// synchronous when the capture lands — or when it fails, in which
-    /// case the popover still opens, with no images. A no-op while a Done
-    /// write is in flight. An element target is enriched once here (its
-    /// gpui provenance), never on the hover path.
-    pub(crate) fn begin_note_capture(
-        &mut self,
-        target: Target,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.feedback.saving {
-            return;
-        }
-        self.feedback.hover = None;
-        self.feedback.hover_point = None;
-        self.feedback.hover_since = None;
-        self.feedback.hover_dirty = None;
-        self.feedback.press = None;
-        self.feedback.drag = None;
-        self.feedback.pending_click = None;
-        let mut target = target;
-        if let Target::Element(hit) = &mut target {
-            self.feedback.probe.enrich(window, hit);
-        }
-        let field = cx.new(|cx| {
-            aui::composer::composer_state_rows("What should change?", 3, 8, window, cx)
-        });
-        // The note carries the screen it was captured on: anything the
-        // owner does before Save (Pause, a mode switch, a session switch)
-        // must not rewrite it.
-        let context = self.feedback_context(window, cx);
-        self.feedback.capturing = true;
-        // While capturing the slot row does not render, so its recorded
-        // bounds go stale the moment the capture starts: drop them here (a
-        // place with `&mut self`), and the next paint after the capture
-        // re-records them. The overlay and `slot_contains` never reuse them.
-        self.feedback.slot_bounds = None;
-        self.feedback.capture_seq = self.feedback.capture_seq.wrapping_add(1);
-        let seq = self.feedback.capture_seq;
-        self.feedback.capture_pending = Some((target, field, context));
-        window.refresh();
-        cx.notify();
-        let weak = cx.entity().downgrade();
-        window.on_next_frame(move |window, _cx| {
-            let weak = weak.clone();
-            window.on_next_frame(move |window, cx| {
-                let _ = weak.update(cx, |this, cx| this.finish_note_capture(window, cx, seq));
-            });
-        });
-        let timer = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(FEEDBACK_CAPTURE_TIMEOUT).await;
-            let _ = this.update_in(cx, |this, window, cx| this.finish_note_capture(window, cx, seq));
-        });
-        self.feedback.capture_task = Some(timer);
-    }
-
-    /// Finish the capture `seq` started: read the window, cut the outlined
-    /// crop, and open the popover (imageless when the render fails). A
-    /// no-op for a stale generation or an already-finished capture, so the
-    /// frame path and the timer bound never open the popover twice.
-    pub(crate) fn finish_note_capture(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        seq: u64,
-    ) {
-        if seq != self.feedback.capture_seq || self.feedback.capture_pending.is_none() {
-            return;
-        }
-        self.feedback.capture_seq = self.feedback.capture_seq.wrapping_add(1);
-        self.feedback.capture_task = None;
-        let (target, field, context) =
-            self.feedback.capture_pending.take().expect("pending checked");
-        self.feedback.capturing = false;
-        let rect = FeedbackUi::target_rect(&target);
-        let scale = window.scale_factor();
-        let (crop, full) = match render_window(window) {
-            Ok(full) => (Some(crop_with_outline(&full, scale, rect, 24.0)), Some(full)),
-            Err(err) => {
-                crate::baaz_log!("feedback capture failed: {err:#}");
-                (None, None)
-            }
-        };
-        self.feedback.popover = Some(PendingNote { target, crop, full, field, context });
-        if let Some(note) = &self.feedback.popover {
-            let focus = note.field.read(cx).focus_handle(cx);
-            window.focus(&focus, cx);
-        }
-        cx.notify();
-    }
-
-    /// Save the open popover's text as a note. Empty text keeps the
-    /// popover open; afterwards focus returns to the layer. The note keeps
-    /// the context captured when it began — never a fresh one, which would
-    /// name whatever screen the owner has since moved to.
-    pub(crate) fn save_feedback_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(note) = self.feedback.popover.as_ref() else {
-            return;
-        };
-        let text = note.field.read(cx).value().trim().to_string();
-        if text.is_empty() {
-            return;
-        }
-        let note = self.feedback.popover.take().expect("popover checked");
-        self.feedback.draft.add(note.target, text, note.context, note.crop, note.full);
-        self.feedback.hover = None;
-        window.focus(&self.feedback.focus, cx);
-        cx.notify();
-    }
-
-    /// Fill the open popover's field without saving, for the `note:` step.
-    pub(crate) fn fill_feedback_note(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(note) = self.feedback.popover.as_ref() else {
-            return;
-        };
-        note.field.update(cx, |field, cx| field.set_value(text.to_owned(), window, cx));
-        cx.notify();
-    }
-
-    /// Close the open popover (or drop its in-flight capture) without
-    /// saving, staying Active. Escape and Cancel land here. Queued steps
-    /// die with it — their popovers will never open.
-    pub(crate) fn cancel_feedback_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.feedback.step_queue.clear();
-        if self.feedback.popover.is_none() && self.feedback.capture_pending.is_none() {
-            return;
-        }
-        self.feedback.cancel_note();
-        window.focus(&self.feedback.focus, cx);
-        cx.notify();
-    }
-
     /// The popover's title: the element's label (its role when macOS named
     /// nothing) or `Area W × H` for a dragged box.
     pub(crate) fn feedback_note_title(target: &Target) -> String {
@@ -2072,20 +2221,19 @@ impl crate::app::Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.feedback.phase != FeedbackPhase::Active {
+        if self.feedback.read(cx).phase != FeedbackPhase::Active {
             return None;
         }
-        self.feedback.expire_discard();
         self.feedback_poll(window, cx);
         // Keep frames coming while anything is waiting on one: a parked
         // cold-tree click, a cold hover retry, a throttled hover trailing
         // edge, an in-flight capture, or a queued step all stall forever
         // in an idle window otherwise.
-        if self.feedback.pending_click.is_some()
-            || self.feedback.hover_since.is_some()
-            || self.feedback.hover_dirty.is_some()
-            || self.feedback.capture_pending.is_some()
-            || !self.feedback.step_queue.is_empty()
+        if self.feedback.read(cx).pending_click.is_some()
+            || self.feedback.read(cx).hover_since.is_some()
+            || self.feedback.read(cx).hover_dirty.is_some()
+            || self.feedback.read(cx).capture_pending.is_some()
+            || !self.feedback.read(cx).step_queue.is_empty()
         {
             aui_motion::request_frame(window);
         }
@@ -2100,8 +2248,8 @@ impl crate::app::Harness {
             .cursor(gpui::CursorStyle::Crosshair)
             .occlude()
             .key_context(FEEDBACK_CONTEXT)
-            .track_focus(&self.feedback.focus)
-            .when(!self.feedback.capturing, |this| this.border_2().border_color(accent))
+            .track_focus(&self.feedback.read(cx).focus)
+            .when(!self.feedback.read(cx).capturing, |this| this.border_2().border_color(accent))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
@@ -2144,13 +2292,13 @@ impl crate::app::Harness {
         win_w: f32,
         win_h: f32,
     ) -> Option<AnyElement> {
-        if self.feedback.capturing {
+        if self.feedback.read(cx).capturing {
             return None;
         }
-        let hit = self.feedback.hover.as_ref()?;
-        if self.feedback.press.is_some()
-            || self.feedback.popover.is_some()
-            || self.feedback.capture_pending.is_some()
+        let hit = self.feedback.read(cx).hover.as_ref()?;
+        if self.feedback.read(cx).press.is_some()
+            || self.feedback.read(cx).popover.is_some()
+            || self.feedback.read(cx).capture_pending.is_some()
         {
             return None;
         }
@@ -2201,11 +2349,11 @@ impl crate::app::Harness {
     /// The live drag box: a 2 px accent border over the 14 % fill.
     /// Decorative: no role, pointer-transparent.
     fn render_feedback_dragbox(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.feedback.capturing {
+        if self.feedback.read(cx).capturing {
             return None;
         }
-        let (start, current) = (self.feedback.press?, self.feedback.drag?);
-        if self.feedback.popover.is_some() || self.feedback.capture_pending.is_some() {
+        let (start, current) = (self.feedback.read(cx).press?, self.feedback.read(cx).drag?);
+        if self.feedback.read(cx).popover.is_some() || self.feedback.read(cx).capture_pending.is_some() {
             return None;
         }
         let (sx, sy) = (f32::from(start.x), f32::from(start.y));
@@ -2239,7 +2387,7 @@ impl crate::app::Harness {
         win_w: f32,
         win_h: f32,
     ) -> Option<AnyElement> {
-        if self.feedback.capturing || self.feedback.draft.is_empty() {
+        if self.feedback.read(cx).capturing || self.feedback.read(cx).draft.is_empty() {
             return None;
         }
         let accent = feedback_accent(cx);
@@ -2248,6 +2396,7 @@ impl crate::app::Harness {
         let current = self.current_pin_context(cx);
         let pins = self
             .feedback
+            .read(cx)
             .visible_pin_rects(&current)
             .into_iter()
             .map(|(rect, index)| {
@@ -2311,7 +2460,7 @@ impl crate::app::Harness {
         // bounds — as a non-accessible placeholder, so the tree names each
         // control once. Drawing both ghosted them a few pixels apart (seen
         // in a capture).
-        let covered = self.feedback.phase == FeedbackPhase::Active && self.feedback.slot_bounds.is_some();
+        let covered = self.feedback.read(cx).phase == FeedbackPhase::Active && self.feedback.read(cx).slot_bounds.is_some();
         let row = self.feedback_slot_row(cx, covered)?;
         // Record the slot's window bounds every frame it paints: the
         // floating copy seats at these, and the capture layer ignores
@@ -2328,7 +2477,7 @@ impl crate::app::Harness {
                     if let Some(first) = bounds.first() {
                         let bounds = *first;
                         let _ = report.update(cx, |this, cx| {
-                            Self::note_slot_bounds(&mut this.feedback.slot_bounds, bounds, cx);
+                            this.feedback.update(cx, |feedback, cx| feedback.note_bounds(SlotPart::Slot, bounds, cx));
                         });
                     }
                 })
@@ -2352,10 +2501,10 @@ impl crate::app::Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.feedback.phase != FeedbackPhase::Active || self.corner_in_overlay(cx) {
+        if self.feedback.read(cx).phase != FeedbackPhase::Active || self.corner_in_overlay(cx) {
             return None;
         }
-        let bounds = self.feedback.slot_bounds?;
+        let bounds = self.feedback.read(cx).slot_bounds?;
         let row = self.feedback_slot_row(cx, false)?;
         let viewport = window.viewport_size();
         let right = f32::from(viewport.width) - f32::from(bounds.right());
@@ -2373,8 +2522,8 @@ impl crate::app::Harness {
     /// top, for tests to assert against without painting. Test-only, so the
     /// normal build (where nothing calls it) stays warning-free.
     #[cfg(test)]
-    pub(crate) fn feedback_slot_overlay_right_top(&self) -> Option<(f32, f32)> {
-        let bounds = self.feedback.slot_bounds?;
+    pub(crate) fn feedback_slot_overlay_right_top(&self, cx: &gpui::App) -> Option<(f32, f32)> {
+        let bounds = self.feedback.read(cx).slot_bounds?;
         Some((f32::from(bounds.right()), f32::from(bounds.top())))
     }
 
@@ -2389,8 +2538,8 @@ impl crate::app::Harness {
         if !self.feedback_slot_shown(cx) {
             return None;
         }
-        let active = self.feedback.phase == FeedbackPhase::Active;
-        let flashing = self.feedback_flashing();
+        let active = self.feedback.read(cx).phase == FeedbackPhase::Active;
+        let flashing = self.feedback_flashing(cx);
         // The decorative copy gets its own id (ids must be unique) and none
         // of the occlusion, role or label the live copy carries. In the
         // centre header the row is plain header icons (docs/83 §5); in
@@ -2407,8 +2556,8 @@ impl crate::app::Harness {
         row = row.child(self.render_feedback_toggle(cx, active, decorative));
         if flashing {
             row = row.child(self.render_feedback_flash(cx, decorative)).pr(px(scale::SP_4));
-        } else if active || !self.feedback.draft.is_empty() {
-            let count = self.feedback.notes_label();
+        } else if active || !self.feedback.read(cx).draft.is_empty() {
+            let count = self.feedback.read(cx).notes_label();
             let count_row = div()
                 .id(if decorative { "feedback-count-ghost" } else { "feedback-count" })
                 .flex_none()
@@ -2434,22 +2583,22 @@ impl crate::app::Harness {
     /// header's `⋯` menu ([`Self::feedback_menu_row_shown`]), Help →
     /// Feedback Mode or ⌃⌥⌘F.
     pub(crate) fn feedback_slot_shown(&self, cx: &gpui::App) -> bool {
-        !self.feedback.capturing
-            && (crate::layout::Layout::get(cx).feedback_mode || self.feedback.forced_on)
-            && (self.feedback.phase != FeedbackPhase::Off || self.feedback_flashing())
+        !self.feedback.read(cx).capturing
+            && (crate::layout::Layout::get(cx).feedback_mode || self.feedback.read(cx).forced_on)
+            && (self.feedback.read(cx).phase != FeedbackPhase::Off || self.feedback_flashing(cx))
     }
 
     /// A Done flash is still holding (it shows only once the mode is Off
     /// or Paused again).
-    fn feedback_flashing(&self) -> bool {
-        self.feedback.phase != FeedbackPhase::Active
-            && self.feedback.saved_flash.as_ref().is_some_and(|flash| flash.at.elapsed() < FEEDBACK_SAVED_FLASH)
+    fn feedback_flashing(&self, cx: &gpui::App) -> bool {
+        self.feedback.read(cx).phase != FeedbackPhase::Active
+            && self.feedback.read(cx).saved_flash.as_ref().is_some_and(|flash| flash.at.elapsed() < FEEDBACK_SAVED_FLASH)
     }
 
     /// Whether the centre header's `⋯` menu carries the "Feedback mode"
     /// row: the setting is on (or a scripted run forced it).
     pub(crate) fn feedback_menu_row_shown(&self, cx: &gpui::App) -> bool {
-        crate::layout::Layout::get(cx).feedback_mode || self.feedback.forced_on
+        crate::layout::Layout::get(cx).feedback_mode || self.feedback.read(cx).forced_on
     }
 
     /// One small text control in the slot's pill — Done (the primary) or
@@ -2487,7 +2636,7 @@ impl crate::app::Harness {
             return toggle.into_any_element();
         }
         let flip = self.main_listener(cx, |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            if !this.feedback.saving {
+            if !this.feedback.read(cx).saving {
                 this.toggle_feedback(window, cx);
             }
         });
@@ -2497,7 +2646,7 @@ impl crate::app::Harness {
                 if let Some(first) = bounds.first() {
                     let bounds = *first;
                     let _ = report.update(cx, |this, cx| {
-                        Self::note_trigger_bounds(&mut this.feedback.toggle_bounds, bounds, cx);
+                        this.feedback.update(cx, |feedback, cx| feedback.note_bounds(SlotPart::Toggle, bounds, cx));
                     });
                 }
             })
@@ -2511,12 +2660,12 @@ impl crate::app::Harness {
     /// Done: the pill's primary, dimmed while there is nothing to save;
     /// writes the report and copies its path. Decorative: the same box.
     fn render_feedback_done(&self, cx: &mut Context<Self>, decorative: bool) -> AnyElement {
-        let enabled = self.feedback.done_enabled(cx);
+        let enabled = self.feedback.read(cx).done_enabled(cx);
         if decorative {
             return Self::slot_text("feedback-done-ghost", "Done", true, false, enabled, true).into_any_element();
         }
         let done = self.main_listener(cx, |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            if this.feedback.done_enabled(cx) {
+            if this.feedback.read(cx).done_enabled(cx) {
                 this.finish_feedback(window, cx);
             }
         });
@@ -2526,7 +2675,7 @@ impl crate::app::Harness {
                 if let Some(first) = bounds.first() {
                     let bounds = *first;
                     let _ = report.update(cx, |this, cx| {
-                        Self::note_trigger_bounds(&mut this.feedback.done_bounds, bounds, cx);
+                        this.feedback.update(cx, |feedback, cx| feedback.note_bounds(SlotPart::Done, bounds, cx));
                     });
                 }
             })
@@ -2545,23 +2694,23 @@ impl crate::app::Harness {
     /// names the confirm), a second within the arm window discards.
     /// Decorative: the same box.
     fn render_feedback_discard(&self, cx: &mut Context<Self>, decorative: bool) -> AnyElement {
-        let armed = self.feedback.discard_armed_live();
-        let enabled = self.feedback.discard_enabled();
+        let armed = self.feedback.read(cx).discard_armed_live();
+        let enabled = self.feedback.read(cx).discard_enabled();
         if decorative {
             return Self::slot_text("feedback-discard-ghost", "Discard", false, armed, enabled, true).into_any_element();
         }
         let label = if armed {
-            format!("Confirm: discard {}", self.feedback.notes_label())
+            format!("Confirm: discard {}", self.feedback.read(cx).notes_label())
         } else {
             "Discard feedback notes".to_owned()
         };
         let tip = if armed {
-            format!("Click again to discard {}", self.feedback.notes_label())
+            format!("Click again to discard {}", self.feedback.read(cx).notes_label())
         } else {
             "Discard feedback notes".to_owned()
         };
         let discard = self.main_listener(cx, |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-            if this.feedback.discard_enabled() {
+            if this.feedback.read(cx).discard_enabled() {
                 this.discard_feedback(window, cx);
             }
         });
@@ -2571,7 +2720,7 @@ impl crate::app::Harness {
                 if let Some(first) = bounds.first() {
                     let bounds = *first;
                     let _ = report.update(cx, |this, cx| {
-                        Self::note_trigger_bounds(&mut this.feedback.discard_bounds, bounds, cx);
+                        this.feedback.update(cx, |feedback, cx| feedback.note_bounds(SlotPart::Discard, bounds, cx));
                     });
                 }
             })
@@ -2590,7 +2739,7 @@ impl crate::app::Harness {
     /// the pill, replacing the count and the actions. Decorative: the same
     /// layout with no id, role or label.
     fn render_feedback_flash(&self, cx: &mut Context<Self>, decorative: bool) -> AnyElement {
-        let flash = self.feedback.saved_flash.as_ref().expect("flash checked");
+        let flash = self.feedback.read(cx).saved_flash.as_ref().expect("flash checked");
         let unit = if flash.notes == 1 { "note" } else { "notes" };
         let p = cx.aui().colors;
         let label = format!("Feedback saved to {}", flash.path);
@@ -2625,10 +2774,10 @@ impl crate::app::Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.feedback.phase != FeedbackPhase::Active || self.feedback.capturing {
+        if self.feedback.read(cx).phase != FeedbackPhase::Active || self.feedback.read(cx).capturing {
             return None;
         }
-        let note = self.feedback.popover.as_ref()?;
+        let note = self.feedback.read(cx).popover.as_ref()?;
         let (target, field) = (note.target.clone(), note.field.clone());
         let p = cx.aui().colors;
         let win = window.viewport_size();
@@ -2776,11 +2925,15 @@ mod tests {
     /// A live shell on the test app: the transition tests need a real
     /// focus handle, which needs the app.
     fn live_shell(cx: &mut gpui::App) -> FeedbackUi {
+        let overlays = cx.new(|_| crate::overlays::Overlays::default());
+        let focus_root = cx.focus_handle();
         FeedbackUi::new(
             Box::new(FakeProbe {
                 hits: Vec::new(),
                 enrich_calls: std::rc::Rc::new(std::cell::Cell::new(0)),
             }),
+            overlays,
+            focus_root,
             cx,
         )
     }
@@ -3009,12 +3162,12 @@ mod tests {
             })
         });
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Active),
             "the toggle enters Active with the setting on"
         );
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.draft.add(
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.draft.add(
                     Target::Area {
                         rect: Rect { x: 8.0, y: 8.0, w: 64.0, h: 32.0 },
                         region: None,
@@ -3023,7 +3176,7 @@ mod tests {
                     crate::feedback::test_context(),
                     None,
                     None,
-                );
+                ); });
             })
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
@@ -3036,11 +3189,11 @@ mod tests {
         assert!(dir.join("report.md").is_file(), "the report renders Markdown");
         assert!(dir.join("report.json").is_file(), "the report renders JSON");
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Off),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Off),
             "Done parks Off"
         );
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.draft.is_empty()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).draft.is_empty()),
             "Done clears the draft"
         );
         restore_state(state);
@@ -3185,17 +3338,17 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |_, cx| crate::layout::Layout::stage(cx, |layout| layout.feedback_mode = true)));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Active),
             "the icon activates from Off"
         );
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Paused),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Paused),
             "the icon pauses from Active"
         );
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Active),
             "the icon resumes from Paused"
         );
         restore_state(state);
@@ -3291,8 +3444,8 @@ mod tests {
         text: &str,
     ) {
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.draft.add(
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.draft.add(
                     Target::Area {
                         rect: Rect { x: 8.0, y: 8.0, w: 64.0, h: 32.0 },
                         region: None,
@@ -3301,7 +3454,7 @@ mod tests {
                     crate::feedback::test_context(),
                     None,
                     None,
-                );
+                ); });
             })
         });
     }
@@ -3318,20 +3471,53 @@ mod tests {
         draw_window(vc);
         draw_window(vc);
         let toggle = vc
-            .update(|_, cx| baaz.read(cx).feedback.toggle_bounds)
+            .update(|_, cx| baaz.read(cx).feedback.read(cx).toggle_bounds)
             .expect("the toggle paints while Active");
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.slot_bounds.is_some()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).slot_bounds.is_some()),
             "the slot records its bounds"
         );
         vc.simulate_click(bounds_center(toggle), gpui::Modifiers::default());
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Paused, "the slot click pauses");
-            assert!(harness.feedback.popover.is_none(), "the slot click files no note");
-            assert!(harness.feedback.capture_pending.is_none(), "the slot click captures nothing");
-            assert!(harness.feedback.pending_click.is_none(), "the slot click parks no retry");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Paused, "the slot click pauses");
+            assert!(harness.feedback.read(cx).popover.is_none(), "the slot click files no note");
+            assert!(harness.feedback.read(cx).capture_pending.is_none(), "the slot click captures nothing");
+            assert!(harness.feedback.read(cx).pending_click.is_none(), "the slot click parks no retry");
         });
+        restore_state(state);
+    }
+
+    /// Plan 4.9b: the shell is its own entity and redraws itself. A press
+    /// on the layer arms the shell's press — its change, its notify — and
+    /// the window re-renders (the root draws the layer from the shell)
+    /// while the root itself is never notified.
+    #[gpui::test]
+    fn a_feedback_change_redraws_without_notifying_the_root(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("feedback-redraw-alone");
+        let (baaz, vc) = live_harness(cx, &state.2);
+        enter_active(&baaz, vc);
+        draw_window(vc);
+        draw_window(vc);
+        vc.run_until_parked();
+        let shell = vc.update(|_, cx| baaz.read(cx).feedback.clone());
+        let root_notifies = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let shell_notifies = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let (root_count, shell_count) = (root_notifies.clone(), shell_notifies.clone());
+        let _watch = vc.update(|_, cx| {
+            (
+                cx.observe(&baaz, move |_, _| root_count.set(root_count.get() + 1)),
+                cx.observe(&shell, move |_, _| shell_count.set(shell_count.get() + 1)),
+            )
+        });
+        crate::sidebar_view::take_baaz_root_renders();
+        let point = gpui::point(gpui::px(400.), gpui::px(400.));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback_press_at(point, window, cx)));
+        vc.run_until_parked();
+        assert_eq!(vc.update(|_, cx| shell.read(cx).press), Some(point), "the press armed on the shell");
+        assert!(shell_notifies.get() > 0, "the shell redrew itself");
+        assert!(crate::sidebar_view::take_baaz_root_renders() > 0, "the window re-rendered the layer");
+        assert_eq!(root_notifies.get(), 0, "the root was never notified");
         restore_state(state);
     }
 
@@ -3345,16 +3531,16 @@ mod tests {
         enter_active(&baaz, vc);
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Paused),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Paused),
             "the handler pauses first"
         );
         draw_window(vc);
         let toggle = vc
-            .update(|_, cx| baaz.read(cx).feedback.toggle_bounds)
+            .update(|_, cx| baaz.read(cx).feedback.read(cx).toggle_bounds)
             .expect("the toggle paints while Paused");
         vc.simulate_click(bounds_center(toggle), gpui::Modifiers::default());
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Active),
             "the slot click resumes"
         );
         restore_state(state);
@@ -3372,7 +3558,7 @@ mod tests {
         draw_window(vc);
         draw_window(vc);
         let done = vc
-            .update(|_, cx| baaz.read(cx).feedback.done_bounds)
+            .update(|_, cx| baaz.read(cx).feedback.read(cx).done_bounds)
             .expect("Done paints while Active with notes");
         vc.simulate_click(bounds_center(done), gpui::Modifiers::default());
         // The click runs parked tasks on its way through, so the write may
@@ -3380,11 +3566,11 @@ mod tests {
         // a report is the clicked Done having saved.
         vc.run_until_parked();
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Off),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Off),
             "the clicked Done parks Off"
         );
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.draft.is_empty()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).draft.is_empty()),
             "the write clears the draft"
         );
         let report_root = crate::feedback::feedback_root();
@@ -3410,7 +3596,7 @@ mod tests {
         // is recorded, and the overlay never exists while Off.
         draw_window(vc);
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.slot_bounds.is_none()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).slot_bounds.is_none()),
             "no slot, no bounds while Off"
         );
         assert!(
@@ -3424,8 +3610,8 @@ mod tests {
         let (bounds, seat) = vc.update(|_, cx| {
             let harness = baaz.read(cx);
             (
-                harness.feedback.slot_bounds.expect("the Active slot records its bounds"),
-                harness.feedback_slot_overlay_right_top().expect("the overlay seats with bounds"),
+                harness.feedback.read(cx).slot_bounds.expect("the Active slot records its bounds"),
+                harness.feedback_slot_overlay_right_top(cx).expect("the overlay seats with bounds"),
             )
         });
         assert_eq!(
@@ -3450,9 +3636,9 @@ mod tests {
         pump_frames(vc, 8);
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.note_count(), 1, "the steps file one note");
-            assert_eq!(harness.feedback.draft.notes[0].text, "drawn note");
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Active, "filing stays Active");
+            assert_eq!(harness.feedback.read(cx).note_count(), 1, "the steps file one note");
+            assert_eq!(harness.feedback.read(cx).draft.notes[0].text, "drawn note");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Active, "filing stays Active");
         });
         assert_eq!(
             crate::steps::step_failures(),
@@ -3464,16 +3650,16 @@ mod tests {
         draw_window(vc);
         draw_window(vc);
         let done = vc
-            .update(|_, cx| baaz.read(cx).feedback.done_bounds)
+            .update(|_, cx| baaz.read(cx).feedback.read(cx).done_bounds)
             .expect("Done paints while Active with a note");
         vc.simulate_click(bounds_center(done), gpui::Modifiers::default());
         vc.run_until_parked();
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Off),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Off),
             "the clicked Done parks Off"
         );
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.draft.is_empty()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).draft.is_empty()),
             "the write clears the draft"
         );
         let report_root = crate::feedback::feedback_root();
@@ -3502,11 +3688,11 @@ mod tests {
         draw_window(vc);
         assert!(overlay(vc), "Active with bounds renders the overlay");
         let toggle = vc
-            .update(|_, cx| baaz.read(cx).feedback.toggle_bounds)
+            .update(|_, cx| baaz.read(cx).feedback.read(cx).toggle_bounds)
             .expect("the toggle paints while Active");
         vc.simulate_click(bounds_center(toggle), gpui::Modifiers::default());
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Paused),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Paused),
             "the drawn toggle click pauses"
         );
         draw_window(vc);
@@ -3527,18 +3713,18 @@ mod tests {
         draw_window(vc);
         draw_window(vc);
         let old_centre = vc.update(|_, cx| {
-            bounds_center(baaz.read(cx).feedback.slot_bounds.expect("the Active slot draws bounds"))
+            bounds_center(baaz.read(cx).feedback.read(cx).slot_bounds.expect("the Active slot draws bounds"))
         });
         inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx).expect("the step runs")));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert!(
-                harness.feedback.slot_bounds.is_none(),
+                harness.feedback.read(cx).slot_bounds.is_none(),
                 "starting the capture clears the unpainted slot's bounds"
             );
             assert!(
-                !harness.feedback.slot_contains(old_centre),
+                !harness.feedback.read(cx).slot_contains(old_centre),
                 "the cleared bounds silence nothing and own nothing"
             );
         });
@@ -3546,7 +3732,7 @@ mod tests {
         drive_frames(vc);
         draw_window(vc);
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.slot_bounds.is_some()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).slot_bounds.is_some()),
             "the next paint re-records the slot"
         );
         // The setting goes off: cleared at once, and no later draw revives
@@ -3558,18 +3744,18 @@ mod tests {
             })
         });
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.slot_bounds.is_none()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).slot_bounds.is_none()),
             "the setting going off clears the bounds"
         );
         draw_window(vc);
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             assert!(
-                harness.feedback.slot_bounds.is_none(),
+                harness.feedback.read(cx).slot_bounds.is_none(),
                 "no draw revives bounds while the slot is unrendered"
             );
             assert!(
-                !harness.feedback.slot_contains(old_centre),
+                !harness.feedback.read(cx).slot_contains(old_centre),
                 "the old rect is never reused"
             );
         });
@@ -3642,10 +3828,10 @@ mod tests {
         pump_frames(vc, 8);
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Paused, "the sequence ends Paused");
-            assert_eq!(harness.feedback.note_count(), 1, "the sequence files one note");
-            assert_eq!(harness.feedback.draft.notes[0].text, "x");
-            assert!(harness.feedback.step_queue.is_empty(), "the pump drained the queue");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Paused, "the sequence ends Paused");
+            assert_eq!(harness.feedback.read(cx).note_count(), 1, "the sequence files one note");
+            assert_eq!(harness.feedback.read(cx).draft.notes[0].text, "x");
+            assert!(harness.feedback.read(cx).step_queue.is_empty(), "the pump drained the queue");
         });
         assert_eq!(
             crate::steps::step_failures(),
@@ -3665,26 +3851,26 @@ mod tests {
         enter_active(&baaz, vc);
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                h.feedback.slot_bounds = Some(gpui::Bounds {
+                h.feedback.update(cx, |feedback, _| { feedback.slot_bounds = Some(gpui::Bounds {
                     origin: gpui::point(gpui::px(10.), gpui::px(10.)),
                     size: gpui::size(gpui::px(100.), gpui::px(30.)),
-                });
+                }); });
                 let inside = gpui::point(gpui::px(20.), gpui::px(20.));
                 let outside = gpui::point(gpui::px(400.), gpui::px(400.));
-                h.feedback_hover_at(inside, window, cx);
-                assert!(h.feedback.hover.is_none(), "no outline inside the slot");
-                h.feedback.hover_dirty = Some(inside);
-                h.hover_hit_test(inside, window, cx);
-                assert!(h.feedback.hover.is_none(), "no trailing outline inside the slot");
-                assert!(h.feedback.hover_dirty.is_none(), "the parked slot point is consumed");
+                h.feedback.update(cx, |feedback, cx| feedback.feedback_hover_at(inside, window, cx));
+                assert!(h.feedback.read(cx).hover.is_none(), "no outline inside the slot");
+                h.feedback.update(cx, |feedback, _| { feedback.hover_dirty = Some(inside); });
+                h.feedback.update(cx, |feedback, cx| feedback.hover_hit_test(inside, window, cx));
+                assert!(h.feedback.read(cx).hover.is_none(), "no trailing outline inside the slot");
+                assert!(h.feedback.read(cx).hover_dirty.is_none(), "the parked slot point is consumed");
                 h.feedback_press_at(inside, window, cx);
-                assert!(h.feedback.press.is_none(), "no press arms inside the slot");
+                assert!(h.feedback.read(cx).press.is_none(), "no press arms inside the slot");
                 h.feedback_press_at(outside, window, cx);
-                assert!(h.feedback.press.is_some(), "a press still arms outside the slot");
+                assert!(h.feedback.read(cx).press.is_some(), "a press still arms outside the slot");
                 h.feedback_release_at(inside, window, cx);
-                assert!(h.feedback.press.is_none(), "the slot release drops the press");
+                assert!(h.feedback.read(cx).press.is_none(), "the slot release drops the press");
                 assert!(
-                    h.feedback.capture_pending.is_none() && h.feedback.pending_click.is_none(),
+                    h.feedback.read(cx).capture_pending.is_none() && h.feedback.read(cx).pending_click.is_none(),
                     "the slot release files no note"
                 );
             })
@@ -3701,7 +3887,7 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         inject_hits(&baaz, vc, vec![f3_hit(270.0, 8.0, 60.0, 28.0, "Project")]);
-        vc.update(|_, cx| baaz.update(cx, |h, _| h.feedback.slot_bounds = None));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.feedback.update(cx, |feedback, _| { feedback.slot_bounds = None; })));
         f3_click(&baaz, vc, 297.0, 21.0);
         match f3_popover_target(&baaz, vc) {
             Some(Target::Element(hit)) => assert_eq!(hit.label, "Project"),
@@ -3720,7 +3906,7 @@ mod tests {
         add_draft_note(&baaz, vc, "kept");
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.discard_armed_live()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).discard_armed_live()),
             "the first Discard press arms"
         );
         aui::data::arm_ax_probe(true);
@@ -3748,8 +3934,8 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.draft.add(
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.draft.add(
                     Target::Area {
                         rect: Rect { x: 8.0, y: 8.0, w: 64.0, h: 32.0 },
                         region: None,
@@ -3758,31 +3944,31 @@ mod tests {
                     crate::feedback::test_context(),
                     None,
                     None,
-                );
+                ); });
             })
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.discard_armed_live()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).discard_armed_live()),
             "the first Discard press arms"
         );
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert!(harness.feedback.saving, "the write is in flight");
-            assert_eq!(harness.feedback.notes_label(), "1 note", "the count being saved shows");
-            assert!(!harness.feedback.discard_armed_live(), "Done disarms Discard");
+            assert!(harness.feedback.read(cx).saving, "the write is in flight");
+            assert_eq!(harness.feedback.read(cx).notes_label(), "1 note", "the count being saved shows");
+            assert!(!harness.feedback.read(cx).discard_armed_live(), "Done disarms Discard");
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Active),
             "the toggle waits out the save"
         );
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Off, "the write parks Off");
-            assert!(!harness.feedback.saving, "the guard lifts");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Off, "the write parks Off");
+            assert!(!harness.feedback.read(cx).saving, "the guard lifts");
         });
         restore_state(state);
     }
@@ -3796,8 +3982,8 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.draft.add(
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.draft.add(
                     Target::Area {
                         rect: Rect { x: 8.0, y: 8.0, w: 64.0, h: 32.0 },
                         region: None,
@@ -3806,35 +3992,35 @@ mod tests {
                     crate::feedback::test_context(),
                     None,
                     None,
-                );
+                ); });
             })
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
-        assert!(vc.update(|_, cx| baaz.read(cx).feedback.discard_armed_live()));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.read(cx).discard_armed_live()));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Paused, "the toggle pauses");
-            assert!(!harness.feedback.discard_armed_live(), "pausing disarms Discard");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Paused, "the toggle pauses");
+            assert!(!harness.feedback.read(cx).discard_armed_live(), "pausing disarms Discard");
         });
         // Escape through Active disarms the same way.
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
-        assert!(vc.update(|_, cx| baaz.read(cx).feedback.discard_armed_live()));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.read(cx).discard_armed_live()));
         vc.simulate_keystrokes("escape");
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Paused, "Escape pauses");
-            assert!(!harness.feedback.discard_armed_live(), "Escape disarms Discard");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Paused, "Escape pauses");
+            assert!(!harness.feedback.read(cx).discard_armed_live(), "Escape disarms Discard");
         });
         // And an emptied draft reads disarmed even with the flag still set.
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
-        assert!(vc.update(|_, cx| baaz.read(cx).feedback.discard_armed_live()));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.read(cx).discard_armed_live()));
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.draft.discard();
-                assert!(!h.feedback.discard_enabled(), "the draft is empty");
-                assert!(!h.feedback.discard_armed_live(), "no notes reads disarmed");
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.draft.discard(); });
+                assert!(!h.feedback.read(cx).discard_enabled(), "the draft is empty");
+                assert!(!h.feedback.read(cx).discard_armed_live(), "no notes reads disarmed");
             })
         });
         restore_state(state);
@@ -3902,8 +4088,8 @@ mod tests {
         );
         // Paused with notes: the icon plus the count and both actions.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.draft.add(
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.draft.add(
                     Target::Area {
                         rect: Rect { x: 8.0, y: 8.0, w: 64.0, h: 32.0 },
                         region: None,
@@ -3912,12 +4098,12 @@ mod tests {
                     crate::feedback::test_context(),
                     None,
                     None,
-                );
+                ); });
             })
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Paused),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Paused),
             "the toggle pauses"
         );
         let paused_labels = draw(vc);
@@ -3938,7 +4124,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
-        assert!(vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Active));
         let sessions_before = vc.update(|_, cx| baaz.read(cx).session_list.read(cx).sessions.len());
         vc.simulate_keystrokes("cmd-n");
         vc.simulate_keystrokes("tab");
@@ -3946,15 +4132,15 @@ mod tests {
             let harness = baaz.read(cx);
             assert_eq!(harness.session_list.read(cx).sessions.len(), sessions_before, "⌘N opened a session under the layer");
             assert!(harness.active.is_none(), "⌘N opened a draft under the layer");
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Active);
             assert!(
-                harness.feedback.focus.is_focused(window),
+                harness.feedback.read(cx).focus.is_focused(window),
                 "Tab moved focus off the layer"
             );
         });
         vc.simulate_keystrokes("ctrl-alt-cmd-f");
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Paused),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Paused),
             "⌃⌥⌘F still pauses from the layer"
         );
         restore_state(state);
@@ -3990,8 +4176,8 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.draft.add(
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.draft.add(
                     Target::Area {
                         rect: Rect { x: 1.0, y: 1.0, w: 8.0, h: 8.0 },
                         region: None,
@@ -4000,8 +4186,8 @@ mod tests {
                     crate::feedback::test_context(),
                     None,
                     None,
-                );
-                h.feedback.draft.add(
+                ); });
+                h.feedback.update(cx, |feedback, _| { feedback.draft.add(
                     Target::Area {
                         rect: Rect { x: 2.0, y: 2.0, w: 8.0, h: 8.0 },
                         region: None,
@@ -4010,12 +4196,12 @@ mod tests {
                     crate::feedback::test_context(),
                     None,
                     None,
-                );
+                ); });
             })
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.saving),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).saving),
             "the first Done raises the guard"
         );
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
@@ -4030,7 +4216,7 @@ mod tests {
         let latest = std::fs::read_to_string(root.join("latest")).expect("Done writes latest");
         let (flash, toasts, clip) = vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            let flash = harness.feedback.saved_flash.as_ref().map(|f| f.notes);
+            let flash = harness.feedback.read(cx).saved_flash.as_ref().map(|f| f.notes);
             let toasts = harness.overlays.read(cx).toasts.len();
             let clip = cx.read_from_clipboard().and_then(|item| item.text());
             (flash, toasts, clip)
@@ -4038,9 +4224,9 @@ mod tests {
         assert_eq!(flash, Some(2), "the header flash names the 2 notes saved");
         assert_eq!(toasts, 0, "no toast repeats the flash");
         assert_eq!(clip.as_deref(), Some(latest.trim()), "the clipboard holds the report dir");
-        assert!(vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Off));
-        assert!(vc.update(|_, cx| baaz.read(cx).feedback.draft.is_empty()));
-        assert!(!vc.update(|_, cx| baaz.read(cx).feedback.saving));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Off));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.read(cx).draft.is_empty()));
+        assert!(!vc.update(|_, cx| baaz.read(cx).feedback.read(cx).saving));
         restore_state(state);
     }
 
@@ -4058,8 +4244,8 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.draft.add(
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.draft.add(
                     Target::Area {
                         rect: Rect { x: 3.0, y: 3.0, w: 8.0, h: 8.0 },
                         region: None,
@@ -4068,16 +4254,16 @@ mod tests {
                     crate::feedback::test_context(),
                     None,
                     None,
-                );
+                ); });
             })
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Active, "the phase survives");
-            assert_eq!(harness.feedback.note_count(), 1, "the draft moves back");
-            assert!(!harness.feedback.saving, "the guard lifts");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Active, "the phase survives");
+            assert_eq!(harness.feedback.read(cx).note_count(), 1, "the draft moves back");
+            assert!(!harness.feedback.read(cx).saving, "the guard lifts");
             let toast = harness.overlays.read(cx).toasts.last().cloned().expect("an error toasts");
             assert_eq!(toast.title.to_string(), "Couldn't save feedback");
         });
@@ -4093,8 +4279,8 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.draft.add(
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.draft.add(
                     Target::Area {
                         rect: Rect { x: 4.0, y: 4.0, w: 8.0, h: 8.0 },
                         region: None,
@@ -4103,14 +4289,14 @@ mod tests {
                     crate::feedback::test_context(),
                     None,
                     None,
-                );
+                ); });
             })
         });
         // The Discard icon's own handler, exactly as the click calls it.
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
         vc.simulate_keystrokes("escape");
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Paused),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Paused),
             "escape pauses after the Discard click"
         );
         restore_state(state);
@@ -4128,8 +4314,8 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("on", window, cx).expect("the step runs")));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
-            assert!(harness.feedback.forced_on, "the run-only flag parks");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Active);
+            assert!(harness.feedback.read(cx).forced_on, "the run-only flag parks");
             assert!(!crate::layout::Layout::get(cx).feedback_mode, "the persisted setting never moves");
         });
         let bogus = vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("bogus", window, cx)));
@@ -4140,8 +4326,8 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("off", window, cx).expect("the step runs")));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Off);
-            assert!(!harness.feedback.forced_on, "off clears the run-only flag");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Off);
+            assert!(!harness.feedback.read(cx).forced_on, "off clears the run-only flag");
             assert!(!crate::layout::Layout::get(cx).feedback_mode, "off leaves the persisted setting alone");
         });
         restore_state(state);
@@ -4156,8 +4342,8 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.draft.add(
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.draft.add(
                     Target::Area {
                         rect: Rect { x: 5.0, y: 5.0, w: 8.0, h: 8.0 },
                         region: None,
@@ -4166,21 +4352,21 @@ mod tests {
                     crate::feedback::test_context(),
                     None,
                     None,
-                );
+                ); });
             })
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
         // A stale arm reads as a first click again, so the second press
         // re-arms instead of clearing.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.discard_armed_at =
-                    Some(Instant::now() - DISCARD_ARM - Duration::from_secs(1));
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.discard_armed_at =
+                    Some(Instant::now() - DISCARD_ARM - Duration::from_secs(1)); });
             })
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.discard_feedback(window, cx)));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.discard_task.is_some()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).discard_task.is_some()),
             "one disarm task is pending after two arms"
         );
         restore_state(state);
@@ -4216,8 +4402,8 @@ mod tests {
         let calls = std::rc::Rc::new(std::cell::Cell::new(0));
         let probe_calls = calls.clone();
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.probe = Box::new(FakeProbe { hits, enrich_calls: probe_calls });
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.probe = Box::new(FakeProbe { hits, enrich_calls: probe_calls }); });
             })
         });
         calls
@@ -4266,8 +4452,8 @@ mod tests {
                 let point = f3_point(x, y);
                 h.feedback_press_at(point, window, cx);
                 h.feedback_release_at(point, window, cx);
-                let seq = h.feedback.capture_seq;
-                h.finish_note_capture(window, cx, seq);
+                let seq = h.feedback.read(cx).capture_seq;
+                h.feedback.update(cx, |feedback, cx| feedback.finish_note_capture(window, cx, seq));
             })
         });
     }
@@ -4276,7 +4462,7 @@ mod tests {
         baaz: &gpui::Entity<crate::app::Harness>,
         vc: &mut gpui::VisualTestContext,
     ) -> Option<Target> {
-        vc.update(|_, cx| baaz.read(cx).feedback.popover.as_ref().map(|note| note.target.clone()))
+        vc.update(|_, cx| baaz.read(cx).feedback.read(cx).popover.as_ref().map(|note| note.target.clone()))
     }
 
     /// Hover hit-tests on a ≥ 2 px move and clears off every hit; a
@@ -4288,28 +4474,28 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback_hover_at(f3_point(20.0, 20.0), window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback.update(cx, |feedback, cx| feedback.feedback_hover_at(f3_point(20.0, 20.0), window, cx))));
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).feedback.hover.as_ref().map(|hit| hit.label.clone())),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).hover.as_ref().map(|hit| hit.label.clone())),
             Some("Headers".to_owned()),
             "hovering the hit outlines it"
         );
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback_hover_at(f3_point(20.5, 20.0), window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback.update(cx, |feedback, cx| feedback.feedback_hover_at(f3_point(20.5, 20.0), window, cx))));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.hover.is_some()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).hover.is_some()),
             "a sub-2 px move keeps the outline without re-hit-testing"
         );
         // The throttle would skip an immediate re-test: age the last one
         // past ~30 ms so the empty-space hover really hit-tests.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.hover_tested_at =
-                    Some(Instant::now() - FEEDBACK_HOVER_THROTTLE - Duration::from_millis(1));
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.hover_tested_at =
+                    Some(Instant::now() - FEEDBACK_HOVER_THROTTLE - Duration::from_millis(1)); });
             })
         });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback_hover_at(f3_point(500.0, 500.0), window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback.update(cx, |feedback, cx| feedback.feedback_hover_at(f3_point(500.0, 500.0), window, cx))));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.hover.is_none()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).hover.is_none()),
             "hovering empty space clears the outline"
         );
         restore_state(state);
@@ -4335,43 +4521,43 @@ mod tests {
                 f3_hit(300.0, 300.0, 100.0, 30.0, "Footer"),
             ],
         );
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback_hover_at(f3_point(20.0, 20.0), window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback.update(cx, |feedback, cx| feedback.feedback_hover_at(f3_point(20.0, 20.0), window, cx))));
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).feedback.hover.as_ref().map(|hit| hit.label.clone())),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).hover.as_ref().map(|hit| hit.label.clone())),
             Some("Headers".to_owned())
         );
         assert_eq!(calls.get(), 0, "hover never enriches");
         // An immediate move onto the other hit is throttled: no re-test,
         // the old outline stays, the position parks as the trailing edge,
         // and still no enrichment.
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback_hover_at(f3_point(310.0, 310.0), window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.feedback.update(cx, |feedback, cx| feedback.feedback_hover_at(f3_point(310.0, 310.0), window, cx))));
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).feedback.hover.as_ref().map(|hit| hit.label.clone())),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).hover.as_ref().map(|hit| hit.label.clone())),
             Some("Headers".to_owned()),
             "the throttled move keeps the last outline"
         );
         assert_eq!(calls.get(), 0, "the throttled move enriches nothing either");
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.hover_dirty.is_some()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).hover_dirty.is_some()),
             "the throttled move parks the trailing edge"
         );
         // The pointer stops. Once the window elapses, a real frame's poll
         // runs the parked hit-test and the outline reaches the last
         // position.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.hover_tested_at =
-                    Some(Instant::now() - FEEDBACK_HOVER_THROTTLE - Duration::from_millis(1));
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.hover_tested_at =
+                    Some(Instant::now() - FEEDBACK_HOVER_THROTTLE - Duration::from_millis(1)); });
             })
         });
         draw_frame(vc);
         assert_eq!(
-            vc.update(|_, cx| baaz.read(cx).feedback.hover.as_ref().map(|hit| hit.label.clone())),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).hover.as_ref().map(|hit| hit.label.clone())),
             Some("Footer".to_owned()),
             "after the window the outline reaches the last position"
         );
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.hover_dirty.is_none()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).hover_dirty.is_none()),
             "the poll consumes the trailing edge"
         );
         assert_eq!(calls.get(), 0, "even the trailing re-test never enriches");
@@ -4392,7 +4578,7 @@ mod tests {
             inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx).expect("the step runs")));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.popover.is_none()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).popover.is_none()),
             "no popover yet: the capture has not landed"
         );
         drive_frames(vc);
@@ -4402,7 +4588,7 @@ mod tests {
         }
         assert_eq!(calls.get(), 1, "the click enriches exactly once");
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.phase == FeedbackPhase::Active),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).phase == FeedbackPhase::Active),
             "note-taking stays Active"
         );
         restore_state(state);
@@ -4422,11 +4608,11 @@ mod tests {
         inject_hits(&baaz, vc, Vec::new());
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:200,200", window, cx).expect("the step runs")));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.popover.is_none()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).popover.is_none()),
             "no popover yet: the click waits for the tree to warm"
         );
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.pending_click.is_some()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).pending_click.is_some()),
             "the miss parks a retry"
         );
         // Let the tree stay cold past the warm window (wall-clock: the
@@ -4434,10 +4620,12 @@ mod tests {
         // frame: its poll falls back to the area and starts the capture,
         // which the frames below land.
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                if let Some(pending) = h.feedback.pending_click.as_mut() {
-                    pending.since = Instant::now() - FEEDBACK_PROBE_WARM - Duration::from_secs(1);
-                }
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| {
+                    if let Some(pending) = feedback.pending_click.as_mut() {
+                        pending.since = Instant::now() - FEEDBACK_PROBE_WARM - Duration::from_secs(1);
+                    }
+                })
             })
         });
         draw_frame(vc);
@@ -4464,10 +4652,10 @@ mod tests {
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
                 h.feedback_press_at(f3_point(300.0, 300.0), window, cx);
-                h.feedback_drag_at(f3_point(100.0, 100.0), cx);
+                h.feedback.update(cx, |feedback, cx| feedback.feedback_drag_at(f3_point(100.0, 100.0), cx));
                 h.feedback_release_at(f3_point(100.0, 100.0), window, cx);
-                let seq = h.feedback.capture_seq;
-                h.finish_note_capture(window, cx, seq);
+                let seq = h.feedback.read(cx).capture_seq;
+                h.feedback.update(cx, |feedback, cx| feedback.finish_note_capture(window, cx, seq));
             })
         });
         match f3_popover_target(&baaz, vc) {
@@ -4491,10 +4679,10 @@ mod tests {
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
                 h.feedback_press_at(f3_point(20.0, 20.0), window, cx);
-                h.feedback_drag_at(f3_point(24.0, 24.0), cx);
+                h.feedback.update(cx, |feedback, cx| feedback.feedback_drag_at(f3_point(24.0, 24.0), cx));
                 h.feedback_release_at(f3_point(24.0, 24.0), window, cx);
-                let seq = h.feedback.capture_seq;
-                h.finish_note_capture(window, cx, seq);
+                let seq = h.feedback.read(cx).capture_seq;
+                h.feedback.update(cx, |feedback, cx| feedback.finish_note_capture(window, cx, seq));
             })
         });
         match f3_popover_target(&baaz, vc) {
@@ -4518,29 +4706,29 @@ mod tests {
         // Empty first: nothing saves, the popover stays open.
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.save_feedback_note(window, cx)));
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.draft.is_empty()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).draft.is_empty()),
             "empty text saves nothing"
         );
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.popover.is_some()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).popover.is_some()),
             "empty text keeps the popover open"
         );
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                h.fill_feedback_note("quieter header", window, cx);
+                h.feedback.update(cx, |feedback, cx| feedback.fill_feedback_note("quieter header", window, cx));
                 h.save_feedback_note(window, cx);
             })
         });
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.note_count(), 1);
-            let note = &harness.feedback.draft.notes[0];
+            assert_eq!(harness.feedback.read(cx).note_count(), 1);
+            let note = &harness.feedback.read(cx).draft.notes[0];
             assert_eq!(note.index, 1);
             assert_eq!(note.text, "quieter header");
             assert_eq!(note.context.mode, "Sessions", "the context is filled per note");
             assert!(note.context.window_w > 0.0, "the context carries the window");
-            assert!(harness.feedback.popover.is_none(), "saving closes the popover");
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
+            assert!(harness.feedback.read(cx).popover.is_none(), "saving closes the popover");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Active);
         });
         restore_state(state);
     }
@@ -4555,18 +4743,18 @@ mod tests {
         enter_active(&baaz, vc);
         inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
         f3_click(&baaz, vc, 20.0, 20.0);
-        assert!(vc.update(|_, cx| baaz.read(cx).feedback.popover.is_some()));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.read(cx).popover.is_some()));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.cancel_feedback_note(window, cx)));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert!(harness.feedback.popover.is_none());
-            assert!(harness.feedback.draft.is_empty(), "cancelling saves nothing");
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Active, "cancelling stays Active");
+            assert!(harness.feedback.read(cx).popover.is_none());
+            assert!(harness.feedback.read(cx).draft.is_empty(), "cancelling saves nothing");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Active, "cancelling stays Active");
         });
         // Again, this time cancelled by a press outside the popover: the
         // release that follows must not start a new note.
         f3_click(&baaz, vc, 20.0, 20.0);
-        assert!(vc.update(|_, cx| baaz.read(cx).feedback.popover.is_some()));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.read(cx).popover.is_some()));
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
                 h.feedback_press_at(f3_point(400.0, 400.0), window, cx);
@@ -4575,11 +4763,11 @@ mod tests {
         });
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert!(harness.feedback.popover.is_none(), "the outside press cancels");
-            assert!(harness.feedback.capture_pending.is_none(), "no capture starts");
-            assert!(harness.feedback.pending_click.is_none(), "no retry parks");
-            assert!(harness.feedback.draft.is_empty());
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
+            assert!(harness.feedback.read(cx).popover.is_none(), "the outside press cancels");
+            assert!(harness.feedback.read(cx).capture_pending.is_none(), "no capture starts");
+            assert!(harness.feedback.read(cx).pending_click.is_none(), "no retry parks");
+            assert!(harness.feedback.read(cx).draft.is_empty());
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Active);
         });
         restore_state(state);
     }
@@ -4676,7 +4864,7 @@ mod tests {
         enter_active(&baaz, vc);
         inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
         f3_click(&baaz, vc, 20.0, 20.0);
-        assert!(vc.update(|_, cx| baaz.read(cx).feedback.popover.is_some()));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.read(cx).popover.is_some()));
         vc.update(|_, cx| {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string("XY".to_owned()));
         });
@@ -4684,26 +4872,26 @@ mod tests {
         vc.simulate_keystrokes("cmd-v");
         vc.simulate_keystrokes("shift-enter");
         let field = vc.update(|_, cx| {
-            baaz.read(cx).feedback.popover.as_ref().expect("popover open").field.read(cx).value().to_string()
+            baaz.read(cx).feedback.read(cx).popover.as_ref().expect("popover open").field.read(cx).value().to_string()
         });
         assert_eq!(field, "hiXY\n", "typing, paste and shift-enter land in the field");
         vc.simulate_keystrokes("enter");
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.note_count(), 1);
-            assert_eq!(harness.feedback.draft.notes[0].text, "hiXY");
-            assert!(harness.feedback.popover.is_none(), "enter saves and closes");
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
+            assert_eq!(harness.feedback.read(cx).note_count(), 1);
+            assert_eq!(harness.feedback.read(cx).draft.notes[0].text, "hiXY");
+            assert!(harness.feedback.read(cx).popover.is_none(), "enter saves and closes");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Active);
         });
         // Escape closes the next popover unsaved and never pauses.
         f3_click(&baaz, vc, 20.0, 20.0);
-        assert!(vc.update(|_, cx| baaz.read(cx).feedback.popover.is_some()));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.read(cx).popover.is_some()));
         vc.simulate_keystrokes("escape");
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert!(harness.feedback.popover.is_none(), "escape closes the popover");
-            assert_eq!(harness.feedback.note_count(), 1, "escape saves nothing");
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Active, "escape never pauses");
+            assert!(harness.feedback.read(cx).popover.is_none(), "escape closes the popover");
+            assert_eq!(harness.feedback.read(cx).note_count(), 1, "escape saves nothing");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Active, "escape never pauses");
         });
         restore_state(state);
     }
@@ -4743,32 +4931,32 @@ mod tests {
         pump_frames(vc, 8);
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.note_count(), 2, "click → note → drag → note files 2 notes");
-            assert_eq!(harness.feedback.draft.notes[0].text, "Make this quieter");
-            assert_eq!(harness.feedback.draft.notes[1].text, "Too much space here");
-            match &harness.feedback.draft.notes[1].target {
+            assert_eq!(harness.feedback.read(cx).note_count(), 2, "click → note → drag → note files 2 notes");
+            assert_eq!(harness.feedback.read(cx).draft.notes[0].text, "Make this quieter");
+            assert_eq!(harness.feedback.read(cx).draft.notes[1].text, "Too much space here");
+            match &harness.feedback.read(cx).draft.notes[1].target {
                 Target::Area { rect, region } => {
                     assert_eq!(*rect, Rect { x: 560.0, y: 300.0, w: 340.0, h: 120.0 });
                     assert_eq!(*region, Some("near Canvas".to_owned()));
                 }
                 other => panic!("the drag saves an area, got {other:?}"),
             }
-            assert!(harness.feedback.popover.is_none());
-            assert!(harness.feedback.step_queue.is_empty(), "the pump drained the queue");
+            assert!(harness.feedback.read(cx).popover.is_none());
+            assert!(harness.feedback.read(cx).step_queue.is_empty(), "the pump drained the queue");
         });
         // `cancel` really runs: a fresh popover opens, then closes unsaved.
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx).expect("the step runs")));
         drive_frames(vc);
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.popover.is_some()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).popover.is_some()),
             "the fresh click opens a popover"
         );
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("cancel", window, cx).expect("the step runs")));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert!(harness.feedback.popover.is_none(), "cancel closes the popover");
-            assert_eq!(harness.feedback.note_count(), 2, "cancel saves nothing");
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Active, "cancel stays Active");
+            assert!(harness.feedback.read(cx).popover.is_none(), "cancel closes the popover");
+            assert_eq!(harness.feedback.read(cx).note_count(), 2, "cancel saves nothing");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Active, "cancel stays Active");
         });
         restore_state(state);
     }
@@ -4786,7 +4974,7 @@ mod tests {
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| h.feedback_press_at(f3_point(20.0, 20.0), window, cx))
         });
-        assert!(vc.update(|_, cx| baaz.read(cx).feedback.press.is_some()));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.read(cx).press.is_some()));
         // The button is up but the press is still armed: the release went
         // elsewhere. A move clears it — no note, no retry, no capture.
         vc.update(|window, cx| {
@@ -4794,14 +4982,14 @@ mod tests {
         });
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert!(harness.feedback.press.is_none(), "the stale press clears");
-            assert!(harness.feedback.drag.is_none(), "the stale drag clears");
-            assert!(harness.feedback.pending_click.is_none(), "no retry parks");
-            assert!(harness.feedback.capture_pending.is_none(), "no capture starts");
-            assert!(harness.feedback.popover.is_none(), "no note is filed");
-            assert!(harness.feedback.draft.is_empty());
+            assert!(harness.feedback.read(cx).press.is_none(), "the stale press clears");
+            assert!(harness.feedback.read(cx).drag.is_none(), "the stale drag clears");
+            assert!(harness.feedback.read(cx).pending_click.is_none(), "no retry parks");
+            assert!(harness.feedback.read(cx).capture_pending.is_none(), "no capture starts");
+            assert!(harness.feedback.read(cx).popover.is_none(), "no note is filed");
+            assert!(harness.feedback.read(cx).draft.is_empty());
             assert!(
-                harness.feedback.hover.as_ref().is_some_and(|hit| hit.label == "Headers"),
+                harness.feedback.read(cx).hover.as_ref().is_some_and(|hit| hit.label == "Headers"),
                 "hover revives on the same move"
             );
         });
@@ -4912,21 +5100,21 @@ mod tests {
         inject_hits(&baaz, vc, vec![f3_hit(10.0, 10.0, 100.0, 30.0, "Headers")]);
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx).expect("the step runs")));
         drive_frames(vc);
-        assert!(vc.update(|_, cx| baaz.read(cx).feedback.popover.is_some()));
+        assert!(vc.update(|_, cx| baaz.read(cx).feedback.read(cx).popover.is_some()));
         vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.fill_feedback_note("half-typed words", window, cx))
+            baaz.update(cx, |h, cx| h.feedback.update(cx, |feedback, cx| feedback.fill_feedback_note("half-typed words", window, cx)))
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Paused);
-            assert!(harness.feedback.popover.is_some(), "pause keeps the popover");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Paused);
+            assert!(harness.feedback.read(cx).popover.is_some(), "pause keeps the popover");
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                assert_eq!(h.feedback.phase, FeedbackPhase::Active);
-                let note = h.feedback.popover.as_ref().expect("resume restores the popover");
+                assert_eq!(h.feedback.read(cx).phase, FeedbackPhase::Active);
+                let note = h.feedback.read(cx).popover.as_ref().expect("resume restores the popover");
                 assert_eq!(
                     note.field.read(cx).value().to_string(),
                     "half-typed words",
@@ -4953,13 +5141,13 @@ mod tests {
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_feedback("click:20,21", window, cx).expect("the step runs")));
         drive_frames(vc);
         vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| h.fill_feedback_note("file me on Done", window, cx))
+            baaz.update(cx, |h, cx| h.feedback.update(cx, |feedback, cx| feedback.fill_feedback_note("file me on Done", window, cx)))
         });
         // Done reads enabled through the same predicate the button
         // renders with: the open popover holds text, so Done will file it
         // first even though the draft is still empty.
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.done_enabled(cx)),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).done_enabled(cx)),
             "an open note with text enables Done with an empty draft"
         );
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
@@ -4969,9 +5157,9 @@ mod tests {
         assert!(std::path::PathBuf::from(latest.trim()).is_dir(), "the report dir lands");
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Off, "Done parks Off");
-            assert!(harness.feedback.draft.is_empty(), "Done clears the draft");
-            assert_eq!(harness.feedback.saved_flash.as_ref().map(|f| f.notes), Some(1), "the flash names 1 note");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Off, "Done parks Off");
+            assert!(harness.feedback.read(cx).draft.is_empty(), "Done clears the draft");
+            assert_eq!(harness.feedback.read(cx).saved_flash.as_ref().map(|f| f.notes), Some(1), "the flash names 1 note");
         });
         restore_state(state);
     }
@@ -4986,19 +5174,24 @@ mod tests {
         enter_active(&baaz, vc);
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                h.feedback.saving = true;
-                h.begin_note_capture(
-                    Target::Area { rect: Rect { x: 1.0, y: 1.0, w: 8.0, h: 8.0 }, region: None },
-                    window,
-                    cx,
-                );
+                h.feedback.update(cx, |feedback, _| { feedback.saving = true; });
+                let feedback = h.feedback.clone();
+                let screen = |window: &mut Window, cx: &gpui::App| h.feedback_context(window, cx);
+                feedback.update(cx, |feedback, cx| {
+                    feedback.begin_note_capture(
+                        &screen,
+                        Target::Area { rect: Rect { x: 1.0, y: 1.0, w: 8.0, h: 8.0 }, region: None },
+                        window,
+                        cx,
+                    )
+                });
             })
         });
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert!(!harness.feedback.capturing, "no capture starts while saving");
-            assert!(harness.feedback.capture_pending.is_none());
-            assert!(harness.feedback.popover.is_none());
+            assert!(!harness.feedback.read(cx).capturing, "no capture starts while saving");
+            assert!(harness.feedback.read(cx).capture_pending.is_none());
+            assert!(harness.feedback.read(cx).popover.is_none());
         });
         restore_state(state);
     }
@@ -5055,7 +5248,7 @@ mod tests {
             baaz.update(cx, |h, cx| h.step_feedback("note:queued behind the capture", window, cx).expect("the step runs"))
         });
         assert!(
-            vc.update(|_, cx| !baaz.read(cx).feedback.step_queue.is_empty()),
+            vc.update(|_, cx| !baaz.read(cx).feedback.read(cx).step_queue.is_empty()),
             "the note waits behind the in-flight capture"
         );
         let failures_before = crate::steps::step_failures();
@@ -5064,15 +5257,15 @@ mod tests {
         // each waiter loudly under its own step name.
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                h.feedback.pause();
+                h.feedback.update(cx, |feedback, _| { feedback.pause(); });
                 window.focus(&h.focus_root, cx);
                 cx.notify();
             })
         });
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Paused);
-            assert!(harness.feedback.step_queue.is_empty(), "pause clears the queue");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Paused);
+            assert!(harness.feedback.read(cx).step_queue.is_empty(), "pause clears the queue");
         });
         assert_eq!(
             crate::steps::step_failures(),
@@ -5102,7 +5295,7 @@ mod tests {
             })
         });
         assert!(
-            vc.update(|_, cx| baaz.read(cx).feedback.capture_pending.is_some()),
+            vc.update(|_, cx| baaz.read(cx).feedback.read(cx).capture_pending.is_some()),
             "the click starts a capture"
         );
         // The owner switches screens before the capture lands.
@@ -5113,17 +5306,17 @@ mod tests {
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
-                let seq = h.feedback.capture_seq;
-                h.finish_note_capture(window, cx, seq);
-                h.fill_feedback_note("kept words", window, cx);
+                let seq = h.feedback.read(cx).capture_seq;
+                h.feedback.update(cx, |feedback, cx| feedback.finish_note_capture(window, cx, seq));
+                h.feedback.update(cx, |feedback, cx| feedback.fill_feedback_note("kept words", window, cx));
                 h.save_feedback_note(window, cx);
             })
         });
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.note_count(), 1);
+            assert_eq!(harness.feedback.read(cx).note_count(), 1);
             assert_eq!(
-                harness.feedback.draft.notes[0].context.mode, "Sessions",
+                harness.feedback.read(cx).draft.notes[0].context.mode, "Sessions",
                 "the note keeps the screen it began on, not the switched-to one"
             );
         });
@@ -5267,7 +5460,7 @@ mod tests {
             assert!(harness.active.is_none(), "⌘N opens no draft while Active");
             assert!(!harness.settings_open(cx), "Settings… stays closed while Active");
             assert!(harness.overlays.read(cx).palette().is_none(), "the palette stays closed while Active");
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Active);
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_feedback(window, cx)));
         vc.update(|window, cx| {
@@ -5307,7 +5500,7 @@ mod tests {
         enter_active(&baaz, vc);
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Active);
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Active);
             assert!(
                 !harness
                     .overlays
@@ -5347,8 +5540,8 @@ mod tests {
         let (baaz, vc) = window_harness(cx, &state.2);
         enter_active(&baaz, vc);
         vc.update(|_, cx| {
-            baaz.update(cx, |h, _| {
-                h.feedback.draft.add(
+            baaz.update(cx, |h, cx| {
+                h.feedback.update(cx, |feedback, _| { feedback.draft.add(
                     Target::Area {
                         rect: Rect { x: 8.0, y: 8.0, w: 64.0, h: 32.0 },
                         region: None,
@@ -5357,15 +5550,15 @@ mod tests {
                     crate::feedback::test_context(),
                     None,
                     None,
-                );
+                ); });
             })
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.finish_feedback(window, cx)));
         vc.run_until_parked();
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
-            assert_eq!(harness.feedback.phase, FeedbackPhase::Off);
-            assert!(harness.feedback.saved_flash.is_some(), "Done arms the header flash");
+            assert_eq!(harness.feedback.read(cx).phase, FeedbackPhase::Off);
+            assert!(harness.feedback.read(cx).saved_flash.is_some(), "Done arms the header flash");
         });
         assert!(
             vc.update(|_, cx| baaz.update(cx, |h, cx| h.render_feedback_header_slot(cx).is_some())),

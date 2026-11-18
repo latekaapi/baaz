@@ -497,7 +497,6 @@ impl SessionRuntime {
                 };
                 if self.store.set_mode(mode) || was_unreported {
                     cx.emit(RuntimeEvent::MenusStale);
-                    cx.notify();
                 }
                 // Auto reported on a model that cannot run it (a launch on
                 // the project's remembered model): ask for Ask, as a pick
@@ -552,7 +551,6 @@ impl SessionRuntime {
                     headline,
                 });
                 cx.emit(RuntimeEvent::EntriesAppended);
-                cx.notify();
             }
             // The facts beside the transcript, whole: the meter, the queue,
             // the retry clock, what waits on the person, the cursor.
@@ -570,7 +568,6 @@ impl SessionRuntime {
                 self.note_reply_progress(usage_landed, cx);
                 cx.emit(RuntimeEvent::MenusStale);
                 self.observe_clocks(cx);
-                cx.notify();
             }
             provider::ProviderEvent::HeaderChanged { session_id, header } => {
                 if session_id != self.session_id {
@@ -1290,10 +1287,7 @@ impl SessionRuntime {
                 if this.provider_kind() == ProviderId::ClaudeCode {
                     this.apply_supplied_claude_catalog(cx);
                 } else {
-                    this.models = Vec::new();
-                    this.models_error =
-                        Some("the model catalog answered without a catalog".to_owned());
-                    cx.notify();
+                    this.models_unavailable(Some("the model catalog answered without a catalog".to_owned()), true, cx);
                 }
             }
             Err(error) => {
@@ -1301,9 +1295,7 @@ impl SessionRuntime {
                 if this.provider_kind() == ProviderId::ClaudeCode {
                     this.apply_supplied_claude_catalog(cx);
                 } else {
-                    this.models = Vec::new();
-                    this.models_error = Some(error.to_string());
-                    cx.notify();
+                    this.models_unavailable(Some(error.to_string()), true, cx);
                 }
             }
         });
@@ -1403,7 +1395,6 @@ impl SessionRuntime {
             });
         }
         cx.emit(RuntimeEvent::EntriesAppended);
-        cx.notify();
     }
 }
 

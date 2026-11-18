@@ -365,8 +365,7 @@ impl Harness {
     pub(crate) fn open_palette(&mut self, kind: PaletteKind, cx: &mut Context<Self>) {
         let already = self.overlays.read(cx).palette().is_some_and(|p| p.kind == kind);
         if already {
-            self.overlays.update(cx, |overlays, _| overlays.close_palette());
-            cx.notify();
+            self.overlays.update(cx, |overlays, cx| overlays.close_palette(cx));
             return;
         }
         self.show_palette(kind, cx);

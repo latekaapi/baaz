@@ -309,7 +309,6 @@ impl Harness {
     pub(crate) fn step_toggle_hidden(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.session_list.update(cx, |list, _| list.show_hidden = !list.show_hidden);
         self.invalidate_list(cx);
-        cx.notify();
         Ok(())
     }
 
@@ -317,7 +316,6 @@ impl Harness {
     pub(crate) fn step_toggle_empty(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.session_list.update(cx, |list, _| list.show_empty = !list.show_empty);
         self.invalidate_list(cx);
-        cx.notify();
         Ok(())
     }
 
@@ -325,7 +323,6 @@ impl Harness {
     pub(crate) fn step_toggle_archived(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.session_list.update(cx, |list, _| list.show_archived = !list.show_archived);
         self.invalidate_list(cx);
-        cx.notify();
         Ok(())
     }
 

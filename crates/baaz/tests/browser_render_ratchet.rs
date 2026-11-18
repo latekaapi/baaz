@@ -52,7 +52,7 @@ const FORBIDDEN: &[&str] = &[
     "reconcile_pages",
     "reconcile_browser_root",
     "record_history",
-    "schedule_tabs_write",
+    "tabs_changed",
     "flush_tabs_save",
     "flush_at_quit",
     "save_soon",

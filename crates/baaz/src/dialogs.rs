@@ -242,8 +242,7 @@ impl Harness {
         // The handoff confirm's facts leave with it: dismissing any other
         // way confirms nothing afterwards.
         self.handoff_state.confirm = None;
-        self.overlays.update(cx, |overlays, _| overlays.close_dialog());
-        cx.notify();
+        self.overlays.update(cx, |overlays, cx| overlays.close_dialog(cx));
     }
 
     /// The quit confirmation (D52): names the running command. `others`
@@ -404,15 +403,14 @@ impl Harness {
                     "@ mention index stopped at {} files; some workspace files are not mentionable",
                     files::CAP
                 );
-                this.overlays.update(cx, |overlays, _| {
+                this.overlays.update(cx, |overlays, cx| {
                     overlays.toast(
                         "@ mentions shortened",
                         format!("{name} holds more than {} files; some are not mentionable.", files::CAP),
-                    );
+                     cx);
                 });
             }
-            this.overlays.update(cx, |overlays, _| overlays.insert_root(key, files, skills));
-            cx.notify();
+            this.overlays.update(cx, |overlays, cx| overlays.insert_root(key, files, skills, cx));
         });
     }
 
@@ -477,7 +475,7 @@ impl Harness {
     /// rather than rebuilding every row to turn the id back into an index and
     /// the index back into the same id (finding `performance-7`).
     pub(crate) fn run_palette_row(&mut self, kind: PaletteKind, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |overlays, _| overlays.close_palette());
+        self.overlays.update(cx, |overlays, cx| overlays.close_palette(cx));
         // A palette action executed leaves Settings (no restore: the
         // destination owns the next route) — except pane/terminal commands,
         // which are ignored with no state change while the page stands
@@ -486,7 +484,6 @@ impl Harness {
             if kind == PaletteKind::Commands
                 && Command::parse(&id).is_some_and(|command| command.is_pane_or_terminal())
             {
-                cx.notify();
                 return;
             }
             self.exit_settings_for_navigation(cx);
@@ -522,7 +519,6 @@ impl Harness {
                 }
             }
         }
-        cx.notify();
     }
 
     /// The tests' way into [`Self::run_palette_row`]: run one palette row
@@ -615,14 +611,13 @@ impl Harness {
             view.update(cx, |view, cx| view.close_plus_menu(cx));
         }
         let already = self.overlays.read(cx).menu().is_some_and(|m| m.kind == kind);
-        self.overlays.update(cx, |overlays, _| {
+        self.overlays.update(cx, |overlays, cx| {
             if already {
-                overlays.close_menu();
+                overlays.close_menu(cx);
             } else {
-                overlays.open(Menu::picker(kind, 0));
+                overlays.open(Menu::picker(kind, 0), cx);
             }
         });
-        cx.notify();
     }
 
     /// The header's overflow menu, anchored under the "…" button: Rename swaps
@@ -638,26 +633,25 @@ impl Harness {
         }
         let (rows, actions) = overflow_rows(
             self.feedback_menu_row_shown(cx),
-            self.feedback.phase != crate::app::feedback_ui::FeedbackPhase::Off,
+            self.feedback.read(cx).phase != crate::app::feedback_ui::FeedbackPhase::Off,
         );
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
             let action = actions.get(*index).copied();
-            this.overlays.update(cx, |overlays, _| overlays.close_menu());
+            this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
             match action {
                 Some(OverflowAction::Rename) => {
                     if let Some(session_id) = this.active_id(cx) {
                         crate::layout::Layout::stage(cx, |layout| layout.sidebar_open = true);
                         this.start_rename(session_id, window, cx);
                     } else {
-                        this.overlays.update(cx, |overlays, _| {
-                            overlays.toast("Nothing to rename", "No session is open.");
+                        this.overlays.update(cx, |overlays, cx| {
+                            overlays.toast("Nothing to rename", "No session is open.", cx);
                         });
                     }
-                    cx.notify();
                 }
                 Some(OverflowAction::Fork) => this.open_palette(PaletteKind::Fork, cx),
                 Some(OverflowAction::Feedback) => {
-                    if !this.feedback.saving {
+                    if !this.feedback.read(cx).saving {
                         this.toggle_feedback(window, cx);
                     }
                     cx.notify();
@@ -666,10 +660,9 @@ impl Harness {
                     if let Some(session_id) = this.active_id(cx) {
                         this.open_archive_dialog(session_id, cx);
                     } else {
-                        this.overlays.update(cx, |overlays, _| {
-                            overlays.toast("Nothing to archive", "No session is open.");
+                        this.overlays.update(cx, |overlays, cx| {
+                            overlays.toast("Nothing to archive", "No session is open.", cx);
                         });
-                        cx.notify();
                     }
                 }
                 None => {}
@@ -679,15 +672,14 @@ impl Harness {
         // above and slides inside the window on overflow. No button bounds
         // yet: no menu this frame, never the old `top(48) right(8)` corner
         // (the button is always rendered, so the notify lands next frame).
-        let Some(trigger) = self.overflow_bounds else {
+        let Some(trigger) = self.overlays.read(cx).anchor(crate::overlays::Anchor::Overflow) else {
             cx.notify();
             return None;
         };
         // A click anywhere outside closes it: the catcher is a sibling of
         // the menu inside the same draw.
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.close_menu());
-            cx.notify();
+            this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
         });
         let catcher = dismiss_layer("overflow-scrim", "Dismiss menu", move |w, cx| dismiss(&(), w, cx));
         Some(
@@ -720,13 +712,12 @@ impl Harness {
             rows.push(MenuRow::Toggle { label: "Terminal".into(), checked: crate::layout::Layout::get(cx).terminal_open });
         }
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.close_menu());
+            this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
             match RightKind::ALL.get(*index) {
                 Some(kind) => this.select_right(*kind, cx),
                 None if terminal => this.toggle_terminal(window, cx),
                 None => {}
             }
-            cx.notify();
         });
         // No `＋` bounds yet: no menu this frame (the button is drawn
         // whenever the pane is, so the notify lands next frame).
@@ -735,8 +726,7 @@ impl Harness {
             return None;
         };
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.close_menu());
-            cx.notify();
+            this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
         });
         let catcher = dismiss_layer("right-views-scrim", "Dismiss menu", move |w, cx| dismiss(&(), w, cx));
         Some(
@@ -784,7 +774,7 @@ impl Harness {
         let rows: Vec<MenuRow> =
             past.iter().map(|url| MenuRow::Toggle { label: url.clone().into(), checked: false }).collect();
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.close_menu());
+            this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
             this.ensure_tabs_loaded(cx);
             // Rows read newest-first, so row `i` steps back `i + 1`.
             if let Some(id) = this.browser.read(cx).browse_centre_shown(cx) {
@@ -796,8 +786,7 @@ impl Harness {
         });
         let trigger = self.browser.read(cx).back_bounds?;
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.close_menu());
-            cx.notify();
+            this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
         });
         let catcher = dismiss_layer("back-history-scrim", "Dismiss menu", move |w, cx| dismiss(&(), w, cx));
         Some(
@@ -820,7 +809,6 @@ impl Harness {
     pub(crate) fn step_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(view) = self.active.clone() else { return };
         view.update(cx, |view, cx| view.step_menu(delta, cx));
-        cx.notify();
     }
 
     pub(crate) fn move_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -948,7 +936,6 @@ impl Harness {
             | DialogAction::SpaceSignIns
             | DialogAction::HandoffConfirm => {}
         }
-        cx.notify();
     }
 
     /// `error-dialog:<offline|blocked|sorry>`: capture aid that raises a
@@ -1023,7 +1010,7 @@ impl Harness {
     /// the corner window over the page ([`Self::corner_in_overlay`]).
     /// Nothing while a capture reads the window, which must read clean.
     pub(crate) fn render_corner_stack(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.feedback.capturing {
+        if self.feedback.read(cx).capturing {
             return None;
         }
         let toast = self.render_toast_pill(cx);
@@ -1078,8 +1065,7 @@ impl Harness {
         let newest_id = newest.id.to_string();
         let dismiss = newest_id.clone();
         let close = self.main_listener(cx, move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&dismiss));
-            cx.notify();
+            this.overlays.update(cx, |overlays, cx| overlays.dismiss_toast(&dismiss, cx));
         });
         // Keyed by the toast, so a new one plays its own enter.
         let mut chip = aui::feedback::toast_chip(gpui::ElementId::Name(format!("toast-chip-{newest_id}").into()), tone, newest.title.clone(), newest.body.clone())
@@ -1090,8 +1076,7 @@ impl Harness {
             let action = newest_id;
             let act = self.main_listener(cx, move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                 this.undo_newest(cx);
-                this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&action));
-                cx.notify();
+                this.overlays.update(cx, |overlays, cx| overlays.dismiss_toast(&action, cx));
             });
             chip = chip.action(first.label.clone(), act);
         }
@@ -1110,8 +1095,8 @@ impl Harness {
         if title.is_empty() {
             return Err("toast needs a title (`toast:<title>|<body>`)".to_owned());
         }
-        self.overlays.update(cx, |overlays, _| {
-            overlays.toast(title, body);
+        self.overlays.update(cx, |overlays, cx| {
+            overlays.toast(title, body, cx);
         });
         Ok(())
     }
@@ -1534,7 +1519,7 @@ mod tests {
         let rename = vc.update(|_, cx| gpui::Focusable::focus_handle(&baaz.read(cx).rename, cx));
         vc.update(|window, cx| {
             window.focus(&rename, cx);
-            baaz.update(cx, |h, cx| h.overlays.update(cx, |overlays, _| overlays.close_menu()));
+            baaz.update(cx, |h, cx| h.overlays.update(cx, |overlays, cx| overlays.close_menu(cx)));
         });
         vc.run_until_parked();
         assert!(vc.update(|window, _| rename.is_focused(window)), "the clicked field keeps the keyboard");
@@ -1565,7 +1550,7 @@ mod tests {
                 .map(|path| crate::files::FileEntry { lower: path.to_lowercase(), path })
                 .collect();
             let overlays = baaz.read(cx).overlays.clone();
-            overlays.update(cx, |o, _| o.insert_root(root, crate::files::WalkResult { entries, truncated: false }, Vec::new()));
+            overlays.update(cx, |o, cx| o.insert_root(root, crate::files::WalkResult { entries, truncated: false }, Vec::new(), cx));
         });
         vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
         vc.run_until_parked();
@@ -2072,7 +2057,7 @@ mod tests {
         vc.update(|_, cx| baaz.update(cx, |_, cx| crate::layout::Layout::stage(cx, |layout| layout.mode = Mode::Browse)));
         assert!(wanted(vc), "Browse hosts the palette in the overlay window");
         vc.update(|_, cx| baaz.update(cx, |h, cx| {
-            h.overlays.update(cx, |o, _| o.close_palette());
+            h.overlays.update(cx, |o, cx| o.close_palette(cx));
         }));
         assert!(!wanted(vc), "Browse with neither palette nor dialog hosts nothing");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.set_dialog(cx, Harness::quit_terminal_dialog("cargo", 0))));
@@ -2098,7 +2083,7 @@ mod tests {
         });
         assert_eq!(focus, Some(query), "a Search palette is typed into its query field");
         vc.update(|_, cx| baaz.update(cx, |h, cx| {
-            h.overlays.update(cx, |o, _| o.close_palette());
+            h.overlays.update(cx, |o, cx| o.close_palette(cx));
             h.set_dialog(cx, Harness::quit_terminal_dialog("cargo", 0));
         }));
         let dialog_focus = vc.update(|_, cx| baaz.read(cx).dialog_focus(cx));
@@ -2309,8 +2294,8 @@ mod tests {
         assert!(covered(vc), "a menu covers the page");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_menu(MenuKind::Account, cx)));
         assert!(!covered(vc), "the account menu stays inside the sidebar");
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.overlays.update(cx, |o, _| o.close_menu())));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.overlays.update(cx, |o, _| o.stack.push(Entry::new(Layer::SiteInfo)))));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.overlays.update(cx, |o, cx| o.close_menu(cx))));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.overlays.update(cx, |o, cx| o.push(Entry::new(Layer::SiteInfo), cx))));
         assert!(!covered(vc), "a panel over the live page covers nothing");
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(Mode::Browse, window, cx)));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.set_dialog(cx, dialog())));

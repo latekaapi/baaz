@@ -950,10 +950,9 @@ impl Harness {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         let Some(is_dir) = is_dir else {
-            self.overlays.update(cx, |overlays, _| {
-                overlays.toast("Link", format!("No such file: {name}"));
+            self.overlays.update(cx, |overlays, cx| {
+                overlays.toast("Link", format!("No such file: {name}"), cx);
             });
-            cx.notify();
             return;
         };
         // HTML, SVG and PDF open rendered in the Page, wherever they live
@@ -964,10 +963,9 @@ impl Harness {
         }
         let Ok(rel) = abs.strip_prefix(root) else {
             cx.open_with_system(abs);
-            self.overlays.update(cx, |overlays, _| {
-                overlays.toast("Link", "Outside the project — opened in its default app.");
+            self.overlays.update(cx, |overlays, cx| {
+                overlays.toast("Link", "Outside the project — opened in its default app.", cx);
             });
-            cx.notify();
             return;
         };
         let rel = rel.to_string_lossy().into_owned();

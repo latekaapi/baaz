@@ -23,7 +23,7 @@ impl Harness {
             let space = self.browser.read(cx).owner_space(&owner);
             if let Some(id) = self.browser.read(cx).tabs.active_of(&owner, space.as_deref()) {
                 if self.browser.update(cx, |browser, _| browser.tabs.set_url_title(id, url, &title)) {
-                    self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+                    self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
                 }
             }
         }
@@ -64,7 +64,7 @@ impl Harness {
                 if let Some(state) = self.browser.read(cx).states.get(&id).cloned() {
                     state.update(cx, |state, _| state.navigate(url));
                     if self.browser.update(cx, |browser, _| browser.tabs.set_url_title(id, url, url)) {
-                        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+                        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
                     }
                     cx.notify();
                     return Ok(());
@@ -72,11 +72,11 @@ impl Harness {
             }
         }
         let id = self.browser.update(cx, |browser, _| browser.tabs.open(space, owner.clone(), url, after));
-        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         // In Browse the person's new tab is what the centre shows next, over
         // any session tab it held.
         if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
-            self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
+            self.browser.update(cx, |browser, cx| browser.set_session_tab(None, cx));
         }
         let key = match &owner {
             Owner::Person => HOME_KEY.to_owned(),
@@ -161,8 +161,7 @@ impl Harness {
             .ok_or("no active person tab to put in the folder")?;
         let id = self.browser.update(cx, |browser, _| browser.tabs.add_folder(&space, name));
         let moved = self.browser.update(cx, |browser, _| browser.tabs.set_folder(tab, Some(&id)));
-        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
-        cx.notify();
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         if moved { Ok(()) } else { Err("the active tab did not move into the new folder".into()) }
     }
 
@@ -172,8 +171,7 @@ impl Harness {
     pub(crate) fn step_space_new(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.ensure_tabs_loaded(cx);
         self.browser.update(cx, |browser, _| browser.tabs.add_space(rest.trim()));
-        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
-        cx.notify();
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         Ok(())
     }
 
@@ -295,7 +293,6 @@ impl Harness {
             };
             data.add_bookmark(&url, &title, folder, tabs::now_ms(), cx);
         });
-        cx.notify();
         Ok(())
     }
 
@@ -309,8 +306,7 @@ impl Harness {
             return Err("no page is open in Browse".into());
         }
         self.focus_browse_address_with("", window, cx);
-        self.browser.update(cx, |browser, _| browser.field_scope = Some(None));
-        cx.notify();
+        self.browser.update(cx, |browser, cx| browser.set_field_scope(Some(None), cx));
         Ok(())
     }
 
@@ -396,11 +392,10 @@ impl Harness {
         if !self.rebuild_shown_browse_page(window, cx) {
             return Err("no tab is shown in Browse".into());
         }
-        self.overlays.update(cx, |o, _| o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Downloads)));
+        self.overlays.update(cx, |o, cx| o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Downloads), cx));
         self.browser.update(cx, |browser, _| browser.downloads_rendered = false);
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::Extensions); });
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::More); });
-        cx.notify();
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::Extensions, cx); });
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::More, cx); });
         Ok(())
     }
 
@@ -426,10 +421,9 @@ impl Harness {
         if self.browse_centre_page(window, cx).is_none() {
             return Err("no page is open in Browse".into());
         }
-        self.overlays.update(cx, |o, _| o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::More)));
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::Downloads); });
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::Extensions); });
-        cx.notify();
+        self.overlays.update(cx, |o, cx| o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::More), cx));
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::Downloads, cx); });
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::Extensions, cx); });
         Ok(())
     }
 
@@ -440,10 +434,9 @@ impl Harness {
         if self.browse_centre_page(window, cx).is_none() {
             return Err("no page is open in Browse".into());
         }
-        self.overlays.update(cx, |o, _| o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Extensions)));
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::Downloads); });
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::More); });
-        cx.notify();
+        self.overlays.update(cx, |o, cx| o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Extensions), cx));
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::Downloads, cx); });
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::More, cx); });
         Ok(())
     }
 
@@ -466,14 +459,13 @@ impl Harness {
         }
         let space = self.browser.read(cx).browse_space();
         let tab_id = self.browser.update(cx, |browser, _| browser.tabs.open(space, Owner::Session(id.clone()), "https://example.com", None));
-        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         // The agent's tools can reach it, so a live check needs no provider.
         let root = self.current_project(cx).map(|project| project.root.clone()).unwrap_or_else(std::env::temp_dir);
         self.terminal_service.register_session(&id, root);
         self.ensure_tab_page(&id, tab_id, window, cx);
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.browser.update(cx, |browser, _| browser.browse_session_tab = Some(tab_id));
-        cx.notify();
+        self.browser.update(cx, |browser, cx| browser.set_session_tab(Some(tab_id), cx));
         Ok(())
     }
 

@@ -136,7 +136,7 @@ impl Harness {
                     ("Plan checked", "Plan: pay-as-you-go — every turn bills API usage".to_owned())
                 }
             };
-            self.overlays.update(cx, |overlays, _| overlays.toast(title, detail));
+            self.overlays.update(cx, |overlays, cx| overlays.toast(title, detail, cx));
         }
         cx.notify();
     }

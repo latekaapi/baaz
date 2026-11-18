@@ -222,10 +222,9 @@ impl RightPane {
     /// A toast on the window's floating layer.
     pub(crate) fn toast(&mut self, title: &str, body: impl Into<String>, cx: &mut Context<Self>) {
         let body = body.into();
-        self.overlays.update(cx, |overlays, _| {
-            overlays.toast(title, body);
+        self.overlays.update(cx, |overlays, cx| {
+            overlays.toast(title, body, cx);
         });
-        cx.notify();
     }
 
     /// The pane's per-session Files state for `root`, as the session record
@@ -485,14 +484,13 @@ impl RightPane {
     /// Open (this pane drawing it) or close the base-branch menu.
     pub(crate) fn set_base_menu(&mut self, open: bool, cx: &mut Context<Self>) {
         let owner = cx.entity_id();
-        self.overlays.update(cx, |o, _| {
+        self.overlays.update(cx, |o, cx| {
             if open {
-                o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::PrBaseMenu).owner(owner));
+                o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::PrBaseMenu).owner(owner), cx);
             } else {
-                o.stack.close(crate::overlay_stack::LayerKind::PrBaseMenu);
+                o.close(crate::overlay_stack::LayerKind::PrBaseMenu, cx);
             }
         });
-        cx.notify();
     }
 
     /// Whether the Page row's Recent pages menu stands open (an entry on the

@@ -127,26 +127,15 @@ impl Harness {
                             this.browser.update(cx, |browser, cx| browser.drop_browse_address(cx));
                         }
                     }
-                    InputEvent::Focus => {
-                        this.browser.update(cx, |browser, _| browser.browse_omnibox_selected = 0);
-                        this.browser.update(cx, |browser, _| browser.browse_omnibox_moved = false);
-                        this.browser.update(cx, |browser, _| browser.browse_completed = None);
-                        this.browser.update(cx, |browser, _| browser.browse_completed_text = None);
-                        cx.notify();
-                    }
+                    InputEvent::Focus => this.browser.update(cx, |browser, cx| browser.reset_omnibox(true, cx)),
                     InputEvent::Change => {
                         // Typing resets the highlight. A Tab completion
                         // survives only its own write: once the text differs
                         // from what Tab wrote, the person is typing something
                         // else and Enter must open that, not the old row.
                         let typed = this.browser.read(cx).browse_address.as_ref().map(|input| input.read(cx).value().to_string());
-                        if this.browser.read(cx).browse_completed_text.is_some() && this.browser.read(cx).browse_completed_text != typed {
-                            this.browser.update(cx, |browser, _| browser.browse_completed = None);
-                            this.browser.update(cx, |browser, _| browser.browse_completed_text = None);
-                        }
-                        this.browser.update(cx, |browser, _| browser.browse_omnibox_selected = 0);
-                        this.browser.update(cx, |browser, _| browser.browse_omnibox_moved = false);
-                        cx.notify();
+                        let stale = this.browser.read(cx).browse_completed_text.is_some() && this.browser.read(cx).browse_completed_text != typed;
+                        this.browser.update(cx, |browser, cx| browser.reset_omnibox(stale, cx));
                     }
                 });
                 self.browser.update(cx, |browser, _| browser.browse_address = Some(input));
@@ -316,9 +305,7 @@ impl Harness {
             }
             None => None,
         };
-        self.browser.update(cx, |browser, _| browser.field_scope = scope);
-        self.browser.update(cx, |browser, _| browser.browse_omnibox_selected = 0);
-        cx.notify();
+        self.browser.update(cx, |browser, cx| browser.set_field_scope(scope, cx));
         true
     }
 
@@ -333,11 +320,7 @@ impl Harness {
         }
         let len = rows.len() as isize;
         let next = (self.browser.read(cx).browse_omnibox_selected as isize + delta).rem_euclid(len);
-        self.browser.update(cx, |browser, _| browser.browse_omnibox_selected = next as usize);
-        self.browser.update(cx, |browser, _| browser.browse_omnibox_moved = true);
-        self.browser.update(cx, |browser, _| browser.browse_completed = None);
-        self.browser.update(cx, |browser, _| browser.browse_completed_text = None);
-        cx.notify();
+        self.browser.update(cx, |browser, cx| browser.step_omnibox(next as usize, true, cx));
     }
 
     /// Complete the highlighted row's text into the field (Tab): tabs write
@@ -367,10 +350,7 @@ impl Harness {
         // The input's own Change arm resets the highlight (keeping the
         // completion, which survives the re-rank); the completed row keeps
         // the highlight too, and its identity owns Enter.
-        self.browser.update(cx, |browser, _| browser.browse_omnibox_selected = index);
-        self.browser.update(cx, |browser, _| browser.browse_omnibox_moved = true);
-        self.browser.update(cx, |browser, _| browser.browse_completed = Some(row.target.clone()));
-        cx.notify();
+        self.browser.update(cx, |browser, cx| browser.complete_omnibox_row(index, row.target.clone(), cx));
     }
 
     /// Activate an omnibox row (Enter opens): Ask asks, a person tab
@@ -417,12 +397,10 @@ impl Harness {
                 }
             }
             OmniTarget::Folder(id) => {
-                self.browser.update(cx, |browser, _| browser.field_scope = Some(Some(id)));
-                self.browser.update(cx, |browser, _| browser.browse_omnibox_selected = 0);
+                self.browser.update(cx, |browser, cx| browser.set_field_scope(Some(Some(id)), cx));
                 if let Some(input) = self.browser.read(cx).browse_address.clone() {
                     input.update(cx, |input, cx| input.set_value("", window, cx));
                 }
-                cx.notify();
             }
             OmniTarget::Tab(id) => {
                 let owner = self.browser.read(cx).tabs.get(id).map(|tab| tab.owner.clone());
@@ -536,6 +514,87 @@ impl Harness {
 }
 
 impl BrowserView {
+    /// The omnibox highlight back on the first row, as a fresh focus or
+    /// typing leaves it; `forget_completion` drops a Tab completion (its
+    /// row and the text it wrote) too. Redraws the field's rows.
+    pub(crate) fn reset_omnibox(&mut self, forget_completion: bool, cx: &mut Context<Self>) {
+        self.browse_omnibox_selected = 0;
+        self.browse_omnibox_moved = false;
+        if forget_completion {
+            self.browse_completed = None;
+            self.browse_completed_text = None;
+        }
+        cx.notify();
+    }
+
+    /// The highlight on row `index`, put there by the arrows: it owns
+    /// Enter now (`commit_browse_address`). `forget_completion` drops a Tab
+    /// completion, which the highlight supersedes.
+    pub(crate) fn step_omnibox(&mut self, index: usize, forget_completion: bool, cx: &mut Context<Self>) {
+        self.browse_omnibox_selected = index;
+        self.browse_omnibox_moved = true;
+        if forget_completion {
+            self.browse_completed = None;
+            self.browse_completed_text = None;
+        }
+        cx.notify();
+    }
+
+    /// The pointer over row `index` lights it (no ownership of Enter).
+    pub(crate) fn hover_omnibox(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.browse_omnibox_selected != index {
+            self.browse_omnibox_selected = index;
+            cx.notify();
+        }
+    }
+
+    /// A Tab completion of `row` at `index`: its identity owns Enter.
+    pub(crate) fn complete_omnibox_row(&mut self, index: usize, row: crate::browser::OmniTarget, cx: &mut Context<Self>) {
+        self.browse_omnibox_selected = index;
+        self.browse_omnibox_moved = true;
+        self.browse_completed = Some(row);
+        cx.notify();
+    }
+
+    /// Scope the field to a bookmarks folder (`Some(None)` the top,
+    /// `Some(Some(id))` a folder) or unscope it, the highlight back on top.
+    pub(crate) fn set_field_scope(&mut self, scope: Option<Option<i64>>, cx: &mut Context<Self>) {
+        self.field_scope = scope;
+        self.browse_omnibox_selected = 0;
+        cx.notify();
+    }
+
+    /// The sidebar's one name field: on a folder or a space (`Some`), or
+    /// gone. Redraws when it moved; whether it did.
+    pub(crate) fn set_naming(&mut self, naming: Option<aui::screens::sidebar::BrowseNaming>, cx: &mut Context<Self>) -> bool {
+        if self.browse_naming == naming {
+            return false;
+        }
+        self.browse_naming = naming;
+        cx.notify();
+        true
+    }
+
+    /// A tab drag ended (dropped or left): no row stands lit as its target.
+    pub(crate) fn clear_drop(&mut self, cx: &mut Context<Self>) {
+        if self.browse_drop_target.is_some() || self.browse_drop_at_end {
+            self.browse_drop_target = None;
+            self.browse_drop_at_end = false;
+            cx.notify();
+        }
+    }
+
+    /// The tab the carried session shows in Browse (`None`: the person's
+    /// own tab). Redraws when it moved; whether it did.
+    pub(crate) fn set_session_tab(&mut self, tab: Option<TabId>, cx: &mut Context<Self>) -> bool {
+        if self.browse_session_tab == tab {
+            return false;
+        }
+        self.browse_session_tab = tab;
+        cx.notify();
+        true
+    }
+
     /// Drop the address input without navigating: the resting view falls
     /// back to the page URL on the next frame. The window-free core of
     /// [`Self::leave_browse_address`], for the project-adoption paths that

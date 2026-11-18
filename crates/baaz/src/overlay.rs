@@ -617,7 +617,7 @@ impl Harness {
     /// for the widest toast; the pills sit at its bottom-right and the
     /// clear rest passes the pointer through to the page.
     fn wanted_corner(&self, window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
-        if !self.corner_in_overlay(cx) || self.feedback.capturing {
+        if !self.corner_in_overlay(cx) || self.feedback.read(cx).capturing {
             return None;
         }
         let toast = !self.overlays.read(cx).toasts.is_empty();
@@ -645,7 +645,7 @@ impl Harness {
         if wanted.is_some() {
             // The slot draws in this window now: the main window's record
             // of it would silence the capture layer at a stale spot.
-            self.feedback.slot_bounds = None;
+            self.feedback.update(cx, |feedback, _| feedback.slot_bounds = None);
         }
         let current = self.browser.read(cx).corner.as_ref().map(|o| o.bounds);
         if wanted == current {
@@ -1075,11 +1075,11 @@ impl Harness {
         for toast in &self.overlays.read(cx).toasts {
             toast.id.to_string().hash(&mut hasher);
         }
-        format!("{:?}", self.feedback.phase).hash(&mut hasher);
-        self.feedback.notes_label().hash(&mut hasher);
-        self.feedback.discard_armed_live().hash(&mut hasher);
-        self.feedback.done_enabled(cx).hash(&mut hasher);
-        self.feedback.saved_flash.as_ref().is_some_and(|f| f.at.elapsed() < crate::app::feedback_ui::FEEDBACK_SAVED_FLASH).hash(&mut hasher);
+        format!("{:?}", self.feedback.read(cx).phase).hash(&mut hasher);
+        self.feedback.read(cx).notes_label().hash(&mut hasher);
+        self.feedback.read(cx).discard_armed_live().hash(&mut hasher);
+        self.feedback.read(cx).done_enabled(cx).hash(&mut hasher);
+        self.feedback.read(cx).saved_flash.as_ref().is_some_and(|f| f.at.elapsed() < crate::app::feedback_ui::FEEDBACK_SAVED_FLASH).hash(&mut hasher);
         hasher.finish()
     }
 
@@ -1284,11 +1284,9 @@ impl Harness {
                 let at = walk.iter().position(|&i| i == this.browser.read(cx).browse_omnibox_selected).unwrap_or(0) as isize;
                 let next = (at + step).clamp(0, walk.len().saturating_sub(1) as isize) as usize;
                 if let Some(&index) = walk.get(next) {
-                    this.browser.update(cx, |browser, _| browser.browse_omnibox_selected = index);
                     // Enter opens the highlighted row once the arrows moved
                     // it (`commit_browse_address`), not the typed text.
-                    this.browser.update(cx, |browser, _| browser.browse_omnibox_moved = true);
-                    cx.notify();
+                    this.browser.update(cx, |browser, cx| browser.step_omnibox(index, false, cx));
                 }
             }
             "tab" => this.complete_omnibox(window, cx),
@@ -1314,12 +1312,7 @@ impl Harness {
             .placeholder(if scoped { "Search bookmarks" } else { "Search or type a URL" })
             .on_hover(move |shown, _, cx| {
                 let Some(&index) = order.get(shown) else { return };
-                let _ = hover.update(cx, |this, cx| {
-                    if this.browser.read(cx).browse_omnibox_selected != index {
-                        this.browser.update(cx, |browser, _| browser.browse_omnibox_selected = index);
-                        cx.notify();
-                    }
-                });
+                let _ = hover.update(cx, |this, cx| this.browser.update(cx, |browser, cx| browser.hover_omnibox(index, cx)));
             })
             .on_intent(move |intent, _, cx| {
                 let _ = baaz.update(cx, |this, cx| match intent {
@@ -1331,9 +1324,7 @@ impl Harness {
                     FieldIntent::Complete => this.run_on_main(cx, |this, window, cx| this.complete_omnibox(window, cx)),
                     FieldIntent::Close => this.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
                     FieldIntent::Unscope => {
-                        this.browser.update(cx, |browser, _| browser.field_scope = None);
-                        this.browser.update(cx, |browser, _| browser.browse_omnibox_selected = 0);
-                        cx.notify();
+                        this.browser.update(cx, |browser, cx| browser.set_field_scope(None, cx));
                     }
                     FieldIntent::SearchExact(_) => {}
                 });
@@ -1485,8 +1476,7 @@ impl Harness {
             }
         }
         let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
-            this.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::SiteInfo); });
-            cx.notify();
+            this.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::SiteInfo, cx); });
         });
         div()
             .size_full()
@@ -1544,8 +1534,7 @@ impl Harness {
             // Leaving the Field also hands focus back: on the main window.
             OverlayKind::Field => self.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
             OverlayKind::SiteInfo => {
-                self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::SiteInfo); });
-                cx.notify();
+                self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::SiteInfo, cx); });
             }
             // The popover's own dismissal (it keeps what is typed).
             OverlayKind::Bookmark => {

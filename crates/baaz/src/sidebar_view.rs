@@ -2026,7 +2026,7 @@ mod tests {
                 h.browser.update(cx, |bv, _| bv.tabs.open(space.clone(), crate::browser::Owner::Person, "https://b.example/", None));
                 let shown = h.browser.update(cx, |browser, _| browser.tabs.open(space, crate::browser::Owner::Session("s-1".to_owned()), "https://c.example/", None));
                 h.browser.update(cx, |browser, _| browser.tabs.activate(shown));
-                h.browser.update(cx, |browser, _| browser.browse_session_tab = Some(shown));
+                h.browser.update(cx, |browser, cx| browser.set_session_tab(Some(shown), cx));
             })
         });
         let before = vc.update(|_, cx| baaz.read(cx).browser.read(cx).tabs.generation);
@@ -2979,6 +2979,56 @@ mod tests {
         vc.run_until_parked();
         assert!(renders(vc) > before, "an opened row menu re-renders the column");
         assert_eq!(vc.update(|_, cx| pane.read(cx).model(cx).row_menu), Some("s1".into()));
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// Plan 4.9b: the owners notify, not the root. A notify of an owner
+    /// the root reads in every frame — the overlay stack, the browser, the
+    /// right pane, the Settings page — re-renders the root on its own, in
+    /// Sessions and in Browse, so a handler that changed one of them (and
+    /// facts of the root's own on the same path) needs no root notify.
+    #[gpui::test]
+    fn an_owner_the_root_draws_redraws_it_without_a_root_notify(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("owner-redraws-root");
+        let (baaz, _pane, vc) = rooted_window(cx, args);
+        vc.run_until_parked();
+        let root_notifies = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let count = root_notifies.clone();
+        let _watch = vc.update(|_, cx| cx.observe(&baaz, move |_, _| count.set(count.get() + 1)));
+        for mode in [crate::layout::Mode::Sessions, crate::layout::Mode::Browse] {
+            vc.update(|_, cx| crate::layout::Layout::update(cx, |layout| layout.mode = mode));
+            vc.run_until_parked();
+            let owners: Vec<(&str, gpui::AnyEntity)> = vc.update(|_, cx| {
+                let h = baaz.read(cx);
+                vec![
+                    ("overlays", h.overlays.clone().into_any()),
+                    ("browser", h.browser.clone().into_any()),
+                    ("right pane", h.right_pane.clone().into_any()),
+                    ("settings page", h.settings_page.clone().into_any()),
+                    ("session list", h.session_list.clone().into_any()),
+                    ("connect screen", h.connect_screen.clone().into_any()),
+                    ("skills page", h.skills_page.clone().into_any()),
+                    ("provider model", h.provider_model.clone().into_any()),
+                    ("terminal dock", h.terminal_dock.clone().into_any()),
+                ]
+            });
+            for (name, owner) in owners {
+                take_baaz_root_renders();
+                root_notifies.set(0);
+                vc.update(|_, cx| cx.notify(owner.entity_id()));
+                vc.run_until_parked();
+                assert!(take_baaz_root_renders() > 0, "a {name} notify re-rendered the root in {mode:?}");
+                assert_eq!(root_notifies.get(), 0, "the root itself was never notified ({name}, {mode:?})");
+            }
+        }
+        // The control: an entity the root never reads redraws nothing.
+        let stranger = vc.update(|_, cx| cx.new(|_| ()));
+        vc.run_until_parked();
+        take_baaz_root_renders();
+        vc.update(|_, cx| stranger.update(cx, |_, cx| cx.notify()));
+        vc.run_until_parked();
+        assert_eq!(take_baaz_root_renders(), 0, "a notify of an entity the root does not read redraws nothing");
         b3c_teardown(&dir, guard, old);
     }
 

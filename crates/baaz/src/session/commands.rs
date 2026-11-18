@@ -453,9 +453,7 @@ impl SessionRuntime {
             .allows_attempt()
         {
             let reason = self.turn_gate().unwrap_or_else(|| "Stopping is not available on this provider.".into());
-            self.banner = Some(reason);
-            self.banner_action = None;
-            cx.notify();
+            self.plain_banner(reason, cx);
             return;
         }
         // The provider lane stops with `retract`, paired as on the muse
@@ -640,7 +638,6 @@ impl SessionRuntime {
         if let Some(queue) = self.start_queue() {
             queue.mode = Some(ask);
             cx.emit(RuntimeEvent::MenusStale);
-            cx.notify();
             return;
         }
         let previous = self.stand_on_mode(ask);
@@ -675,9 +672,7 @@ impl SessionRuntime {
         cx: &mut Context<Self>,
     ) {
         if rows.is_empty() {
-            self.models = Vec::new();
-            self.models_error = Some("the model catalog answered with no usable model".to_owned());
-            cx.notify();
+            self.models_unavailable(Some("the model catalog answered with no usable model".to_owned()), true, cx);
             return;
         }
         let current = self.model_id();
@@ -874,9 +869,7 @@ impl SessionRuntime {
                 provider::Capability::CompactSession,
             )
             .unwrap_or_else(|| "Compacting is not available on this provider.".into());
-            self.banner = Some(reason);
-            self.banner_action = None;
-            cx.notify();
+            self.plain_banner(reason, cx);
             return;
         }
         let command = ProviderCommand::CompactSession {
@@ -915,8 +908,7 @@ impl SessionRuntime {
             // the start lands rather than staying silently empty.
             if let Some(queue) = self.start_queue() {
                 queue.models = true;
-                self.models_error = Some("Models list once the session has started…".to_owned());
-                cx.notify();
+                self.models_unavailable(Some("Models list once the session has started…".to_owned()), false, cx);
                 return;
             }
             self.request_provider_models(cx);
@@ -943,18 +935,36 @@ impl SessionRuntime {
                 // The child is still answering its open, and attaching it
                 // asks for the catalog, so an open picker fills then.
                 if self.is_starting() {
-                    self.models_error = Some("Models list once the session has started…".to_owned());
-                    cx.notify();
+                    self.models_unavailable(Some("Models list once the session has started…".to_owned()), false, cx);
                     return;
                 }
-                self.models_error = Some(
+                self.models_unavailable(Some(
                     "Codex lists models from its own session child, and this view holds none: \
                      open the session to list them"
                         .to_owned(),
-                );
-                cx.notify();
+                ), false, cx);
             }
         }
+    }
+
+    /// Why the model picker lists nothing (`None`: it lists), dropping the
+    /// rows it held when `clear_rows`. The picker reads it on its next
+    /// frame.
+    pub(crate) fn models_unavailable(&mut self, why: Option<String>, clear_rows: bool, cx: &mut Context<Self>) {
+        if clear_rows {
+            self.models = Vec::new();
+        }
+        self.models_error = why;
+        cx.notify();
+    }
+
+    /// A plain banner (no action) saying `message`. Unlike
+    /// [`Self::set_banner`] it leaves a grown lost banner's failure and the
+    /// mode-fallback mark as they were.
+    pub(crate) fn plain_banner(&mut self, message: String, cx: &mut Context<Self>) {
+        self.banner = Some(message);
+        self.banner_action = None;
+        cx.notify();
     }
 
     /// The lease is gone: banner the view and refuse sends
@@ -963,9 +973,7 @@ impl SessionRuntime {
     /// except a successful resume.
     pub(crate) fn set_lease_lost(&mut self, message: &str, cx: &mut Context<Self>) {
         self.lease_notice = Some(message.to_owned());
-        self.banner = Some(message.to_owned());
-        self.banner_action = None;
-        cx.notify();
+        self.plain_banner(message.to_owned(), cx);
     }
 
     /// A later resume succeeded: the lease is back, sends flow again, and the
@@ -982,9 +990,11 @@ impl SessionRuntime {
 }
 
 impl SessionView {
+    /// A toast on the window's floating layer: the stack redraws it, and
+    /// every caller that also changes this view (a menu closing) redraws
+    /// that through its own change.
     pub(super) fn toast(&mut self, title: impl Into<String>, body: impl Into<String>, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |overlays, _| overlays.toast(title, body));
-        cx.notify();
+        self.overlays.update(cx, |overlays, cx| overlays.toast(title, body, cx));
     }
 }
 
@@ -1073,7 +1083,6 @@ impl SessionRuntime {
             Block::Plan { id: id.clone(), items, sections, state: PlanState::Proposed },
         );
         cx.emit(RuntimeEvent::EntriesAppended);
-        cx.notify();
     }
 
     /// The sidebar's description line for this session: the first meaningful

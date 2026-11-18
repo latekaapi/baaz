@@ -107,7 +107,7 @@ impl Harness {
         // A new session (possibly in another project) drops the session tab
         // the Browse centre held and leaves the address field, even when the
         // mode never changed and `set_mode` early-returned.
-        self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
+        self.browser.update(cx, |browser, cx| browser.set_session_tab(None, cx));
         self.leave_browse_address(window, cx);
         // A `new` while a provider switch is pending is the person doing
         // something else: the switch is cancelled (its open lands stale
@@ -1038,7 +1038,7 @@ impl Harness {
         // `set` without `notify`: a parked view reuses its retained subtree
         // unless it is dirty.
         view.update(cx, |_, cx| cx.notify());
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::PageMenu); });
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::PageMenu, cx); });
         self.active = Some(view.clone());
         // Reopening a session that stands at its end reads it (task 3.1);
         // one still loading reads on its `HistoryReady`.

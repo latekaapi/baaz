@@ -55,16 +55,14 @@ impl Harness {
         for id in ids {
             self.browse_sidebar_tab(id, true, window, cx);
         }
-        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
-        cx.notify();
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
     }
 
     /// Open the right-click menu (one at a time) and keep the page from
     /// taking the next click.
     pub(crate) fn open_browse_menu(&mut self, menu: BrowseMenu, cx: &mut Context<Self>) {
-        self.browser.update(cx, |browser, _| browser.browse_naming = None);
-        self.overlays.update(cx, |o, _| o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::BrowseMenu(menu))));
-        cx.notify();
+        self.browser.update(cx, |browser, cx| browser.set_naming(None, cx));
+        self.overlays.update(cx, |o, cx| o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::BrowseMenu(menu)), cx));
     }
 
     /// The page controls' ⋯: opens the page menu under the button (FF's
@@ -117,8 +115,8 @@ impl Harness {
 
     /// Close the right-click menu, if one is open.
     pub(crate) fn close_browse_menu(&mut self, cx: &mut Context<Self>) {
-        let closed = self.overlays.update(cx, |o, _| {
-            let entry = o.stack.close(crate::overlay_stack::LayerKind::BrowseMenu)?;
+        self.overlays.update(cx, |o, cx| {
+            let entry = o.close(crate::overlay_stack::LayerKind::BrowseMenu, cx)?;
             if let crate::overlay_stack::Layer::BrowseMenu(menu) = &entry.layer {
                 if matches!(menu.target, aui::screens::sidebar::BrowseMenuTarget::Page { .. }) {
                     o.stack.note_pressed_shut(Some(crate::overlay_stack::Trigger::BrowsePageMenu));
@@ -126,28 +124,24 @@ impl Harness {
             }
             Some(())
         });
-        if closed.is_some() {
-            cx.notify();
-        }
     }
 
     /// Put a name field on `target`, seeded with `draft` and focused: the
     /// sidebar's one rename editor serves folders and spaces too.
     pub(crate) fn start_browse_naming(&mut self, target: BrowseNaming, draft: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::BrowseMenu); });
-        self.overlays.update(cx, |o, _| {
-            o.stack.close(crate::overlay_stack::LayerKind::RenameSession);
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::BrowseMenu, cx); });
+        self.overlays.update(cx, |o, cx| {
+            o.close(crate::overlay_stack::LayerKind::RenameSession, cx);
         });
         self.rename.update(cx, |state, cx| state.set_value(draft.to_owned(), window, cx));
-        self.browser.update(cx, |browser, _| browser.browse_naming = Some(target));
+        self.browser.update(cx, |browser, cx| browser.set_naming(Some(target), cx));
         window.focus(&self.rename.focus_handle(cx), cx);
-        cx.notify();
     }
 
     /// Commit a name field. A blank folder name keeps "New folder"; a blank
     /// new space is "Space N"; a blank rename keeps the old name.
     pub(crate) fn commit_browse_name(&mut self, target: BrowseNaming, text: &str, cx: &mut Context<Self>) {
-        self.browser.update(cx, |browser, _| browser.browse_naming = None);
+        self.browser.update(cx, |browser, cx| browser.set_naming(None, cx));
         let text = text.trim();
         let changed = match target {
             BrowseNaming::Folder(id) => self.browser.update(cx, |browser, _| browser.tabs.rename_folder(&id, text)),
@@ -158,17 +152,14 @@ impl Harness {
             }
         };
         if changed {
-            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+            self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         }
         self.arm_composer_focus(cx);
-        cx.notify();
     }
 
     /// Abandon a name field: the folder keeps whatever name it had.
     pub(crate) fn cancel_browse_name(&mut self, cx: &mut Context<Self>) {
-        if self.browser.update(cx, |browser, _| browser.browse_naming.take().is_some()) {
-            cx.notify();
-        }
+        self.browser.update(cx, |browser, cx| browser.set_naming(None, cx));
     }
 
     /// Today's "new folder" (and Move to folder › New folder): a folder
@@ -181,7 +172,7 @@ impl Harness {
         if let Some(tab) = tab {
             self.browser.update(cx, |browser, _| browser.tabs.set_folder(tab, Some(&id)));
         }
-        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         self.start_browse_naming(BrowseNaming::Folder(id.into()), NEW_FOLDER, window, cx);
     }
 
@@ -200,8 +191,8 @@ impl Harness {
         if !self.browser.update(cx, |browser, _| browser.tabs.switch_space(&id)) {
             return;
         }
-        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
-        self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
+        self.browser.update(cx, |browser, cx| browser.set_session_tab(None, cx));
         match self.browser.read(cx).tabs.active_of(&Owner::Person, Some(&id)) {
             Some(tab) => {
                 self.ensure_tab_page(HOME_KEY, tab, window, cx);
@@ -227,10 +218,9 @@ impl Harness {
 
     /// A tab menu row.
     pub(crate) fn browse_tab_action(&mut self, tab: TabId, action: TabAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::BrowseMenu); });
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::BrowseMenu, cx); });
         self.ensure_tabs_loaded(cx);
         let Some(found) = self.browser.read(cx).tabs.get(tab).cloned() else {
-            cx.notify();
             return;
         };
         match action {
@@ -239,25 +229,25 @@ impl Harness {
                 if let Some(folder) = found.folder.as_deref() {
                     self.browser.update(cx, |browser, _| browser.tabs.set_folder(copy, Some(folder)));
                 }
-                self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+                self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
                 self.browse_sidebar_tab(copy, false, window, cx);
             }
             TabAction::CopyLink => {
                 cx.write_to_clipboard(ClipboardItem::new_string(found.url.clone()));
-                self.overlays.update(cx, |overlays, _| overlays.toast("Link copied", &found.url));
+                self.overlays.update(cx, |overlays, cx| overlays.toast("Link copied", &found.url, cx));
             }
             TabAction::TogglePin => {
                 self.browser.update(cx, |browser, _| browser.tabs.set_pinned(tab, !found.pinned));
-                self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+                self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
             }
             TabAction::MoveToFolder(folder) => {
                 self.browser.update(cx, |browser, _| browser.tabs.set_folder(tab, Some(folder.as_ref())));
-                self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+                self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
             }
             TabAction::MoveToNewFolder => self.browse_new_folder(Some(tab), window, cx),
             TabAction::RemoveFromFolder => {
                 self.browser.update(cx, |browser, _| browser.tabs.set_folder(tab, None));
-                self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+                self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
             }
             TabAction::Close => self.browse_sidebar_tab(tab, true, window, cx),
             TabAction::CloseOthers => {
@@ -270,7 +260,7 @@ impl Harness {
 
     /// A folder menu row.
     pub(crate) fn browse_folder_action(&mut self, folder: &str, action: FolderAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::BrowseMenu); });
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::BrowseMenu, cx); });
         match action {
             FolderAction::Rename => {
                 let name = self.browser.read(cx).tabs.folders.iter().find(|f| f.id == folder).map(|f| f.name.clone()).unwrap_or_default();
@@ -283,7 +273,7 @@ impl Harness {
             }
             FolderAction::Delete => {
                 if self.browser.update(cx, |browser, _| browser.tabs.delete_folder(folder)) {
-                    self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+                    self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
                 }
             }
         }
@@ -292,7 +282,7 @@ impl Harness {
 
     /// A task-folder menu row (and the head's click: Open chat).
     pub(crate) fn browse_task_folder_action(&mut self, session: &str, action: TaskFolderAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::BrowseMenu); });
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::BrowseMenu, cx); });
         match action {
             // A browser chat opens in its card, over the page (R3); a
             // project session opens in Sessions.
@@ -322,7 +312,7 @@ impl Harness {
     /// A space-chip menu row. Deleting a space closes the pages it held;
     /// the last space is never deleted (the row is disabled).
     pub(crate) fn browse_space_action(&mut self, space: &str, action: SpaceAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::BrowseMenu); });
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::BrowseMenu, cx); });
         match action {
             SpaceAction::Rename => {
                 let name = self.browser.read(cx).tabs.spaces.iter().find(|s| s.id == space).map(|s| s.name.clone()).unwrap_or_default();
@@ -386,7 +376,7 @@ impl Harness {
             for id in held {
                 self.close_tab(HOME_KEY, id, window, cx);
             }
-            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+            self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
             if was_current {
                 self.ensure_browse_tab(window, cx);
             }

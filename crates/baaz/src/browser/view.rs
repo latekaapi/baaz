@@ -220,7 +220,8 @@ pub(crate) struct BrowserView {
     /// persists.
     pub(crate) browse_omnibox_moved: bool,
     /// The header back button's rect (B2a-H4): what the back-history menu
-    /// seats at, reported the way `overflow_bounds` is. Never persists.
+    /// seats at, reported the way the header `…` anchor is
+    /// (`Overlays::note_anchor`). Never persists.
     pub(crate) back_bounds: Option<Bounds<Pixels>>,
     /// Whether the Browse centre's page held the keyboard on the last
     /// frame's occlusion ([`Self::occlude`], B2a-H4 7b): the rising edge ends address editing,

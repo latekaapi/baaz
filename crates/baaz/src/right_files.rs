@@ -313,8 +313,7 @@ pub(crate) fn files_screen(
                 let _ = weak.update(cx, |this, cx| {
                     let menu = FilesMenu { root: root.clone(), id: menu.id.to_string(), is_dir: menu.is_dir, at: menu.at };
                     let owner = cx.entity_id();
-                    this.overlays.update(cx, |o, _| o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::FilesMenu(menu)).owner(owner)));
-                    cx.notify();
+                    this.overlays.update(cx, |o, cx| o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::FilesMenu(menu)).owner(owner), cx));
                 });
             }
         });
@@ -552,11 +551,7 @@ impl RightPane {
 
     /// Close the Files context menu; whether one was open.
     pub(crate) fn close_files_menu(&mut self, cx: &mut Context<Self>) -> bool {
-        let open = self.overlays.update(cx, |o, _| o.stack.close(crate::overlay_stack::LayerKind::FilesMenu)).is_some();
-        if open {
-            cx.notify();
-        }
-        open
+        self.overlays.update(cx, |o, cx| o.close(crate::overlay_stack::LayerKind::FilesMenu, cx)).is_some()
     }
 
     fn run_files_menu(&mut self, menu: &FilesMenu, action: FilesMenuAction, cx: &mut Context<Self>) {
@@ -580,15 +575,14 @@ impl RightPane {
         let view_rows: Vec<aui::nav::MenuRow> = rows.iter().map(|(label, _)| aui::nav::MenuRow::Toggle { label: (*label).into(), checked: false }).collect();
         let held = menu.clone();
         let activate = cx.listener(move |this: &mut Self, index: &usize, _, cx| {
-            this.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::FilesMenu); });
+            this.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::FilesMenu, cx); });
             if let Some(action) = actions.get(*index) {
                 this.run_files_menu(&held, *action, cx);
             }
             cx.notify();
         });
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::FilesMenu); });
-            cx.notify();
+            this.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::FilesMenu, cx); });
         });
         let catcher = div()
             .id("files-menu-scrim")
@@ -598,8 +592,7 @@ impl RightPane {
             .on_mouse_down(gpui::MouseButton::Right, move |_, w, cx| dismiss(&(), w, cx))
             .on_click({
                 let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-                    this.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::FilesMenu); });
-                    cx.notify();
+                    this.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::FilesMenu, cx); });
                 });
                 move |_, w, cx| dismiss(&(), w, cx)
             });

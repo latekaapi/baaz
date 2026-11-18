@@ -39,7 +39,7 @@ impl Harness {
             changed |= browser.tabs.ensure_spaces(|id| projects.projects.iter().find(|p| p.id == id).map(|p| p.name.clone()))
         });
         if changed {
-            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+            self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         }
     }
 
@@ -61,7 +61,7 @@ impl Harness {
         };
         let space = self.browser.read(cx).browse_space();
         let id = self.browser.update(cx, |browser, _| browser.tabs.open(space, owner.clone(), initial_url(stored.as_deref()), None));
-        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         id
     }
 
@@ -102,13 +102,12 @@ impl Harness {
         if let Some(folder) = folder {
             self.browser.update(cx, |browser, _| browser.tabs.set_folder(id, Some(&folder)));
         }
-        self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
-        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+        self.browser.update(cx, |browser, cx| browser.set_session_tab(None, cx));
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         self.ensure_tab_page(HOME_KEY, id, window, cx);
         // ⌘T lands on the new-tab page with the field focused (B2a-H4):
         // the Harness-owned address input, empty for a blank tab.
         self.focus_browse_address_with("", window, cx);
-        cx.notify();
     }
 
     /// Select the Browse sidebar's tab `id` (B2a-H2): the model
@@ -137,11 +136,10 @@ impl Harness {
             }
         }
         if self.browser.update(cx, |browser, _| browser.tabs.activate(id)) {
-            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+            self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         }
-        self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
-        self.browser.update(cx, |browser, _| browser.browse_drop_target = None);
-        self.browser.update(cx, |browser, _| browser.browse_drop_at_end = false);
+        self.browser.update(cx, |browser, cx| browser.set_session_tab(None, cx));
+        self.browser.update(cx, |browser, cx| browser.clear_drop(cx));
         self.ensure_tab_page(HOME_KEY, id, window, cx);
         self.sync_find_input_to_tab(id, window, cx);
         self.leave_browse_address(window, cx);
@@ -167,8 +165,7 @@ impl Harness {
         let Some(space) = self.browse_command_ready(cx) else {
             return;
         };
-        if self.browser.update(cx, |browser, _| browser.browse_session_tab.take().is_some()) {
-            cx.notify();
+        if self.browser.update(cx, |browser, cx| browser.set_session_tab(None, cx)) {
             return;
         }
         let owner = Owner::Person;
@@ -197,12 +194,12 @@ impl Harness {
         let Some(id) = self.browser.update(cx, |browser, _| browser.tabs.reopen_last()) else {
             return;
         };
-        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         let ours = self.browser.read(cx).tabs.get(id).is_some_and(|tab| {
             tab.owner == Owner::Person && tab.space.as_deref() == space.as_deref()
         });
         if ours {
-            self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
+            self.browser.update(cx, |browser, cx| browser.set_session_tab(None, cx));
             self.ensure_tab_page(HOME_KEY, id, window, cx);
         }
         cx.notify();
@@ -240,10 +237,9 @@ impl Harness {
             return;
         }
         if self.browser.update(cx, |browser, _| browser.tabs.move_active_by(&Owner::Person, space.as_deref(), delta)) {
-            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+            self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         }
         let _ = window;
-        cx.notify();
     }
 
     /// Close the person tab `id` from the Browse sidebar's ×: the
@@ -255,8 +251,7 @@ impl Harness {
         if self.browser.read(cx).tabs.get(id).is_none_or(|tab| tab.owner != Owner::Person) {
             return;
         }
-        self.browser.update(cx, |browser, _| browser.browse_drop_target = None);
-        self.browser.update(cx, |browser, _| browser.browse_drop_at_end = false);
+        self.browser.update(cx, |browser, cx| browser.clear_drop(cx));
         self.close_tab(HOME_KEY, id, window, cx);
     }
 
@@ -267,8 +262,7 @@ impl Harness {
         self.ensure_tabs_loaded(cx);
         let pinned = !self.browser.read(cx).tabs.get(id).filter(|tab| tab.owner == Owner::Person)?.pinned;
         self.browser.update(cx, |browser, _| browser.tabs.set_pinned(id, pinned)).then_some(pinned)?;
-        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
-        cx.notify();
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         Some(pinned)
     }
 
@@ -287,15 +281,15 @@ impl Harness {
             return;
         }
         if self.browser.update(cx, |browser, _| browser.tabs.activate(id)) {
-            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+            self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         }
-        self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
+        self.browser.update(cx, |browser, cx| browser.set_session_tab(None, cx));
         let state = self.ensure_tab_page(HOME_KEY, id, window, cx);
         let url = tab.url.clone();
         if !url.is_empty() {
             state.update(cx, |state, _cx| state.navigate(&url));
         }
-        self.browser.update(cx, |browser, _| browser.browse_drop_target = None);
+        self.browser.update(cx, |browser, cx| browser.clear_drop(cx));
         cx.notify();
     }
 
@@ -314,9 +308,9 @@ impl Harness {
             }
         }
         if self.browser.update(cx, |browser, _| browser.tabs.activate(id)) {
-            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+            self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         }
-        self.browser.update(cx, |browser, _| browser.browse_session_tab = Some(id));
+        self.browser.update(cx, |browser, cx| browser.set_session_tab(Some(id), cx));
         self.ensure_tab_page(HOME_KEY, id, window, cx);
         cx.notify();
     }
@@ -336,7 +330,7 @@ impl Harness {
             (Owner::Session(_), false) => self.select_session_tab(id, window, cx),
             (Owner::Session(session), true) => {
                 if self.browser.read(cx).browse_session_tab == Some(id) {
-                    self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
+                    self.browser.update(cx, |browser, cx| browser.set_session_tab(None, cx));
                 }
                 self.close_tab(&session, id, window, cx);
                 cx.notify();
@@ -360,7 +354,7 @@ impl Harness {
             return;
         }
         if self.browser.update(cx, |browser, _| browser.tabs.activate(id)) {
-            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+            self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         }
         self.ensure_tab_page(key, id, window, cx);
         cx.notify();
@@ -403,7 +397,7 @@ impl Harness {
         // dropped, so the closed page stayed on screen over the next tab and
         // read as a frozen window (owner, 9 Nov). Whoever closes, it goes.
         self.terminal_service.unregister_tab_page(id.0);
-        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         // B2a-H2b: closing the current project's last person tab while
         // in Browse opens a fresh blank one — entering Browse and this
         // close are the two events that create tabs, never render. Other
@@ -481,8 +475,7 @@ impl Harness {
             return;
         };
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.browser.update(cx, |browser, _| browser.browse_session_tab = Some(id));
-        cx.notify();
+        self.browser.update(cx, |browser, cx| browser.set_session_tab(Some(id), cx));
     }
 
 
@@ -516,15 +509,14 @@ impl Harness {
             }
         }
         self.browser.update(cx, |browser, _| browser.agent_tabs.retain(|_, id| !in_space.contains(id)));
-        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         crate::baaz_log!("browse: space {space} sign-ins → {}", if own { "its own" } else { "shared" });
-        self.overlays.update(cx, |o, _| {
+        self.overlays.update(cx, |o, cx| {
             o.toast(
                 if own { format!("\u{201C}{name}\u{201D} has its own sign-ins") } else { format!("\u{201C}{name}\u{201D} shares sign-ins again") },
                 if own { "Its pages reload signed out; sign in here." } else { "" },
-            )
+             cx)
         });
-        cx.notify();
     }
 
     /// Reopen the closed tab `id` from a new-tab pick-up row and select it:
@@ -576,9 +568,13 @@ impl BrowserView {
     /// save (750 ms), so a spell of changes — a title that keeps changing,
     /// a burst of opens — coalesces into one write off the UI thread, the
     /// newest snapshot wins, and a constant stream still lands within the
-    /// delay of its first change ([`crate::store::JsonStore`]).
-    pub(crate) fn schedule_tabs_write(&mut self) {
+    /// delay of its first change ([`crate::store::JsonStore`]) — and
+    /// redraw: every tab change is drawn (the sidebar's rows, the strip,
+    /// the centre), so this is the one notify a tab change makes. The root
+    /// reads this view in every frame, so it re-renders too.
+    pub(crate) fn tabs_changed(&mut self, cx: &mut Context<Self>) {
         tabs::save_soon(&self.tabs);
+        cx.notify();
     }
 
     /// Land the tabs durably, synchronously: the quit and window-close

@@ -370,9 +370,8 @@ impl BrowserView {
         self.revoke_stale_visit_grants();
         self.route_browse_permissions(centre, in_browse, cx);
         if tabs_dirty {
-            self.schedule_tabs_write();
-            // The sidebar's rows and the header read the tabs: redraw.
-            cx.notify();
+            // The sidebar's rows and the header read the tabs: it redraws.
+            self.tabs_changed(cx);
         }
         cx.emit(BrowserEvent::PagesChanged { session_urls });
     }

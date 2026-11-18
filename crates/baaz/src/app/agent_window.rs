@@ -304,19 +304,58 @@ fn step_state(status: &aui_protocol::ToolStatus) -> aui::browse::agent_window::S
     }
 }
 
+impl crate::browser::BrowserView {
+    /// The agent line's own state (and, when `keys` says, whether it takes
+    /// the keyboard): the line float redraws from this view's notify.
+    pub(crate) fn set_agent_line(&mut self, line: LineUi, keys: Option<bool>, cx: &mut Context<Self>) {
+        self.agent_window.line_ui = line;
+        if let Some(keys) = keys {
+            self.agent_window.line_wants_keys = keys;
+        }
+        cx.notify();
+    }
+
+    /// The agent card's state. Opening it (`take_answer`) carries the
+    /// line's inline answer on, so the line closes it: it never shows twice.
+    /// Docking and undocking move the card without touching the line.
+    pub(crate) fn set_agent_card(&mut self, card: CardUi, take_answer: bool, cx: &mut Context<Self>) {
+        self.agent_window.card_ui = card;
+        if take_answer && card != CardUi::Closed && matches!(self.agent_window.line_ui, LineUi::Answer { .. }) {
+            self.agent_window.line_ui = LineUi::Closed;
+        }
+        cx.notify();
+    }
+
+    /// Drop the "This page" chip from the next ask.
+    pub(crate) fn remove_page_chip(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.agent_window.line_page_chip, false) {
+            cx.notify();
+        }
+    }
+
+    /// The line's notice under its field (a missing provider), or none.
+    pub(crate) fn set_agent_notice(&mut self, notice: Option<String>, cx: &mut Context<Self>) {
+        if self.agent_window.line_notice != notice {
+            self.agent_window.line_notice = notice;
+            cx.notify();
+        }
+    }
+}
+
 impl Harness {
     /// ⌘J: open the line on the page on screen, or close it.
     pub(crate) fn toggle_agent_line(&mut self, cx: &mut Context<Self>) {
         if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.browser.read(cx).browse_centre_shown(cx).is_none() {
             return;
         }
-        self.browser.update(cx, |browser, _| browser.agent_window.line_ui = if browser.agent_window.line_ui == LineUi::Closed { LineUi::Ask } else { LineUi::Closed });
-        self.browser.update(cx, |browser, _| browser.agent_window.line_wants_keys = browser.agent_window.line_ui == LineUi::Ask);
-        // "This page" stands again each time the line opens.
-        if self.browser.read(cx).agent_window.line_ui == LineUi::Ask {
-            self.browser.update(cx, |browser, _| browser.agent_window.line_page_chip = true);
-        }
-        cx.notify();
+        self.browser.update(cx, |browser, cx| {
+            let opening = browser.agent_window.line_ui == LineUi::Closed;
+            // "This page" stands again each time the line opens.
+            if opening {
+                browser.agent_window.line_page_chip = true;
+            }
+            browser.set_agent_line(if opening { LineUi::Ask } else { LineUi::Closed }, Some(opening), cx);
+        });
     }
 
     /// Escape in the agent window: the handoff picker first, then the card,
@@ -328,19 +367,15 @@ impl Harness {
                 // The picker's own dismissal, through the overlay stack.
                 picker.update(cx, |picker, cx| picker.dismiss(cx));
             } else if self.browser.read(cx).agent_window.card_ui == CardUi::Card {
-                self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Closed);
+                self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Closed, true, cx));
             }
         } else {
             match self.browser.read(cx).agent_window.line_ui {
-                LineUi::Answer { .. } => {
-                    self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Ask);
-                    self.browser.update(cx, |browser, _| browser.agent_window.line_wants_keys = true);
-                }
-                LineUi::Ask | LineUi::Drafted { .. } => self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Closed),
+                LineUi::Answer { .. } => self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Ask, Some(true), cx)),
+                LineUi::Ask | LineUi::Drafted { .. } => self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Closed, None, cx)),
                 _ => {}
             }
         }
-        cx.notify();
     }
 
     /// ⌘E: open the card on the current chat, or close it.
@@ -348,12 +383,11 @@ impl Harness {
         if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return;
         }
-        self.browser.update(cx, |browser, _| browser.agent_window.card_ui = if browser.agent_window.card_ui == CardUi::Closed { CardUi::Card } else { CardUi::Closed });
         // The card carries the answer on: the line does not show it twice.
-        if self.browser.read(cx).agent_window.card_ui != CardUi::Closed && matches!(self.browser.read(cx).agent_window.line_ui, LineUi::Answer { .. }) {
-            self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Closed);
-        }
-        cx.notify();
+        self.browser.update(cx, |browser, cx| {
+            let card = if browser.agent_window.card_ui == CardUi::Closed { CardUi::Card } else { CardUi::Closed };
+            browser.set_agent_card(card, true, cx);
+        });
     }
 
     /// ⌘⇧E: dock the card as a column, or undock it.
@@ -361,11 +395,10 @@ impl Harness {
         if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return;
         }
-        self.browser.update(cx, |browser, _| browser.agent_window.card_ui = if browser.agent_window.card_ui == CardUi::Column { CardUi::Card } else { CardUi::Column });
-        if matches!(self.browser.read(cx).agent_window.line_ui, LineUi::Answer { .. }) {
-            self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Closed);
-        }
-        cx.notify();
+        self.browser.update(cx, |browser, cx| {
+            let card = if browser.agent_window.card_ui == CardUi::Column { CardUi::Card } else { CardUi::Column };
+            browser.set_agent_card(card, true, cx);
+        });
     }
 
     /// The tab on screen in Browse, as the chat's prompt names it.
@@ -406,8 +439,7 @@ impl Harness {
             None => self.start_browser_chat(prompt, window, cx),
         };
         let Some(session) = session else {
-            self.browser.update(cx, |browser, _| browser.agent_window.line_notice = Some("Connect a provider in Settings › Providers to ask about pages.".into()));
-            cx.notify();
+            self.browser.update(cx, |browser, cx| browser.set_agent_notice(Some("Connect a provider in Settings › Providers to ask about pages.".into()), cx));
             return;
         };
         if let Some((_, title, url)) = page.as_ref() {
@@ -425,15 +457,13 @@ impl Harness {
         if let Some(input) = self.browser.read(cx).agent_window.agent_line_input.clone() {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
-        self.browser.update(cx, |browser, _| browser.agent_window.line_notice = None);
+        self.browser.update(cx, |browser, cx| browser.set_agent_notice(None, cx));
         let line_ui = match (draft, page) {
             (true, Some((tab, _, _))) => LineUi::Drafting { session, tab },
             _ if inline => LineUi::Answer { question: ask.to_owned(), session },
             _ => self.browser.read(cx).agent_window.line_ui.clone(),
         };
-        self.browser.update(cx, |browser, _| browser.agent_window.line_ui = line_ui);
-        self.browser.update(cx, |browser, _| browser.agent_window.line_wants_keys = false);
-        cx.notify();
+        self.browser.update(cx, |browser, cx| browser.set_agent_line(line_ui, Some(false), cx));
     }
 
     /// A browser chat's own browser tools need no second ask from its
@@ -477,15 +507,17 @@ impl Harness {
             // Past a few steps, or waiting on the person's OK, the ask moves
             // to the card, where the steps and the question show.
             LineUi::Answer { session, .. } if session == id && (steps > INLINE_MAX_STEPS || asks) => {
-                self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Closed);
-                if self.browser.read(cx).agent_window.card_ui == CardUi::Closed {
-                    self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Card);
-                }
-                cx.notify();
+                // An open card closes the line's answer itself.
+                self.browser.update(cx, |browser, cx| {
+                    if browser.agent_window.card_ui == CardUi::Closed {
+                        browser.set_agent_card(CardUi::Card, true, cx);
+                    } else {
+                        browser.set_agent_line(LineUi::Closed, None, cx);
+                    }
+                });
             }
             LineUi::Drafting { session, tab } if session == id && !busy => {
-                self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Drafted { session, tab });
-                cx.notify();
+                self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Drafted { session, tab }, None, cx));
             }
             _ => {}
         }
@@ -533,10 +565,7 @@ impl Harness {
                     self.ask_browser_chat(ask, true, id.as_ref() == "draft", window, cx);
                 }
             }
-            LineIntent::ChipRemove(_) => {
-                self.browser.update(cx, |browser, _| browser.agent_window.line_page_chip = false);
-                cx.notify();
-            }
+            LineIntent::ChipRemove(_) => self.browser.update(cx, |browser, cx| browser.remove_page_chip(cx)),
             LineIntent::Copy => {
                 if let Some(text) = self.own_line_state(cx).and_then(|state| match state {
                     aui::browse::agent_window::LineState::Answer { answer, .. } => answer,
@@ -545,37 +574,22 @@ impl Harness {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
                 }
             }
-            LineIntent::Dismiss => {
-                self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Ask);
-                self.browser.update(cx, |browser, _| browser.agent_window.line_wants_keys = true);
-                cx.notify();
-            }
-            LineIntent::Expand => {
-                self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Card);
-                if matches!(self.browser.read(cx).agent_window.line_ui, LineUi::Answer { .. }) {
-                    self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Closed);
-                }
-                cx.notify();
-            }
+            LineIntent::Dismiss => self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Ask, Some(true), cx)),
+            LineIntent::Expand => self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Card, true, cx)),
             LineIntent::Undo => {
                 if let LineUi::Drafted { tab, .. } = self.browser.read(cx).agent_window.line_ui.clone() {
                     if let Some(state) = self.browser.read(cx).states.get(&crate::browser::tabs::TabId(tab)).cloned() {
                         state.update(cx, |state, _| state.eval_with_result(u64::MAX - tab, UNDO_DRAFT_JS));
                     }
                 }
-                self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Closed);
-                cx.notify();
+                self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Closed, None, cx));
             }
-            LineIntent::Done => {
-                self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Closed);
-                cx.notify();
-            }
+            LineIntent::Done => self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Closed, None, cx)),
             LineIntent::Stop => {
                 if let Some(view) = self.registry.browser_chat().cloned() {
                     view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.interrupt(cx)));
                 }
-                self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Ask);
-                cx.notify();
+                self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Ask, None, cx));
             }
             LineIntent::Plus => {}
             _ => {}
@@ -608,13 +622,13 @@ impl Harness {
                     input.update(cx, |input, cx| input.set_value("", window, cx));
                 }
             }
-            CardIntent::Dock => self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Column),
-            CardIntent::Undock => self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Card),
+            CardIntent::Dock => self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Column, false, cx)),
+            CardIntent::Undock => self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Card, false, cx)),
             CardIntent::Close => {
-                self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Closed);
-                self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::HandoffPicker); });
+                self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Closed, true, cx));
+                self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::HandoffPicker, cx); });
             }
-            CardIntent::ChipRemove(_) => self.browser.update(cx, |browser, _| browser.agent_window.line_page_chip = false),
+            CardIntent::ChipRemove(_) => self.browser.update(cx, |browser, cx| browser.remove_page_chip(cx)),
             CardIntent::Model => self.open_settings_page("browser", cx),
             CardIntent::Handoff => self.toggle_handoff_picker(cx),
             CardIntent::OpenHandoff => self.open_handoff_target(window, cx),
@@ -639,7 +653,6 @@ impl Harness {
             }
             CardIntent::Plus => {}
         }
-        cx.notify();
     }
 }
 
@@ -721,15 +734,14 @@ impl Harness {
         }
         self.set_browser_chat(view, cx);
         match kind {
-            "steps" => self.browser.update(cx, |browser, _| browser.agent_window.card_ui = CardUi::Card),
+            "steps" => self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Card, false, cx)),
             "draft" => {
                 if let Some((tab, _, _)) = page {
-                    self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Drafted { session: id, tab });
+                    self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Drafted { session: id, tab }, None, cx));
                 }
             }
-            _ => self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Answer { question: ask.to_owned(), session: id }),
+            _ => self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Answer { question: ask.to_owned(), session: id }, None, cx)),
         }
-        cx.notify();
         Ok(())
     }
 }
@@ -839,7 +851,7 @@ impl Harness {
             None => {
                 let space = self.browser.read(cx).browse_space();
                 let tab = self.browser.update(cx, |bv, _| bv.tabs.open(space, owner, crate::browser::tabs::BLANK, None));
-                self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+                self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
                 tab
             }
         };

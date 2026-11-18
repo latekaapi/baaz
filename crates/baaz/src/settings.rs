@@ -695,6 +695,7 @@ impl SettingsPage {
         self.state.open(target, active);
         self.focus_armed = true;
         self.set_default_menu(false, cx);
+        cx.notify();
     }
 
     /// Whether the "New sessions start in" menu stands open (an entry on the
@@ -718,30 +719,32 @@ impl SettingsPage {
     /// pops it and redraws the page.
     fn set_menu(&mut self, layer: crate::overlay_stack::Layer, open: bool, cx: &mut Context<Self>) {
         let owner = cx.entity_id();
-        self.overlays.update(cx, |o, _| {
+        self.overlays.update(cx, |o, cx| {
             if open {
-                o.stack.push(crate::overlay_stack::Entry::new(layer).owner(owner));
+                o.push(crate::overlay_stack::Entry::new(layer).owner(owner), cx);
             } else {
-                o.stack.close(layer.kind());
+                o.close(layer.kind(), cx);
             }
         });
     }
 
     /// Close: the route shuts and a recording disarms. The root restores
     /// the rest and redraws (`Harness::close_settings`).
-    pub(crate) fn close(&mut self) {
+    pub(crate) fn close(&mut self, cx: &mut Context<Self>) {
         self.state.close();
         self.recording = None;
+        cx.notify();
     }
 
     /// Leave for navigation: nothing to restore. `false` when the page
-    /// was not open; the root redraws when it was.
-    pub(crate) fn exit_for_navigation(&mut self) -> bool {
+    /// was not open; it redraws (and with it the root) when it was.
+    pub(crate) fn exit_for_navigation(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.state.open {
             return false;
         }
         self.state.exit_for_navigation();
         self.recording = None;
+        cx.notify();
         true
     }
 
@@ -780,7 +783,6 @@ impl SettingsPage {
             return false;
         }
         self.set_default_menu(true, cx);
-        cx.notify();
         true
     }
 }
@@ -801,9 +803,8 @@ impl SettingsPage {
                 self.set_default_menu(false, cx);
                 cx.emit(SettingsEvent::SetDefaultProvider(ProviderId::from_icon(provider)));
             }
-            _ => return,
+            _ => {}
         }
-        cx.notify();
     }
 
     /// One provider card intent: Details folds on the page; everything else
@@ -1402,7 +1403,6 @@ impl SettingsPage {
             .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                 let open = !this.assistant_menu_open(cx);
                 this.set_menu(crate::overlay_stack::Layer::AssistantMenu, open, cx);
-                cx.notify();
             }));
         if let Some(choice) = current.as_ref() {
             chip = chip.leading(aui_icons::provider_mark(choice.provider.icon()).size(px(scale::ICON_DEFAULT)));
@@ -1440,13 +1440,11 @@ impl SettingsPage {
                             crate::layout::Layout::stage(cx, |layout| layout.assistant = crate::browser::assistant::AssistantPrefs { provider: Some(provider), model: Some(model) });
                             this.set_menu(crate::overlay_stack::Layer::AssistantMenu, false, cx);
                             crate::layout::Layout::save(cx);
-                            cx.notify();
                         });
                     })
                     .on_close(move |_, cx| {
                         let _ = close.update(cx, |this, cx| {
                             this.set_menu(crate::overlay_stack::Layer::AssistantMenu, false, cx);
-                            cx.notify();
                         });
                     }),
             );
@@ -2126,10 +2124,10 @@ impl Harness {
         self.settings_page.update(cx, |page, cx| page.open(target, active, cx));
         // Settings replaces the Skills page as it does the transcript.
         self.leave_skills(cx);
-        self.overlays.update(cx, |overlays, _| {
-            overlays.close_menu();
-            overlays.close_palette();
-            overlays.close_dialog();
+        self.overlays.update(cx, |overlays, cx| {
+            overlays.close_menu(cx);
+            overlays.close_palette(cx);
+            overlays.close_dialog(cx);
         });
         // Settings → Providers recomputes the B4M plan off the UI thread:
         // the row renders the cache (never the walker) and follows when
@@ -2141,7 +2139,6 @@ impl Harness {
             // behind it, never on the render path.
             self.refresh_import_scan_if_stale(cx);
         }
-        cx.notify();
     }
 
     /// Close the Settings page, restoring the saved session. Scroll,
@@ -2149,9 +2146,8 @@ impl Harness {
     /// never wrote their state, it only hid them. Closing hands the
     /// keyboard to the composer next frame.
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
-        self.settings_page.update(cx, |page, _| page.close());
+        self.settings_page.update(cx, |page, cx| page.close(cx));
         self.arm_composer_focus(cx);
-        cx.notify();
     }
 
     /// One Escape press on the page (§1.3 order): cancel a recording, clear
@@ -2165,9 +2161,8 @@ impl Harness {
         match self.settings_page.update(cx, |page, cx| page.escape(cx)) {
             SettingsEscape::Close => self.close_settings(cx),
             // Up from a sub-page moves the nav's selection and the crumbs,
-            // which the root's frame draws.
-            SettingsEscape::UpToProviders => cx.notify(),
-            SettingsEscape::CancelRecording | SettingsEscape::ClearSearch => {}
+            // which the root's frame draws: the page's own notify redraws it.
+            SettingsEscape::UpToProviders | SettingsEscape::CancelRecording | SettingsEscape::ClearSearch => {}
         }
         true
     }
@@ -2175,9 +2170,7 @@ impl Harness {
     /// Leave the page for navigation (⌘N, palette jump, session click):
     /// the destination owns the next route, so nothing is restored.
     pub(crate) fn exit_settings_for_navigation(&mut self, cx: &mut Context<Self>) {
-        if self.settings_page.update(cx, |page, _| page.exit_for_navigation()) {
-            cx.notify();
-        }
+        self.settings_page.update(cx, |page, cx| page.exit_for_navigation(cx));
     }
 
     /// `settings[:<section>]`: open the page, optionally at that section
@@ -2519,7 +2512,6 @@ impl Harness {
             SettingsEvent::ImportChrome => self.open_chrome_import(cx),
             SettingsEvent::IncludeSite(site) => {
                 self.browser.read(cx).data.clone().update(cx, |data, cx| data.include(site, cx));
-                cx.notify();
             }
             SettingsEvent::MakeDefaultBrowser => {
                 if !crate::default_browser::make_baaz_default() {

@@ -95,7 +95,6 @@ impl SessionRuntime {
         }
         self.full_outputs.insert(block_id.clone(), full_output::Fetch::Fetching);
         cx.emit(RuntimeEvent::CardsChanged);
-        cx.notify();
         let command = ProviderCommand::ReadStoredOutput {
             session_id: self.session_id.clone(),
             item: block_id.clone(),
@@ -118,7 +117,6 @@ impl SessionRuntime {
                 }
             }
             cx.emit(RuntimeEvent::CardsChanged);
-            cx.notify();
         });
     }
 
@@ -247,7 +245,6 @@ impl SessionRuntime {
     pub fn inject_external_approval(&mut self, approval: ExternalApproval, cx: &mut Context<Self>) {
         self.external_approvals.inject(approval);
         cx.emit(RuntimeEvent::ApprovalRequested);
-        cx.notify();
     }
 
     /// Decide an external approval: `decline` ("no, do something else",
@@ -432,7 +429,6 @@ impl SessionRuntime {
         let settled = self.external_approvals.resolve(approval_id);
         if settled {
             cx.emit(RuntimeEvent::EntriesAppended);
-            cx.notify();
         }
         settled
     }

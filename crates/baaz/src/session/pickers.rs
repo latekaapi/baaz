@@ -150,7 +150,7 @@ impl SessionView {
             .owner(owner)
             .view(picker.into())
             .keep(dismissed);
-        self.overlays.update(cx, |overlays, _| overlays.stack.push(entry));
+        self.overlays.update(cx, |overlays, cx| overlays.push(entry, cx));
     }
 
     /// Open the model picker with the selection on `selected` (one past

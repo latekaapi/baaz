@@ -71,11 +71,11 @@ impl Harness {
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, cx| view.close_plus_menu(cx));
         }
-        self.overlays.update(cx, |overlays, _| {
+        self.overlays.update(cx, |overlays, cx| {
             if already {
-                overlays.close_menu();
+                overlays.close_menu(cx);
             } else {
-                overlays.open(Menu::project(project, from_header));
+                overlays.open(Menu::project(project, from_header), cx);
             }
         });
         cx.notify();
@@ -119,7 +119,6 @@ impl Harness {
         self.note_project_changed(cx);
         self.rejoin(cx);
         self.invalidate_list(cx);
-        cx.notify();
         id
     }
 
@@ -135,7 +134,7 @@ impl Harness {
     /// to the old project). Window-free, for the adoption paths that own no
     /// window.
     pub(crate) fn note_project_changed(&mut self, cx: &mut Context<Self>) {
-        self.browser.update(cx, |browser, _| browser.browse_session_tab = None);
+        self.browser.update(cx, |browser, cx| browser.set_session_tab(None, cx));
         self.browser.update(cx, |browser, cx| browser.drop_browse_address(cx));
         // The window's title names the project.
         self.queue_title(cx);
@@ -192,9 +191,8 @@ impl Harness {
         self.note_project_changed(cx);
         self.rename.update(cx, |state, cx| state.set_value(project.name, window, cx));
         let entry = Self::rename_entry(crate::overlay_stack::Layer::RenameProject(id));
-        self.overlays.update(cx, |o, _| o.stack.push(entry));
+        self.overlays.update(cx, |o, cx| o.push(entry, cx));
         window.focus(&self.rename.focus_handle(cx), cx);
-        cx.notify();
     }
 
     /// Ask before removing a project from the sidebar: a danger dialog in
@@ -253,7 +251,6 @@ impl Harness {
         // The rows re-resolve by root now, settled once for the whole batch.
         self.clear_session_projects(&id, cx);
         self.invalidate_list(cx);
-        cx.notify();
     }
 
     /// Commit whatever is in the rename field as the project rename: an
@@ -261,8 +258,8 @@ impl Harness {
     /// something), and a rename never touches the folder.
     pub(crate) fn commit_project_rename(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.renaming_project(cx) else { return };
-        self.overlays.update(cx, |o, _| {
-            o.stack.close(crate::overlay_stack::LayerKind::RenameProject);
+        self.overlays.update(cx, |o, cx| {
+            o.close(crate::overlay_stack::LayerKind::RenameProject, cx);
         });
         let text = self.rename.read(cx).value().to_string();
         let text = text.trim().to_owned();
@@ -282,7 +279,6 @@ impl Harness {
         projects::write(&self.session_list.read(cx).projects);
         self.invalidate_list(cx);
         self.arm_composer_focus(cx);
-        cx.notify();
     }
 
     /// `projects`: the Projects palette, over whatever is open.
@@ -363,12 +359,9 @@ impl Harness {
                 let id = self.current_project_id().ok_or("no project menu is open and no current project")?;
                 self.open_project_menu(Some(id), true, cx);
             }
-            self.overlays.update(cx, |overlays, _| {
-                if let Some(menu) = overlays.menu_mut().filter(|menu| menu.kind == MenuKind::Project) {
-                    menu.sub_open = true;
-                }
+            self.overlays.update(cx, |overlays, cx| {
+                overlays.edit_menu(Some(MenuKind::Project), |menu| !std::mem::replace(&mut menu.sub_open, true), cx);
             });
-            cx.notify();
             return Ok(());
         }
         let slot = rest.trim().parse::<u8>().ok().filter(|slot| (1..=8).contains(slot));
@@ -386,7 +379,6 @@ impl Harness {
             Ok::<(), String>(())
         })?;
         self.invalidate_list(cx);
-        cx.notify();
         Ok(())
     }
 
@@ -523,7 +515,7 @@ impl Harness {
             // dismisses the menu before acting.
             let keep = matches!(action, Some(ProjectMenuAction::Colour));
             if !keep {
-                this.overlays.update(cx, |overlays, _| overlays.close_menu());
+                this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
             }
             match action {
                 Some(ProjectMenuAction::Pick(id)) => this.pick_project(id, window, cx),
@@ -538,12 +530,16 @@ impl Harness {
                     }
                 }
                 Some(ProjectMenuAction::Colour) => {
-                    this.overlays.update(cx, |overlays, _| {
-                        if let Some(menu) = overlays.menu_mut().filter(|menu| menu.kind == MenuKind::Project) {
-                            menu.sub_open = !menu.sub_open;
-                        }
+                    this.overlays.update(cx, |overlays, cx| {
+                        overlays.edit_menu(
+                            Some(MenuKind::Project),
+                            |menu| {
+                                menu.sub_open = !menu.sub_open;
+                                true
+                            },
+                            cx,
+                        );
                     });
-                    cx.notify();
                 }
                 Some(ProjectMenuAction::Pin) => {
                     if let Some(id) = target_for.clone() {
@@ -554,7 +550,6 @@ impl Harness {
                         });
                         projects::write(&this.session_list.read(cx).projects);
                         this.invalidate_list(cx);
-                        cx.notify();
                     }
                 }
                 Some(ProjectMenuAction::Reveal) => {
@@ -597,8 +592,7 @@ impl Harness {
         // draw, so it covers the window without covering the menu — the same
         // shape the composer's chip pickers use.
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.close_menu());
-            cx.notify();
+            this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
         });
         let catcher = div()
             .id("project-menu-scrim")
@@ -614,7 +608,7 @@ impl Harness {
                 if let Some(first) = bounds.first() {
                     let bounds = *first;
                     let _ = menu_report.update(cx, |this, cx| {
-                        Harness::note_trigger_bounds(&mut this.project_menu_bounds, bounds, cx);
+                        this.overlays.update(cx, |overlays, cx| overlays.note_anchor(crate::overlays::Anchor::ProjectMenu, bounds, cx));
                     });
                 }
             })
@@ -637,7 +631,7 @@ impl Harness {
         // `crates/aui/src/nav/view_menu.rs`: `MENU_PAD`, `SEP_H`,
         // `SEP_MARGIN_Y`).
         if colour_open {
-            if let (Some(id), Some(menu_bounds)) = (target, self.project_menu_bounds) {
+            if let (Some(id), Some(menu_bounds)) = (target, self.overlays.read(cx).anchor(crate::overlays::Anchor::ProjectMenu)) {
                 if let Some(current) = self.session_list.read(cx).projects.find(&id).map(|p| p.colour) {
                     let row_h = f32::from(cx.aui().metrics.row);
                     let row_top = f32::from(menu_bounds.origin.y)
@@ -668,7 +662,6 @@ impl Harness {
                             });
                             projects::write(&this.session_list.read(cx).projects);
                             this.invalidate_list(cx);
-                            cx.notify();
                         }
                     });
                     overlay = overlay.child(anchored_menu(

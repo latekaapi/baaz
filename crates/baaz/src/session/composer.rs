@@ -32,21 +32,27 @@ impl SessionView {
                     if let Some(picker) = self.mention_picker(cx) {
                         picker.update(cx, |picker, cx| picker.set_query(&filter, cx));
                     }
-                    self.overlays.update(cx, |overlays, _| {
-                        if let Some(menu) = overlays.menu_mut() {
-                            menu.filter = filter;
-                            menu.selected = 0;
-                        }
+                    self.overlays.update(cx, |overlays, cx| {
+                        overlays.edit_menu(
+                            None,
+                            |menu| {
+                                let changed = menu.filter != filter || menu.selected != 0;
+                                menu.filter = filter;
+                                menu.selected = 0;
+                                changed
+                            },
+                            cx,
+                        );
                     });
                 } else if kind == MenuKind::Mention {
                     self.open_mention_picker(at, filter, cx);
                 } else {
                     let mut menu = Menu::caret(kind, at);
                     menu.filter = filter;
-                    self.overlays.update(cx, |overlays, _| overlays.open_composer_menu(menu, composer));
+                    self.overlays.update(cx, |overlays, cx| overlays.open_composer_menu(menu, composer, cx));
                 }
             }
-            None if caret_menu => self.overlays.update(cx, |overlays, cx| overlays.close_menu_and_tell(cx)),
+            None if caret_menu => self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx)),
             None => {}
         }
         if let Some(filter) = self
@@ -70,10 +76,10 @@ impl SessionView {
     /// opening it replaces whatever menu stood open).
     pub fn toggle_plus_menu(&mut self, cx: &mut Context<Self>) {
         if self.plus_open(cx) {
-            self.overlays.update(cx, |overlays, cx| overlays.close_menu_and_tell(cx));
+            self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
         } else {
             let composer = self.composer_focus_handle(cx);
-            self.overlays.update(cx, |overlays, _| overlays.open_composer_menu(Menu::picker(MenuKind::Plus, 0), composer));
+            self.overlays.update(cx, |overlays, cx| overlays.open_composer_menu(Menu::picker(MenuKind::Plus, 0), composer, cx));
         }
         cx.notify();
     }
@@ -82,7 +88,7 @@ impl SessionView {
     pub fn toggle_picker(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
         let open = self.overlays.read(cx).is_open(kind);
         if open {
-            self.overlays.update(cx, |overlays, cx| overlays.close_menu_and_tell(cx));
+            self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
             cx.notify();
             return;
         }
@@ -113,7 +119,7 @@ impl SessionView {
             self.open_model_picker(selected, cx);
         } else {
             let composer = self.composer_focus_handle(cx);
-            self.overlays.update(cx, |overlays, _| overlays.open_composer_menu(Menu::picker(kind, selected), composer));
+            self.overlays.update(cx, |overlays, cx| overlays.open_composer_menu(Menu::picker(kind, selected), composer, cx));
         }
         cx.notify();
     }
@@ -141,7 +147,7 @@ impl SessionView {
             return;
         }
         let rows = self.menu_rows(cx);
-        self.overlays.update(cx, |overlays, _| overlays.move_selection(delta, rows));
+        self.overlays.update(cx, |overlays, cx| overlays.move_selection(delta, rows, cx));
         cx.notify();
     }
 
@@ -527,12 +533,9 @@ impl SessionView {
                 }
             }
             Some(MenuKind::Model) => {
-                self.overlays.update(cx, |overlays, _| {
-                    if let Some(menu) = overlays.menu_mut() {
-                        menu.sub_open = delta > 0;
-                    }
+                self.overlays.update(cx, |overlays, cx| {
+                    overlays.edit_menu(None, |menu| std::mem::replace(&mut menu.sub_open, delta > 0) != (delta > 0), cx);
                 });
-                cx.notify();
             }
             _ => {}
         }
@@ -710,10 +713,8 @@ impl SessionView {
     /// chip no longer names.
     pub(super) fn sync_mode_menu_check(&mut self, cx: &mut Context<Self>) {
         let checked = MODES.iter().position(|mode| *mode == self.runtime.read(cx).mode()).unwrap_or(0);
-        self.overlays.update(cx, |overlays, _| {
-            if let Some(menu) = overlays.menu_mut().filter(|menu| menu.kind == MenuKind::Mode) {
-                menu.selected = checked;
-            }
+        self.overlays.update(cx, |overlays, cx| {
+            overlays.edit_menu(Some(MenuKind::Mode), |menu| std::mem::replace(&mut menu.selected, checked) != checked, cx);
         });
     }
 }
@@ -836,7 +837,7 @@ impl SessionView {
     }
 
     pub(super) fn close_menu(&mut self, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |overlays, cx| overlays.close_menu_and_tell(cx));
+        self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
         cx.notify();
     }
 
@@ -846,7 +847,7 @@ impl SessionView {
         if !self.plus_open(cx) {
             return false;
         }
-        self.overlays.update(cx, |overlays, cx| overlays.close_menu_and_tell(cx));
+        self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
         cx.notify();
         true
     }
@@ -941,7 +942,7 @@ impl SessionView {
             }
             Command::Help => {
                 let composer = self.composer_focus_handle(cx);
-                self.overlays.update(cx, |overlays, _| overlays.open_composer_menu(Menu::caret(MenuKind::Command, 0), composer));
+                self.overlays.update(cx, |overlays, cx| overlays.open_composer_menu(Menu::caret(MenuKind::Command, 0), composer, cx));
                 cx.notify();
             }
             // `/fork` with nothing named opens the turn picker; `/fork <n>`

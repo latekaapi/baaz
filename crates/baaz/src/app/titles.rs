@@ -110,7 +110,6 @@ impl Harness {
         });
         self.invalidate_list(cx);
         self.run_title_attempt(session_id.to_owned(), message, 1, cx);
-        cx.notify();
     }
 
     /// One background attempt: one completion on the session's own
@@ -225,7 +224,6 @@ impl Harness {
             }
         });
         self.invalidate_list(cx);
-        cx.notify();
     }
 
     /// Silent and cheap: one log line, the first-prompt label stands, never
@@ -241,7 +239,6 @@ impl Harness {
             }
         });
         self.invalidate_list(cx);
-        cx.notify();
     }
 
     /// Give up waiting: the row falls back to the first prompt and the
@@ -271,7 +268,6 @@ impl Harness {
             }
         });
         self.invalidate_list(cx);
-        cx.notify();
     }
 
     /// One watchdog per attempt: [`titles::TITLE_TIMEOUT_SECS`] on the
@@ -299,7 +295,6 @@ impl Harness {
             }
         });
         self.invalidate_list(cx);
-        cx.notify();
         Ok(())
     }
 
@@ -332,7 +327,6 @@ impl Harness {
             }
         });
         self.invalidate_list(cx);
-        cx.notify();
         Ok(())
     }
 }
@@ -621,7 +615,6 @@ impl Harness {
         }, cx);
         self.session_list.update(cx, |list, _| list.byline_live.remove(real_id));
         self.invalidate_list(cx);
-        cx.notify();
     }
 
     /// Silent and cheap: one log line, the free excerpt stands, never a

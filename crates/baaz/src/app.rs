@@ -67,7 +67,7 @@ use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
-    Bounds, Pixels, PlatformInput, ScrollDelta, ScrollEvent, StatefulInteractiveElement as _,
+    Pixels, PlatformInput, ScrollDelta, ScrollEvent, StatefulInteractiveElement as _,
     StyleRefinement, Styled as _, actions, div, point, prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths,
     FocusHandle, Focusable, SharedString, Subscription, Task, Window,
 };
@@ -413,7 +413,7 @@ pub fn set_menus(cx: &mut App) {
                                 .clone()
                                 .downcast::<Harness>()
                                 .map(|harness| {
-                                    harness.read(cx).feedback.phase == feedback_ui::FeedbackPhase::Active
+                                    harness.read(cx).feedback.read(cx).phase == feedback_ui::FeedbackPhase::Active
                                 })
                                 .unwrap_or(false)
                         })
@@ -743,8 +743,10 @@ pub struct Harness {
     /// One entity, shared with the views that draw an entry (the session
     /// view's composer menus, the right pane's, the Browse view's).
     pub(crate) overlays: Entity<Overlays>,
-    /// F2 feedback mode shell: phase, draft, probe, discard arm.
-    pub(crate) feedback: feedback_ui::FeedbackUi,
+    /// F2 feedback mode shell: phase, draft, probe, discard arm — its own
+    /// entity, which redraws itself (plan 4.9b); the root draws the layer
+    /// and the header slot from it.
+    pub(crate) feedback: Entity<feedback_ui::FeedbackUi>,
     /// The sidebar divider's width and whatever drag is in flight over it
     /// (see [`crate::resize`]).
     pub(crate) resize: ResizeDrag,
@@ -840,18 +842,6 @@ pub struct Harness {
     /// open flag, catalog, filter, search, selection, dialogs and CLI calls
     /// (`skills_page.rs`, task 4.4).
     pub(crate) skills_page: Entity<crate::skills_page::SkillsPage>,
-    /// Shell trigger bounds in window coordinates, recorded once per frame
-    /// by `on_children_prepainted` wrappers on the triggers themselves — what
-    /// every shell menu seats at through `aui::overlay::anchored_menu`
-    /// (menus anchor to their triggers, never constants).
-    /// Each wrapper notifies only on its first bounds (nothing → something),
-    /// so a menu opened before the first prepaint appears on the next frame
-    /// instead of flashing at a wrong seat, and nothing repaints afterwards.
-    /// The header overflow `…` button: the overflow menu's trigger.
-    pub(crate) overflow_bounds: Option<Bounds<Pixels>>,
-    /// The open project menu's own rect: the Colour submenu's anchor is
-    /// computed off its right edge at the Colour row's height.
-    pub(crate) project_menu_bounds: Option<Bounds<Pixels>>,
     /// The search card's status line and the three facts it is made of:
     /// whether the query is blank and the two result counts (finding
     /// `performance-9`). Only ever read while the search palette is open.
@@ -975,6 +965,16 @@ impl Harness {
         let browser_fake = args.screenshot.is_some();
         let browser = cx.new(|cx| crate::browser::BrowserView::new(browser_fake, overlays.clone(), cx));
         let muse_slot = crate::providers::MuseSlot::default();
+        let focus_root = cx.focus_handle();
+        let feedback = cx.new(|cx| {
+            feedback_ui::FeedbackUi::new(feedback_ui::FeedbackUi::probe_for(), overlays.clone(), focus_root.clone(), cx)
+        });
+        // Entering Active closed the dialog through the stack: the root's
+        // half of `close_dialog` (the facts that rode it) follows.
+        cx.subscribe(&feedback, |this: &mut Self, _, event: &feedback_ui::FeedbackEvent, _| match event {
+            feedback_ui::FeedbackEvent::ClosedDialog => this.handoff_state.confirm = None,
+        })
+        .detach();
         let mut this = Self {
             new_provider,
             args,
@@ -997,7 +997,7 @@ impl Harness {
             sidebar_pane,
             registry: registry::SessionRegistry::default(),
             overlays,
-            feedback: feedback_ui::FeedbackUi::new(feedback_ui::FeedbackUi::probe_for(), cx),
+            feedback,
             resize: ResizeDrag::restored(restored),
             right_pane,
             browser,
@@ -1005,7 +1005,7 @@ impl Harness {
             lights_hidden: false,
             capture,
             session_mcp: false,
-            focus_root: cx.focus_handle(),
+            focus_root,
             hosting_overlay: false,
             tier: None,
             tier_probing: false,
@@ -1024,8 +1024,6 @@ impl Harness {
             rename: rename.clone(),
             settings_page,
             skills_page,
-            overflow_bounds: None,
-            project_menu_bounds: None,
             search_status: RefCell::new(None),
             send_anyway: false,
             tasks: Vec::new(),
@@ -1357,40 +1355,6 @@ impl Harness {
     /// The current project's id, when one is current.
     pub(crate) fn current_project_id(&self) -> Option<String> {
         self.current_project.clone()
-    }
-
-    /// Record one shell trigger's window bounds, notifying only when they
-    /// arrive for the first time: a menu opened before the first prepaint
-    /// appears on the next frame instead of flashing at a wrong seat, and
-    /// steady bounds never schedule work of their own.
-    pub(crate) fn note_trigger_bounds(
-        slot: &mut Option<Bounds<Pixels>>,
-        bounds: Bounds<Pixels>,
-        cx: &mut Context<Harness>,
-    ) {
-        let had = slot.is_some();
-        *slot = Some(bounds);
-        if !had {
-            cx.notify();
-        }
-    }
-
-    /// Record the feedback header slot's window bounds, notifying whenever
-    /// they first arrive or CHANGE: entering Active widens the slot
-    /// leftwards (and resizes, mode switches and sidebar toggles move it),
-    /// and the floating copy must reseat instead of ghosting at the old
-    /// origin. Steady bounds never schedule work of their own. Slot-only —
-    /// the other triggers keep [`Self::note_trigger_bounds`].
-    pub(crate) fn note_slot_bounds(
-        slot: &mut Option<Bounds<Pixels>>,
-        bounds: Bounds<Pixels>,
-        cx: &mut Context<Harness>,
-    ) {
-        let changed = *slot != Some(bounds);
-        *slot = Some(bounds);
-        if changed {
-            cx.notify();
-        }
     }
 
     /// The current project: the open session's project, else the last used —
@@ -1865,7 +1829,7 @@ impl Harness {
         // A user toggle always animates, even when a restore armed the
         // snap and no frame has consumed it yet.
         self.right_pane.update(cx, |pane, _| pane.snap = false);
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::PageMenu); });
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::PageMenu, cx); });
         crate::layout::Layout::stage(cx, |layout| layout.right_open = !layout.right_open);
         crate::baaz_log!("toggle right pane: open={}", crate::layout::Layout::get(cx).right_open);
         self.arm_browser_url_focus(cx);
@@ -1926,7 +1890,7 @@ impl Harness {
         self.leave_browse_address(window, cx);
         // A menu belongs to the mode it opened in; left open it would hide a
         // page. (A modal follows the mode: its entry's host is `Modal`.)
-        self.overlays.update(cx, |overlays, _| overlays.close_menu());
+        self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
         // The CEF claim check filters `BaazBrowse` rows by this flag, set
         // here (never read from gpui state inside the router callback).
         crate::keymap::set_claim_live_browse(mode == layout::Mode::Browse);
@@ -1994,7 +1958,7 @@ impl Harness {
     pub(crate) fn select_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
         // A user pick always animates (see `toggle_right`).
         self.right_pane.update(cx, |pane, _| pane.snap = false);
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::PageMenu); });
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::PageMenu, cx); });
         self.open_right_on(kind, cx);
         self.arm_browser_url_focus(cx);
     }
@@ -3228,7 +3192,7 @@ impl Harness {
                         if let Some(first) = bounds.first() {
                             let bounds = *first;
                             let _ = overflow_report.update(cx, |this, cx| {
-                                Harness::note_trigger_bounds(&mut this.overflow_bounds, bounds, cx);
+                                this.overlays.update(cx, |overlays, cx| overlays.note_anchor(crate::overlays::Anchor::Overflow, bounds, cx));
                             });
                         }
                     })
@@ -3363,7 +3327,7 @@ impl Harness {
         self.load_index(cx);
         let tier_banner = self.tier_banner();
         view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_tier_banner(tier_banner, cx)));
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::PageMenu); });
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::PageMenu, cx); });
         self.active = Some(view);
         // The replayed session is current, so its agent routes may drive
         // the terminal (D53): register it for this window's project root.
@@ -3893,12 +3857,7 @@ impl Harness {
             .on_activate(move |index, w, cx| activate(&index, w, cx))
             .on_highlight(move |index, _, cx| {
                 if let Some(index) = index {
-                    let _ = report.update(cx, |this, cx| {
-                        if this.browser.read(cx).browse_omnibox_selected != index {
-                            this.browser.update(cx, |browser, _| browser.browse_omnibox_selected = index);
-                            cx.notify();
-                        }
-                    });
+                    let _ = report.update(cx, |this, cx| this.browser.update(cx, |browser, cx| browser.hover_omnibox(index, cx)));
                 }
             });
         let mut last_kind: Option<crate::browser::SuggestKind> = None;
@@ -4345,7 +4304,7 @@ impl Harness {
         if problems.is_empty() {
             return;
         }
-        self.overlays.update(cx, |overlays, _| {
+        self.overlays.update(cx, |overlays, cx| {
             for problem in problems {
                 let aside_name = |aside: &std::path::Path| {
                     aside.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
@@ -4375,10 +4334,9 @@ impl Harness {
                 if overlays.toasts.iter().any(|toast| toast.title.as_ref() == title) {
                     continue;
                 }
-                overlays.toast(title, body);
+                overlays.toast(title, body, cx);
             }
         });
-        cx.notify();
     }
 
     /// Hang up every provider lane's child this window holds — the open
@@ -4605,10 +4563,9 @@ impl Harness {
             None => self.args.workspace.join(path),
         };
         if !full.is_file() {
-            self.overlays.update(cx, |overlays, _| {
-                overlays.toast("File not found", format!("{path} is no longer in this workspace."));
+            self.overlays.update(cx, |overlays, cx| {
+                overlays.toast("File not found", format!("{path} is no longer in this workspace."), cx);
             });
-            cx.notify();
             return;
         }
         cx.reveal_path(&full);
@@ -4992,7 +4949,7 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &ToggleAgentColumn, _, cx| this.toggle_agent_column(cx)))
                 .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
                 .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                    if this.feedback.blocks_chrome_action() {
+                    if this.feedback.read(cx).blocks_chrome_action() {
                         return;
                     }
                     this.toggle_sidebar(cx)
@@ -5000,7 +4957,7 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &NewSession, window, cx| {
                     // Feedback Active swallows menu-bar dispatches the way
                     // the layer swallows its keys (one shared guard).
-                    if this.feedback.blocks_chrome_action() {
+                    if this.feedback.read(cx).blocks_chrome_action() {
                         return;
                     }
                     // ⌘T lands on the new-tab page with the field focused
@@ -5016,7 +4973,7 @@ impl Render for Harness {
                     this.new_session(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &AddProject, window, cx| {
-                    if this.feedback.blocks_chrome_action() {
+                    if this.feedback.read(cx).blocks_chrome_action() {
                         return;
                     }
                     this.open_projects(false, window, cx)
@@ -5024,25 +4981,25 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &Interrupt, _, cx| this.interrupt(cx)))
                 .on_action(cx.listener(|this, _: &Cancel, window, cx| this.cancel(window, cx)))
                 .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
-                    if this.feedback.blocks_chrome_action() {
+                    if this.feedback.read(cx).blocks_chrome_action() {
                         return;
                     }
                     this.open_search(window, cx)
                 }))
-                .on_action(cx.listener(|this, _: &MinimizeWindow, window, _| {
-                    if this.feedback.blocks_chrome_action() {
+                .on_action(cx.listener(|this, _: &MinimizeWindow, window, cx| {
+                    if this.feedback.read(cx).blocks_chrome_action() {
                         return;
                     }
                     window.minimize_window()
                 }))
-                .on_action(cx.listener(|this, _: &ZoomWindow, window, _| {
-                    if this.feedback.blocks_chrome_action() {
+                .on_action(cx.listener(|this, _: &ZoomWindow, window, cx| {
+                    if this.feedback.read(cx).blocks_chrome_action() {
                         return;
                     }
                     window.zoom_window()
                 }))
                 .on_action(cx.listener(|this, _: &ToggleTheme, window, cx| {
-                    if this.feedback.blocks_chrome_action() {
+                    if this.feedback.read(cx).blocks_chrome_action() {
                         return;
                     }
                     // The opposite of what the window paints, stored as the
@@ -5057,7 +5014,7 @@ impl Render for Harness {
                 .on_action(cx.listener(|this, _: &ToggleFeedback, window, cx| this.toggle_feedback(window, cx)))
                 .on_action(cx.listener(|this, _: &FeedbackEscape, window, cx| this.escape_feedback(window, cx)))
                 .on_action(cx.listener(|this, _: &ShowAbout, _, cx| {
-                    if this.feedback.blocks_chrome_action() {
+                    if this.feedback.read(cx).blocks_chrome_action() {
                         return;
                     }
                     this.show_about(cx)
@@ -5066,19 +5023,19 @@ impl Render for Harness {
                 // run, General on first open — an empty target spells that
                 // (`normalize_settings_target`). Never a toggle.
                 .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
-                    if this.feedback.blocks_chrome_action() {
+                    if this.feedback.read(cx).blocks_chrome_action() {
                         return;
                     }
                     this.open_settings_page("", cx)
                 }))
-                .on_action(cx.listener(|this, _: &ShowDocs, _, _| {
-                    if this.feedback.blocks_chrome_action() {
+                .on_action(cx.listener(|this, _: &ShowDocs, _, cx| {
+                    if this.feedback.read(cx).blocks_chrome_action() {
                         return;
                     }
                     this.show_docs()
                 }))
                 .on_action(cx.listener(|this, _: &aui::keys::TogglePalette, _, cx| {
-                    if this.feedback.blocks_chrome_action() {
+                    if this.feedback.read(cx).blocks_chrome_action() {
                         return;
                     }
                     this.open_palette(PaletteKind::Commands, cx)
@@ -5099,7 +5056,7 @@ impl Render for Harness {
                 // page holds the keyboard (the keymap claims it at the
                 // CEF router, and this root binding carries it there).
                 .on_action(cx.listener(|this, _: &ToggleBrowseMode, window, cx| {
-                    if this.feedback.blocks_chrome_action() {
+                    if this.feedback.read(cx).blocks_chrome_action() {
                         return;
                     }
                     this.toggle_browse_mode(window, cx);
@@ -5331,8 +5288,7 @@ impl Harness {
             this.dismiss_overlay_view(view.entity_id(), cx);
         });
         let entry = entry.view(view.clone().into()).keep(dismissed);
-        self.overlays.update(cx, |overlays, _| overlays.stack.push(entry));
-        cx.notify();
+        self.overlays.update(cx, |overlays, cx| overlays.push(entry, cx));
     }
 
     /// A view on the stack asked to be dismissed: the stack pops newest
@@ -5349,7 +5305,7 @@ impl Harness {
     /// Close the top entry: notify the view that draws it, run its own
     /// close hook. `false` when nothing was open.
     pub(crate) fn pop_overlay_entry(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(entry) = self.overlays.update(cx, |overlays, _| overlays.stack.pop()) else {
+        let Some(entry) = self.overlays.update(cx, |overlays, cx| overlays.pop(cx)) else {
             return false;
         };
         let crate::overlay_stack::Entry { layer, owner, on_close, .. } = entry;
@@ -5357,10 +5313,11 @@ impl Harness {
             let app: &mut gpui::App = cx;
             app.notify(owner);
         }
+        // The stack's own notify (it popped) redraws the root, and with it
+        // whatever the close hook changed here.
         if let Some(on_close) = on_close {
             on_close(layer, self, cx);
         }
-        cx.notify();
         true
     }
 
@@ -5542,7 +5499,7 @@ mod tests {
         assert!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_open));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_palette(PaletteKind::Commands, cx)));
         vc.update(|_, cx| baaz.update(cx, |h, cx| {
-            h.overlays.update(cx, |o, _| o.close_palette());
+            h.overlays.update(cx, |o, cx| o.close_palette(cx));
         }));
         vc.draw(
             gpui::point(gpui::px(0.), gpui::px(0.)),
@@ -6609,7 +6566,7 @@ mod tests {
                 let space = h.browser.read(cx).browse_space();
                 let alpha = h.browser.update(cx, |browser, _| browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://alpha.example/1", None));
                 let beta = h.browser.update(cx, |browser, _| browser.tabs.open(space, crate::browser::Owner::Person, "https://beta.example/2", None));
-                h.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+                h.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
                 (alpha, beta)
             })
         });
@@ -6998,8 +6955,8 @@ mod tests {
             })
         });
         vc.update(|_, cx| baaz.update(cx, |h, cx| {
-            h.overlays.update(cx, |o, _| {
-                o.toast("Saved", "A toast in the corner stack.");
+            h.overlays.update(cx, |o, cx| {
+                o.toast("Saved", "A toast in the corner stack.", cx);
             });
         }));
         draw_shell(&mut *vc, &baaz);
@@ -7331,7 +7288,7 @@ mod tests {
                 let space = h.browser.read(cx).browse_space();
                 let first = h.browser.update(cx, |browser, _| browser.tabs.open(space.clone(), crate::browser::Owner::Person, "https://first.example/", None));
                 let second = h.browser.update(cx, |browser, _| browser.tabs.open(space, crate::browser::Owner::Person, "https://second.example/", None));
-                h.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+                h.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
                 (first, second)
             })
         });

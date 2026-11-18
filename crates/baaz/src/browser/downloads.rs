@@ -13,18 +13,16 @@ impl Harness {
     pub(crate) fn toggle_browse_downloads(&mut self, anchor: Option<gpui::Bounds<gpui::Pixels>>, cx: &mut Context<Self>) {
         let open = !self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Downloads);
         self.dismiss_browse_popovers(cx);
-        self.overlays.update(cx, |o, _| o.stack.set(crate::overlay_stack::Layer::Downloads, open));
+        self.overlays.update(cx, |o, cx| o.set(crate::overlay_stack::Layer::Downloads, open, cx));
         self.browser.update(cx, |browser, _| browser.downloads_anchor = anchor);
-        cx.notify();
     }
 
     /// The footer's extensions button (R4): its popover above it.
     pub(crate) fn toggle_browse_extensions(&mut self, anchor: Option<gpui::Bounds<gpui::Pixels>>, cx: &mut Context<Self>) {
         let open = !self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Extensions);
         self.dismiss_browse_popovers(cx);
-        self.overlays.update(cx, |o, _| o.stack.set(crate::overlay_stack::Layer::Extensions, open));
+        self.overlays.update(cx, |o, cx| o.set(crate::overlay_stack::Layer::Extensions, open, cx));
         self.browser.update(cx, |browser, _| browser.downloads_anchor = anchor);
-        cx.notify();
     }
 
     /// Cancel the download `id` on its owning tab's page.
@@ -50,8 +48,7 @@ impl Harness {
     /// moved or vanished toasts instead of revealing nothing.
     pub(crate) fn reveal_browse_download(&mut self, path: &str, cx: &mut Context<Self>) {
         if !std::path::Path::new(path).exists() {
-            self.overlays.update(cx, |overlays, _| overlays.toast("Downloads", "File moved or deleted"));
-            cx.notify();
+            self.overlays.update(cx, |overlays, cx| overlays.toast("Downloads", "File moved or deleted", cx));
             return;
         }
         let _ = crate::system_open::open_detached([std::ffi::OsStr::new("-R"), std::ffi::OsStr::new("--"), path.as_ref()]);

@@ -147,9 +147,7 @@ impl SessionRuntime {
         }
         let reason =
             self.questions_gate().unwrap_or_else(|| "Questions are not available on this provider.".into());
-        self.banner = Some(reason);
-        self.banner_action = None;
-        cx.notify();
+        self.plain_banner(reason, cx);
         false
     }
 }

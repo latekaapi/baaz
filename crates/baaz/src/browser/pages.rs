@@ -222,7 +222,7 @@ impl Harness {
                     let title = state.read(cx).title().to_string();
                     state.update(cx, |state, _cx| state.navigate(&url));
                     if self.browser.update(cx, |browser, _| browser.tabs.set_url_title(id, &url, &title)) {
-                        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+                        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
                     }
                 }
             } else {
@@ -361,10 +361,9 @@ impl Harness {
                 cx.notify();
             }
             None => {
-                self.overlays.update(cx, |overlays, _| {
-                    overlays.toast("Browser", "No open session to attach the screenshot to.");
+                self.overlays.update(cx, |overlays, cx| {
+                    overlays.toast("Browser", "No open session to attach the screenshot to.", cx);
                 });
-                cx.notify();
             }
         }
     }
@@ -386,10 +385,9 @@ impl Harness {
                 window.focus(&focus, cx);
             }
             WebviewIntent::Console => {
-                self.overlays.update(cx, |overlays, _| {
-                    overlays.toast("Browser", "Console is not available yet.");
+                self.overlays.update(cx, |overlays, cx| {
+                    overlays.toast("Browser", "Console is not available yet.", cx);
                 });
-                cx.notify();
             }
             WebviewIntent::Screenshot => {
                 let key = self.browser_key(cx);
@@ -442,11 +440,9 @@ impl Harness {
                         cx.notify();
                     }
                     None => {
-                        self.overlays.update(cx, |overlays, _| {
-                            overlays
-                                .toast("Browser", "No open session to attach the annotations to.");
+                        self.overlays.update(cx, |overlays, cx| {
+                            overlays.toast("Browser", "No open session to attach the annotations to.", cx);
                         });
-                        cx.notify();
                     }
                 }
             }
@@ -518,9 +514,8 @@ impl BrowserView {
                 let page = cx.new(|cx| WebviewState::new(backend, cx));
                 self.adopt_page(id, page, cx);
                 self.find_strips.remove(id);
-                self.schedule_tabs_write();
+                self.tabs_changed(cx);
                 placed_any = true;
-                cx.notify();
             }
             let opens = state.update(cx, |state, _| state.take_open_requests());
             for (url, foreground) in opens {
@@ -534,9 +529,8 @@ impl BrowserView {
                     opener.0, shown.map(|id| id.0), placed.map(|id| id.0), before.map(|id| id.0), after.map(|id| id.0)
                 );
                 if placed.is_some() {
-                    self.schedule_tabs_write();
+                    self.tabs_changed(cx);
                     placed_any = true;
-                    cx.notify();
                 }
             }
         }

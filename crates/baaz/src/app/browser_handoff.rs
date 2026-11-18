@@ -249,7 +249,7 @@ impl Harness {
     /// task folder, the target opens in Sessions with the chat's context as
     /// an unsent draft, and the chat records the handoff (board 3b).
     pub(crate) fn hand_off_browser_chat(&mut self, target: HandoffTarget, window: &mut Window, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::HandoffPicker); });
+        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::HandoffPicker, cx); });
         let Some(chat) = self.registry.browser_chat().cloned() else { return };
         let (chat_id, answer) = {
             let view = chat.read(cx);
@@ -296,7 +296,7 @@ impl Harness {
             for (tab, _, _) in &tabs {
                 self.browser.update(cx, |browser, _| browser.tabs.move_to(*tab, Owner::Session(target_id.clone())));
             }
-            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+            self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         }
         self.terminal_service.revoke_grants(&chat_id);
         let n = tabs.len();

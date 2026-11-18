@@ -8,9 +8,9 @@ impl Harness {
 
     pub(crate) fn dismiss_browse_popovers(&mut self, cx: &mut Context<Self>) -> bool {
         use crate::overlay_stack::LayerKind;
-        let open = self.overlays.update(cx, |o, _| {
+        let open = self.overlays.update(cx, |o, cx| {
             // Close all three: no short circuit.
-            [LayerKind::Downloads, LayerKind::Extensions, LayerKind::More].map(|kind| o.stack.close(kind).is_some()).contains(&true)
+            [LayerKind::Downloads, LayerKind::Extensions, LayerKind::More].map(|kind| o.close(kind, cx).is_some()).contains(&true)
         });
         self.browser.update(cx, |browser, _| browser.downloads_rendered = false);
         if open {
@@ -150,7 +150,7 @@ impl Harness {
         self.ensure_tabs_loaded(cx);
         let title = self.browser.read(cx).tabs.get(id).map(|tab| tab.title.clone()).unwrap_or_default();
         if self.browser.update(cx, |browser, _| browser.tabs.set_url_title(id, url, &title)) {
-            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+            self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         }
         match self.browser.read(cx).states.get(&id).cloned() {
             Some(state) => {
@@ -199,15 +199,13 @@ impl Harness {
             .unwrap_or_default();
         let site = history::host_of(&url);
         if !history::recordable(&url) || site.is_empty() {
-            self.overlays.update(cx, |o, _| o.toast("Nothing to forget", "This page is not kept in history."));
-            cx.notify();
+            self.overlays.update(cx, |o, cx| o.toast("Nothing to forget", "This page is not kept in history.", cx));
             return;
         }
         self.browser.read(cx).data.clone().update(cx, |data, cx| data.exclude(&site, cx));
-        self.overlays.update(cx, |o, _| {
-            o.toast(format!("{site} won’t be remembered"), "Its history is gone. Undo in Settings › Browser.")
+        self.overlays.update(cx, |o, cx| {
+            o.toast(format!("{site} won’t be remembered"), "Its history is gone. Undo in Settings › Browser.", cx)
         });
-        cx.notify();
     }
 
     /// "Allow ads on this site": flips the shown site's exception; a toast
@@ -228,8 +226,7 @@ impl Harness {
         } else {
             (format!("Ads blocked on {site}"), "")
         };
-        self.overlays.update(cx, |o, _| o.toast(title, body));
-        cx.notify();
+        self.overlays.update(cx, |o, cx| o.toast(title, body, cx));
     }
 
     /// Clear history: asks first, since it cannot be undone.
@@ -254,7 +251,6 @@ impl Harness {
     /// Clear history now (confirmed).
     pub(crate) fn clear_history_now(&mut self, cx: &mut Context<Self>) {
         self.browser.read(cx).data.clone().update(cx, |data, cx| data.clear_history(cx));
-        self.overlays.update(cx, |o, _| o.toast("History cleared", ""));
-        cx.notify();
+        self.overlays.update(cx, |o, cx| o.toast("History cleared", "", cx));
     }
 }

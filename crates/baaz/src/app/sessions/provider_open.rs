@@ -1293,7 +1293,6 @@ impl Harness {
         crate::sessions::write(&self.session_list.read(cx).overrides);
         self.rejoin(cx);
         self.invalidate_list(cx);
-        cx.notify();
     }
 
     /// Open a fork minted by `ForkSession` as a new provider-lane view on

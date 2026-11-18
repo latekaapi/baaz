@@ -1190,7 +1190,7 @@ impl SessionView {
             }
             RuntimeEvent::Toast { title, body } => {
                 let (title, body) = (title.clone(), body.clone());
-                self.overlays.update(cx, |overlays, _| overlays.toast(title, body));
+                self.overlays.update(cx, |overlays, cx| overlays.toast(title, body, cx));
             }
         }
         cx.notify();
@@ -2194,7 +2194,6 @@ impl SessionRuntime {
         self.fold_provider_events(capture.events(), cx);
         self.observe_clocks(cx);
         cx.emit(RuntimeEvent::EntriesAppended);
-        cx.notify();
     }
 
     /// Start a `--bench` run over a capture: read-only like a replay, but the
@@ -2208,7 +2207,6 @@ impl SessionRuntime {
             self.remember_command(&command_id, &text);
         }
         cx.emit(RuntimeEvent::EntriesAppended);
-        cx.notify();
     }
 }
 
@@ -2513,9 +2511,7 @@ impl SessionRuntime {
                 self.restore_prompt(queue.sends.join("\n\n"), cx);
             }
         }
-        self.banner = Some(format!("This session did not start: {message}"));
-        self.banner_action = None;
-        cx.notify();
+        self.plain_banner(format!("This session did not start: {message}"), cx);
     }
 
     /// Lock the composer while a provider switch replaces this view (Y2b).

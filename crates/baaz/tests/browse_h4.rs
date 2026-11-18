@@ -159,7 +159,7 @@ fn omnibox_covers_only_while_rows_render() {
     let app = source("app.rs");
     let switch = fn_body(&app, "set_mode");
     assert!(
-        !switch.contains("browse_session_tab = None"),
+        !switch.contains("set_session_tab(None"),
         "a mode switch keeps the session tab the centre holds"
     );
     assert!(switch.contains("leave_browse_address(window, cx)"), "a mode switch leaves the field");
@@ -281,7 +281,7 @@ fn held_session_tab_clears_everywhere() {
     let browser = browser_source();
     for name in ["select_browse_sidebar_tab", "new_browse_sidebar_tab", "step_tab_new"] {
         assert!(
-            fn_body(&browser, name).contains("browse_session_tab = None"),
+            fn_body(&browser, name).contains("set_session_tab(None"),
             "{name} clears the held tab"
         );
     }
@@ -290,7 +290,7 @@ fn held_session_tab_clears_everywhere() {
     assert!(row.contains("self.resume(session"), "a session-tab row opens its session");
     let open = source("app/sessions/open.rs");
     assert!(
-        fn_body(&open, "new_session_in").contains("browse_session_tab = None"),
+        fn_body(&open, "new_session_in").contains("set_session_tab(None"),
         "a new session clears it even without a mode switch"
     );
     let projects = source("project_menu.rs");

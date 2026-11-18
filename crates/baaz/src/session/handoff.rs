@@ -71,7 +71,6 @@ impl SessionRuntime {
         self.handoff_card = Some(card.clone());
         self.append_client_block(card_id, card);
         cx.emit(RuntimeEvent::EntriesAppended);
-        cx.notify();
     }
 
     /// Refresh the card on a transition. A no-op when the card never
@@ -103,7 +102,6 @@ impl SessionRuntime {
         self.handoff_pack_full = Some(pack);
         self.handoff_pack_display = Some(display);
         cx.emit(RuntimeEvent::CardsChanged);
-        cx.notify();
     }
 
     /// Whether the destination already shows the source prefix above its
@@ -215,7 +213,6 @@ impl SessionRuntime {
         }
         cx.emit(RuntimeEvent::EntriesAppended);
         cx.emit(RuntimeEvent::CardsChanged);
-        cx.notify();
     }
 }
 

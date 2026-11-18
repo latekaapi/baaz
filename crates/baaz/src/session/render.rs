@@ -2289,10 +2289,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         let overlays = self.overlays.clone();
         let hover = move |index: usize, _: &mut Window, cx: &mut gpui::App| {
             overlays.update(cx, |overlays, cx| {
-                if let Some(menu) = overlays.menu_mut().filter(|m| m.kind == kind && m.selected != index) {
-                    menu.selected = index;
-                    cx.notify();
-                }
+                overlays.edit_menu(Some(kind), |menu| std::mem::replace(&mut menu.selected, index) != index, cx);
             });
         };
         let element = match kind {

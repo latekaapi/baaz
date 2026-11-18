@@ -671,13 +671,13 @@ impl SkillsPage {
     /// one of the page's menus.
     fn set_layer(&mut self, layer: crate::overlay_stack::Layer, open: bool, cx: &mut Context<Self>) {
         let owner = cx.entity_id();
-        self.overlays.update(cx, |o, _| {
+        self.overlays.update(cx, |o, cx| {
             if open {
                 if !o.stack.is_open(layer.kind()) {
-                    o.stack.push(crate::overlay_stack::Entry::new(layer).owner(owner));
+                    o.push(crate::overlay_stack::Entry::new(layer).owner(owner), cx);
                 }
             } else {
-                o.stack.close(layer.kind());
+                o.close(layer.kind(), cx);
             }
         });
     }
@@ -686,18 +686,58 @@ impl SkillsPage {
     /// page itself (D54). Selecting a session returns outright.
     pub(crate) fn close_skills(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.dialog, SkillsDialog::Closed) {
-            self.dialog = SkillsDialog::Closed;
-            cx.notify();
+            self.set_dialog(SkillsDialog::Closed, cx);
             return;
         }
         if self.add_menu_open(cx) {
             self.set_add_menu(false, cx);
-            cx.notify();
             return;
         }
         if self.open {
             self.open = false;
             self.detail_focused = false;
+            cx.notify();
+        }
+    }
+
+    /// A re-list landed: the page leaves its loading state and takes a
+    /// clean catalog (the `/` menu follows), or keeps its rows under the
+    /// banner — the CLI's own error (`Err`) or the list's first. One redraw
+    /// for every CLI landing that re-lists.
+    fn land_catalog(&mut self, landed: Result<SkillsCatalog, String>, cx: &mut Context<Self>) {
+        self.loading = false;
+        match landed {
+            Err(message) => self.error = Some(message),
+            Ok(catalog) if catalog.errors.is_empty() => {
+                self.catalog = catalog;
+                self.error = None;
+                self.sync_menu_skills(cx);
+            }
+            Ok(catalog) => self.error = catalog.errors.first().cloned(),
+        }
+        cx.notify();
+    }
+
+    /// A CLI mutation failed: the page leaves its loading state and a toast
+    /// says why. The toast's redraw draws the page too: it is composed
+    /// uncached inside the root's frame (`compose_skills_page`).
+    fn land_failure(&mut self, title: &'static str, message: String, cx: &mut Context<Self>) {
+        self.loading = false;
+        self.overlays.update(cx, |overlays, cx| {
+            overlays.toast(title, message, cx);
+        });
+    }
+
+    /// Open or close the page's dialog.
+    fn set_dialog(&mut self, dialog: SkillsDialog, cx: &mut Context<Self>) {
+        self.dialog = dialog;
+        cx.notify();
+    }
+
+    /// The New dialog's inline error (a name taken, a write that failed).
+    fn set_new_error(&mut self, error: String, cx: &mut Context<Self>) {
+        if let SkillsDialog::New { error: slot, .. } = &mut self.dialog {
+            *slot = Some(error);
             cx.notify();
         }
     }
@@ -712,22 +752,14 @@ impl SkillsPage {
         let program = self.program.clone();
         let root = self.root();
         self.wire_call(cx, move || skills::list_catalog(&program, &root), |this, catalog, cx| {
-            this.loading = false;
-            if catalog.errors.is_empty() {
-                // A clean list replaces the page and clears the banner; the
-                // selection follows by id, dropping off the page when gone.
-                let selected = this.selected.clone();
-                this.catalog = catalog;
-                this.error = None;
-                this.sync_menu_skills(cx);
-                if selected.as_ref().is_some_and(|id| this.skills_lookup(id).is_none()) {
-                    this.selected = None;
-                    this.detail_body = None;
-                }
-            } else {
-                this.error = catalog.errors.first().cloned();
+            // A clean list replaces the page and clears the banner; the
+            // selection follows by id, dropping off the page when gone.
+            let clean = catalog.errors.is_empty();
+            this.land_catalog(Ok(catalog), cx);
+            if clean && this.selected.as_ref().is_some_and(|id| this.skills_lookup(id).is_none()) {
+                this.selected = None;
+                this.detail_body = None;
             }
-            cx.notify();
         });
     }
 
@@ -822,19 +854,7 @@ impl SkillsPage {
                 let catalog = skills::list_catalog(&program, &root);
                 (result, catalog)
             },
-            |this, (result, catalog), cx| {
-                this.loading = false;
-                if let Err(message) = result {
-                    this.error = Some(message);
-                } else if catalog.errors.is_empty() {
-                    this.catalog = catalog;
-                    this.error = None;
-                    this.sync_menu_skills(cx);
-                } else {
-                    this.error = catalog.errors.first().cloned();
-                }
-                cx.notify();
-            },
+            |this, (result, catalog), cx| this.land_catalog(result.map(|()| catalog), cx),
         );
         cx.notify();
     }
@@ -897,7 +917,7 @@ impl SkillsPage {
     fn sync_menu_skills(&mut self, cx: &mut Context<Self>) {
         let root = self.root();
         let rows = self.catalog.rows.clone();
-        self.overlays.update(cx, |overlays, _| overlays.set_skills(root, rows));
+        self.overlays.update(cx, |overlays, cx| overlays.set_skills(root, rows, cx));
     }
 
     /// Toggle the "Add skill ▾" menu (A1). Opening dry-runs both sources
@@ -905,7 +925,6 @@ impl SkillsPage {
     pub(crate) fn toggle_add_menu(&mut self, cx: &mut Context<Self>) {
         if self.add_menu_open(cx) {
             self.set_add_menu(false, cx);
-            cx.notify();
             return;
         }
         self.set_add_menu(true, cx);
@@ -938,7 +957,6 @@ impl SkillsPage {
                 cx.notify();
             },
         );
-        cx.notify();
     }
 
     /// The menu's import trailing: "N new", "none", or "…" while counting.
@@ -961,8 +979,7 @@ impl SkillsPage {
         self.set_add_menu(false, cx);
         self.new_name.update(cx, |state, cx| state.set_value(String::new(), window, cx));
         self.new_desc.update(cx, |state, cx| state.set_value(String::new(), window, cx));
-        self.dialog = SkillsDialog::New { scope: TargetScope::Project, error: None };
-        cx.notify();
+        self.set_dialog(SkillsDialog::New { scope: TargetScope::Project, error: None }, cx);
     }
 
     /// Move New skill… / the install preview between scopes.
@@ -981,8 +998,7 @@ impl SkillsPage {
     /// Close the dialog, if one stands open.
     pub(crate) fn close_skills_dialog(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.dialog, SkillsDialog::Closed) {
-            self.dialog = SkillsDialog::Closed;
-            cx.notify();
+            self.set_dialog(SkillsDialog::Closed, cx);
         }
     }
 
@@ -1000,10 +1016,7 @@ impl SkillsPage {
             .err()
             .or_else(|| skills::validate_skill_description(&description).err());
         if let Some(error) = error {
-            if let SkillsDialog::New { error: slot, .. } = &mut self.dialog {
-                *slot = Some(error);
-            }
-            cx.notify();
+            self.set_new_error(error, cx);
             return;
         }
         let root = self.root();
@@ -1014,14 +1027,11 @@ impl SkillsPage {
                 let file = match skills::create_project_skill(&root, &name, &description) {
                     Ok(file) => file,
                     Err(error) => {
-                        if let SkillsDialog::New { error: slot, .. } = &mut self.dialog {
-                            *slot = Some(error);
-                        }
-                        cx.notify();
+                        self.set_new_error(error, cx);
                         return;
                     }
                 };
-                self.dialog = SkillsDialog::Closed;
+                self.set_dialog(SkillsDialog::Closed, cx);
                 let dir = file.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| file.clone());
                 self.wire_call(
                     cx,
@@ -1031,25 +1041,17 @@ impl SkillsPage {
                         (verdict, catalog, file)
                     },
                     move |this, (verdict, catalog, file), cx| {
-                        this.loading = false;
-                        if catalog.errors.is_empty() {
-                            this.catalog = catalog;
-                            this.error = None;
-                            this.sync_menu_skills(cx);
-                        } else {
-                            this.error = catalog.errors.first().cloned();
-                        }
+                        this.land_catalog(Ok(catalog), cx);
                         this.selected = Some(select.clone());
                         this.load_selected_body(cx);
                         let (title, detail) = match verdict {
                             Ok(verdict) => ("Skill created", verdict),
                             Err(message) => ("Skill created, validate failed", message),
                         };
-                        this.overlays.update(cx, |overlays, _| overlays.toast(title, detail));
+                        this.overlays.update(cx, |overlays, cx| overlays.toast(title, detail, cx));
                         if crate::system_open::open_detached([&file]).is_err() {
                             crate::baaz_log!("could not open {}", file.display());
                         }
-                        cx.notify();
                     },
                 );
                 self.loading = true;
@@ -1064,13 +1066,10 @@ impl SkillsPage {
                             .map_err(|e| format!("Could not write the scaffold: {e}"))
                     })
                 {
-                    if let SkillsDialog::New { error: slot, .. } = &mut self.dialog {
-                        *slot = Some(error);
-                    }
-                    cx.notify();
+                    self.set_new_error(error, cx);
                     return;
                 }
-                self.dialog = SkillsDialog::Closed;
+                self.set_dialog(SkillsDialog::Closed, cx);
                 self.wire_call(
                     cx,
                     move || {
@@ -1080,16 +1079,9 @@ impl SkillsPage {
                         (installed, catalog)
                     },
                     move |this, (installed, catalog), cx| {
-                        this.loading = false;
                         match installed {
                             Ok(()) => {
-                                if catalog.errors.is_empty() {
-                                    this.catalog = catalog;
-                                    this.error = None;
-                                    this.sync_menu_skills(cx);
-                                } else {
-                                    this.error = catalog.errors.first().cloned();
-                                }
+                                this.land_catalog(Ok(catalog), cx);
                                 this.selected = Some(select.clone());
                                 this.load_selected_body(cx);
                                 // The installed copy is the row's file now;
@@ -1105,18 +1097,17 @@ impl SkillsPage {
                                         crate::baaz_log!("could not open {}", path.display());
                                     }
                                 }
-                                this.overlays.update(cx, |overlays, _| {
-                                    overlays.toast("Skill created", format!("Personal skill `{select}` installed."));
+                                this.overlays.update(cx, |overlays, cx| {
+                                    overlays.toast("Skill created", format!("Personal skill `{select}` installed."), cx);
                                 });
                             }
                             Err(message) => {
-                                this.error = Some(message.clone());
-                                this.overlays.update(cx, |overlays, _| {
-                                    overlays.toast("Create failed", message);
+                                this.land_catalog(Err(message.clone()), cx);
+                                this.overlays.update(cx, |overlays, cx| {
+                                    overlays.toast("Create failed", message, cx);
                                 });
                             }
                         }
-                        cx.notify();
                     },
                 );
                 self.loading = true;
@@ -1125,7 +1116,6 @@ impl SkillsPage {
         // The New dialog's fields clear only on open, so a failed Create
         // keeps what was typed.
         let _ = window;
-        cx.notify();
     }
 
     /// Load the selected row's SKILL.md the way selection does: disk reads
@@ -1162,7 +1152,6 @@ impl SkillsPage {
     /// the preview modal.
     pub(crate) fn choose_install_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_add_menu(false, cx);
-        cx.notify();
         cx.activate(true);
         let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
@@ -1254,7 +1243,7 @@ impl SkillsPage {
         let program = self.program.clone();
         let dir_path = std::path::PathBuf::from(&dir);
         let select = name.clone();
-        self.dialog = SkillsDialog::Closed;
+        self.set_dialog(SkillsDialog::Closed, cx);
         self.wire_call(
             cx,
             move || {
@@ -1273,40 +1262,27 @@ impl SkillsPage {
                 (outcome, catalog)
             },
             move |this, (outcome, catalog), cx| {
-                this.loading = false;
                 match outcome {
                     Ok(()) => {
-                        if catalog.errors.is_empty() {
-                            this.catalog = catalog;
-                            this.error = None;
-                            this.sync_menu_skills(cx);
-                        } else {
-                            this.error = catalog.errors.first().cloned();
-                        }
+                        this.land_catalog(Ok(catalog), cx);
                         this.selected = Some(select.clone());
                         this.load_selected_body(cx);
-                        this.overlays.update(cx, |overlays, _| {
-                            overlays.toast("Skill installed", format!("`{}` is ready.", select.as_str()));
+                        this.overlays.update(cx, |overlays, cx| {
+                            overlays.toast("Skill installed", format!("`{}` is ready.", select.as_str()), cx);
                         });
                     }
-                    Err(message) => {
-                        this.overlays.update(cx, |overlays, _| {
-                            overlays.toast("Install failed", message);
-                        });
-                    }
+                    Err(message) => this.land_failure("Install failed", message, cx),
                 }
-                cx.notify();
             },
         );
         self.loading = true;
-        cx.notify();
     }
 
     /// Open the import preview for a source (A4): the dry-run, classified
     /// against the landed catalog.
     pub(crate) fn open_import(&mut self, source: skills::ImportSource, cx: &mut Context<Self>) {
         self.set_add_menu(false, cx);
-        self.dialog = SkillsDialog::Import { source, rows: Vec::new(), skipped: 0, loading: true, error: None };
+        self.set_dialog(SkillsDialog::Import { source, rows: Vec::new(), skipped: 0, loading: true, error: None }, cx);
         let program = self.program.clone();
         let catalog = self.catalog.clone();
         self.wire_call(
@@ -1343,7 +1319,6 @@ impl SkillsPage {
                 cx.notify();
             },
         );
-        cx.notify();
     }
 
     /// Flip one import row's checkbox. Installed rows are dead (A4).
@@ -1382,7 +1357,7 @@ impl SkillsPage {
         let count = picked.len();
         let root = self.root();
         let program = self.program.clone();
-        self.dialog = SkillsDialog::Closed;
+        self.set_dialog(SkillsDialog::Closed, cx);
         self.wire_call(
             cx,
             move || {
@@ -1405,32 +1380,19 @@ impl SkillsPage {
                 (outcome, catalog)
             },
             move |this, (outcome, catalog), cx| {
-                this.loading = false;
                 match outcome {
                     Ok(()) => {
-                        if catalog.errors.is_empty() {
-                            this.catalog = catalog;
-                            this.error = None;
-                            this.sync_menu_skills(cx);
-                        } else {
-                            this.error = catalog.errors.first().cloned();
-                        }
+                        this.land_catalog(Ok(catalog), cx);
                         let noun = if count == 1 { "skill" } else { "skills" };
-                        this.overlays.update(cx, |overlays, _| {
-                            overlays.toast("Import done", format!("Imported {count} {noun}."));
+                        this.overlays.update(cx, |overlays, cx| {
+                            overlays.toast("Import done", format!("Imported {count} {noun}."), cx);
                         });
                     }
-                    Err(message) => {
-                        this.overlays.update(cx, |overlays, _| {
-                            overlays.toast("Import failed", message);
-                        });
-                    }
+                    Err(message) => this.land_failure("Import failed", message, cx),
                 }
-                cx.notify();
             },
         );
         self.loading = true;
-        cx.notify();
     }
 
     /// "Ask Muse to write one" (A5; shown only while Muse is connected): a
@@ -1465,14 +1427,13 @@ impl SkillsPage {
                 .unwrap_or_else(|| skills::project_skill_dir(&root, &row.name).to_string_lossy().into_owned());
             (format!("Remove {} from this project?", row.name), format!("Moves {path} to the Trash."))
         };
-        self.dialog = SkillsDialog::Remove {
+        self.set_dialog(SkillsDialog::Remove {
             key: key.to_owned(),
             name: row.name,
             headline,
             detail,
             personal,
-        };
-        cx.notify();
+        }, cx);
     }
 
     /// Run the confirmed Remove (A6): Personal uninstalls through the CLI;
@@ -1495,28 +1456,16 @@ impl SkillsPage {
                     (outcome, catalog)
                 },
                 move |this, (outcome, catalog), cx| {
-                    this.loading = false;
                     match outcome {
                         Ok(()) => {
-                            if catalog.errors.is_empty() {
-                                this.catalog = catalog;
-                                this.error = None;
-                                this.sync_menu_skills(cx);
-                            } else {
-                                this.error = catalog.errors.first().cloned();
-                            }
-                            this.overlays.update(cx, |overlays, _| {
-                                overlays.toast("Skill removed", format!("`{name}` is gone."));
+                            this.land_catalog(Ok(catalog), cx);
+                            this.overlays.update(cx, |overlays, cx| {
+                                overlays.toast("Skill removed", format!("`{name}` is gone."), cx);
                             });
                         }
-                        Err(message) => {
-                            this.overlays.update(cx, |overlays, _| {
-                                overlays.toast("Remove failed", message);
-                            });
-                        }
+                        Err(message) => this.land_failure("Remove failed", message, cx),
                     }
                     let _ = key;
-                    cx.notify();
                 },
             );
             self.loading = true;
@@ -1529,15 +1478,14 @@ impl SkillsPage {
                 .unwrap_or_else(|| skills::project_skill_dir(&root, &name));
             match skills::move_to_trash_dir(&dir, &skills::trash_dir()) {
                 Ok(_) => {
-                    self.overlays.update(cx, |overlays, _| {
-                        overlays.toast("Skill removed", format!("`{name}` moved to the Trash."));
+                    self.overlays.update(cx, |overlays, cx| {
+                        overlays.toast("Skill removed", format!("`{name}` moved to the Trash."), cx);
                     });
                 }
                 Err(message) => {
-                    self.overlays.update(cx, |overlays, _| {
-                        overlays.toast("Remove failed", message);
+                    self.overlays.update(cx, |overlays, cx| {
+                        overlays.toast("Remove failed", message, cx);
                     });
-                    cx.notify();
                     return;
                 }
             }
@@ -1958,7 +1906,6 @@ impl SkillsPage {
         // transparent, so the page behind it captures unchanged.
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
             this.set_add_menu(false, cx);
-            cx.notify();
         });
         // "Ask Muse to write one" is Muse's own row: it always opens a Muse
         // session (`/create-skill` is Muse's), so it names its provider
@@ -2571,16 +2518,14 @@ impl SkillsPage {
                     let dir = dir.clone();
                     this.wire_call(cx, move || skills::validate_skill(&program, &dir), |this, result, cx| {
                         match result {
-                            Ok(verdict) => this.overlays.update(cx, |overlays, _| {
-                                overlays.toast("Skill valid", verdict);
+                            Ok(verdict) => this.overlays.update(cx, |overlays, cx| {
+                                overlays.toast("Skill valid", verdict, cx);
                             }),
-                            Err(message) => this.overlays.update(cx, |overlays, _| {
-                                overlays.toast("Validate failed", message);
+                            Err(message) => this.overlays.update(cx, |overlays, cx| {
+                                overlays.toast("Validate failed", message, cx);
                             }),
                         }
-                        cx.notify();
                     });
-                    cx.notify();
                 });
                 menu = menu.child(
                     button("skill-validate", "Validate")
@@ -2591,7 +2536,6 @@ impl SkillsPage {
             let copy = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
                 this.set_overflow(false, cx);
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone()));
-                cx.notify();
             });
             menu = menu.child(
                 button("skill-copy-path", "Copy path").accessibility_label(format!("Copy {} path", skill.name)).on_click(copy),
@@ -2630,7 +2574,6 @@ impl SkillsPage {
             SkillDetailIntent::Action(action) if action.as_ref() == "overflow" => {
                 let open = !this.overflow_open(cx);
                 this.set_overflow(open, cx);
-                cx.notify();
             }
             SkillDetailIntent::Action(action) if action.as_ref() == "reveal" => {
                 if let Some(row) = this.catalog.find(&key) {

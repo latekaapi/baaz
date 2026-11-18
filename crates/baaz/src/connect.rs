@@ -759,11 +759,11 @@ impl ConnectScreen {
     /// screen.
     fn set_menu(&mut self, open: bool, cx: &mut Context<Self>) {
         let owner = cx.entity_id();
-        self.overlays.update(cx, |o, _| {
+        self.overlays.update(cx, |o, cx| {
             if open {
-                o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::ConnectMenu).owner(owner));
+                o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::ConnectMenu).owner(owner), cx);
             } else {
-                o.stack.close(crate::overlay_stack::LayerKind::ConnectMenu);
+                o.close(crate::overlay_stack::LayerKind::ConnectMenu, cx);
             }
         });
     }
@@ -787,7 +787,6 @@ impl ConnectScreen {
             return false;
         }
         self.set_menu(true, cx);
-        cx.notify();
         true
     }
 
@@ -804,11 +803,9 @@ impl ConnectScreen {
             ConnectIntent::ToggleDefaultMenu => {
                 let open = !self.menu_open(cx);
                 self.set_menu(open, cx);
-                cx.notify();
             }
             ConnectIntent::CloseDefaultMenu => {
                 self.set_menu(false, cx);
-                cx.notify();
             }
             ConnectIntent::SetDefault(provider) => {
                 self.set_menu(false, cx);
@@ -953,8 +950,8 @@ impl Harness {
 
     /// Take Muse's sign-in sheet off the overlay stack, nothing else.
     pub(crate) fn close_muse_sheet_entry(&mut self, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |o, _| {
-            o.stack.close(crate::overlay_stack::LayerKind::MuseSheet);
+        self.overlays.update(cx, |o, cx| {
+            o.close(crate::overlay_stack::LayerKind::MuseSheet, cx);
         });
     }
 
@@ -1663,9 +1660,10 @@ mod tests {
     }
 
     /// Task 4.4: the connect screen is its own region entity over the
-    /// shared provider model. Its footer menu, and a Codex sign-in moving on
-    /// the model, land on the screen and notify the screen alone (and the
-    /// model the screen observes); the root is never notified. Draws once
+    /// shared provider model. Its footer menu (an entry on the overlay
+    /// stack, which notifies — plan 4.9b) and a Codex sign-in moving on the
+    /// model (which the screen observes) land on the screen; the root is
+    /// never notified. Draws once
     /// first, so the screen stands as a capture shows it.
     #[gpui::test]
     fn the_connect_screen_follows_its_menu_and_the_model_without_notifying_the_root(cx: &mut gpui::TestAppContext) {
@@ -1694,10 +1692,16 @@ mod tests {
         );
         vc.run_until_parked();
         let (screen, model) = vc.update(|_, cx| (baaz.read(cx).connect_screen.clone(), baaz.read(cx).provider_model.clone()));
-        let (screen_notes, root_notes) = (Rc::new(Cell::new(0usize)), Rc::new(Cell::new(0usize)));
+        let overlays = vc.update(|_, cx| baaz.read(cx).overlays.clone());
+        let (screen_notes, root_notes, stack_notes) =
+            (Rc::new(Cell::new(0usize)), Rc::new(Cell::new(0usize)), Rc::new(Cell::new(0usize)));
         let _watch = vc.update(|_, cx| {
-            let (s, r) = (screen_notes.clone(), root_notes.clone());
-            (cx.observe(&screen, move |_, _| s.set(s.get() + 1)), cx.observe(&baaz, move |_, _| r.set(r.get() + 1)))
+            let (s, r, o) = (screen_notes.clone(), root_notes.clone(), stack_notes.clone());
+            (
+                cx.observe(&screen, move |_, _| s.set(s.get() + 1)),
+                cx.observe(&baaz, move |_, _| r.set(r.get() + 1)),
+                cx.observe(&overlays, move |_, _| o.set(o.get() + 1)),
+            )
         });
         vc.update(|_, cx| screen.update(cx, |screen, cx| screen.intent(ConnectIntent::ToggleDefaultMenu, cx)));
         let moved = vc.update(|_, cx| model.update(cx, |model, cx| model.step_codex_login("device", cx)));
@@ -1713,7 +1717,11 @@ mod tests {
                 "the sign-in moved on the model"
             );
         });
-        assert!(screen_notes.get() >= 2, "the screen is notified for its menu and for the model: {}", screen_notes.get());
+        // Plan 4.9b: the menu is an entry on the overlay stack, whose own
+        // notify redraws the screen (composed uncached in the root's frame);
+        // the model's change reaches the screen through its observer.
+        assert!(stack_notes.get() >= 1, "the stack is notified for the menu: {}", stack_notes.get());
+        assert!(screen_notes.get() >= 1, "the screen is notified for the model: {}", screen_notes.get());
         assert_eq!(root_notes.get(), 0, "the root is not notified for the screen's own state");
         restore_scripted(held);
     }

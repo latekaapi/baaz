@@ -156,6 +156,19 @@ pub struct Menu {
 }
 
 impl Menu {
+    /// Move the selection by `delta` rows within `count`, wrapping; whether
+    /// it moved.
+    pub fn step(&mut self, delta: isize, count: usize) -> bool {
+        let before = self.selected;
+        if count == 0 {
+            self.selected = 0;
+        } else {
+            let count = count as isize;
+            self.selected = (((self.selected as isize + delta) % count + count) % count) as usize;
+        }
+        self.selected != before
+    }
+
     /// A chip picker with the selection on `selected`.
     pub fn picker(kind: MenuKind, selected: usize) -> Self {
         Self { kind, selected, filter: String::new(), at: 0, project: None, project_header: false, sub_open: false, session: None }
@@ -226,17 +239,79 @@ pub struct Overlays {
     roots_order: Vec<String>,
     /// Monotonic id source, so two identical toasts are still two toasts.
     next_toast: u64,
+    /// Where the shell's own menus seat ([`Anchor`]), in window
+    /// coordinates, recorded once per frame by `on_children_prepainted`
+    /// wrappers on their triggers — what `aui::overlay::anchored_menu`
+    /// seats them at (menus anchor to their triggers, never constants).
+    anchors: [Option<gpui::Bounds<gpui::Pixels>>; 2],
+}
+
+/// A shell menu's anchor ([`Overlays::note_anchor`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Anchor {
+    /// The header overflow `…` button: the overflow menu's trigger.
+    Overflow,
+    /// The open project menu's own rect: the Colour submenu's anchor is
+    /// computed off its right edge at the Colour row's height.
+    ProjectMenu,
 }
 
 impl Overlays {
+    // Every mutation below is the owner's: it changes the stack or the
+    // toasts and notifies this entity once, when something changed. The root
+    // reads the stack in every frame (`modal_overlay_wanted`), so that notify
+    // redraws the root and runs its settle (which observes this entity);
+    // callers never notify after these (plan 4.9b).
+
     /// The modal, if any.
     pub fn dialog(&self) -> Option<&Dialog> {
         self.stack.dialog()
     }
 
+    /// Open `entry` on top, replacing an open entry of its kind
+    /// ([`OverlayStack::push`]).
+    pub(crate) fn push(&mut self, entry: Entry, cx: &mut gpui::Context<Self>) {
+        self.stack.push(entry);
+        cx.notify();
+    }
+
+    /// Close the entry of `kind`, if open ([`OverlayStack::close`]).
+    pub(crate) fn close(&mut self, kind: LayerKind, cx: &mut gpui::Context<Self>) -> Option<Entry> {
+        let closed = self.stack.close(kind);
+        if closed.is_some() {
+            cx.notify();
+        }
+        closed
+    }
+
+    /// Close the top entry ([`OverlayStack::pop`]).
+    pub(crate) fn pop(&mut self, cx: &mut gpui::Context<Self>) -> Option<Entry> {
+        let popped = self.stack.pop();
+        if popped.is_some() {
+            cx.notify();
+        }
+        popped
+    }
+
+    /// Close every entry of the `kinds`, as a mode switch does.
+    pub(crate) fn close_all(&mut self, kinds: &[LayerKind], cx: &mut gpui::Context<Self>) {
+        if kinds.iter().any(|kind| self.stack.is_open(*kind)) {
+            self.stack.close_all(kinds);
+            cx.notify();
+        }
+    }
+
+    /// Open `layer` (`open`) or close its kind: a flag-shaped toggle.
+    pub(crate) fn set(&mut self, layer: Layer, open: bool, cx: &mut gpui::Context<Self>) {
+        if open || self.stack.is_open(layer.kind()) {
+            self.stack.set(layer, open);
+            cx.notify();
+        }
+    }
+
     /// Dismiss the modal.
-    pub fn close_dialog(&mut self) {
-        self.stack.close(LayerKind::Dialog);
+    pub fn close_dialog(&mut self, cx: &mut gpui::Context<Self>) {
+        self.close(LayerKind::Dialog, cx);
     }
 
     /// The open command palette, if any.
@@ -245,8 +320,8 @@ impl Overlays {
     }
 
     /// Close the palette.
-    pub fn close_palette(&mut self) {
-        self.stack.close(LayerKind::Palette);
+    pub fn close_palette(&mut self, cx: &mut gpui::Context<Self>) {
+        self.close(LayerKind::Palette, cx);
     }
 
     /// The open popover, if any.
@@ -254,36 +329,61 @@ impl Overlays {
         self.stack.menu()
     }
 
-    /// The open popover, to move its selection or filter.
-    pub fn menu_mut(&mut self) -> Option<&mut Menu> {
-        self.stack.menu_mut()
-    }
-
-    /// Close the open popover.
-    pub fn close_menu(&mut self) {
-        self.stack.close(LayerKind::Menu);
-    }
-
-    /// Close the open popover from a view the root does not hear (the
-    /// composer's menus), and say so: the root's settle observes the stack
-    /// and hands the keyboard back where the menu found it.
-    pub(crate) fn close_menu_and_tell(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.menu().is_some() {
-            self.close_menu();
+    /// Change the open popover of `kind` (its submenu flag, its selection),
+    /// if that is the open one: `edit` returns whether it changed anything.
+    pub(crate) fn edit_menu(&mut self, kind: Option<MenuKind>, edit: impl FnOnce(&mut Menu) -> bool, cx: &mut gpui::Context<Self>) {
+        let Some(menu) = self.stack.menu_mut().filter(|menu| kind.is_none_or(|kind| menu.kind == kind)) else {
+            return;
+        };
+        if edit(menu) {
             cx.notify();
         }
     }
 
+    /// Change the open import sheet's content: `change` answers `None` when
+    /// it changed nothing (and nothing is redrawn).
+    pub(crate) fn edit_import_sheet<R>(
+        &mut self,
+        change: impl FnOnce(&mut crate::import_ui::ImportSheet) -> Option<R>,
+        cx: &mut gpui::Context<Self>,
+    ) -> Option<R> {
+        let changed = self.stack.import_sheet_mut().and_then(change);
+        if changed.is_some() {
+            cx.notify();
+        }
+        changed
+    }
+
+    /// Change the open Chrome import sheet's content: `change` answers
+    /// `None` when it changed nothing (a stale count, a run already going).
+    pub(crate) fn edit_chrome_import<R>(
+        &mut self,
+        change: impl FnOnce(&mut crate::chrome_import_ui::ChromeImportSheet) -> Option<R>,
+        cx: &mut gpui::Context<Self>,
+    ) -> Option<R> {
+        let changed = self.stack.chrome_import_mut().and_then(change);
+        if changed.is_some() {
+            cx.notify();
+        }
+        changed
+    }
+
+    /// Close the open popover. The root's settle observes the stack and
+    /// hands the keyboard back where the menu found it.
+    pub fn close_menu(&mut self, cx: &mut gpui::Context<Self>) {
+        self.close(LayerKind::Menu, cx);
+    }
+
     /// Open a menu, replacing whatever menu was open.
-    pub fn open(&mut self, menu: Menu) {
-        self.stack.push(Entry::new(Layer::Menu(menu)));
+    pub fn open(&mut self, menu: Menu, cx: &mut gpui::Context<Self>) {
+        self.push(Entry::new(Layer::Menu(menu)), cx);
     }
 
     /// Open one of the composer's own menus (a caret menu or a chip picker),
     /// replacing whatever menu was open: closing it hands the keyboard to
     /// the composer (`composer`) unless another field took it.
-    pub(crate) fn open_composer_menu(&mut self, menu: Menu, composer: gpui::FocusHandle) {
-        self.stack.push(Entry::new(Layer::Menu(menu)).restore_to(composer));
+    pub(crate) fn open_composer_menu(&mut self, menu: Menu, composer: gpui::FocusHandle, cx: &mut gpui::Context<Self>) {
+        self.push(Entry::new(Layer::Menu(menu)).restore_to(composer), cx);
     }
 
     /// Whether `kind` is the open menu.
@@ -292,24 +392,19 @@ impl Overlays {
     }
 
     /// Move the selection by `delta` rows within `count`, wrapping.
-    pub fn move_selection(&mut self, delta: isize, count: usize) {
-        let Some(menu) = self.menu_mut() else { return };
-        if count == 0 {
-            menu.selected = 0;
-            return;
-        }
-        let count = count as isize;
-        menu.selected = (((menu.selected as isize + delta) % count + count) % count) as usize;
+    pub fn move_selection(&mut self, delta: isize, count: usize, cx: &mut gpui::Context<Self>) {
+        self.edit_menu(None, |menu| menu.step(delta, count), cx);
     }
 
     /// Show a note. Toasts are informational here — a compaction that did
     /// nothing, a command this build does not have — so they carry no action.
     /// Returns the toast's id, so callers with something to retract (the
     /// feedback shell's "mode is off" note) can dismiss it later.
-    pub fn toast(&mut self, title: impl Into<String>, body: impl Into<String>) -> String {
+    pub fn toast(&mut self, title: impl Into<String>, body: impl Into<String>, cx: &mut gpui::Context<Self>) -> String {
         self.next_toast += 1;
         let id = format!("toast-{}", self.next_toast);
         self.toasts.push(ToastData::new(id.clone(), title.into(), body.into()).kind(ToastKind::Neutral));
+        cx.notify();
         id
     }
 
@@ -323,6 +418,7 @@ impl Overlays {
         title: impl Into<String>,
         body: impl Into<String>,
         action: impl Into<String>,
+        cx: &mut gpui::Context<Self>,
     ) -> String {
         self.next_toast += 1;
         let id = format!("toast-{}", self.next_toast);
@@ -332,12 +428,35 @@ impl Overlays {
                 .kind(ToastKind::Neutral)
                 .action(ToastAction::new(label.to_lowercase(), label).primary()),
         );
+        cx.notify();
         id
     }
 
     /// Drop the toast with this id.
-    pub fn dismiss_toast(&mut self, id: &str) {
+    pub fn dismiss_toast(&mut self, id: &str, cx: &mut gpui::Context<Self>) {
+        let before = self.toasts.len();
         self.toasts.retain(|t| t.id != id);
+        if self.toasts.len() != before {
+            cx.notify();
+        }
+    }
+
+    /// Record `anchor`'s window bounds, redrawing only when they arrive for
+    /// the first time (nothing → something): a menu opened before the first
+    /// prepaint appears on the next frame instead of flashing at a wrong
+    /// seat, and steady bounds never schedule work of their own.
+    pub(crate) fn note_anchor(&mut self, anchor: Anchor, bounds: gpui::Bounds<gpui::Pixels>, cx: &mut gpui::Context<Self>) {
+        let slot = &mut self.anchors[anchor as usize];
+        let had = slot.is_some();
+        *slot = Some(bounds);
+        if !had {
+            cx.notify();
+        }
+    }
+
+    /// `anchor`'s last recorded bounds.
+    pub(crate) fn anchor(&self, anchor: Anchor) -> Option<gpui::Bounds<gpui::Pixels>> {
+        self.anchors[anchor as usize]
     }
 
     /// Whether `root`'s files and skills are already cached.
@@ -359,7 +478,7 @@ impl Overlays {
     /// Replace one root's skills without touching its files: the Skills page
     /// pushes each landed catalog here so the `/` menu follows the page
     /// after any mutation (D64).
-    pub fn set_skills(&mut self, root: String, skills: Vec<crate::skills::Skill>) {
+    pub fn set_skills(&mut self, root: String, skills: Vec<crate::skills::Skill>, cx: &mut gpui::Context<Self>) {
         self.roots_order.retain(|cached| cached != &root);
         self.roots_order.push(root.clone());
         while self.roots_order.len() > MAX_CACHED_ROOTS {
@@ -368,6 +487,7 @@ impl Overlays {
             self.skills_by_root.remove(&oldest);
         }
         self.skills_by_root.insert(root, skills);
+        cx.notify();
     }
 
     /// Store a walked root's files and skills, evicting the least recently
@@ -378,6 +498,7 @@ impl Overlays {
         root: String,
         files: crate::files::WalkResult,
         skills: Vec<crate::skills::Skill>,
+        cx: &mut gpui::Context<Self>,
     ) {
         self.roots_order.retain(|cached| cached != &root);
         self.roots_order.push(root.clone());
@@ -388,6 +509,7 @@ impl Overlays {
         }
         self.files_by_root.insert(root.clone(), files);
         self.skills_by_root.insert(root, skills);
+        cx.notify();
     }
 }
 
@@ -747,7 +869,7 @@ mod tests {
             action: DialogAction::Dismiss,
             archive_target: None,
         })));
-        overlays.open(Menu::picker(MenuKind::Model, 0));
+        overlays.stack.push(Entry::new(Layer::Menu(Menu::picker(MenuKind::Model, 0))));
         assert!(overlays.stack.pop().is_some());
         assert!(overlays.menu().is_none() && overlays.dialog().is_some());
         assert!(overlays.stack.pop().is_some());
@@ -756,20 +878,18 @@ mod tests {
 
     #[test]
     fn the_selection_wraps_both_ways() {
-        let mut overlays = Overlays::default();
-        overlays.open(Menu::picker(MenuKind::Effort, 0));
-        overlays.move_selection(-1, 3);
-        assert_eq!(overlays.menu().unwrap().selected, 2);
-        overlays.move_selection(1, 3);
-        assert_eq!(overlays.menu().unwrap().selected, 0);
+        let mut menu = Menu::picker(MenuKind::Effort, 0);
+        assert!(menu.step(-1, 3));
+        assert_eq!(menu.selected, 2);
+        assert!(menu.step(1, 3));
+        assert_eq!(menu.selected, 0);
     }
 
     #[test]
     fn an_empty_menu_keeps_the_selection_at_zero() {
-        let mut overlays = Overlays::default();
-        overlays.open(Menu::caret(MenuKind::Command, 0));
-        overlays.move_selection(1, 0);
-        assert_eq!(overlays.menu().unwrap().selected, 0);
+        let mut menu = Menu::caret(MenuKind::Command, 0);
+        assert!(!menu.step(1, 0));
+        assert_eq!(menu.selected, 0);
     }
 
     #[test]
@@ -797,32 +917,36 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_per_root_cache_serves_each_root_its_own_files() {
-        let mut overlays = Overlays::default();
+    #[gpui::test]
+    fn the_per_root_cache_serves_each_root_its_own_files(cx: &mut gpui::TestAppContext) {
+        let entity = gpui::AppContext::new(cx, |_| Overlays::default());
+        entity.update(cx, |overlays, cx| {
         assert!(overlays.files_for("/work/a").is_empty());
-        overlays.insert_root("/work/a".into(), walk_with(&["src/main.rs"]), Vec::new());
-        overlays.insert_root("/work/b".into(), walk_with(&["docs/notes.md"]), Vec::new());
+        overlays.insert_root("/work/a".into(), walk_with(&["src/main.rs"]), Vec::new(), cx);
+        overlays.insert_root("/work/b".into(), walk_with(&["docs/notes.md"]), Vec::new(), cx);
         assert_eq!(overlays.files_for("/work/a").len(), 1);
         assert_eq!(overlays.files_for("/work/a")[0].path, "src/main.rs");
         assert_eq!(overlays.files_for("/work/b")[0].path, "docs/notes.md");
         assert!(overlays.has_root("/work/a"));
         assert!(!overlays.has_root("/work/c"));
+        });
     }
 
-    #[test]
-    fn the_cache_holds_eight_roots_and_re_walk_counts_as_use() {
-        let mut overlays = Overlays::default();
+    #[gpui::test]
+    fn the_cache_holds_eight_roots_and_re_walk_counts_as_use(cx: &mut gpui::TestAppContext) {
+        let entity = gpui::AppContext::new(cx, |_| Overlays::default());
+        entity.update(cx, |overlays, cx| {
         for i in 0..MAX_CACHED_ROOTS {
-            overlays.insert_root(format!("/work/{i}"), walk_with(&["f"]), Vec::new());
+            overlays.insert_root(format!("/work/{i}"), walk_with(&["f"]), Vec::new(), cx);
         }
         assert!(overlays.has_root("/work/0"));
         // Re-walking `/work/0` moves it to the back; the next insert drops
         // `/work/1` instead.
-        overlays.insert_root("/work/0".into(), walk_with(&["f"]), Vec::new());
-        overlays.insert_root("/work/new".into(), walk_with(&["f"]), Vec::new());
+        overlays.insert_root("/work/0".into(), walk_with(&["f"]), Vec::new(), cx);
+        overlays.insert_root("/work/new".into(), walk_with(&["f"]), Vec::new(), cx);
         assert!(overlays.has_root("/work/0"));
         assert!(overlays.has_root("/work/new"));
         assert!(!overlays.has_root("/work/1"));
+        });
     }
 }

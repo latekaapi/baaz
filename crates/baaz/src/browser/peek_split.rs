@@ -166,7 +166,7 @@ impl Harness {
                 LinkGesture::Split if person && in_browse => self.open_split(opener, &url, cx),
                 _ => {
                     if self.browser.update(cx, |browser, _| super::chrome::place_popup_tab(&mut browser.tabs, opener, &url, false)).is_some() {
-                        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+                        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
                     }
                 }
             }
@@ -221,7 +221,7 @@ impl Harness {
         if let Some(id) = self.browser.update(cx, |browser, _| super::chrome::place_popup_tab(&mut browser.tabs, peek.opener, &url, true)) {
             peek.state.update(cx, |state, _| state.set_corner_radius(0.0));
             self.browser.update(cx, |browser, cx| browser.adopt_page(id, peek.state, cx));
-            self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+            self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         }
         cx.notify();
     }
@@ -231,8 +231,7 @@ impl Harness {
         let Some(right) = self.browser.update(cx, |browser, _| super::chrome::place_popup_tab(&mut browser.tabs, opener, url, false)) else { return };
         self.browser.update(cx, |browser, _| browser.split = Some(SplitPair { left: opener, right }));
         self.browser.update(cx, |browser, _| browser.split_ratio = 0.5);
-        self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
-        cx.notify();
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
     }
 
     /// A half's ×: leave Split, keep both tabs. Closing the shown half

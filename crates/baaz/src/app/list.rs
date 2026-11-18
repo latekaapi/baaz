@@ -169,8 +169,8 @@ impl Harness {
     pub(crate) fn rename_session(&mut self, session_id: String, name: Option<String>, cx: &mut Context<Self>) {
         let name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
         self.set_override(&session_id, |meta| meta.name = name, cx);
-        self.overlays.update(cx, |o, _| {
-            o.stack.close(crate::overlay_stack::LayerKind::RenameSession);
+        self.overlays.update(cx, |o, cx| {
+            o.close(crate::overlay_stack::LayerKind::RenameSession, cx);
         });
     }
 
@@ -203,9 +203,8 @@ impl Harness {
             .unwrap_or_default();
         self.rename.update(cx, |state, cx| state.set_value(current, window, cx));
         let entry = Self::rename_entry(crate::overlay_stack::Layer::RenameSession(session_id));
-        self.overlays.update(cx, |o, _| o.stack.push(entry));
+        self.overlays.update(cx, |o, cx| o.push(entry, cx));
         window.focus(&self.rename.focus_handle(cx), cx);
-        cx.notify();
     }
 
     /// Commit whatever is in the rename field: the project when a project
@@ -254,25 +253,22 @@ impl Harness {
             detail.to_owned(),
             cx,
         );
-        cx.notify();
     }
 
     /// One toast with one Undo for one undoable batch, and a timer that takes
     /// both away together, so a press after the toast has gone does nothing.
     pub(crate) fn push_undo(&mut self, batch: UndoBatch, title: String, detail: String, cx: &mut Context<Self>) {
         let toast =
-            self.overlays.update(cx, |overlays, _| overlays.toast_with_action(title, &detail, "Undo"));
+            self.overlays.update(cx, |overlays, cx| overlays.toast_with_action(title, &detail, "Undo", cx));
         let undo = batch.clone();
         self.tasks.push(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(UNDO_WINDOW).await;
             let _ = this.update(cx, |this, cx| {
-                this.overlays.update(cx, |overlays, _| overlays.dismiss_toast(&toast));
+                this.overlays.update(cx, |overlays, cx| overlays.dismiss_toast(&toast, cx));
                 this.session_list.update(cx, |list, _| list.undo_stack.retain(|batch| *batch != undo));
-                cx.notify();
             });
         }));
         self.session_list.update(cx, |list, _| list.undo_stack.push(batch));
-        cx.notify();
     }
 
     /// The toast's Undo: put the newest batch back — one hidden row, one
@@ -643,7 +639,7 @@ impl Harness {
             .map(|entry| entry.id.clone())
             .collect();
         if cleared.is_empty() {
-            self.overlays.update(cx, |overlays, _| overlays.toast("No empty sessions", "Every listed session has at least one turn."));
+            self.overlays.update(cx, |overlays, cx| overlays.toast("No empty sessions", "Every listed session has at least one turn.", cx));
             return;
         }
         let n = cleared.len();

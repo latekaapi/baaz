@@ -68,14 +68,13 @@ impl RightPane {
     pub(crate) fn set_page_menu(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.page_menu_open(cx) != open {
             let owner = cx.entity_id();
-            self.overlays.update(cx, |o, _| {
+            self.overlays.update(cx, |o, cx| {
                 if open {
-                    o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::PageMenu).owner(owner));
+                    o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::PageMenu).owner(owner), cx);
                 } else {
-                    o.stack.close(crate::overlay_stack::LayerKind::PageMenu);
+                    o.close(crate::overlay_stack::LayerKind::PageMenu, cx);
                 }
             });
-            cx.notify();
         }
     }
 

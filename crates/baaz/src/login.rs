@@ -96,7 +96,8 @@ impl Login {
 
     /// The method choice: forget the flow. The field keeps whatever it
     /// holds — callers that leave the key form (`Back`, `ChooseAnother`,
-    /// a returned submit) clear it explicitly — so notify after calling.
+    /// a returned submit) clear it explicitly; `Harness::login_back_to_choose`
+    /// resets and redraws.
     /// Whether a sign-in flow is running (the device flow starting or
     /// waiting): closing the sheet cancels it.
     pub(crate) fn flow_running(&self) -> bool {
@@ -146,6 +147,12 @@ fn login_state_name(state: &LoginState) -> &'static str {
 /// `apply_login_sample` and `submit_api_key` from `new`, `logout` from the
 /// account menu, `login_escape` from Escape and `render_login` from `render`.
 impl Harness {
+    /// Back to the method choice ([`Login::reset_to_choose`]), redrawn.
+    pub(crate) fn login_back_to_choose(&mut self, cx: &mut Context<Self>) {
+        self.login.reset_to_choose();
+        cx.notify();
+    }
+
     /// Move to `state`, with the one stderr line a headless `--login-steps`
     /// run follows the flow by. The line carries the state name only — never
     /// a URL, a code or a key.
@@ -311,8 +318,7 @@ impl Harness {
                 Some(LoginMethod::Account) => self.start_device_flow(cx),
                 Some(LoginMethod::ApiKey) => self.login_intent(LoginIntent::UseApiKey, window, cx),
                 None => {
-                    self.login.reset_to_choose();
-                    cx.notify();
+                    self.login_back_to_choose(cx);
                 }
             },
             LoginIntent::Cancel => self.cancel_login_flow(cx),
@@ -435,8 +441,7 @@ impl Harness {
     /// notification that precedes its result is then a no-op — the screen is
     /// already where it would go.
     pub(crate) fn cancel_login_flow(&mut self, cx: &mut Context<Self>) {
-        self.login.reset_to_choose();
-        cx.notify();
+        self.login_back_to_choose(cx);
         if !self.muse_slot.is_ready() {
             return;
         }
@@ -468,8 +473,7 @@ impl Harness {
         if !self.muse_slot.is_ready() {
             self.forget_muse_rows(cx);
             self.auth = Auth::SignedOut;
-            self.login.reset_to_choose();
-            cx.notify();
+            self.login_back_to_choose(cx);
             return;
         }
         let slot = self.muse_slot.clone();
@@ -480,11 +484,11 @@ impl Harness {
                     let env_key = identity.lane == AccountLane::EnvKey;
                     this.auth = Auth::SignedIn(identity);
                     if env_key {
-                        this.overlays.update(cx, |overlays, _| {
+                        this.overlays.update(cx, |overlays, cx| {
                             overlays.toast(
                                 "Still signed in",
                                 "META_API_KEY is set in the environment; unset it and relaunch to sign out.",
-                            );
+                             cx);
                         });
                     }
                     cx.notify();
@@ -576,8 +580,7 @@ impl Harness {
             }
             LoginOutcome::Cancelled => {
                 if !matches!(self.login.state, LoginState::Choose) {
-                    self.login.reset_to_choose();
-                    cx.notify();
+                    self.login_back_to_choose(cx);
                 }
             }
             // An outcome a newer server invented: the honest card is the
@@ -644,8 +647,7 @@ impl Harness {
     pub(crate) fn apply_login_sample(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         match self.args.login {
             LoginSample::Choose => {
-                self.login.reset_to_choose();
-                cx.notify();
+                self.login_back_to_choose(cx);
             }
             // Sample identity, for captures of the signed-in shell. No child runs behind it: the chrome
             // draws, and anything needing the wire quietly does nothing.

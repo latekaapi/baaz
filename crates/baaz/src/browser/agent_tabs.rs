@@ -35,7 +35,7 @@ impl Harness {
                 } else if let Some(main) = self.window_sync.handle {
                     let space = self.browser.read(cx).browse_space();
                     let id = self.browser.update(cx, |browser, _| browser.tabs.open(space, owner.clone(), &url, None));
-                    self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
+                    self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
                     let this = cx.entity();
                     let key = session.clone();
                     cx.defer(move |cx| {
@@ -79,8 +79,7 @@ impl Harness {
                     if let Some(state) = self.browser.read(cx).states.get(&id).cloned() {
                         self.register_tab_page(&session, id, &state, cx);
                     }
-                    self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
-                    cx.notify();
+                    self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
                     Ok(json!({"current": id.0}))
                 }
                 None => Err(String::from("no such tab in this session: browser_tabs lists them")),
@@ -90,8 +89,7 @@ impl Harness {
                     let name = call.params.get("name").and_then(Value::as_str).unwrap_or("").to_owned();
                     let url = self.browser.read(cx).tabs.get(id).map(|tab| tab.url.clone()).unwrap_or_default();
                     self.browser.update(cx, |browser, _| browser.tabs.set_url_title(id, &url, &name));
-                    self.browser.update(cx, |browser, _| browser.schedule_tabs_write());
-                    cx.notify();
+                    self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
                     Ok(json!({"named": id.0}))
                 }
                 None => Err(String::from("no such tab in this session: browser_tabs lists them")),

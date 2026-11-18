@@ -250,7 +250,7 @@ fn feedback_steps_pending(handle: WindowHandle<Root>, cx: &mut AsyncApp) -> bool
                     .clone()
                     .downcast::<crate::app::Harness>()
                     .ok()
-                    .is_some_and(|baaz| baaz.read(cx).has_pending_steps())
+                    .is_some_and(|baaz| baaz.read(cx).feedback.read(cx).has_pending_steps())
             })
             .unwrap_or(false)
     })

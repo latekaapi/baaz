@@ -223,8 +223,8 @@ impl ProviderStatusModel {
     /// (owner, 2026-10-29: a failure is never only a log line).
     pub(crate) fn sign_out_failed(&mut self, id: ProviderId, error: String, cx: &mut Context<Self>) {
         self.busy.remove(&id);
-        self.overlays.update(cx, |overlays, _| {
-            overlays.toast(format!("Couldn't sign out of {}", id.label()), error);
+        self.overlays.update(cx, |overlays, cx| {
+            overlays.toast(format!("Couldn't sign out of {}", id.label()), error, cx);
         });
         cx.notify();
     }
@@ -250,15 +250,14 @@ impl ProviderStatusModel {
             self.busy.remove(&id);
             if let Some(status) = statuses.iter().find(|status| status.provider == id) {
                 let (title, body) = settled_toast(status, after_sign_out);
-                let toast = self.overlays.update(cx, |overlays, _| overlays.toast(title, body));
+                let toast = self.overlays.update(cx, |overlays, cx| overlays.toast(title, body, cx));
                 // A press's answer, not news: it leaves by itself. A failed
                 // sign-out's toast is not this one and stays.
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(SETTLED_TOAST_FOR).await;
                     let _ = this.update(cx, |this, cx| {
                         this.overlays.update(cx, |overlays, cx| {
-                            overlays.dismiss_toast(&toast);
-                            cx.notify();
+                            overlays.dismiss_toast(&toast, cx);
                         });
                     });
                 })

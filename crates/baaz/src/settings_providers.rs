@@ -674,10 +674,9 @@ impl Harness {
             let text = collect.await;
             let _ = this.update(cx, |this, cx| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                this.overlays.update(cx, |overlays, _| {
-                    overlays.toast(format!("{} diagnostics copied", id.label()), "Paste them where you need them.");
+                this.overlays.update(cx, |overlays, cx| {
+                    overlays.toast(format!("{} diagnostics copied", id.label()), "Paste them where you need them.", cx);
                 });
-                cx.notify();
             });
         })
         .detach();
@@ -753,7 +752,6 @@ impl Harness {
             // Over the Settings page, like every other sign-in (D5 B3).
             SignInPlan::MuseSheet => {
                 self.open_muse_sheet(cx);
-                cx.notify();
             }
             SignInPlan::ClaudeSheet => self.open_setup_sheet(id, crate::setup::SetupKind::SignIn, window, cx),
             // The one Codex sign-in: the connect screen's, which keeps its
