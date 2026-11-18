@@ -405,9 +405,14 @@ impl Overlays {
     /// Returns the toast's id, so callers with something to retract (a
     /// provider recheck's settled note) can dismiss it later.
     pub fn toast(&mut self, title: impl Into<String>, body: impl Into<String>, cx: &mut gpui::Context<Self>) -> String {
+        self.push_toast(|id| ToastData::new(id, title.into(), body.into()).kind(ToastKind::Neutral), cx)
+    }
+
+    /// Stack the toast `make` builds under the next id, and return the id.
+    fn push_toast(&mut self, make: impl FnOnce(String) -> ToastData, cx: &mut gpui::Context<Self>) -> String {
         self.next_toast += 1;
         let id = format!("toast-{}", self.next_toast);
-        self.toasts.push(ToastData::new(id.clone(), title.into(), body.into()).kind(ToastKind::Neutral));
+        self.toasts.push(make(id.clone()));
         cx.notify();
         id
     }
@@ -424,16 +429,15 @@ impl Overlays {
         action: impl Into<String>,
         cx: &mut gpui::Context<Self>,
     ) -> String {
-        self.next_toast += 1;
-        let id = format!("toast-{}", self.next_toast);
         let label = action.into();
-        self.toasts.push(
-            ToastData::new(id.clone(), title.into(), body.into())
-                .kind(ToastKind::Neutral)
-                .action(ToastAction::new(label.to_lowercase(), label).primary()),
-        );
-        cx.notify();
-        id
+        self.push_toast(
+            |id| {
+                ToastData::new(id, title.into(), body.into())
+                    .kind(ToastKind::Neutral)
+                    .action(ToastAction::new(label.to_lowercase(), label).primary())
+            },
+            cx,
+        )
     }
 
     /// Drop the toast with this id.
@@ -483,15 +487,7 @@ impl Overlays {
     /// pushes each landed catalog here so the `/` menu follows the page
     /// after any mutation (D64).
     pub fn set_skills(&mut self, root: String, skills: Vec<crate::skills::Skill>, cx: &mut gpui::Context<Self>) {
-        self.roots_order.retain(|cached| cached != &root);
-        self.roots_order.push(root.clone());
-        while self.roots_order.len() > MAX_CACHED_ROOTS {
-            let oldest = self.roots_order.remove(0);
-            self.files_by_root.remove(&oldest);
-            self.skills_by_root.remove(&oldest);
-        }
-        self.skills_by_root.insert(root, skills);
-        cx.notify();
+        self.cache_root(root, None, skills, cx);
     }
 
     /// Store a walked root's files and skills, evicting the least recently
@@ -504,6 +500,19 @@ impl Overlays {
         skills: Vec<crate::skills::Skill>,
         cx: &mut gpui::Context<Self>,
     ) {
+        self.cache_root(root, Some(files), skills, cx);
+    }
+
+    /// Cache `root`'s skills, and its files when walked, as the most
+    /// recently used root, evicting the oldest past [`MAX_CACHED_ROOTS`];
+    /// the menus that list them redraw.
+    fn cache_root(
+        &mut self,
+        root: String,
+        files: Option<crate::files::WalkResult>,
+        skills: Vec<crate::skills::Skill>,
+        cx: &mut gpui::Context<Self>,
+    ) {
         self.roots_order.retain(|cached| cached != &root);
         self.roots_order.push(root.clone());
         while self.roots_order.len() > MAX_CACHED_ROOTS {
@@ -511,7 +520,9 @@ impl Overlays {
             self.files_by_root.remove(&oldest);
             self.skills_by_root.remove(&oldest);
         }
-        self.files_by_root.insert(root.clone(), files);
+        if let Some(files) = files {
+            self.files_by_root.insert(root.clone(), files);
+        }
         self.skills_by_root.insert(root, skills);
         cx.notify();
     }

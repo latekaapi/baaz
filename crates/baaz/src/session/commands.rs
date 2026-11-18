@@ -23,7 +23,7 @@ impl SessionView {
     /// prefixes the model-visible input.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.runtime.read(cx).is_input_locked() {
-            // The runtime's notify redraws this view (it observes it).
+            // The `as_mut` borrows notify the runtime, which this view observes.
             self.runtime.as_mut(cx).banner = Some("Switching provider — sends resume when the new session opens.".to_owned());
             self.runtime.as_mut(cx).banner_action = None;
             return;
@@ -111,7 +111,7 @@ impl SessionRuntime {
         if let Some(queue) = self.start_queue() {
             queue.sends.push(text);
             self.submitting = true;
-            cx.notify();
+            cx.emit(RuntimeEvent::TurnChanged);
             return;
         }
         self.submit(text, cx);
@@ -244,7 +244,7 @@ impl SessionRuntime {
         self.provider_send(command, cx, move |this, result, cx| {
             this.submitted_provider(result, text, planning, optimistic_id, tail, cx);
         });
-        cx.notify();
+        cx.emit(RuntimeEvent::TurnChanged);
     }
 
     /// The `SubmitInput` ack. Admission only — the authority for what the
@@ -320,7 +320,7 @@ impl SessionRuntime {
                 self.restore_prompt(text, cx);
             }
         }
-        cx.notify();
+        cx.emit(RuntimeEvent::TurnChanged);
     }
 
     /// The provider lane's content parts: attached files inline as text
@@ -428,7 +428,7 @@ impl SessionRuntime {
                 this.restore_prompt(text, cx);
             }
         });
-        cx.notify();
+        cx.emit(RuntimeEvent::ComposerChanged);
     }
 
     /// Stop, with the retract intent paired: a turn interrupted before any
@@ -486,7 +486,7 @@ impl SessionRuntime {
                     crate::baaz_log!("interrupt: the provider turn was already over; settling the view");
                     this.clear_running();
                     this.submitting = false;
-                    cx.notify();
+                    cx.emit(RuntimeEvent::TurnChanged);
                     return;
                 }
                 this.report_provider_error(&error, cx);
@@ -523,7 +523,7 @@ impl SessionRuntime {
         if let Some(restored) = pending.into_iter().last().map(|stopped| stopped.text) {
             self.restore_prompt(restored, cx);
         }
-        cx.notify();
+        cx.emit(RuntimeEvent::TurnChanged);
     }
 
     /// `turn/unqueue`, remembering why — and the row's text, captured now —
@@ -547,7 +547,7 @@ impl SessionRuntime {
                 this.report_provider_error(&error, cx);
             }
         });
-        cx.notify();
+        cx.emit(RuntimeEvent::TurnChanged);
     }
 
     /// Switch the session's model. On the muse lane that is the existing
@@ -654,7 +654,6 @@ impl SessionRuntime {
                 this.report_provider_error(&error, cx);
             }
         });
-        cx.notify();
     }
 
     /// Fold a neutral model catalog into the picker: human labels shown,
@@ -754,7 +753,6 @@ impl SessionRuntime {
         self.models_error = None;
         cx.emit(RuntimeEvent::MenusStale);
         self.leave_auto_if_unsupported(cx);
-        cx.notify();
     }
 }
 
@@ -801,7 +799,7 @@ impl SessionRuntime {
             row.is_active = row.model_id == model_id;
         }
         self.pending_model = Some(model_id.to_owned());
-        cx.notify();
+        cx.emit(RuntimeEvent::MenusStale);
     }
 
     /// `session/setApprovalMode`. The chip and the marker both come from
@@ -817,7 +815,7 @@ impl SessionRuntime {
         // start, and the chip reads it meanwhile (see `mode`).
         if let Some(queue) = self.start_queue() {
             queue.mode = Some(mode);
-            cx.notify();
+            cx.emit(RuntimeEvent::MenusStale);
             return;
         }
         // A request still standing unreported (the open's, or the
@@ -831,7 +829,7 @@ impl SessionRuntime {
         // settles; one superseded while waiting never goes out.
         if self.mode_pick_in_flight {
             self.mode_pick_queued = Some(mode);
-            cx.notify();
+            cx.emit(RuntimeEvent::MenusStale);
             return;
         }
         // Only a send that will answer holds the slot (a view with no lane
@@ -956,7 +954,7 @@ impl SessionRuntime {
             self.models = Vec::new();
         }
         self.models_error = why;
-        cx.notify();
+        cx.emit(RuntimeEvent::MenusStale);
     }
 
     /// A plain banner (no action) saying `message`. Unlike
@@ -965,7 +963,7 @@ impl SessionRuntime {
     pub(crate) fn plain_banner(&mut self, message: String, cx: &mut Context<Self>) {
         self.banner = Some(message);
         self.banner_action = None;
-        cx.notify();
+        cx.emit(RuntimeEvent::BannerChanged);
     }
 
     /// The lease is gone: banner the view and refuse sends
@@ -986,7 +984,7 @@ impl SessionRuntime {
             self.banner = None;
             self.banner_action = None;
         }
-        cx.notify();
+        cx.emit(RuntimeEvent::BannerChanged);
     }
 }
 
@@ -1013,7 +1011,7 @@ impl SessionRuntime {
                 let secs = this.running.as_ref().map(|r| crate::clock::elapsed_since(r.started).as_secs());
                 if secs != this.last_tick_secs {
                     this.last_tick_secs = secs;
-                    cx.notify();
+                    cx.emit(RuntimeEvent::Ticked);
                 }
                 this.running.is_some()
             });
@@ -1049,7 +1047,7 @@ impl SessionRuntime {
         // the start queue like a chip pick.
         if let Some(queue) = self.start_queue() {
             queue.mode = Some(restore);
-            cx.notify();
+            cx.emit(RuntimeEvent::ComposerChanged);
             return;
         }
         let command = ProviderCommand::SelectApprovalMode {
@@ -1063,7 +1061,7 @@ impl SessionRuntime {
                 this.report_provider_error(&error, cx);
             }
         });
-        cx.notify();
+        cx.emit(RuntimeEvent::ComposerChanged);
     }
 
     /// The plan turn finished: append the plan card built from its reply.

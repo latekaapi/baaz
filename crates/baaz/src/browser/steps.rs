@@ -199,7 +199,6 @@ impl Harness {
                 data.set_text(&url, &title, &words);
             }
         });
-        cx.notify();
         Ok(())
     }
 
@@ -239,7 +238,7 @@ impl Harness {
             return Err("no page is open in Browse".into());
         }
         self.focus_browse_address_with("", window, cx);
-        self.browser.update(cx, |browser, cx| browser.set_field_scope(Some(None), cx));
+        self.browser.update(cx, |browser, cx| browser.move_omnibox(super::OmniboxStep::Scope(Some(None)), cx));
         Ok(())
     }
 

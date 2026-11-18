@@ -128,7 +128,7 @@ impl Harness {
                             this.browser.update(cx, |browser, cx| browser.drop_browse_address(cx));
                         }
                     }
-                    InputEvent::Focus => this.browser.update(cx, |browser, cx| browser.reset_omnibox(true, cx)),
+                    InputEvent::Focus => this.browser.update(cx, |browser, cx| browser.move_omnibox(OmniboxStep::Reset { forget_completion: true }, cx)),
                     InputEvent::Change => {
                         // Typing resets the highlight. A Tab completion
                         // survives only its own write: once the text differs
@@ -136,7 +136,7 @@ impl Harness {
                         // else and Enter must open that, not the old row.
                         let typed = this.browser.read(cx).browse_address.as_ref().map(|input| input.read(cx).value().to_string());
                         let stale = this.browser.read(cx).browse_completed_text.is_some() && this.browser.read(cx).browse_completed_text != typed;
-                        this.browser.update(cx, |browser, cx| browser.reset_omnibox(stale, cx));
+                        this.browser.update(cx, |browser, cx| browser.move_omnibox(OmniboxStep::Reset { forget_completion: stale }, cx));
                     }
                 });
                 self.browser.update(cx, |browser, _| browser.browse_address = Some(input));
@@ -306,7 +306,7 @@ impl Harness {
             }
             None => None,
         };
-        self.browser.update(cx, |browser, cx| browser.set_field_scope(scope, cx));
+        self.browser.update(cx, |browser, cx| browser.move_omnibox(OmniboxStep::Scope(scope), cx));
         true
     }
 
@@ -321,7 +321,7 @@ impl Harness {
         }
         let len = rows.len() as isize;
         let next = (self.browser.read(cx).browse_omnibox_selected as isize + delta).rem_euclid(len);
-        self.browser.update(cx, |browser, cx| browser.highlight_omnibox_row(next as usize, true, cx));
+        self.browser.update(cx, |browser, cx| browser.move_omnibox(OmniboxStep::Arrow { index: next as usize, forget_completion: true }, cx));
     }
 
     /// Complete the highlighted row's text into the field (Tab): tabs write
@@ -351,7 +351,7 @@ impl Harness {
         // The input's own Change arm resets the highlight (keeping the
         // completion, which survives the re-rank); the completed row keeps
         // the highlight too, and its identity owns Enter.
-        self.browser.update(cx, |browser, cx| browser.complete_omnibox_row(index, row.target.clone(), cx));
+        self.browser.update(cx, |browser, cx| browser.move_omnibox(OmniboxStep::Complete { index, row: row.target.clone() }, cx));
     }
 
     /// Activate an omnibox row (Enter opens): Ask asks, a person tab
@@ -398,7 +398,7 @@ impl Harness {
                 }
             }
             OmniTarget::Folder(id) => {
-                self.browser.update(cx, |browser, cx| browser.set_field_scope(Some(Some(id)), cx));
+                self.browser.update(cx, |browser, cx| browser.move_omnibox(OmniboxStep::Scope(Some(Some(id))), cx));
                 if let Some(input) = self.browser.read(cx).browse_address.clone() {
                     input.update(cx, |input, cx| input.set_value("", window, cx));
                 }
@@ -514,55 +514,72 @@ impl Harness {
     }
 }
 
+/// One move of the omnibox ([`BrowserView::move_omnibox`]).
+pub(crate) enum OmniboxStep {
+    /// Back on the first row; `forget_completion` drops a Tab completion
+    /// (its row and the text it wrote) too.
+    Reset { forget_completion: bool },
+    /// The arrows' highlight on row `index`; a completion it supersedes
+    /// goes when `forget_completion`.
+    Arrow { index: usize, forget_completion: bool },
+    /// The pointer over row `index`.
+    Hover(usize),
+    /// A Tab completion of `row` at `index`.
+    Complete { index: usize, row: crate::browser::OmniTarget },
+    /// The folder scope.
+    Scope(Option<Option<i64>>),
+}
+
 impl BrowserView {
-    /// The omnibox highlight back on the first row, as a fresh focus or
-    /// typing leaves it; `forget_completion` drops a Tab completion (its
-    /// row and the text it wrote) too. Redraws the field's rows.
-    pub(crate) fn reset_omnibox(&mut self, forget_completion: bool, cx: &mut Context<Self>) {
-        self.browse_omnibox_selected = 0;
-        self.browse_omnibox_moved = false;
-        if forget_completion {
+    /// Move the omnibox's highlight (or its scope) — the field's one owner
+    /// method — and redraw the rows when anything moved (or the text did).
+    pub(crate) fn move_omnibox(&mut self, step: OmniboxStep, cx: &mut Context<Self>) {
+        let before = (self.browse_omnibox_selected, self.browse_omnibox_moved, self.browse_completed.clone(), self.browse_completed_text.clone(), self.field_scope);
+        // A reset always redraws: it follows typing (and a fresh focus), and
+        // the rows are the typed text's.
+        let typed = matches!(step, OmniboxStep::Reset { .. });
+        let forget = match step {
+            // Back on the first row, as a fresh focus or typing leaves it.
+            OmniboxStep::Reset { forget_completion } => {
+                self.browse_omnibox_selected = 0;
+                self.browse_omnibox_moved = false;
+                forget_completion
+            }
+            // The arrows put the highlight on a row: it owns Enter now
+            // (`commit_browse_address`).
+            OmniboxStep::Arrow { index, forget_completion } => {
+                self.browse_omnibox_selected = index;
+                self.browse_omnibox_moved = true;
+                forget_completion
+            }
+            // The pointer over a row lights it (no ownership of Enter).
+            OmniboxStep::Hover(index) => {
+                self.browse_omnibox_selected = index;
+                false
+            }
+            // A Tab completion of a row: its identity owns Enter.
+            OmniboxStep::Complete { index, row } => {
+                self.browse_omnibox_selected = index;
+                self.browse_omnibox_moved = true;
+                self.browse_completed = Some(row);
+                false
+            }
+            // Scoped to a bookmarks folder (`Some(None)` the top,
+            // `Some(Some(id))` a folder) or unscoped, back on top.
+            OmniboxStep::Scope(scope) => {
+                self.field_scope = scope;
+                self.browse_omnibox_selected = 0;
+                false
+            }
+        };
+        if forget {
             self.browse_completed = None;
             self.browse_completed_text = None;
         }
-        cx.notify();
-    }
-
-    /// The highlight on row `index`, put there by the arrows: it owns
-    /// Enter now (`commit_browse_address`). `forget_completion` drops a Tab
-    /// completion, which the highlight supersedes.
-    pub(crate) fn highlight_omnibox_row(&mut self, index: usize, forget_completion: bool, cx: &mut Context<Self>) {
-        self.browse_omnibox_selected = index;
-        self.browse_omnibox_moved = true;
-        if forget_completion {
-            self.browse_completed = None;
-            self.browse_completed_text = None;
-        }
-        cx.notify();
-    }
-
-    /// The pointer over row `index` lights it (no ownership of Enter).
-    pub(crate) fn hover_omnibox(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.browse_omnibox_selected != index {
-            self.browse_omnibox_selected = index;
+        let after = (self.browse_omnibox_selected, self.browse_omnibox_moved, self.browse_completed.clone(), self.browse_completed_text.clone(), self.field_scope);
+        if typed || before != after {
             cx.notify();
         }
-    }
-
-    /// A Tab completion of `row` at `index`: its identity owns Enter.
-    pub(crate) fn complete_omnibox_row(&mut self, index: usize, row: crate::browser::OmniTarget, cx: &mut Context<Self>) {
-        self.browse_omnibox_selected = index;
-        self.browse_omnibox_moved = true;
-        self.browse_completed = Some(row);
-        cx.notify();
-    }
-
-    /// Scope the field to a bookmarks folder (`Some(None)` the top,
-    /// `Some(Some(id))` a folder) or unscope it, the highlight back on top.
-    pub(crate) fn set_field_scope(&mut self, scope: Option<Option<i64>>, cx: &mut Context<Self>) {
-        self.field_scope = scope;
-        self.browse_omnibox_selected = 0;
-        cx.notify();
     }
 
     /// The sidebar's one name field: on a folder or a space (`Some`), or

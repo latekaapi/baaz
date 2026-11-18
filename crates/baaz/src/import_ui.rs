@@ -509,7 +509,6 @@ impl Harness {
         });
         self.with_import_sheet(cx, |sheet| sheet.stage = SheetStage::Progress);
         self.next_import_batch(cx);
-        cx.notify();
     }
 
     /// Run the next batch on the background executor; it lands through
@@ -660,7 +659,6 @@ impl Harness {
         if let Some(id) = first {
             self.sidebar_pane.update(cx, |pane, cx| pane.set_reveal(Some(id), false, cx));
         }
-        cx.notify();
     }
 
     // ---------------------------------------------------------------- steps

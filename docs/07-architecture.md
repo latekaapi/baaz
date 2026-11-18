@@ -129,18 +129,18 @@ entities `RightPane` (`right_pane.rs`), `TerminalDock`
 
 ### `Harness` — the window root
 
-`Harness` (`app.rs`) has 50 fields. Its methods are spread over 62
+`Harness` (`app.rs`) has 45 fields. Its methods are spread over 62
 `impl Harness` blocks in 53 files (`app/*.rs` — the sidebar's root half is
 `app/sidebar_host.rs` — the
 `browser/` seam files, `dialogs.rs`, `login.rs` and others). Roughly:
 
 | group | examples |
 |---|---|
-| providers, sign-in, onboarding | `muse_hub`, `muse_slot`, `provider_factory`, `wire`, `login`, `tier`; `provider_model` (`ProviderStatusModel`, `provider_model.rs`, task 4.4: the statuses, the sign-out banners, the cards waiting on a press and the Codex sign-in, read and observed by every surface that shows them); `connect_screen` (a region entity, `connect.rs`) and `setup` (the setup sheet's entity, `setup.rs`) |
+| providers, sign-in, onboarding | `muse_hub`, `muse_slot`, `provider_factory`, `wire`, `auth`, `tier`; `login` (the `Login` entity, `login.rs`, task 4.9c: the sign-in flow's state and the API-key field, drawn by the Muse sheet, which redraws on its notify — the root only drives the `account/*` lane); `provider_model` (`ProviderStatusModel`, `provider_model.rs`, task 4.4: the statuses, the sign-out banners, the cards waiting on a press and the Codex sign-in, read and observed by every surface that shows them); `connect_screen` (a region entity, `connect.rs`) and `setup` (the setup sheet's entity, `setup.rs`) |
 | session list | `session_list`: the `SessionList` model entity (`session_list.rs`, task 4.7) holding the rows, the stores they are joined from (`index`, `overrides`, `provider_sessions`, `projects`, `branches`), the list filters, the fetch state, the title bookkeeping and the caches (visible rows, grouping, chain index); a change emits `SessionListEvent` and notifies the list, never the root. `Harness` drives the fetch and the joins and reads through `session_list.read(cx)` |
 | live session views | `active`, `registry`, `pending_id`, `drafts`, `unsent`, `starts_in_flight`, the switch/replace epochs and claims |
 | handoff | `handoffs`, `handoff_epoch`, `pending_handoff`, `handoff_confirm` |
-| sidebar | `sidebar_pane`: the `SidebarPane` view (task 4.7), which owns its scroll, hover and hover card, reveal, wheel, fade and Pinned disclosure; the `rename` field it shares with the header |
+| sidebar | `sidebar_pane`: the `SidebarPane` view (task 4.7), which owns its scroll, hover and hover card, reveal, wheel, fade and Pinned disclosure, and (task 4.9c) the divider's width and drag (`ResizeDrag`, `resize.rs`); the `rename` field it shares with the header |
 | right pane | `right_pane`: a region entity (`right_pane.rs`, task 4.3) that owns its cache, divider, refresh, watch, focus and menus |
 | browser and Browse mode | `browser`: the `BrowserView` region entity (`browser/view.rs`, task 4.5) holding the tabs and webviews, the Field and find inputs, the Browse sidebar's menus and drags, three of the four overlay windows (`overlay`, `corner`, `page_float`: one slot each, holding the window once its open task lands — no `*_pending` twin), `data` (the `browser.db` service), `occlusion` (the one `NativeOcclusion` owner) and `agent_window` (`AgentWindowState`, `app/agent_window.rs`: the agent line and card and the card's float; the handoff picker is a `Picker` view on the overlay stack) |
 | settings, skills, palettes | `settings_page` (a region entity, `settings.rs`, task 4.4, that owns its route, search, focus, the Shortcuts rows and recording), `skills_page` (a region entity, `skills_page.rs`, task 4.4), `import`, the search palette's `TextareaState` query field (the search reads it; the Commands and Projects palettes own theirs since task 4.6b) |
@@ -191,6 +191,13 @@ notify of anything the root reads each frame — the overlay stack, the
 browser, the right pane, the Settings and Skills pages, the session list,
 the connect screen, the provider model, the terminal dock — re-renders the root without the root being told
 (`sidebar_view::an_owner_the_root_draws_redraws_it_without_a_root_notify`).
+Task 4.9c moved the rest of the clusters: the sign-in flow is the `Login`
+entity, the sidebar drag lives on `SidebarPane` (a child view's notify
+dirties its ancestors, the root included), a layout write reaches the root
+through its `LayoutStore` observer, and the runtime names its changes as
+`RuntimeEvent`s (below)
+(`sidebar_view::the_login_flow_redraws_its_sheet_without_notifying_the_root`,
+`sidebar_view::a_sidebar_drag_redraws_the_shell_without_notifying_the_root`).
 The root notifies only for its own fields. `tests/notify_ratchet.rs` refuses
 a notify hidden behind a helper, a macro or another spelling, and holds the
 count to a ceiling that only falls.
@@ -207,12 +214,19 @@ the clocks, the start queue and the handoff state. `SessionView`
 (`session.rs`, 68 fields) draws one runtime: the composer and the card
 fields, the virtual-list bookkeeping and render caches, folds, spans and the
 quote flow, the `@` rank (`MentionRank`), and the overlays handle. It holds
-`Entity<SessionRuntime>`, observes it (a runtime notify redraws the view,
-never the root) and maps each `RuntimeEvent` to one list operation
+`Entity<SessionRuntime>` and redraws on every `RuntimeEvent` (never the
+root), mapping the transcript's to one list operation
 (`EntriesAppended` / `EntryUpdated(ix)` / `EntriesRemoved` /
 `ApprovalRequested` → refresh from the change and keep the tail;
 `ApprovalDecided` closes the field open on it; `CardsChanged` rebuilds the
 card cache; `MenusStale` re-reads the open menu's check; `Toast`). The
+runtime's own methods never `notify` (task 4.9c): the facets beside the
+transcript are named too — `TurnChanged` (sending, running, the queue, a
+stop), `Ticked` (the turn's clock, a countdown), `BannerChanged`,
+`ComposerChanged` (attachments, effort, plan, a prompt handed back),
+`QuestionsChanged`, `HistoryChanged` (the loading row) and
+`HeaderChanged`. The view still observes the runtime, because a write made
+from outside through `Entity::as_mut` notifies it as the borrow drops. The
 person's intents go the other way: the view calls the runtime (submit,
 interrupt, decide, answer, picks). Both halves' methods live under
 `session/`: `lane.rs` (the provider lane), `commands.rs`, `composer.rs`,
@@ -255,7 +269,7 @@ shuts runtimes down, not views.
 
 | owner | file | owns |
 |---|---|---|
-| `SidebarPane` | `sidebar_view.rs` | the sidebar column (task 4.7): the virtual list's state and its sync, hover and the hover card's arm, the one-shot reveal, the wheel accumulator and scripted sweep, the mode-switch fade, the Pinned disclosure, the group menus' seats. It subscribes to `SessionList`, observes the layout global, takes `SidebarFacts` from the root and emits `SidebarEvent`s the root maps (`app/sidebar_host.rs`); it holds no handle to the root |
+| `SidebarPane` | `sidebar_view.rs` | the sidebar column (task 4.7): the virtual list's state and its sync, hover and the hover card's arm, the one-shot reveal, the wheel accumulator and scripted sweep, the mode-switch fade, the Pinned disclosure, the group menus' seats, and the divider's width and drag (task 4.9c: a press and a move notify the pane, a release persists through the layout global). It subscribes to `SessionList`, observes the layout global, takes `SidebarFacts` from the root and emits `SidebarEvent`s the root maps (`app/sidebar_host.rs`); it holds no handle to the root |
 | `SessionList` | `session_list.rs` | the session list as a model (task 4.7): rows, stores, filters, fetch state, title bookkeeping, the visible/grouping/chain caches keyed on the root's `ListFacts`, and the joins (`rejoin_scoped`, `merge_provider_rows`, `install_provisional_rows`) |
 | `Overlays` | `overlays.rs`, `overlay_stack.rs` | its mutations notify (task 4.9b): `push`/`close`/`pop`/`set`, the menu, sheet and toast methods each change the stack and notify once when something changed, so no caller notifies after them; it also keeps the shell menus' anchors (`note_anchor`: the header `…` and the project menu). State: the overlay stack (task 4.6a) — every dialog, palette, menu, popover, sheet and inline rename is one typed entry carrying `covers_page`, `takes_keyboard`, `host` (the main window, an overlay panel, or — the dialog and the palette — wherever the mode puts them), its owner and its close hook; Escape pops it (`Harness::pop_overlay`), `Covers` reads its `covers_page`, and closing an entry gives back the focus it took (applied in the root's frame) — plus toasts and the `@`-picker walks. Since task 4.6b an entry may hold the view that draws it: the dialog (`DialogView`, `dialogs.rs`), the Muse sheet (`MuseSheetView`, `login.rs`), the setup sheet (`SetupHost`), the import and Chrome-import sheets (`ImportSheetView`, `ChromeImportView`), the bookmark popover (`BookmarkView`, `overlay/bookmark.rs`) and the pickers; each emits `DismissEvent`, which pops the stack newest-first (`Harness::dismiss_overlay_view`). The root pushes their facts in each frame and maps their typed events. The rest are drawn by `Harness`, the composer, the right pane, the Settings and Skills pages and the connect screen, each reading its own entry |
 | `Picker<D>` | `picker.rs` | the one list picker (task 4.6b, Zed's `picker` read for the shape): query (its own field, a borrowed one, or typed elsewhere), selection, ↑ ↓ ↩ Escape, hover; a `PickerDelegate` gives the rows, the narrowing, the pick and the look (the library's own component). Delegates: the palette (`palette.rs`: ⌘K, `/resume`, `/fork`, search, Projects), the model picker and the `@` mention (`session/pickers.rs`), the hand-off picker (`app/browser_handoff.rs`) |
@@ -352,9 +366,9 @@ sessions with no project default to `~/baaz-sessions`
 6. **Fold.** The runtime's `on_provider_event` handles taps (approvals,
    questions, banners) and passes `Deltas` to `SessionStore::apply_deltas`,
    then says which entry moved (`RuntimeEvent`). The view's handler redraws
-   the view, so an event needs no notify of its own; a change no event
-   names (a banner, a chip, a clock) `cx.notify()`s the runtime, which the
-   view observes.
+   the view, so an event needs no notify of its own; a change beside the
+   transcript (a banner, a chip, a clock) is an event too (`BannerChanged`,
+   `ComposerChanged`, `Ticked`, …).
 7. **Render.** The view over it (if any) maps the event to one list
    operation and its cached subtree re-renders; the root is not notified.
    `transcript.rs` maps turns to `aui` elements on a virtual list.

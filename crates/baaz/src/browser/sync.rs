@@ -61,7 +61,7 @@ impl Harness {
     /// exactly this rect.
     pub(super) fn browse_centre_content_rect(&self, content: Bounds<Pixels>, window: &Window, cx: &gpui::App) -> Bounds<Pixels> {
         let sidebar = if crate::layout::Layout::get(cx).sidebar_open {
-            gpui::px(self.resize.width)
+            gpui::px(self.sidebar_width(cx))
         } else {
             gpui::px(0.0)
         };
@@ -87,7 +87,7 @@ impl Harness {
         // between the sidebar column and the right column, the dock below
         // it inside the column.
         if !self.settings_open(cx) {
-            let sidebar = if crate::layout::Layout::get(cx).sidebar_open { gpui::px(self.resize.width) } else { gpui::px(0.0) };
+            let sidebar = if crate::layout::Layout::get(cx).sidebar_open { gpui::px(self.sidebar_width(cx)) } else { gpui::px(0.0) };
             let mut right = if crate::layout::Layout::get(cx).right_open { gpui::px(self.right_width(cx)) } else { gpui::px(0.0) };
             // The docked agent column takes its strip beside the page (R3):
             // the page gives it up rather than sitting under it (the card
@@ -259,13 +259,15 @@ impl BrowserView {
 
     /// Take `state` as tab `id`'s live page and follow it: every change the
     /// page reports runs [`Self::reconcile_pages`], frame or no frame. The
-    /// one way a page joins [`Self::states`].
+    /// one way a page joins [`Self::states`], and redrawn here: the centre
+    /// (and the root, which reads this view every frame) shows the new page.
     pub(crate) fn adopt_page(&mut self, id: TabId, state: Entity<WebviewState>, cx: &mut Context<Self>) {
         self.page_watch.insert(id, cx.observe(&state, |this, _, cx| this.reconcile_pages(cx)));
         self.states.insert(id, state);
         // A page built at its URL has nothing to report yet: reconcile it
         // once on the next turn, so it reaches its tab and history now.
         self.reconcile_soon(cx);
+        cx.notify();
     }
 
     /// Run the page reconcile on the next turn (once, however many ask).

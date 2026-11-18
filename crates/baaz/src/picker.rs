@@ -179,10 +179,7 @@ impl<D: PickerDelegate> Picker<D> {
         delegate.update_matches(&query);
         let changed = cx.subscribe(&field, |picker: &mut Self, field, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                let query = field.read(cx).value().to_string();
-                picker.delegate.update_matches(&query);
-                picker.clamp();
-                cx.notify();
+                picker.requery(&field, cx);
             }
         });
         Picker { delegate, query: Some(PickerQuery::Field(field)), selected: 0, focus: cx.focus_handle(), _query_changed: Some(changed), on_pick: None }
@@ -201,10 +198,7 @@ impl<D: PickerDelegate> Picker<D> {
         let field = cx.new(|cx| aui::composer::composer_state_rows(placeholder, 1, 1, window, cx));
         let changed = cx.subscribe(&field, |picker: &mut Self, field, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                let query = field.read(cx).value().to_string();
-                picker.delegate.update_matches(&query);
-                picker.clamp();
-                cx.notify();
+                picker.requery(&field, cx);
             }
         });
         if self.focus.is_focused(window) {
@@ -240,6 +234,15 @@ impl<D: PickerDelegate> Picker<D> {
         }
     }
 
+    /// The query field's text changed: narrow to it, the selection kept
+    /// inside the rows there are.
+    fn requery(&mut self, field: &Entity<TextareaState>, cx: &mut Context<Self>) {
+        let query = field.read(cx).value().to_string();
+        self.delegate.update_matches(&query);
+        self.clamp();
+        cx.notify();
+    }
+
     /// A query typed elsewhere changed: narrow to it, selection on the head.
     pub(crate) fn set_query(&mut self, query: &str, cx: &mut Context<Self>) {
         if let Some(PickerQuery::Typed(typed)) = &mut self.query {
@@ -268,13 +271,13 @@ impl<D: PickerDelegate> Picker<D> {
     /// Move the selection by `delta`, wrapping over the rows there are.
     pub(crate) fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
         let count = self.delegate.match_count();
-        self.selected = if count == 0 {
+        let ix = if count == 0 {
             0
         } else {
             let count = count as isize;
             (((self.selected as isize + delta) % count + count) % count) as usize
         };
-        cx.notify();
+        self.select(ix, cx);
     }
 
 

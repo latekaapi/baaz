@@ -138,7 +138,6 @@ impl Harness {
             };
             self.overlays.update(cx, |overlays, cx| overlays.toast(title, detail, cx));
         }
-        cx.notify();
     }
 
     /// The probe owed after one with no verdict: on the backoff's clock, and
@@ -290,8 +289,7 @@ impl Harness {
                     // it) — either way the row settles.
                     _ => crate::provider_status::note_muse_unavailable_now(),
                 }
-                crate::provider_status::clear_usage_refreshing(&[crate::providers::ProviderId::Muse]);
-                cx.notify();
+                this.set_usage_refreshing(&[crate::providers::ProviderId::Muse], false, cx);
             },
         );
     }

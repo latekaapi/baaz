@@ -100,6 +100,16 @@ pub(crate) fn split_left_width(centre: Bounds<Pixels>, ratio: f32) -> Pixels {
 }
 
 /// The ratio that puts the divider's middle under window x `x`.
+/// One step of the Split divider's drag ([`BrowserView::split_drag`]).
+pub(crate) enum SplitDrag {
+    /// The press on the divider.
+    Press,
+    /// A move: the left half's new share of the centre.
+    Move(f32),
+    /// The release.
+    Release,
+}
+
 pub(crate) fn split_ratio_at(centre: Bounds<Pixels>, x: f32) -> f32 {
     let usable = f32::from(centre.size.width) - SPLIT_GAP;
     if usable <= 0.0 {
@@ -295,6 +305,20 @@ impl BrowserView {
         let other = pair.partner(shown)?;
         self.tabs.get(other).is_some().then_some(other)
     }
+    /// One step of the Split divider's drag, redrawn when it moved
+    /// something: the press arms it (the pages stop taking the pointer),
+    /// a move sets the left half's share, the release disarms it.
+    pub(crate) fn split_drag(&mut self, step: SplitDrag, cx: &mut Context<Self>) {
+        let moved = match step {
+            SplitDrag::Press => !std::mem::replace(&mut self.split_dragging, true),
+            SplitDrag::Move(ratio) => std::mem::replace(&mut self.split_ratio, ratio) != ratio,
+            SplitDrag::Release => std::mem::replace(&mut self.split_dragging, false),
+        };
+        if moved {
+            cx.notify();
+        }
+    }
+
     /// Close the Peek (Esc, ×, a click on the page beneath).
     pub(crate) fn close_peek(&mut self, cx: &mut Context<Self>) {
         self.peek_watch = None;

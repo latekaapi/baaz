@@ -31,8 +31,8 @@
 //! of its concerns have their own modules and reach back in through one call
 //! per seam:
 //!
-//! * [`crate::login`] — the login screen, the `account/*` lane, the device
-//!   and API-key flows, sign-out, and `render_login`.
+//! * [`crate::login`] — the `account/*` lane, the device and API-key flows
+//!   (the `Login` entity the Muse sheet draws), and sign-out.
 //! * [`crate::sidebar_view`] — the sidebar column as its own view
 //!   (`SidebarPane`: nav block, session rows, the footer, the rail, Browse
 //!   mode's rows), over the [`crate::session_list`] model; the root's half
@@ -60,8 +60,6 @@ use aui::feedback::{banner, BannerKind, BannerRun};
 use aui::keys::{Cancel, FocusNext, FocusPrev, TogglePalette, ToggleSidebar};
 use aui::overlay::DialogKind;
 use aui::shell::{RESIZE_HANDLE_W, app_shell, drag_capture_overlay, resize_handle};
-#[cfg(feature = "probe")]
-use aui::shell::clamp_sidebar_width;
 use aui_icons::{icon, IconName};
 use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use futures::channel::mpsc::UnboundedReceiver;
@@ -87,7 +85,6 @@ use crate::login::{Auth, Login};
 use crate::overlays::{Dialog, DialogAction, MenuKind, Overlays, PaletteKind};
 use crate::providers::ProviderId;
 use crate::region::Region as _;
-use crate::resize::ResizeDrag;
 use crate::right;
 use crate::runtime::CaptureToken;
 use crate::session::{self, Draft, SessionEvent, SessionHost, SessionRuntime, SessionView};
@@ -626,7 +623,7 @@ pub struct Harness {
     pub(crate) provider_factory: crate::providers::ProviderFactory,
     pub(crate) wire: Wire,
     pub(crate) auth: Auth,
-    pub(crate) login: Login,
+    pub(crate) login: Entity<Login>,
     /// The window's provider facts (task 4.4): the statuses, the quiet
     /// sign-out banners, the cards waiting on a press and the Codex sign-in
     /// flow, owned once and read (or observed) by every surface that shows
@@ -671,9 +668,6 @@ pub struct Harness {
     /// One entity, shared with the views that draw an entry (the session
     /// view's composer menus, the right pane's, the Browse view's).
     pub(crate) overlays: Entity<Overlays>,
-    /// The sidebar divider's width and whatever drag is in flight over it
-    /// (see [`crate::resize`]).
-    pub(crate) resize: ResizeDrag,
     /// The right pane (task 4.3): its cache, refresh, watch, divider,
     /// focus, menus and drafts live on the entity; the root composes its
     /// view, seats its tab row, and maps its events
@@ -805,19 +799,20 @@ impl Harness {
         let search_query = cx.new(|cx| composer_state_rows("Search sessions and created files", 1, 1, window, cx));
         // The session list, and the sidebar column over it: the pane holds
         // the list and the rename field, never this entity.
-        let session_list = cx.new(|_| crate::session_list::SessionList::new());
-        let sidebar_pane = {
-            let (list, rename) = (session_list.clone(), rename.clone());
-            cx.new(move |cx| SidebarPane::new(list, rename, cx))
-        };
-        // The API-key field: masked, with the capture-safe placeholder. Enter
-        // inside it submits (single-line inputs always emit `PressEnter`).
-        let api_key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste your key"));
         // The divider's last settled x, or the default for a fresh store.
         // Window preferences live in one gpui global (`layout.json`), read
         // once here when `main` has not already: a test window boots it.
         layout::Layout::init(cx);
         let restored = layout::sidebar_width(layout::Layout::get(cx));
+        let session_list = cx.new(|_| crate::session_list::SessionList::new());
+        // The pane owns the divider's drag, starting at the restored width.
+        let sidebar_pane = {
+            let (list, rename) = (session_list.clone(), rename.clone());
+            cx.new(move |cx| SidebarPane::new(list, rename, restored, cx))
+        };
+        // The API-key field: masked, with the capture-safe placeholder. Enter
+        // inside it submits (single-line inputs always emit `PressEnter`).
+        let api_key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste your key"));
         // The right divider's last settled width, or the default: the pane
         // starts there, sharing the window's floating layer for its toasts.
         let overlays = cx.new(|_| Overlays::default());
@@ -898,7 +893,7 @@ impl Harness {
             provider_factory,
             wire: Wire::Connecting,
             auth: Auth::Probing,
-            login: Login::new(api_key.clone()),
+            login: cx.new(|_| Login::new(api_key.clone())),
             provider_model,
             connect_screen,
             setup,
@@ -909,7 +904,6 @@ impl Harness {
             sidebar_pane,
             registry: registry::SessionRegistry::default(),
             overlays,
-            resize: ResizeDrag::restored(restored),
             right_pane,
             browser,
             lights_hidden: false,
@@ -1101,7 +1095,6 @@ impl Harness {
         this.field_subscriptions.push(cx.subscribe(&rename, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.sidebar_pane.update(cx, |_, cx| cx.notify());
-                cx.notify();
             }
         }));
         // Typing in the search palette's query re-queries off the UI thread.
@@ -1110,14 +1103,12 @@ impl Harness {
                 this.refresh_search(cx);
             }
         }));
-        // The API-key field: Enter submits, and any change re-renders the
-        // form — `can_submit` is recomputed in `render_login`, so the Sign
-        // in button tracks the field's non-empty trimmed text.
+        // The API-key field: Enter submits. A keystroke redraws the window
+        // the field is drawn in, and the Muse sheet works `can_submit` out
+        // from the field's text as it draws.
         this.field_subscriptions.push(cx.subscribe(&api_key, |this: &mut Self, _, event: &InputEvent, cx| {
-            match event {
-                InputEvent::PressEnter { .. } => this.submit_api_key(cx),
-                InputEvent::Change => cx.notify(),
-                _ => {}
+            if let InputEvent::PressEnter { .. } = event {
+                this.submit_api_key(cx);
             }
         }));
         this.session_list.update(cx, |list, _| list.overrides = crate::sessions::read());
@@ -1658,7 +1649,6 @@ impl Harness {
                     action: DialogAction::Reconnect,
                     archive_target: None,
                 });
-                cx.notify();
             }
         });
     }
@@ -1749,7 +1739,6 @@ impl Harness {
         self.defer_browser_prewarm(cx);
         self.save_right_for_active(cx);
         self.refresh_right_now(cx);
-        cx.notify();
     }
 
     /// Switch between Sessions and Browse (⌥⌘B, the sidebar switch, the
@@ -1812,7 +1801,6 @@ impl Harness {
         }
         self.prewarm_browser_if_needed(cx);
         self.refresh_right_now(cx);
-        cx.notify();
     }
 
     /// Open the right pane on `kind`: records the kind, forces the pane
@@ -1849,7 +1837,6 @@ impl Harness {
         self.defer_browser_prewarm(cx);
         self.save_right_for_active(cx);
         self.refresh_right_now(cx);
-        cx.notify();
     }
 
     /// Open the right pane on `kind` without ever closing it (B8): records
@@ -1886,7 +1873,6 @@ impl Harness {
         self.defer_browser_prewarm(cx);
         self.save_right_for_active(cx);
         self.refresh_right_now(cx);
-        cx.notify();
     }
 
     /// Arm the URL-field focus the next Browser frame owes (Z7a2): only a
@@ -3763,7 +3749,7 @@ impl Harness {
             .on_activate(move |index, w, cx| activate(&index, w, cx))
             .on_highlight(move |index, _, cx| {
                 if let Some(index) = index {
-                    let _ = report.update(cx, |this, cx| this.browser.update(cx, |browser, cx| browser.hover_omnibox(index, cx)));
+                    let _ = report.update(cx, |this, cx| this.browser.update(cx, |browser, cx| browser.move_omnibox(crate::browser::OmniboxStep::Hover(index), cx)));
                 }
             });
         let mut last_kind: Option<crate::browser::SuggestKind> = None;
@@ -4617,6 +4603,7 @@ impl Render for Harness {
             };
             let holes = cx.entity().downgrade();
             let (right_width, right_resizing) = (self.right_width(cx), self.right_pane.read(cx).resize.active);
+            let (sidebar_width, sidebar_resizing) = (self.sidebar_width(cx), self.sidebar_resizing(cx));
             let right_snap = self.right_pane.update(cx, |pane, _| pane.take_snap());
             // Painted lights off: the window owns real, glossy ones, and
             // the painted set only ever stacked underneath them.
@@ -4624,9 +4611,9 @@ impl Render for Harness {
                 .native_lights(true)
                 .animate(!browse)
                 .page_sheet(browse)
-                .sidebar_width(px(self.resize.width))
+                .sidebar_width(px(sidebar_width))
                 .right_width(px(right_width))
-                .resizing(self.resize.active || right_resizing || right_snap)
+                .resizing(sidebar_resizing || right_resizing || right_snap)
                 .sidebar_open(crate::layout::Layout::get(cx).sidebar_open)
                 .right_open(right_open)
                 .sidebar(sidebar)
@@ -4681,7 +4668,7 @@ impl Render for Harness {
                         .absolute()
                         .top_0()
                         .bottom_0()
-                        .left(px(self.resize.width - RESIZE_HANDLE_W / 2.0))
+                        .left(px(self.sidebar_width(cx) - RESIZE_HANDLE_W / 2.0))
                         .child(
                             resize_handle("sidebar-resize")
                                 .on_drag_start(move |x, _, cx| {
@@ -4753,14 +4740,14 @@ impl Render for Harness {
         // One overlay, not two: the two drags never run together, so it
         // routes every move to whichever one is in flight.
         let capture: Option<AnyElement> =
-            (self.resize.active || self.right_pane.read(cx).resize.active).then(|| {
+            (self.sidebar_resizing(cx) || self.right_pane.read(cx).resize.active).then(|| {
                 let travel = cx.entity().downgrade();
                 let release = cx.entity().downgrade();
                 drag_capture_overlay("resize-capture")
                     .on_drag(move |x, _, cx| {
                         travel
                             .update(cx, |this, cx| {
-                                if this.resize.active {
+                                if this.sidebar_resizing(cx) {
                                     this.drag_resize(x, cx);
                                 } else {
                                     this.drag_right_resize(x, cx);
@@ -4771,7 +4758,7 @@ impl Render for Harness {
                     .on_drag_end(move |_, cx| {
                         release
                             .update(cx, |this, cx| {
-                                if this.resize.active {
+                                if this.sidebar_resizing(cx) {
                                     this.end_resize(cx);
                                 } else {
                                     this.end_right_resize(cx);
@@ -6636,7 +6623,7 @@ mod tests {
         draw_shell(&mut *vc, &baaz);
         let (open_page, width) = vc.update(|_, cx| {
             let h = baaz.read(cx);
-            (h.browser.read(cx).centre_page_rect.expect("the occlusion stores the rect"), h.resize.width)
+            (h.browser.read(cx).centre_page_rect.expect("the occlusion stores the rect"), h.sidebar_width(cx))
         });
         assert_eq!(open_page.origin, gpui::point(gpui::px(width), gpui::px(0.0)), "open: flush with the sidebar column");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
@@ -8013,15 +8000,15 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
                 h.begin_resize(100.0, cx);
-                assert!(h.resize.active);
+                assert!(h.sidebar_resizing(cx));
                 h.begin_right_resize(100.0, cx);
                 assert!(!h.right_pane.read(cx).resize.active, "a right press mid-sidebar-drag is a no-op");
                 h.end_resize(cx);
-                assert!(!h.resize.active);
+                assert!(!h.sidebar_resizing(cx));
                 h.begin_right_resize(100.0, cx);
                 assert!(h.right_pane.read(cx).resize.active);
                 h.begin_resize(100.0, cx);
-                assert!(!h.resize.active, "a sidebar press mid-right-drag is a no-op");
+                assert!(!h.sidebar_resizing(cx), "a sidebar press mid-right-drag is a no-op");
                 h.end_right_resize(cx);
                 assert!(!h.right_pane.read(cx).resize.active);
             })

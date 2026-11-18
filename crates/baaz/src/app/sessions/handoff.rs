@@ -657,7 +657,6 @@ impl Harness {
             view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.replace_handoff_card(&card_id, card, cx)));
         }
         crate::baaz_log!("handoff failed {}: {reason}", pending.source_session);
-        cx.notify();
     }
 
     /// Reopening a handoff destination (`docs/22-handoff.md` §8): prefix +

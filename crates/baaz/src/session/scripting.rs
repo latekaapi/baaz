@@ -268,7 +268,7 @@ impl SessionRuntime {
         ];
         self.models_error = None;
         self.models_fixture = true;
-        cx.notify();
+        cx.emit(RuntimeEvent::MenusStale);
         Ok(())
     }
 }
@@ -317,7 +317,7 @@ impl SessionRuntime {
             let reading = parse_context(rest.trim()).ok_or_else(|| format!("`{rest}` is not <used>/<window>/<level>"))?;
             self.fake_context = Some(reading);
         }
-        cx.notify();
+        cx.emit(RuntimeEvent::HeaderChanged);
         Ok(())
     }
 }
@@ -541,25 +541,20 @@ impl SessionView {
 
     /// `top`: jump to the head of the transcript without touching the pointer.
     pub(crate) fn step_top(&mut self, cx: &mut Context<Self>) -> StepResult {
-        self.follow = false;
-        self.list_state.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
-        cx.notify();
+        self.jump_list(super::ListJump::Row(0), cx);
         Ok(())
     }
 
     /// `end`: jump to the tail of the transcript.
     pub(crate) fn step_end(&mut self, cx: &mut Context<Self>) -> StepResult {
-        self.list_state.scroll_to_end();
-        cx.notify();
+        self.jump_list(super::ListJump::End, cx);
         Ok(())
     }
 
     /// `mid`: jump to the middle of the transcript.
     pub(crate) fn step_mid(&mut self, cx: &mut Context<Self>) -> StepResult {
-        self.follow = false;
         let mid = self.list_len / 2;
-        self.list_state.scroll_to(gpui::ListOffset { item_ix: mid, offset_in_item: px(0.0) });
-        cx.notify();
+        self.jump_list(super::ListJump::Row(mid), cx);
         Ok(())
     }
 

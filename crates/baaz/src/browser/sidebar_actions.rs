@@ -199,7 +199,6 @@ impl Harness {
             }
             None => self.ensure_browse_tab(window, cx),
         }
-        cx.notify();
     }
 
     /// The Ask button: a new session with the page as its unsent draft
@@ -255,7 +254,6 @@ impl Harness {
                 self.close_tabs(others, window, cx);
             }
         }
-        cx.notify();
     }
 
     /// A folder menu row.
@@ -277,7 +275,6 @@ impl Harness {
                 }
             }
         }
-        cx.notify();
     }
 
     /// A task-folder menu row (and the head's click: Open chat).
@@ -365,7 +362,6 @@ impl Harness {
                 }
             }
         }
-        cx.notify();
     }
 
     /// Delete a space now (confirmed, or empty): close the pages it held and
@@ -381,7 +377,6 @@ impl Harness {
                 self.ensure_browse_tab(window, cx);
             }
         }
-        cx.notify();
     }
 }
 

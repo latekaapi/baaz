@@ -421,9 +421,8 @@ impl RightPane {
         if message.is_empty() || ui.busy.is_some() || paths.is_empty() {
             return;
         }
-        ui.busy = Some(GitBusy::Committing);
         ui.hook_failure = None;
-        cx.notify();
+        self.set_git_busy(root, Some(GitBusy::Committing), cx);
         let root = root.to_path_buf();
         cx.spawn(async move |this, cx| {
             let r = root.clone();
@@ -431,7 +430,6 @@ impl RightPane {
                 cx.background_executor().spawn(async move { git_ops::commit_paths(&r, &message, &paths) }).await;
             let _ = this.update(cx, |this: &mut Self, cx| {
                 let ui = this.changes_ui(&root);
-                ui.busy = None;
                 match outcome {
                     CommitOutcome::Done => {
                         ui.message.clear();
@@ -443,35 +441,39 @@ impl RightPane {
                     CommitOutcome::Failed(reason) => this.toast("Commit", reason, cx),
                 }
                 this.refresh_now(cx);
-                cx.notify();
+                this.set_git_busy(&root, None, cx);
             });
         })
         .detach();
     }
 
+    /// A git operation on `root`'s Changes box starts (`Some`) or ends
+    /// (`None`): the box's buttons and its spinner read it.
+    fn set_git_busy(&mut self, root: &Path, busy: Option<GitBusy>, cx: &mut Context<Self>) {
+        self.changes_ui(root).busy = busy;
+        cx.notify();
+    }
+
     /// Push the branch (setting its upstream the first time).
     pub(crate) fn push_branch(&mut self, root: &Path, cx: &mut Context<Self>) {
         let Some(Some(tree)) = self.cache.git_for(root) else { return };
-        let ui = self.changes_ui(root);
-        if ui.busy.is_some() {
+        if self.changes_ui(root).busy.is_some() {
             return;
         }
-        ui.busy = Some(GitBusy::Pushing);
-        cx.notify();
+        self.set_git_busy(root, Some(GitBusy::Pushing), cx);
         let root = root.to_path_buf();
         cx.spawn(async move |this, cx| {
             let r = root.clone();
             let result = cx.background_executor().spawn(async move { git_ops::push(&r, &tree.branch, tree.upstream.is_some()) }).await;
             let _ = this.update(cx, |this: &mut Self, cx| {
                 let ui = this.changes_ui(&root);
-                ui.busy = None;
                 ui.unpushed_without_upstream = None;
                 ui.pr_read_at = None;
                 if let Err(reason) = result {
                     this.toast("Push", reason, cx);
                 }
                 this.refresh_now(cx);
-                cx.notify();
+                this.set_git_busy(&root, None, cx);
             });
         })
         .detach();
@@ -551,8 +553,7 @@ impl RightPane {
         if title.trim().is_empty() || ui.busy.is_some() {
             return;
         }
-        ui.busy = Some(GitBusy::CreatingPr);
-        cx.notify();
+        self.set_git_busy(root, Some(GitBusy::CreatingPr), cx);
         let root = root.to_path_buf();
         cx.spawn(async move |this, cx| {
             let r = root.clone();
@@ -560,7 +561,6 @@ impl RightPane {
             let result = cx.background_executor().spawn(async move { git_ops::create_pr(&r, &base, &head, &title, &body, draft) }).await;
             let _ = this.update(cx, |this: &mut Self, cx| {
                 let ui = this.changes_ui(&root);
-                ui.busy = None;
                 match result {
                     Ok(pr) => {
                         ui.pr = Some(Some(pr));
@@ -569,7 +569,7 @@ impl RightPane {
                     }
                     Err(reason) => this.toast("Create PR", reason, cx),
                 }
-                cx.notify();
+                this.set_git_busy(&root, None, cx);
             });
         })
         .detach();

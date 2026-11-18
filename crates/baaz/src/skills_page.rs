@@ -94,6 +94,16 @@ pub(crate) fn skills_column(detail_open: bool) -> (f32, f32) {
 /// the Add menu opens just under it.
 const SKILLS_HEADER_ROW_H: f32 = 36.0;
 
+/// One way the list can show ([`SkillsPage::set_list_option`]).
+pub(crate) enum ListOption {
+    /// The filter segment.
+    Filter(SkillsFilter),
+    /// Hide the skills that are off.
+    HideOff(bool),
+    /// List every built-in, not just the first two.
+    ShowAllBuiltin(bool),
+}
+
 /// The page's filter: All plus one segment per scope section (D56).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SkillsFilter {
@@ -479,6 +489,19 @@ impl SkillsPage {
         std::mem::take(&mut self.pending_create)
     }
 
+    /// How the list shows (the filter segment, Hide off, the built-ins'
+    /// Show all), redrawn when it moved.
+    pub(crate) fn set_list_option(&mut self, option: ListOption, cx: &mut Context<Self>) {
+        let moved = match option {
+            ListOption::Filter(filter) => std::mem::replace(&mut self.filter, filter) != filter,
+            ListOption::HideOff(hide) => std::mem::replace(&mut self.hide_off, hide) != hide,
+            ListOption::ShowAllBuiltin(all) => std::mem::replace(&mut self.show_all_builtin, all) != all,
+        };
+        if moved {
+            cx.notify();
+        }
+    }
+
     /// Leave the page outright (selecting or starting a session, opening
     /// Settings): no layer-by-layer peel.
     pub(crate) fn leave(&mut self, cx: &mut Context<Self>) {
@@ -695,11 +718,7 @@ impl SkillsPage {
             self.set_add_menu(false, cx);
             return;
         }
-        if self.open {
-            self.open = false;
-            self.detail_focused = false;
-            cx.notify();
-        }
+        self.leave(cx);
     }
 
     /// A re-list landed: the page leaves its loading state and takes a
@@ -777,32 +796,10 @@ impl SkillsPage {
     /// Disk reads land synchronously; virtual skills inspect off the UI
     /// thread and the pane reads "Loading…" meanwhile.
     pub(crate) fn select_skill(&mut self, key: String, cx: &mut Context<Self>) {
-        self.selected = Some(key.clone());
+        self.selected = Some(key);
         self.detail_body = None;
         self.set_overflow(false, cx);
-        let root = self.root();
-        if let Some(VisibleRow::Live(index)) = self.skills_lookup(&key) {
-            let skill = self.catalog.rows[index].clone();
-            if skill.is_virtual() {
-                self.detail_loading = true;
-                let program = self.program.clone();
-                self.wire_call(
-                    cx,
-                    move || skills::skill_body(&program, &skill, &root),
-                    move |this, body, cx| {
-                        this.detail_loading = false;
-                        if this.selected.as_deref() == Some(key.as_str()) {
-                            this.detail_body = body.map(|text| (key.clone(), text));
-                        }
-                        cx.notify();
-                    },
-                );
-            } else if let Some(body) = skills::skill_body(&self.program, &self.catalog.rows[index], &root)
-            {
-                let id = self.catalog.rows[index].id.clone();
-                self.detail_body = Some((id, body));
-            }
-        }
+        self.load_selected_body(cx);
         cx.notify();
     }
 
@@ -1120,8 +1117,8 @@ impl SkillsPage {
         let _ = window;
     }
 
-    /// Load the selected row's SKILL.md the way selection does: disk reads
-    /// land synchronously, virtual skills inspect off the UI thread.
+    /// Load the selected row's SKILL.md (a selection, a re-list): disk
+    /// reads land synchronously, virtual skills inspect off the UI thread.
     fn load_selected_body(&mut self, cx: &mut Context<Self>) {
         let key = match self.selected.clone() {
             Some(key) => key,
@@ -1691,13 +1688,11 @@ impl SkillsPage {
         let active = crate::skills_page::SkillsFilter::ALL.iter().position(|f| *f == self.filter).unwrap_or(0);
         let pick_filter = cx.listener(|this: &mut Self, index: &usize, _, cx| {
             if let Some(filter) = crate::skills_page::SkillsFilter::ALL.get(*index).copied() {
-                this.filter = filter;
-                cx.notify();
+                this.set_list_option(ListOption::Filter(filter), cx);
             }
         });
         let flip_hide = cx.listener(|this: &mut Self, _: &SwitchIntent, _, cx| {
-            this.hide_off = !this.hide_off;
-            cx.notify();
+            this.set_list_option(ListOption::HideOff(!this.hide_off), cx);
         });
         let filter_row = h_flex()
             .flex_none()
@@ -1772,8 +1767,7 @@ impl SkillsPage {
                     let more = live.len() - 2;
                     if self.show_all_builtin {
                         let less = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                            this.show_all_builtin = false;
-                            cx.notify();
+                            this.set_list_option(ListOption::ShowAllBuiltin(false), cx);
                         });
                         list = list.child(
                             div().w_full().px(px(SKILLS_ROW_INSET)).py(px(scale::SP_2)).child(
@@ -1784,8 +1778,7 @@ impl SkillsPage {
                         );
                     } else {
                         let show = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                            this.show_all_builtin = true;
-                            cx.notify();
+                            this.set_list_option(ListOption::ShowAllBuiltin(true), cx);
                         });
                         list = list.child(
                             div().w_full().px(px(SKILLS_ROW_INSET)).py(px(scale::SP_2)).child(

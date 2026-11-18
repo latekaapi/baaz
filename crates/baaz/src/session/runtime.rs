@@ -15,9 +15,12 @@
 //! It speaks twice:
 //! - [`SessionEvent`]: what the application must decide (rows, records,
 //!   titles, handoffs, dialogs). The root subscribes to every runtime.
-//! - [`RuntimeEvent`]: what the view must redraw. The view maps each to one
-//!   list operation (Zed's `AcpThreadEvent` shape); everything else the
-//!   view draws follows the runtime's own `notify`, which the view observes.
+//! - [`RuntimeEvent`]: what the view must redraw, named: the transcript's
+//!   list operations (Zed's `AcpThreadEvent` shape) and the facets beside
+//!   it (the turn, the banner, the composer, the menus, the clocks). The
+//!   view redraws on every one; the runtime's own methods do not `notify`
+//!   (docs/82 4.9c), so a watcher of its state subscribes as well as
+//!   observes (an `Entity::as_mut` write from outside still notifies).
 //!
 //! Dropping the runtime hangs up its provider child ([`Drop`]); dropping a
 //! view does not.
@@ -307,8 +310,9 @@ pub struct SessionRuntime {
     pub(super) tasks: Vec<Task<()>>,
 }
 
-/// What a [`SessionRuntime`] tells the view drawing it. Each maps to one
-/// list operation on the view; nothing here reaches the root.
+/// What a [`SessionRuntime`] tells the view drawing it: each names what
+/// moved, and the view redraws on every one (a list operation first, for
+/// the transcript's). Nothing here reaches the root.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeEvent {
     /// Turns arrived at the end of the transcript (a send's bubble, a
@@ -330,6 +334,25 @@ pub enum RuntimeEvent {
     /// The model catalog, the picked model or the approval mode moved: an
     /// open composer menu re-reads its check.
     MenusStale,
+    /// The turn's own state moved without the transcript moving: sending,
+    /// running, the queue, a stop, a lane attached or lost. The send/stop
+    /// button, the status line and the queue strip read it.
+    TurnChanged,
+    /// A clock on screen advanced: the running turn's elapsed second, or a
+    /// question's or a retry's countdown.
+    Ticked,
+    /// The banner over the composer went up, changed or came down (a
+    /// command error, the lease, a lost child, the billing guard).
+    BannerChanged,
+    /// What goes out with the next turn moved: the attachments, the effort,
+    /// plan mode, a prompt handed back, the lock during a provider switch.
+    ComposerChanged,
+    /// A question's gathered answers moved.
+    QuestionsChanged,
+    /// History paging started or finished: the loading row comes or goes.
+    HistoryChanged,
+    /// The session's header facts (or a scripted context reading) moved.
+    HeaderChanged,
     /// A short notice for the window's toast stack.
     Toast {
         /// The toast's heading.

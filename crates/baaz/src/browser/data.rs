@@ -317,12 +317,15 @@ impl BrowserData {
         self.seq
     }
 
-    fn apply(&mut self, op: FrontOp) {
+    /// Apply `op` to the front at once (the worker gets it separately) and
+    /// redraw: every bookmark, folder and history edit comes through here.
+    fn apply(&mut self, op: FrontOp, cx: &mut Context<Self>) {
         self.seq += 1;
         self.front.apply(&op);
         if !self.snapshots_out.is_empty() {
             self.journal.push((self.seq, op));
         }
+        cx.notify();
     }
 
     fn provisional(&mut self) -> i64 {
@@ -573,7 +576,7 @@ impl BrowserData {
         if site.is_empty() {
             return;
         }
-        self.apply(FrontOp::Exclude(site.clone()));
+        self.apply(FrontOp::Exclude(site.clone()), cx);
         // The Field stops showing the site's pages now, not when the next
         // search lands.
         if let Some(hits) = self.hits.borrow_mut().as_mut() {
@@ -584,24 +587,21 @@ impl BrowserData {
         }
         self.send(Op::Exclude(site));
         self.history_changed();
-        cx.notify();
     }
 
     /// Record `site` again.
     pub(crate) fn include(&mut self, site: &str, cx: &mut Context<Self>) {
         let site = history::host_of(site);
-        self.apply(FrontOp::Include(site.clone()));
+        self.apply(FrontOp::Include(site.clone()), cx);
         self.send(Op::Include(site));
-        cx.notify();
     }
 
     /// Forget all history.
     pub(crate) fn clear_history(&mut self, cx: &mut Context<Self>) {
-        self.apply(FrontOp::ClearHistory);
+        self.apply(FrontOp::ClearHistory, cx);
         self.send(Op::ClearHistory);
         *self.hits.borrow_mut() = None;
         self.asked.borrow_mut().take();
-        cx.notify();
     }
 
     /// Bookmark `url` into `folder` (⌘D: the Bookmarks bar): the existing
@@ -613,9 +613,8 @@ impl BrowserData {
         let folder = self.resolve(folder);
         let id = self.provisional();
         let mark = Bookmark { id, url: url.to_owned(), title: title.to_owned(), folder, added_ms: now };
-        self.apply(FrontOp::AddBookmark(mark.clone()));
+        self.apply(FrontOp::AddBookmark(mark.clone()), cx);
         self.send(Op::AddBookmark { provisional: id, url: url.to_owned(), title: title.to_owned(), folder, now });
-        cx.notify();
         mark
     }
 
@@ -624,26 +623,23 @@ impl BrowserData {
     pub(crate) fn add_folder(&mut self, name: &str, parent: Option<i64>, cx: &mut Context<Self>) -> i64 {
         let parent = parent.map(|p| self.resolve(p));
         let id = self.provisional();
-        self.apply(FrontOp::AddFolder { id, name: name.to_owned(), parent });
+        self.apply(FrontOp::AddFolder { id, name: name.to_owned(), parent }, cx);
         self.send(Op::AddFolder { provisional: id, name: name.to_owned(), parent, source: "baaz".to_owned() });
-        cx.notify();
         id
     }
 
     /// Rename a bookmark and move it to `folder`.
     pub(crate) fn update_bookmark(&mut self, id: i64, title: &str, folder: i64, cx: &mut Context<Self>) {
         let (id, folder) = (self.resolve(id), self.resolve(folder));
-        self.apply(FrontOp::UpdateBookmark { id, title: title.to_owned(), folder });
+        self.apply(FrontOp::UpdateBookmark { id, title: title.to_owned(), folder }, cx);
         self.send(Op::UpdateBookmark { id, title: title.to_owned(), folder });
-        cx.notify();
     }
 
     /// Remove one bookmark.
     pub(crate) fn remove_bookmark(&mut self, id: i64, cx: &mut Context<Self>) {
         let id = self.resolve(id);
-        self.apply(FrontOp::RemoveBookmark(id));
+        self.apply(FrontOp::RemoveBookmark(id), cx);
         self.send(Op::RemoveBookmark { id });
-        cx.notify();
     }
 
     /// Import a Chrome profile in the worker; the answer says what it wrote,

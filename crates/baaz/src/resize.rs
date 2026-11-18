@@ -1,5 +1,6 @@
-//! The sidebar divider's drag: the six fields that only a drag reads, and the
-//! four handlers the resize strip calls.
+//! The dividers' drags: the fields that only a drag reads ([`ResizeDrag`],
+//! held by the sidebar pane; [`RightResizeDrag`], held by the right pane),
+//! and the handlers the resize strips call.
 //!
 //! The strip reports positions and nothing else — no click count, no press
 //! state — so everything a drag needs to be reconstructed lives in
@@ -28,7 +29,8 @@ use crate::layout::LayoutGlobal as _;
 /// positions only, never the click count, so recency is the reset signal.
 const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// The sidebar divider's geometry and whatever drag is in flight over it.
+/// The sidebar divider's geometry and whatever drag is in flight over it,
+/// held by the sidebar pane ([`crate::sidebar_view::SidebarPane::resize`]).
 pub(crate) struct ResizeDrag {
     /// The sidebar divider's current x, in window pixels. Local state until
     /// the drag settles, then `layout.json`.
@@ -162,6 +164,46 @@ impl ResizeDrag {
         let width = self.width;
         layout::Layout::update(cx, |layout| layout.sidebar_width = Some(width));
     }
+
+    /// Arm the drag from the grab point `x`.
+    pub(crate) fn begin(&mut self, x: f32) {
+        self.active = true;
+        self.grab_x = x;
+        self.start_w = self.width;
+        self.moved = 0.0;
+    }
+
+    /// One move to `x`: the divider follows from where the drag started,
+    /// clamped. False while no drag is armed.
+    pub(crate) fn drag_to(&mut self, x: f32) -> bool {
+        if !self.active {
+            return false;
+        }
+        let width = layout::drag_width(self.start_w, self.grab_x, x);
+        self.moved = self.moved.max((width - self.start_w).abs());
+        self.width = width;
+        true
+    }
+
+    /// The release: disarm and settle — a release with no travel shortly
+    /// after the previous one is the handle's double-click, which resets to
+    /// the default width instead of keeping a tap that moved nothing. False
+    /// while no drag is armed; the caller persists.
+    pub(crate) fn end(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        self.active = false;
+        self.scripted = false;
+        let now = std::time::Instant::now();
+        if self.moved < 2.0 && self.last_release.is_some_and(|last| now.duration_since(last) < DOUBLE_CLICK_WINDOW) {
+            self.width = SIDEBAR_WIDTH;
+            self.last_release = None;
+        } else {
+            self.last_release = Some(now);
+        }
+        true
+    }
 }
 
 /// The right-pane divider's geometry and whatever drag is in flight over
@@ -261,60 +303,68 @@ impl RightResizeDrag {
 }
 
 impl Harness {
-    /// The press on the resize strip: arm the drag from the grab point.
-    ///
-    /// A resize drag owns the list exactly like a wheel gesture does: it
-    /// disarms any armed reveal — a drag
-    /// starting within a few frames of an outside open must not scroll the
-    /// sessions list itself — and no reveal installs while it is in flight.
+    /// The press on the sidebar strip: the pane arms its drag
+    /// ([`crate::sidebar_view::SidebarPane::begin_resize`]). Refuses while
+    /// the right pane's drag runs: both dividers can never be under the
+    /// pointer at once.
     pub(crate) fn begin_resize(&mut self, x: f32, cx: &mut Context<Self>) {
         if self.right_pane.read(cx).resize.active {
             return;
         }
-        self.sidebar_pane.update(cx, |pane, _| pane.user_owns_list());
-        let drag = &mut self.resize;
-        drag.active = true;
-        drag.grab_x = x;
-        drag.start_w = drag.width;
-        drag.moved = 0.0;
-        cx.notify();
+        self.sidebar_pane.update(cx, |pane, cx| pane.begin_resize(x, cx));
     }
 
-    /// A move with the button held: the divider follows from where the drag
-    /// started, clamped, with no spring between it and the pointer.
+    /// A move with the button held on the sidebar strip.
     pub(crate) fn drag_resize(&mut self, x: f32, cx: &mut Context<Self>) {
-        let drag = &mut self.resize;
-        if !drag.active {
-            return;
-        }
-        let width = layout::drag_width(drag.start_w, drag.grab_x, x);
-        drag.moved = drag.moved.max((width - drag.start_w).abs());
-        drag.width = width;
-        cx.notify();
+        self.sidebar_pane.update(cx, |pane, cx| pane.drag_resize(x, cx));
     }
 
-    /// The release, wherever it lands: disarm, settle, persist. A release
-    /// with no travel shortly after the previous one is the handle's
-    /// double-click, which resets to the default width instead of keeping a
-    /// tap that moved nothing.
+    /// The release on the sidebar strip, wherever it lands.
     pub(crate) fn end_resize(&mut self, cx: &mut Context<Self>) {
-        let drag = &mut self.resize;
-        if !drag.active {
+        self.sidebar_pane.update(cx, |pane, cx| pane.end_resize(cx));
+    }
+
+    /// The window went inactive: a sidebar drag still armed is over,
+    /// settled where it stands (the pane's own rule, which spares a
+    /// scripted drag).
+    pub(crate) fn settle_resize_on_deactivate(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_pane.update(cx, |pane, cx| pane.settle_resize_on_deactivate(cx));
+    }
+
+    #[cfg(feature = "probe")]
+    /// One tick of a `resize-sweep:` (scripting only): the divider marches
+    /// one step, and the tick logs its width plus the renders and re-hint
+    /// the frame before it cost, so per-tick resize cost is readable off a
+    /// scripted run. Like a real drag it owns the list (no reveal installs
+    /// while active); unlike one it never persists — a measurement, not a
+    /// choice. The next tick waits for the frame this one asks for.
+    pub(crate) fn resize_sweep_tick(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        // The pane marches its own divider and redraws (the shell, its
+        // ancestor, with it); done at the target, when the clamp stops all
+        // progress, or past any reasonable drag, it settles without
+        // persisting.
+        let Some((next, done)) = self.sidebar_pane.update(cx, |pane, cx| pane.tick_resize_sweep(cx)) else {
             return;
-        }
-        drag.active = false;
-        drag.scripted = false;
-        let now = std::time::Instant::now();
-        if drag.moved < 2.0
-            && drag.last_release.is_some_and(|last| now.duration_since(last) < DOUBLE_CLICK_WINDOW)
-        {
-            drag.width = SIDEBAR_WIDTH;
-            drag.last_release = None;
+        };
+        let pane = crate::sidebar_view::take_sidebar_pane_renders();
+        let root = crate::sidebar_view::take_baaz_root_renders();
+        let rehint = self.active.clone().map(|view| view.update(cx, |view, _| view.take_trace_rehint())).unwrap_or(false);
+        crate::baaz_log!("rssweep w={next:.1} pane={pane} root={root} rehint={}", rehint as u8);
+        if done {
+            crate::baaz_log!("rssweep done w={next:.1}");
         } else {
-            drag.last_release = Some(now);
+            cx.on_next_frame(window, |this, window, cx| this.resize_sweep_tick(window, cx));
         }
-        drag.persist(cx);
-        cx.notify();
+    }
+
+    /// A sidebar drag is in flight.
+    pub(crate) fn sidebar_resizing(&self, cx: &gpui::App) -> bool {
+        self.sidebar_pane.read(cx).resize.active
+    }
+
+    /// The sidebar divider's x now.
+    pub(crate) fn sidebar_width(&self, cx: &gpui::App) -> f32 {
+        self.sidebar_pane.read(cx).resize.width
     }
 
     /// The press on the right pane's strip: arm the pane's drag from the
@@ -322,7 +372,7 @@ impl Harness {
     /// sidebar drag runs: both dividers can never be under the pointer at
     /// once, so the second press is a no-op rather than a second drag.
     pub(crate) fn begin_right_resize(&mut self, x: f32, cx: &mut Context<Self>) {
-        if self.resize.active {
+        if self.sidebar_resizing(cx) {
             return;
         }
         self.sidebar_pane.update(cx, |pane, _| pane.user_owns_list());
@@ -342,18 +392,14 @@ impl Harness {
     /// The release, wherever it lands: disarm, settle, persist to
     /// `rightWidth`. A release with no travel shortly after the previous
     /// one is the handle's double-click, which resets to the default right
-    /// width instead of keeping a tap that moved nothing.
+    /// width instead of keeping a tap that moved nothing. The persist is a
+    /// layout-global update, whose observers (the root) redraw.
     pub(crate) fn end_right_resize(&mut self, cx: &mut Context<Self>) {
-        let settled = self.right_pane.update(cx, |pane, cx| {
-            let settled = pane.resize.end();
-            if settled {
+        self.right_pane.update(cx, |pane, cx| {
+            if pane.resize.end() {
                 pane.resize.persist(cx);
             }
-            settled
         });
-        if settled {
-            cx.notify();
-        }
     }
 }
 

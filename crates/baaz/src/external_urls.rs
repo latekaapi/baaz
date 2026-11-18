@@ -223,9 +223,10 @@ impl Harness {
                 crate::baaz_log!("open-url: no tab opened for {url}: {reason}");
             }
         }
+        // The mode switch (a layout write) and each opened tab redraw the
+        // window themselves.
         cx.activate(true);
         window.activate_window();
-        cx.notify();
     }
 
     /// Open the URLs queued before sign-in, in arrival order. A no-op

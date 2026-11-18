@@ -27,7 +27,7 @@ use gpui::{ElementId, ListOffset, WeakEntity};
 
 use crate::sidebar_view::{
     browse_tab_id, browse_tab_key, footer_identity, muse_plan_label, task_face_for, SidebarEvent, SidebarFacts,
-    SidebarFrame, SidebarPane, NAV_NEEDS_YOU, NAV_PROJECTS, NAV_SKILLS,
+    SidebarPane, NAV_NEEDS_YOU, NAV_PROJECTS, NAV_SKILLS,
 };
 use crate::sidebar::SessionRow as _;
 
@@ -92,8 +92,7 @@ impl Harness {
     /// answering whether they moved. Never notifies the root.
     pub(crate) fn push_sidebar_facts(&mut self, cx: &mut Context<Self>) -> bool {
         let facts = self.sidebar_facts(cx);
-        let frame = SidebarFrame { width: self.resize.width, resizing: self.resize.active };
-        self.sidebar_pane.update(cx, |pane, cx| pane.push_facts(facts, frame, cx))
+        self.sidebar_pane.update(cx, |pane, cx| pane.push_facts(facts, cx))
     }
 
     /// The column's facts, from the root's render while it composes the

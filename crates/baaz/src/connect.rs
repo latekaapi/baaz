@@ -914,12 +914,10 @@ impl Harness {
         self.compose_muse_sheet(cx)
     }
 
-    /// Muse's sign-in sheet for this frame, its facts pushed first (it
-    /// draws right after, in this same frame), or `None` when it is down.
+    /// Muse's sign-in sheet for this frame (it draws the login flow it
+    /// holds), or `None` when it is down.
     fn compose_muse_sheet(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let view = self.overlays.read(cx).stack.view_as::<crate::login::MuseSheetView>(crate::overlay_stack::LayerKind::MuseSheet)?;
-        let facts = self.muse_sheet_facts(cx);
-        view.update(cx, |sheet, _| sheet.facts = Some(facts));
         Some(view.into_any_element())
     }
 
@@ -931,11 +929,10 @@ impl Harness {
 
     /// [`Self::close_muse_sheet`] without a window: what the stack's pop runs.
     pub(crate) fn close_muse_sheet_now(&mut self, cx: &mut Context<Self>) {
-        if self.login.flow_running() {
+        if self.login.read(cx).flow_running() {
             self.cancel_login_flow(cx);
         }
         self.close_muse_sheet_entry(cx);
-        cx.notify();
     }
 
 
@@ -952,8 +949,9 @@ impl Harness {
     /// session without ever raising the sheet, so nothing appeared
     /// (docs/65 §1). The open session stays; it waits on the sign-in.
     pub(crate) fn open_muse_sheet(&mut self, cx: &mut Context<Self>) {
-        self.login.reset_to_choose();
-        let view = cx.new(crate::login::MuseSheetView::new);
+        self.login_back_to_choose(cx);
+        let login = self.login.clone();
+        let view = cx.new(|cx| crate::login::MuseSheetView::new(login, cx));
         // Its buttons run on the main window (the field focuses there).
         let asked = cx.subscribe(&view, |this: &mut Self, _, event: &crate::login::MuseSheetEvent, cx| {
             let event = *event;

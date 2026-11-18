@@ -390,8 +390,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         verb: "split-ratio",
         run: |this, rest, _, cx| {
             let ratio = rest.trim().parse::<f32>().map_err(|_| format!("`{rest}` is not a number"))?;
-            this.browser.update(cx, |bv, _| bv.split_ratio = crate::browser::peek_split::clamp_split(ratio));
-            cx.notify();
+            let ratio = crate::browser::peek_split::clamp_split(ratio);
+            this.browser.update(cx, |bv, cx| bv.split_drag(crate::browser::peek_split::SplitDrag::Move(ratio), cx));
             Ok(())
         },
     },
@@ -526,8 +526,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
             // The banner a typed auth failure raises, on the open session's
             // provider; no session records a step failure.
             let id = this.active.as_ref().map(|view| view.read(cx).rt(cx).provider_kind()).ok_or("no open session")?;
-            this.provider_model.update(cx, |model, _| model.raise_typed_signed_out(id));
-            cx.notify();
+            this.provider_model.update(cx, |model, cx| model.raise_typed_signed_out(id, cx));
             Ok(())
         },
     },
@@ -678,7 +677,6 @@ impl Harness {
         if slug.eq_ignore_ascii_case("off") || slug.eq_ignore_ascii_case("closed") {
             crate::layout::Layout::stage(cx, |layout| layout.right_open = false);
             self.save_right_for_active(cx);
-            cx.notify();
             return Ok(());
         }
         match crate::layout::RightKind::parse(slug) {
@@ -688,7 +686,6 @@ impl Harness {
                     layout.right_open = true;
                 });
                 self.save_right_for_active(cx);
-                cx.notify();
                 Ok(())
             }
             None => {
@@ -766,7 +763,6 @@ impl Harness {
             crate::layout::Layout::stage(cx, |layout| layout.right_width = Some(width));
             self.right_pane.update(cx, |pane, _| pane.resize.width = width);
         }
-        cx.notify();
         Ok(())
     }
 

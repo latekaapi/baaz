@@ -62,7 +62,6 @@ impl Harness {
         if url == BLANK {
             state.update(cx, |state, cx| state.begin_editing(window, cx));
         }
-        cx.notify();
         Ok(())
     }
 
@@ -204,7 +203,6 @@ impl Harness {
         self.ensure_tab_page(HOME_KEY, id, window, cx);
         self.sync_find_input_to_tab(id, window, cx);
         self.leave_browse_address(window, cx);
-        cx.notify();
     }
 
     /// Whether the Browse tab shortcuts may fire: only in Browse mode.
@@ -263,7 +261,6 @@ impl Harness {
             self.browser.update(cx, |browser, cx| browser.set_session_tab(None, cx));
             self.ensure_tab_page(HOME_KEY, id, window, cx);
         }
-        cx.notify();
     }
 
     /// ⌘1–⌘8 (a 1-based display slot) and ⌘9 (the last tab) in Browse:
@@ -374,7 +371,6 @@ impl Harness {
         }
         self.browser.update(cx, |browser, cx| browser.set_session_tab(Some(id), cx));
         self.ensure_tab_page(HOME_KEY, id, window, cx);
-        cx.notify();
     }
 
     /// A Browse sidebar row's select or close, routed by the tab's owner:
@@ -395,7 +391,6 @@ impl Harness {
                     self.browser.update(cx, |browser, cx| browser.set_session_tab(None, cx));
                 }
                 self.close_tab(&session, id, window, cx);
-                cx.notify();
             }
         }
     }
@@ -420,7 +415,6 @@ impl Harness {
             self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         }
         self.ensure_tab_page(key, id, window, cx);
-        cx.notify();
     }
 
     /// Close `id`: the closed page is dropped; only when the closed tab
@@ -475,7 +469,6 @@ impl Harness {
             return;
         }
         if !was_active {
-            cx.notify();
             return;
         }
         match next {
@@ -494,7 +487,6 @@ impl Harness {
                 }
             }
         }
-        cx.notify();
     }
 
     /// Forget a session's stored browser URL (its last tab just closed),

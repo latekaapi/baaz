@@ -923,13 +923,13 @@ fn field_subscriptions_survive_opening_a_session(cx: &mut gpui::TestAppContext) 
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
             harness.set_login_state(aui::screens::LoginState::ApiKey { can_submit: true, error: None }, cx);
-            let field = harness.login.api_key_field();
+            let field = harness.login.read(cx).api_key_field();
             field.update(cx, |state, cx| state.set_value("sk-test-f2", window, cx));
             field.update(cx, |_, cx| cx.emit(InputEvent::PressEnter { secondary: false, shift: false }));
         });
     });
     assert_ne!(
-        vc.update(|_, cx| baaz.read(cx).login.state_name()),
+        vc.update(|_, cx| baaz.read(cx).login.read(cx).state_name()),
         "apikey",
         "Enter in the key field submits"
     );

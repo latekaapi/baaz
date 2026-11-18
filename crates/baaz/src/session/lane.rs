@@ -332,7 +332,7 @@ impl SessionRuntime {
         if let Lane::Provider(lane) = &mut self.lane {
             lane.unreported_mode = requested;
         }
-        cx.notify();
+        cx.emit(RuntimeEvent::TurnChanged);
     }
 
     /// Record the session in the fold, take the provider as the lane, and
@@ -454,7 +454,6 @@ impl SessionRuntime {
                     // A block that opens after the reply (a tool call the
                     // model went on to compose) takes the tail back.
                     self.note_reply_progress(false, cx);
-                    cx.notify();
                 }
             }
             provider::ProviderEvent::ApprovalRequested { session_id, approval_id, headline } => {
@@ -574,7 +573,7 @@ impl SessionRuntime {
                     return;
                 }
                 if self.store.set_header(&header) {
-                    cx.notify();
+                    cx.emit(RuntimeEvent::HeaderChanged);
                 }
             }
             // A turn running before it says anything: the stop button and
@@ -589,7 +588,7 @@ impl SessionRuntime {
                 self.submitting = false;
                 self.last_tick_secs = None;
                 self.start_ticker(cx);
-                cx.notify();
+                cx.emit(RuntimeEvent::TurnChanged);
             }
             // How a turn ended, beyond its footer: the plan card for a plan
             // turn, the created files for search, the sign-in hint for a
@@ -623,7 +622,7 @@ impl SessionRuntime {
                     failed,
                     error,
                 });
-                cx.notify();
+                cx.emit(RuntimeEvent::TurnChanged);
             }
             // A submission's words handed back: by the intent the row's
             // button recorded when it was a reclaimed queue row, else to the
@@ -653,7 +652,7 @@ impl SessionRuntime {
                     None if !text.is_empty() => self.restore_prompt(text, cx),
                     None => {}
                 }
-                cx.notify();
+                cx.emit(RuntimeEvent::TurnChanged);
             }
             // A row's status: the application's, for sessions no view
             // follows; a view has its own transcript to read.
@@ -684,7 +683,7 @@ impl SessionRuntime {
                     self.banner = None;
                     self.banner_action = None;
                     self.child_failure = None;
-                    cx.notify();
+                    cx.emit(RuntimeEvent::BannerChanged);
                 }
             }
             provider::ProviderEvent::ConnectionLost { reason } => self.lose_child(&reason, None, cx),
@@ -714,7 +713,7 @@ impl SessionRuntime {
         // (its one child is the window's connection, and the hub
         // brings it back); every other lane speaks for itself.
         if self.provider_kind().shares_one_child() {
-            cx.notify();
+            cx.emit(RuntimeEvent::TurnChanged);
         } else {
             self.note_child_lost(reason, stderr, cx);
         }
@@ -768,7 +767,7 @@ impl SessionRuntime {
                         this.banner_action = None;
                     }
                     this.child_failure = None;
-                    cx.notify();
+                    cx.emit(RuntimeEvent::BannerChanged);
                 }
                 Err(error) => {
                     this.revive_failed(&error, cx);
@@ -1286,7 +1285,7 @@ impl SessionRuntime {
             self.running = Some(super::Running { turn_id, started: crate::clock::now_instant() });
             self.last_tick_secs = None;
             self.start_ticker(cx);
-            cx.notify();
+            cx.emit(RuntimeEvent::TurnChanged);
         }
     }
 
@@ -1347,7 +1346,7 @@ impl SessionRuntime {
                         row.is_active = row.model_id == active;
                     }
                 }
-                cx.notify();
+                cx.emit(RuntimeEvent::MenusStale);
             }
         });
     }

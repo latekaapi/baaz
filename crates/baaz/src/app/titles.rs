@@ -430,7 +430,6 @@ impl Harness {
         }
         self.handoff_state.runs.insert(source.clone(), run);
         self.refresh_handoff_card(&source, cx);
-        cx.notify();
     }
 
     /// One watchdog per summary: [`crate::handoff::SUMMARY_TIMEOUT_SECS`]
@@ -497,7 +496,6 @@ impl Harness {
         }
         self.refresh_handoff_card(source, cx);
         self.arm_handoff_tick(source.to_owned(), epoch, cx);
-        cx.notify();
     }
 }
 

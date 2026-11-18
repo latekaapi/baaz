@@ -634,13 +634,18 @@ impl Harness {
             // (`SettingsPage::provider_intent`), never here.
             ProviderAction::ToggleDetails => {}
             ProviderAction::ChangePath => self.choose_provider_path(id, cx),
-            ProviderAction::ClearPath => {
-                crate::details::set_path_override(id, None);
-                crate::provider_status::recheck_provider(id);
-                cx.notify();
-            }
+            ProviderAction::ClearPath => self.set_provider_path(id, None, cx),
             ProviderAction::CopyDiagnostics => self.copy_provider_diagnostics(id, cx),
         }
+    }
+
+    /// Store `path` as the binary Baaz runs for `id` (`None`: back to the
+    /// one found on PATH) and re-check the provider against it; the card
+    /// the root draws redraws.
+    fn set_provider_path(&mut self, id: ProviderId, path: Option<&std::path::Path>, cx: &mut Context<Self>) {
+        crate::details::set_path_override(id, path);
+        crate::provider_status::recheck_provider(id);
+        cx.notify();
     }
 
     /// "Change path…": a file panel for the binary Baaz should run; the
@@ -655,11 +660,7 @@ impl Harness {
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             let Some(path) = paths.into_iter().next() else { return };
-            let _ = this.update(cx, |_, cx| {
-                crate::details::set_path_override(id, Some(&path));
-                crate::provider_status::recheck_provider(id);
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.set_provider_path(id, Some(&path), cx));
         })
         .detach();
     }

@@ -82,7 +82,6 @@ impl SessionRuntime {
         self.handoff_card = Some(card.clone());
         let landed = self.replace_client_block(card_id, card);
         self.announce_landed(&landed, cx);
-        cx.notify();
     }
 
     /// Retire the composer: sends refuse with the read-only notice from
@@ -91,7 +90,7 @@ impl SessionRuntime {
         self.handed_off_to = Some((to, destination));
         self.banner = self.handoff_readonly_notice();
         self.banner_action = None;
-        cx.notify();
+        cx.emit(RuntimeEvent::BannerChanged);
     }
 
     /// Remember the pack's texts when it submits, so the view can hide the
@@ -305,9 +304,9 @@ impl SessionRuntime {
                     });
                 }
             }
-            cx.notify();
+            cx.emit(RuntimeEvent::TurnChanged);
         });
-        cx.notify();
+        cx.emit(RuntimeEvent::TurnChanged);
     }
 
     #[cfg(feature = "probe")]

@@ -117,16 +117,6 @@ impl Default for SidebarFacts {
     }
 }
 
-/// The column's geometry this frame: read at render, pushed without a
-/// notify — a width change re-renders the cached pane through its bounds.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct SidebarFrame {
-    /// The column's width.
-    pub(crate) width: f32,
-    /// A divider drag is in flight: no reveal moves the list meanwhile.
-    pub(crate) resizing: bool,
-}
-
 /// What the column asks the root for.
 #[derive(Clone, Debug)]
 pub(crate) enum SidebarEvent {
@@ -183,8 +173,10 @@ pub(crate) struct SidebarPane {
     rename: Entity<TextareaState>,
     /// What the root last pushed ([`SidebarFacts`]).
     facts: SidebarFacts,
-    /// The column's width and drag ([`SidebarFrame`]).
-    frame: SidebarFrame,
+    /// The divider's width and whatever drag is in flight over it: the
+    /// pane owns it, so a drag redraws the column (and the shell around it,
+    /// an ancestor) without the root (docs/82 4.9c).
+    pub(crate) resize: crate::resize::ResizeDrag,
     /// The sessions list's scroll state: the caller-owned `ListState` the
     /// virtualised sidebar lays out through. Kept in sync with the
     /// flattened rows on every render by [`Self::sync_list`]: `reset` after
@@ -473,8 +465,9 @@ impl SidebarPane {
     /// The id the pane hands the virtual list.
     pub(crate) const SIDEBAR_VIEW_ID: &'static str = "sessions";
 
-    /// The column over `list`, typing renames in `rename`.
-    pub(crate) fn new(list: Entity<SessionList>, rename: Entity<TextareaState>, cx: &mut Context<Self>) -> Self {
+    /// The column over `list`, typing renames in `rename`, `width` wide
+    /// (what `layout.json` restored).
+    pub(crate) fn new(list: Entity<SessionList>, rename: Entity<TextareaState>, width: f32, cx: &mut Context<Self>) -> Self {
         let subscriptions = vec![
             // A list change re-renders the column from the list's own
             // event. An event, not a notify: gpui-pre drops an observer's
@@ -490,7 +483,7 @@ impl SidebarPane {
             list,
             rename,
             facts: SidebarFacts::default(),
-            frame: SidebarFrame::default(),
+            resize: crate::resize::ResizeDrag::restored(width),
             list_state: sidebar_list_state(0),
             hovered: None,
             hovered_group: None,
@@ -520,10 +513,8 @@ impl SidebarPane {
     /// notifies the pane only when the facts differ from the last ones —
     /// answering whether they did. Called from the root's render: a notify
     /// raised inside the draw lands on the next frame, so the caller asks
-    /// for one. The frame (width, drag) is taken without a notify: a width
-    /// change re-renders the cached pane through its bounds.
-    pub(crate) fn push_facts(&mut self, facts: SidebarFacts, frame: SidebarFrame, cx: &mut Context<Self>) -> bool {
-        self.frame = frame;
+    /// for one.
+    pub(crate) fn push_facts(&mut self, facts: SidebarFacts, cx: &mut Context<Self>) -> bool {
         if self.facts == facts {
             return false;
         }
@@ -545,6 +536,87 @@ impl SidebarPane {
         self.reveal = id;
         self.reveal_unknown = None;
         cx.notify();
+    }
+
+    /// The press on the divider: arm the drag from the grab point. A drag
+    /// owns the list like a wheel gesture does: an armed reveal is
+    /// disarmed, and none installs while it is in flight.
+    pub(crate) fn begin_resize(&mut self, x: f32, cx: &mut Context<Self>) {
+        self.user_owns_list();
+        self.resize.begin(x);
+        cx.notify();
+    }
+
+    /// A move with the button held: the divider follows, clamped.
+    pub(crate) fn drag_resize(&mut self, x: f32, cx: &mut Context<Self>) {
+        if self.resize.drag_to(x) {
+            cx.notify();
+        }
+    }
+
+    /// The release, wherever it lands: disarm, settle, persist. The write
+    /// is a layout-global update, whose observers (this pane, the root)
+    /// redraw.
+    pub(crate) fn end_resize(&mut self, cx: &mut Context<Self>) {
+        if self.resize.end() {
+            self.resize.persist(cx);
+        }
+    }
+
+    /// The window went inactive mid-drag: a release outside it never reaches
+    /// the overlay, so a pointer drag settles where it stands (a scripted
+    /// one has no pointer, and only its own `resize-end` settles it).
+    pub(crate) fn settle_resize_on_deactivate(&mut self, cx: &mut Context<Self>) {
+        if self.resize.active && !self.resize.scripted {
+            self.resize.active = false;
+            self.resize.persist(cx);
+        }
+    }
+
+    #[cfg(feature = "probe")]
+    /// `sidebar-width:` — a width settled like a released drag, minus the
+    /// pointer (persisted: the layout global's observers redraw).
+    pub(crate) fn settle_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        self.resize.width = aui::shell::clamp_sidebar_width(width);
+        self.resize.active = false;
+        self.resize.persist(cx);
+    }
+
+    #[cfg(feature = "probe")]
+    /// `resize-begin` steps: the drag has no pointer behind it.
+    pub(crate) fn mark_resize_scripted(&mut self) {
+        self.resize.scripted = true;
+    }
+
+    #[cfg(feature = "probe")]
+    /// Start a frame-paced width sweep (`resize-sweep:`): it owns the list
+    /// like a drag and never persists.
+    pub(crate) fn start_resize_sweep(&mut self, sweep: crate::resize::ResizeSweep, cx: &mut Context<Self>) {
+        self.user_owns_list();
+        self.resize.sweep = Some(sweep);
+        self.resize.active = true;
+        self.resize.scripted = true;
+        cx.notify();
+    }
+
+    #[cfg(feature = "probe")]
+    /// One sweep tick: the divider marches one step. Answers the new width
+    /// and whether the sweep is over (at the target, when the clamp stops
+    /// progress, or past any reasonable drag), or `None` when no sweep
+    /// runs. Over, it settles without persisting.
+    pub(crate) fn tick_resize_sweep(&mut self, cx: &mut Context<Self>) -> Option<(f32, bool)> {
+        let from = self.resize.width;
+        let sweep = self.resize.sweep.as_mut()?;
+        let next = sweep.advance(from);
+        let done = next == from || next == sweep.target || sweep.ticks > 10_000;
+        self.resize.width = next;
+        if done {
+            self.resize.sweep = None;
+            self.resize.active = false;
+            self.resize.scripted = false;
+        }
+        cx.notify();
+        Some((next, done))
     }
 
     /// The person owns the list (a divider drag, a scripted sweep): any
@@ -896,7 +968,7 @@ impl SidebarPane {
     /// Whether the list may move on its own: never under a user scroll, a
     /// gesture or a divider drag.
     fn list_is_free(&self) -> bool {
-        !self.user_scrolled && !self.gesture_active() && !self.frame.resizing
+        !self.user_scrolled && !self.gesture_active() && !self.resize.active
     }
 
     /// Re-anchor the scroll position after [`Self::sync_list`] spliced:
@@ -1207,7 +1279,7 @@ impl Render for SidebarPane {
         }
         let pane = cx.entity().downgrade();
         let screen = sidebar_screen(Self::SIDEBAR_VIEW_ID, model, self.list_state.clone())
-            .width(px(self.frame.width))
+            .width(px(self.resize.width))
             .rename_textarea(&self.rename)
             // v3: the sidebar has no ground of its own — on the frame in the
             // column, on Floating in the peek card; the shell's bar carries
@@ -3004,6 +3076,74 @@ mod tests {
         vc.update(|_, cx| stranger.update(cx, |_, cx| cx.notify()));
         vc.run_until_parked();
         assert_eq!(take_baaz_root_renders(), 0, "a notify of an entity the root does not read redraws nothing");
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// Plan 4.9c: the sign-in flow is its own entity. A step of the flow
+    /// (here the device flow failing) notifies the `Login` the Muse sheet
+    /// draws: the window redraws, the sheet reads the new state, and the
+    /// root is never notified.
+    #[gpui::test]
+    fn the_login_flow_redraws_its_sheet_without_notifying_the_root(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("login-entity-redraws");
+        let (baaz, _pane, vc) = rooted_window(cx, args);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_muse_sheet(cx)));
+        vc.run_until_parked();
+        let login = vc.update(|_, cx| baaz.read(cx).login.clone());
+        let (root_notifies, login_notifies) = (std::rc::Rc::new(std::cell::Cell::new(0usize)), std::rc::Rc::new(std::cell::Cell::new(0usize)));
+        let (r, l) = (root_notifies.clone(), login_notifies.clone());
+        let _watch = vc.update(|_, cx| {
+            (cx.observe(&baaz, move |_, _| r.set(r.get() + 1)), cx.observe(&login, move |_, _| l.set(l.get() + 1)))
+        });
+        take_baaz_root_renders();
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.set_login_state(aui::screens::LoginState::Error { message: "Sign-in failed.".into(), method: None }, cx)
+            })
+        });
+        vc.run_until_parked();
+        assert!(login_notifies.get() > 0, "the flow's own entity was notified");
+        assert!(take_baaz_root_renders() > 0, "the window redrew the sheet");
+        assert_eq!(root_notifies.get(), 0, "the root itself was never notified");
+        assert_eq!(vc.update(|_, cx| login.read(cx).state_name()), "error");
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// Plan 4.9c: the sidebar pane owns the divider's drag. A press and a
+    /// move notify the pane, whose shell (the root, its ancestor) redraws
+    /// at the new width; the release persists through the layout global.
+    /// The root is never notified along the way.
+    #[gpui::test]
+    fn a_sidebar_drag_redraws_the_shell_without_notifying_the_root(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("sidebar-drag-redraws");
+        let (baaz, pane, vc) = rooted_window(cx, args);
+        let root_notifies = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let count = root_notifies.clone();
+        let _watch = vc.update(|_, cx| cx.observe(&baaz, move |_, _| count.set(count.get() + 1)));
+        let start = vc.update(|_, cx| baaz.read(cx).sidebar_width(cx));
+        take_baaz_root_renders();
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.begin_resize(start, cx)));
+        vc.run_until_parked();
+        assert!(vc.update(|_, cx| pane.read(cx).resize.active), "the pane holds the drag");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.drag_resize(start + 24.0, cx)));
+        vc.run_until_parked();
+        assert!(take_baaz_root_renders() > 0, "the shell redrew under the drag");
+        let moved = vc.update(|_, cx| baaz.read(cx).sidebar_width(cx));
+        assert!((moved - start).abs() > 1.0, "the divider followed the pointer: {start} -> {moved}");
+        assert_eq!(root_notifies.get(), 0, "the press and the move never notified the root");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.end_resize(cx)));
+        vc.run_until_parked();
+        assert!(!vc.update(|_, cx| pane.read(cx).resize.active), "the release settled it");
+        assert_eq!(
+            vc.update(|_, cx| crate::layout::Layout::get(cx).sidebar_width),
+            Some(moved),
+            "the release persisted the width"
+        );
+        // The release's layout write reaches the root through the global's
+        // observer (every preference write does), never a notify of the
+        // drag's own.
         b3c_teardown(&dir, guard, old);
     }
 

@@ -69,11 +69,14 @@ pub(crate) enum Auth {
     SignedIn(#[allow(dead_code)] Identity),
 }
 
-/// The login screen's own state. The screen itself is stateless (it is the
-/// library's `aui::screens::login`): this owns the [`LoginState`], the
-/// device flow's URL and code, which method is running, and the API-key
-/// field. There is no task field: every wire call runs on the background
-/// executor and returns through `update`, like every other command.
+/// The sign-in flow's own state, an entity (docs/82 4.9c): the screen itself
+/// is stateless (it is the library's `aui::screens::login`); this owns the
+/// [`LoginState`], the device flow's URL and code, which method is running,
+/// and the API-key field. The Muse sheet ([`MuseSheetView`]) reads it and
+/// redraws on its notify; the root only drives the flow (the `account/*`
+/// lane is the root's). There is no task field: every wire call runs on the
+/// background executor and returns through `update`, like every other
+/// command.
 pub(crate) struct Login {
     state: LoginState,
     url: Option<String>,
@@ -95,10 +98,6 @@ impl Login {
         Self { state: LoginState::Choose, url: None, code: None, method: None, api_key, revealed: false }
     }
 
-    /// The method choice: forget the flow. The field keeps whatever it
-    /// holds — callers that leave the key form (`Back`, `ChooseAnother`,
-    /// a returned submit) clear it explicitly; `Harness::login_back_to_choose`
-    /// resets and redraws.
     /// Whether a sign-in flow is running (the device flow starting or
     /// waiting): closing the sheet cancels it.
     pub(crate) fn flow_running(&self) -> bool {
@@ -116,12 +115,28 @@ impl Login {
         self.api_key.clone()
     }
 
-    pub(crate) fn reset_to_choose(&mut self) {
+    /// Back to the method choice: forget the flow, and redraw the sheet.
+    pub(crate) fn reset_to_choose(&mut self, cx: &mut Context<Self>) {
         self.state = LoginState::Choose;
         self.url = None;
         self.code = None;
         self.method = None;
         crate::baaz_log!("login → choose");
+        cx.notify();
+    }
+
+    /// Move to `state`, with the one stderr line a headless `--login-steps`
+    /// run follows the flow by. The line carries the state name only — never
+    /// a URL, a code or a key. The sheet redraws.
+    fn set_state(&mut self, state: LoginState, cx: &mut Context<Self>) {
+        crate::baaz_log!("login → {}", login_state_name(&state));
+        self.state = state;
+        cx.notify();
+    }
+
+    /// The running method, if any.
+    fn method(&self) -> Option<LoginMethod> {
+        self.method
     }
 }
 
@@ -141,26 +156,23 @@ fn login_state_name(state: &LoginState) -> &'static str {
 }
 
 
-/// The login half of [`Harness`]: the fields stay on the struct in `app.rs`,
-/// the flow lives here, and the shell reaches it through one call per seam —
+/// The login half of [`Harness`]: `auth` stays on the struct in `app.rs`, the
+/// flow's state is the [`Login`] entity the Muse sheet draws, the flow
+/// lives here, and the shell reaches it through one call per seam —
 /// `probe_account` from `connect`, `on_account_event` from the hub's
-/// connection stream,
-/// `apply_login_sample` and `submit_api_key` from `new`, `logout` from the
-/// account menu, `login_escape` from Escape and `render_login` from `render`.
+/// connection stream, `apply_login_sample` and `submit_api_key` from `new`,
+/// `logout` from the account menu, `login_intent` from the sheet.
 impl Harness {
-    /// Back to the method choice ([`Login::reset_to_choose`]), redrawn.
+    /// Back to the method choice ([`Login::reset_to_choose`]). The field
+    /// keeps whatever it holds — callers that leave the key form (`Back`,
+    /// `ChooseAnother`, a returned submit) clear it explicitly.
     pub(crate) fn login_back_to_choose(&mut self, cx: &mut Context<Self>) {
-        self.login.reset_to_choose();
-        cx.notify();
+        self.login.update(cx, |login, cx| login.reset_to_choose(cx));
     }
 
-    /// Move to `state`, with the one stderr line a headless `--login-steps`
-    /// run follows the flow by. The line carries the state name only — never
-    /// a URL, a code or a key.
+    /// Move the flow to `state` ([`Login::set_state`]).
     pub(crate) fn set_login_state(&mut self, state: LoginState, cx: &mut Context<Self>) {
-        crate::baaz_log!("login → {}", login_state_name(&state));
-        self.login.state = state;
-        cx.notify();
+        self.login.update(cx, |login, cx| login.set_state(state, cx));
     }
 
     /// The boot probe and the re-probe after every `account/changed`:
@@ -197,7 +209,7 @@ impl Harness {
                 crate::baaz_log!("account → loggedOut");
                 this.tier_retry_settled();
                 this.auth = Auth::SignedOut;
-                this.login.reset_to_choose();
+                this.login_back_to_choose(cx);
                 #[cfg(feature = "probe")]
                 this.run_login_steps(cx);
                 cx.notify();
@@ -264,7 +276,7 @@ impl Harness {
                 crate::provider_status::refresh_muse_status();
                 let was_in = matches!(self.auth, Auth::SignedIn(_));
                 self.auth = Auth::SignedOut;
-                self.login.reset_to_choose();
+                self.login_back_to_choose(cx);
                 // Never a full-screen gate: on the connect screen the rows
                 // already show it; in the shell the sessions wait on the
                 // connection and a quiet banner names the way back.
@@ -288,36 +300,41 @@ impl Harness {
         match intent {
             LoginIntent::StartAccount => self.start_device_flow(cx),
             LoginIntent::UseApiKey => {
-                self.login.method = Some(LoginMethod::ApiKey);
-                self.set_login_state(LoginState::ApiKey { can_submit: false, error: None }, cx);
-                window.focus(&self.login.api_key.focus_handle(cx), cx);
+                self.login.update(cx, |login, cx| {
+                    login.method = Some(LoginMethod::ApiKey);
+                    login.set_state(LoginState::ApiKey { can_submit: false, error: None }, cx);
+                });
+                let field = self.login.read(cx).api_key.focus_handle(cx);
+                window.focus(&field, cx);
             }
             LoginIntent::SubmitApiKey => self.submit_api_key(cx),
+            // The field draws its own masked flag (its notify redraws it);
+            // `revealed` only mirrors it for the next flip.
             LoginIntent::ToggleReveal => {
-                let next = !self.login.revealed;
-                self.login.revealed = next;
-                let api_key = self.login.api_key.clone();
+                let api_key = self.login.update(cx, |login, _| {
+                    login.revealed = !login.revealed;
+                    login.api_key.clone()
+                });
+                let next = self.login.read(cx).revealed;
                 api_key.update(cx, |state, cx| state.set_masked(next, window, cx));
-                cx.notify();
             }
             LoginIntent::Back | LoginIntent::ChooseAnother => {
-                self.login.reset_to_choose();
-                let api_key = self.login.api_key.clone();
+                self.login_back_to_choose(cx);
+                let api_key = self.login.read(cx).api_key.clone();
                 api_key.update(cx, |state, cx| state.clean(window, cx));
-                cx.notify();
             }
             LoginIntent::OpenBrowser => {
-                if let Some(url) = self.login.url.clone() {
+                if let Some(url) = self.login.read(cx).url.clone() {
                     // Straight into the child's argv; never into a log.
                     let _ = auth::open_in_browser(&url);
                 }
             }
             LoginIntent::CopyCode => {
-                if let Some(code) = self.login.code.clone() {
+                if let Some(code) = self.login.read(cx).code.clone() {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
                 }
             }
-            LoginIntent::Retry => match self.login.method {
+            LoginIntent::Retry => match self.login.read(cx).method() {
                 Some(LoginMethod::Account) => self.start_device_flow(cx),
                 Some(LoginMethod::ApiKey) => self.login_intent(LoginIntent::UseApiKey, window, cx),
                 None => {
@@ -334,7 +351,7 @@ impl Harness {
     /// in a notification — and the browser opens once, on entering the
     /// device state (D26). Nothing here is logged but the state name.
     pub(crate) fn start_device_flow(&mut self, cx: &mut Context<Self>) {
-        self.login.method = Some(LoginMethod::Account);
+        self.login.update(cx, |login, _| login.method = Some(LoginMethod::Account));
         if !self.muse_slot.is_ready() {
             self.set_login_state(
                 LoginState::Error { message: "Muse is not running.".into(), method: Some(LoginMethod::Account) },
@@ -348,8 +365,10 @@ impl Harness {
         self.wire_call(cx, work, |this, result, cx| match result {
             Ok(Ack::LoginChallenge { verification_url, user_code }) => match (verification_url, user_code) {
                 (Some(url), Some(code)) => {
-                    this.login.url = Some(url.clone());
-                    this.login.code = Some(code.clone());
+                    this.login.update(cx, |login, _| {
+                        login.url = Some(url.clone());
+                        login.code = Some(code.clone());
+                    });
                     this.set_login_state(
                         LoginState::Device {
                             url: url.clone().into(),
@@ -396,10 +415,10 @@ impl Harness {
     /// when the call returns, whatever it returned (D24). An empty field
     /// does nothing — the Sign in button is disabled until there is text.
     pub(crate) fn submit_api_key(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.login.state, LoginState::ApiKey { .. }) {
+        if !matches!(self.login.read(cx).state, LoginState::ApiKey { .. }) {
             return;
         }
-        let key = self.login.api_key.read(cx).value().to_string();
+        let key = self.login.read(cx).api_key.read(cx).value().to_string();
         let trimmed = key.trim().to_owned();
         if trimmed.is_empty() {
             return;
@@ -414,18 +433,19 @@ impl Harness {
             );
             return;
         }
-        self.login.method = Some(LoginMethod::ApiKey);
+        self.login.update(cx, |login, _| login.method = Some(LoginMethod::ApiKey));
         self.set_login_state(LoginState::Validating, cx);
         let slot = self.muse_slot.clone();
         let work = move || slot.control().and_then(|lane| lane.send(Command::BeginLogin { api_key: Some(trimmed) }));
         // `wire_call_in` for the window the field-clear needs.
         self.wire_call_in(cx, work, |this, result, window, cx| {
-            let api_key = this.login.api_key.clone();
+            let api_key = this.login.read(cx).api_key.clone();
             api_key.update(cx, |state, cx| state.clean(window, cx));
             match result {
                 // A stored key: the signed-in `account/changed` follows
-                // and enters the app; until then the spinner stays.
-                Ok(_) => cx.notify(),
+                // and enters the app; until then the spinner stays (the
+                // cleared field redraws itself).
+                Ok(_) => {}
                 Err(error) => {
                     this.set_login_state(
                         LoginState::ApiKey {
@@ -502,7 +522,7 @@ impl Harness {
                     this.tier_retry_settled();
                     this.forget_muse_rows(cx);
                     this.auth = Auth::SignedOut;
-                    this.login.reset_to_choose();
+                    this.login_back_to_choose(cx);
                     // A deliberate sign-out still clears, but outside the
                     // connect screen it lands in the shell with the quiet
                     // banner — never the old full-screen gate.
@@ -571,18 +591,18 @@ impl Harness {
                 // An API-key failure belongs on the key form, where the key
                 // can be fixed — not on the error card with its way back.
                 if outcome == LoginOutcome::Failed
-                    && self.login.method == Some(LoginMethod::ApiKey)
+                    && self.login.read(cx).method() == Some(LoginMethod::ApiKey)
                 {
                     self.set_login_state(LoginState::ApiKey { can_submit: false, error: Some(text) }, cx);
                 } else {
                     self.set_login_state(
-                        LoginState::Error { message: text, method: self.login.method },
+                        LoginState::Error { message: text, method: self.login.read(cx).method() },
                         cx,
                     );
                 }
             }
             LoginOutcome::Cancelled => {
-                if !matches!(self.login.state, LoginState::Choose) {
+                if !matches!(self.login.read(cx).state, LoginState::Choose) {
                     self.login_back_to_choose(cx);
                 }
             }
@@ -592,11 +612,11 @@ impl Harness {
                 let text: SharedString =
                     message.unwrap_or_else(|| "The sign-in ended in a way this build does not understand.".to_owned())
                         .into();
-                if self.login.method == Some(LoginMethod::ApiKey) {
+                if self.login.read(cx).method() == Some(LoginMethod::ApiKey) {
                     self.set_login_state(LoginState::ApiKey { can_submit: false, error: Some(text) }, cx);
                 } else {
                     self.set_login_state(
-                        LoginState::Error { message: text, method: self.login.method },
+                        LoginState::Error { message: text, method: self.login.read(cx).method() },
                         cx,
                     );
                 }
@@ -635,7 +655,7 @@ impl Harness {
     pub(crate) fn step_key_from_env(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match std::env::var(rest) {
             Ok(value) => {
-                let api_key = self.login.api_key.clone();
+                let api_key = self.login.read(cx).api_key.clone();
                 api_key.update(cx, |state, cx| state.set_value(value, window, cx));
                 true
             }
@@ -726,24 +746,16 @@ fn error_words(error: &ProviderError) -> String {
 
 /// Muse's sign-in sheet as its own view (D5 B3, plan 4.6): the setup
 /// sheet's frame at 460 wide over the 45 % scrim — mark, "Sign in to Muse",
-/// ✕ — with the login's own steps inside. The sign-in itself is the root's
-/// (the `account/*` lane, the field that must never hand the key to
-/// anything but the wire): the root pushes the state and the field in each
-/// frame ([`MuseSheetFacts`]) and runs what the sheet asks for
-/// ([`MuseSheetEvent`]). ✕ and Escape dismiss it through the overlay stack
-/// (`DismissEvent`); the scrim does not.
+/// ✕ — with the login's own steps inside. It draws the [`Login`] entity it
+/// holds (the state, the API-key field) and redraws on its notify; the
+/// sign-in itself is the root's (the `account/*` lane, the field that must
+/// never hand the key to anything but the wire), which runs what the sheet
+/// asks for ([`MuseSheetEvent`]). ✕ and Escape dismiss it through the
+/// overlay stack (`DismissEvent`); the scrim does not.
 pub(crate) struct MuseSheetView {
-    /// What the root pushed this frame.
-    pub(crate) facts: Option<MuseSheetFacts>,
+    /// The flow it draws.
+    login: Entity<Login>,
     focus: gpui::FocusHandle,
-}
-
-/// What the Muse sheet draws, pushed by the root.
-pub(crate) struct MuseSheetFacts {
-    /// The login's state, `can_submit` already worked out.
-    pub(crate) state: LoginState,
-    /// The API-key field (the root's: the key goes from it to the wire).
-    pub(crate) api_key: Entity<InputState>,
 }
 
 /// What the Muse sheet asks the root for.
@@ -751,8 +763,6 @@ pub(crate) struct MuseSheetFacts {
 pub(crate) enum MuseSheetEvent {
     /// A login button.
     Intent(LoginIntent),
-    /// The eye flipped the field's mask to this (revealed when `true`).
-    Revealed(bool),
 }
 
 impl gpui::EventEmitter<MuseSheetEvent> for MuseSheetView {}
@@ -765,14 +775,26 @@ impl gpui::Focusable for MuseSheetView {
 }
 
 impl MuseSheetView {
-    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
-        MuseSheetView { facts: None, focus: cx.focus_handle() }
+    pub(crate) fn new(login: Entity<Login>, cx: &mut Context<Self>) -> Self {
+        MuseSheetView { login, focus: cx.focus_handle() }
     }
 }
 
 impl Render for MuseSheetView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(facts) = self.facts.as_ref() else { return gpui::div().into_any_element() };
+        // `can_submit` tracks the field's non-empty trimmed text, worked out
+        // every frame (the stored bool is only the shape the state needs);
+        // a keystroke redraws the window the field is drawn in.
+        let (state, api_key) = {
+            let login = self.login.read(cx);
+            let state = match &login.state {
+                LoginState::ApiKey { error, .. } => {
+                    LoginState::ApiKey { can_submit: !login.api_key.read(cx).value().trim().is_empty(), error: error.clone() }
+                }
+                other => other.clone(),
+            };
+            (state, login.api_key.clone())
+        };
         let me = cx.entity().downgrade();
         let intent = move |intent: LoginIntent, _: &mut Window, cx: &mut gpui::App| {
             let _ = me.update(cx, |_, cx| match intent {
@@ -781,17 +803,17 @@ impl Render for MuseSheetView {
                 intent => cx.emit(MuseSheetEvent::Intent(intent)),
             });
         };
-        // The eye flips the field's masked flag and tells the root, so the
-        // root's `revealed` flips from the truth. The component never sees
-        // the key: it only reads the masked flag for the glyph.
-        let toggle = facts.api_key.clone();
-        let me = cx.entity().downgrade();
-        let field = secret_field("login-key", &facts.api_key).placeholder("Paste your key").on_toggle_reveal(move |window, cx| {
+        // The eye flips the field's masked flag and the flow's mirror of
+        // it, so the next `ToggleReveal` flips from the truth. The component
+        // never sees the key: it only reads the masked flag for the glyph.
+        let toggle = api_key.clone();
+        let flow = self.login.clone();
+        let field = secret_field("login-key", &api_key).placeholder("Paste your key").on_toggle_reveal(move |window, cx| {
             let next = !toggle.read(cx).presentation().is_masked();
             toggle.update(cx, |state, cx| state.set_masked(next, window, cx));
-            let _ = me.update(cx, |_, cx| cx.emit(MuseSheetEvent::Revealed(next)));
+            flow.update(cx, |login, _| login.revealed = next);
         });
-        let card = login("login", facts.state.clone())
+        let card = login("login", state)
             .product("Muse")
             .headline("Sign in to Muse")
             .provider(aui_icons::Provider::Muse)
@@ -815,24 +837,10 @@ impl Render for MuseSheetView {
 }
 
 impl Harness {
-    /// What the Muse sheet draws now: the login's state with `can_submit`
-    /// tracking the field's non-empty trimmed text (recomputed every frame;
-    /// the stored bool is only the shape the state needs).
-    pub(crate) fn muse_sheet_facts(&self, cx: &gpui::App) -> MuseSheetFacts {
-        let state = match &self.login.state {
-            LoginState::ApiKey { error, .. } => {
-                LoginState::ApiKey { can_submit: !self.login.api_key.read(cx).value().trim().is_empty(), error: error.clone() }
-            }
-            other => other.clone(),
-        };
-        MuseSheetFacts { state, api_key: self.login.api_key.clone() }
-    }
-
     /// What the Muse sheet asked for, on the main window.
     pub(crate) fn on_muse_sheet_event(&mut self, event: MuseSheetEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             MuseSheetEvent::Intent(intent) => self.login_intent(intent, window, cx),
-            MuseSheetEvent::Revealed(next) => self.login.revealed = next,
         }
     }
 }

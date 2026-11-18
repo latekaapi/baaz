@@ -80,7 +80,6 @@ impl Harness {
                 overlays.open(Menu::project(project, from_header), cx);
             }
         });
-        cx.notify();
     }
 
     /// Adopt every dropped directory, the first becoming current: the

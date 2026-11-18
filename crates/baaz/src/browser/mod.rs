@@ -68,6 +68,7 @@ mod downloads;
 mod find;
 mod keys;
 mod omnibox;
+pub(crate) use omnibox::OmniboxStep;
 mod page_actions;
 mod pages;
 mod permissions;

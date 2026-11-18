@@ -2153,7 +2153,7 @@ mod tests {
         vc.run_until_parked();
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.login_intent(aui::screens::LoginIntent::UseApiKey, window, cx)));
         vc.run_until_parked();
-        let key_field = vc.update(|_, cx| gpui::Focusable::focus_handle(baaz.read(cx).muse_sheet_facts(cx).api_key.read(cx), cx));
+        let key_field = vc.update(|_, cx| gpui::Focusable::focus_handle(baaz.read(cx).login.read(cx).api_key_field().read(cx), cx));
         assert!(vc.update(|window, _| key_field.is_focused(window)), "the sheet's key field holds the keyboard");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_menu(MenuKind::Overflow, cx)));
         vc.run_until_parked();

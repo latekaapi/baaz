@@ -1032,8 +1032,9 @@ impl SessionView {
     }
 
     /// A view over `runtime`: every view field, the composer and the card
-    /// fields, and the two links to the runtime — its notify redraws this
-    /// view, and each [`RuntimeEvent`] is one list operation here. Views
+    /// fields, and the two links to the runtime — each [`RuntimeEvent`]
+    /// redraws this view (a list operation first, for the transcript's),
+    /// and so does a notify (an `as_mut` write made from outside). Views
     /// are made on demand over a runtime the registry already holds, so a
     /// dropped (evicted) view is built again over the same session.
     pub fn over(runtime: Entity<SessionRuntime>, host: SessionHost, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -1076,8 +1077,11 @@ impl SessionView {
                 cx.notify();
             }
         });
-        // Whatever the runtime notifies (a banner, a chip, a clock) this view
-        // draws; the root is not told.
+        // Whatever the runtime says moved (a turn, a banner, a chip, a clock)
+        // this view draws; the root is not told. The runtime's own methods
+        // name each change as a `RuntimeEvent`; a write made from outside
+        // through `Entity::as_mut` notifies it instead (the borrow notifies
+        // on drop), which this view also follows.
         let redraw = cx.observe(&runtime, |_, _, cx| cx.notify());
         let events = cx.subscribe(&runtime, |this: &mut Self, _, event: &RuntimeEvent, cx| {
             this.on_runtime_event(event, cx);
@@ -1192,6 +1196,13 @@ impl SessionView {
                 self.sync_model_menu_check(cx);
                 self.sync_mode_menu_check(cx);
             }
+            RuntimeEvent::TurnChanged
+            | RuntimeEvent::Ticked
+            | RuntimeEvent::BannerChanged
+            | RuntimeEvent::ComposerChanged
+            | RuntimeEvent::QuestionsChanged
+            | RuntimeEvent::HistoryChanged
+            | RuntimeEvent::HeaderChanged => {}
             RuntimeEvent::Toast { title, body } => {
                 let (title, body) = (title.clone(), body.clone());
                 self.overlays.update(cx, |overlays, cx| overlays.toast(title, body, cx));
@@ -1615,7 +1626,7 @@ impl SessionRuntime {
             if !starting && self.models_error.as_deref() == Some(MUSE_STARTING_MENU) {
                 self.models_error = Some(MUSE_DOWN_MENU.to_owned());
             }
-            cx.notify();
+            cx.emit(RuntimeEvent::MenusStale);
         }
     }
 
@@ -1736,7 +1747,7 @@ impl SessionRuntime {
     /// `browser-chat-fixture` step: the agent card and line with no turn).
     pub(crate) fn load_fixture(&mut self, session: aui_protocol::Session, cx: &mut Context<Self>) {
         self.store.load(session);
-        cx.notify();
+        cx.emit(RuntimeEvent::EntriesAppended);
     }
 
     /// The transcript this view renders, when its session has loaded: what
@@ -1853,7 +1864,7 @@ impl SessionRuntime {
         if usage_landed && self.reply_done.is_none() {
             self.reply_done = self.running.as_ref().map(|running| running.turn_id.clone());
             cx.emit(SessionEvent::ReplyComplete { session_id: self.session_id.clone() });
-            cx.notify();
+            cx.emit(RuntimeEvent::TurnChanged);
         }
     }
 
@@ -2066,7 +2077,7 @@ impl SessionRuntime {
         }
         if self.tier_banner != banner {
             self.tier_banner = banner;
-            cx.notify();
+            cx.emit(RuntimeEvent::BannerChanged);
         }
     }
 }
@@ -2190,6 +2201,38 @@ impl SessionView {
         self.follow = true;
         cx.notify();
     }
+
+    /// Move the transcript list (see [`ListJump`]) and redraw: the one
+    /// place a click, a reported height, a step or the bench moves it.
+    pub(crate) fn jump_list(&mut self, to: ListJump, cx: &mut Context<Self>) {
+        match to {
+            ListJump::Tail => {
+                self.follow = true;
+                self.list_state.scroll_to_end();
+            }
+            #[cfg(feature = "probe")]
+            ListJump::End => self.list_state.scroll_to_end(),
+            #[cfg(feature = "probe")]
+            ListJump::Row(item_ix) => {
+                self.follow = false;
+                self.list_state.scroll_to(gpui::ListOffset { item_ix, offset_in_item: px(0.0) });
+            }
+        }
+        cx.notify();
+    }
+}
+
+/// Where [`SessionView::jump_list`] moves the transcript list.
+pub(crate) enum ListJump {
+    /// The end, following it from now on (the jump pill, a resize at the end).
+    Tail,
+    /// The end, following as before (the `end` step).
+    #[cfg(feature = "probe")]
+    End,
+    /// Row `n` from the top, no longer following (the `top`/`mid` steps,
+    /// the bench).
+    #[cfg(feature = "probe")]
+    Row(usize),
 }
 
 impl SessionRuntime {
@@ -2233,21 +2276,17 @@ impl SessionView {
     /// Drive the transcript list to `frac` of the folded turns (0 = top,
     /// 1 = tail) without touching the pointer, for `--bench --bench-scroll`.
     pub fn bench_scroll_to(&mut self, frac: f32, cx: &mut Context<Self>) {
-        self.follow = false;
         // Rows, not turns: the list is one item per block. The cache may be
         // a frame behind the fold; the row count is what the list holds now.
         let len = self.list_len;
         let ix = ((len.saturating_sub(1) as f32) * frac.clamp(0.0, 1.0)) as usize;
-        self.list_state.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: px(0.0) });
-        cx.notify();
+        self.jump_list(ListJump::Row(ix), cx);
     }
 
     #[cfg(feature = "probe")]
     /// Pin the transcript to the tail, for `--bench --bench-scroll tail`.
     pub fn bench_scroll_tail(&mut self, cx: &mut Context<Self>) {
-        self.follow = true;
-        self.list_state.scroll_to_end();
-        cx.notify();
+        self.jump_list(ListJump::Tail, cx);
     }
 
     #[cfg(feature = "probe")]
@@ -2539,7 +2578,7 @@ impl SessionRuntime {
     /// Lock the composer while a provider switch replaces this view (Y2b).
     pub(crate) fn set_input_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
         self.input_locked = locked;
-        cx.notify();
+        cx.emit(RuntimeEvent::ComposerChanged);
     }
 
     /// Whether sends are refused while the replacement opens.
@@ -2550,7 +2589,7 @@ impl SessionRuntime {
     /// Show the switch's pick on the chip while this view is still drawn.
     pub(crate) fn set_switching_to(&mut self, provider: Option<ProviderId>, cx: &mut Context<Self>) {
         self.switching_to = provider;
-        cx.notify();
+        cx.emit(RuntimeEvent::ComposerChanged);
     }
 
     /// The provider mark the composer chip draws (Y2b display override).

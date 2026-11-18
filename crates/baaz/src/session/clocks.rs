@@ -45,7 +45,7 @@ impl SessionRuntime {
         self.countdown = Some(cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(COUNTDOWN_TICK).await;
             let alive = this.update(cx, |this, cx| {
-                cx.notify();
+                cx.emit(RuntimeEvent::Ticked);
                 !this.question_started.is_empty() || this.retry_started.is_some()
             });
             if !matches!(alive, Ok(true)) {

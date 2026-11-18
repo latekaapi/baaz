@@ -69,10 +69,11 @@ impl SessionView {
         let Some(request) = self.runtime.read(cx).store.side().pending_prompts.get(input_id) else { return };
         let Some(at) = request.questions.iter().position(|q| q.id == question_id) else { return };
         let Some(previous) = at.checked_sub(1).and_then(|i| request.questions.get(i)).map(|q| q.id.clone()) else { return };
+        // The borrow notifies the runtime as it drops, which this view
+        // observes: the card redraws with the pick shown again.
         if let Some(gathered) = self.runtime.as_mut(cx).answers.get_mut(input_id) {
             gathered.remove(&previous);
         }
-        cx.notify();
     }
 
     /// An option's "Preview" chevron.
@@ -196,7 +197,7 @@ impl SessionRuntime {
         let gathered = self.answers.entry(input_id.clone()).or_default();
         gathered.insert(answer.question_id.clone(), answer);
         if gathered.len() < questions {
-            cx.notify();
+            cx.emit(RuntimeEvent::QuestionsChanged);
             return;
         }
         let answers: Vec<provider::QuestionAnswer> =
@@ -212,7 +213,7 @@ impl SessionRuntime {
                 this.settle_provider_failed(&input_id, &error, cx);
             }
         });
-        cx.notify();
+        cx.emit(RuntimeEvent::QuestionsChanged);
     }
 }
 
@@ -237,7 +238,7 @@ impl SessionRuntime {
                 this.settle_provider_failed(&input_id, &error, cx);
             }
         });
-        cx.notify();
+        cx.emit(RuntimeEvent::QuestionsChanged);
     }
 }
 

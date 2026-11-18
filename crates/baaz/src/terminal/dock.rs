@@ -279,11 +279,12 @@ impl TerminalDock {
         let Some(root) = self.facts.project.clone() else { return };
         let id = self.host.read(cx).tabs_for(&root).get(index).map(|tab| tab.id.clone());
         if let Some(id) = id {
+            // A busy tab asks first (the root raises the dialog, nothing
+            // here moves yet); an idle one closes now.
             match self.host.read(cx).running_command(cx, &id) {
                 Some(running) => cx.emit(TerminalDockEvent::ConfirmClose { tab: id, running }),
-                None => self.host.update(cx, |host, _| host.close(&id)),
+                None => self.close_tab_now(&id, cx),
             }
-            cx.notify();
         }
     }
 

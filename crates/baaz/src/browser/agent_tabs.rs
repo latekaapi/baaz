@@ -48,7 +48,6 @@ impl Harness {
                                 if let Some(state) = current.and_then(|tab| this.browser.read(cx).states.get(&tab).cloned()) {
                                     this.register_tab_page(&key, current.unwrap_or(id), &state, cx);
                                 }
-                                cx.notify();
                             });
                         });
                     });

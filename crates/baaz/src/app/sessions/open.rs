@@ -856,8 +856,7 @@ impl Harness {
         if async_ids.is_empty() {
             return;
         }
-        crate::provider_status::mark_usage_refreshing(&async_ids);
-        cx.notify();
+        self.set_usage_refreshing(&async_ids, true, cx);
         if muse_async {
             self.refresh_muse_usage(cx);
         }
@@ -878,17 +877,27 @@ impl Harness {
                     .ok()
                     .flatten()
                 },
-                |_this, usage, cx| {
+                |this, usage, cx| {
                     // A reading replaces the held one; a probe that read
                     // nothing keeps it — either way the row settles.
                     if let Some(snapshot) = usage {
                         crate::provider_status::record_probed_snapshot(snapshot);
                     }
-                    crate::provider_status::clear_usage_refreshing(&[ProviderId::Codex]);
-                    cx.notify();
+                    this.set_usage_refreshing(&[ProviderId::Codex], false, cx);
                 },
             );
         }
+    }
+
+    /// `ids`' usage rows start (`true`) or stop reading "Refreshing…" in
+    /// the account menu, which the root draws.
+    pub(crate) fn set_usage_refreshing(&mut self, ids: &[ProviderId], refreshing: bool, cx: &mut Context<Self>) {
+        if refreshing {
+            crate::provider_status::mark_usage_refreshing(ids);
+        } else {
+            crate::provider_status::clear_usage_refreshing(ids);
+        }
+        cx.notify();
     }
 
     /// Forget `session_id`'s view wherever it lives — open or parked. A

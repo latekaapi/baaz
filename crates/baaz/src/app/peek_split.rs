@@ -100,18 +100,16 @@ impl Harness {
         // the strip.
         let drag = |x: f32, this: &mut Self, cx: &mut Context<Self>| {
             if let Some(centre) = this.browser.read(cx).centre_page_rect {
-                this.browser.update(cx, |browser, _| browser.split_ratio = peek_split::split_ratio_at(centre, x));
-                cx.notify();
+                let ratio = peek_split::split_ratio_at(centre, x);
+                this.browser.update(cx, |browser, cx| browser.split_drag(peek_split::SplitDrag::Move(ratio), cx));
             }
         };
         let start = cx.listener(|this: &mut Self, _: &f32, _, cx| {
-            this.browser.update(cx, |browser, _| browser.split_dragging = true);
-            cx.notify();
+            this.browser.update(cx, |browser, cx| browser.split_drag(peek_split::SplitDrag::Press, cx));
         });
         let moved = cx.listener(move |this: &mut Self, x: &f32, _, cx| drag(*x, this, cx));
         let end = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.browser.update(cx, |browser, _| browser.split_dragging = false);
-            cx.notify();
+            this.browser.update(cx, |browser, cx| browser.split_drag(peek_split::SplitDrag::Release, cx));
         });
         let moved_strip = std::rc::Rc::new(moved);
         let moved_layer = moved_strip.clone();

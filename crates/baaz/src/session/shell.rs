@@ -50,7 +50,7 @@ impl SessionRuntime {
                 this.report_provider_retryable(&error, BannerAction::RetryShell(retry), cx);
             }
         });
-        cx.notify();
+        cx.emit(RuntimeEvent::TurnChanged);
     }
 
     // ------------------------------------------------------------------ fork

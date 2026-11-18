@@ -502,8 +502,8 @@ impl SessionRuntime {
         if self.effort != effort {
             self.effort = effort;
             cx.emit(SessionEvent::EffortSelected { effort: crate::projects::effort_string(effort) });
+            cx.emit(RuntimeEvent::ComposerChanged);
         }
-        cx.notify();
     }
 
     /// The effort levels the slider walks (no Default), low to high.
@@ -685,7 +685,7 @@ impl SessionRuntime {
     /// the project says.
     pub(crate) fn set_initial_effort(&mut self, effort: Option<ReasoningEffort>, cx: &mut Context<Self>) {
         self.effort = effort;
-        cx.notify();
+        cx.emit(RuntimeEvent::ComposerChanged);
     }
 }
 
@@ -1155,13 +1155,13 @@ impl SessionRuntime {
                 }
             }
         }
-        cx.notify();
+        cx.emit(RuntimeEvent::ComposerChanged);
     }
 
     pub(super) fn attach_bytes(&mut self, name: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
         if !self.offers(provider::Capability::ImageInput) {
             self.refuse_images();
-            cx.notify();
+            cx.emit(RuntimeEvent::ComposerChanged);
             return;
         }
         self.image_seq += 1;
@@ -1177,7 +1177,7 @@ impl SessionRuntime {
             move || images::from_bytes(work_id, name, &bytes),
             move |this: &mut Self, decoded, cx| this.resolve_image(&id, decoded, cx),
         );
-        cx.notify();
+        cx.emit(RuntimeEvent::ComposerChanged);
     }
 
     /// A background decode landed: swap the placeholder chip for the image, or
@@ -1195,14 +1195,24 @@ impl SessionRuntime {
                 self.failed_chips.push((failed.id, failed.name, short_reason(&reason)));
             }
         }
-        cx.notify();
+        cx.emit(RuntimeEvent::ComposerChanged);
+    }
+
+    /// A chip's ✕: whatever the chip stands for (an image, a file, a quote,
+    /// a failed read) leaves the outgoing turn.
+    pub(super) fn remove_chip(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.images.retain(|image| image.id != id);
+        self.files.retain(|file| file.id != id);
+        self.quotes.retain(|quote| quote.id != id);
+        self.failed_chips.retain(|(chip, _, _)| chip != id);
+        cx.emit(RuntimeEvent::ComposerChanged);
     }
 
     /// D4: a Browse annotation batch is waiting in the draft; it goes out
     /// with the next turn and draws as that turn.
     pub(crate) fn set_annotation_draft(&mut self, batch: crate::sent::SentAnnotations, cx: &mut Context<Self>) {
         self.annotation_draft = Some(batch);
-        cx.notify();
+        cx.emit(RuntimeEvent::ComposerChanged);
     }
 
     /// D4: remembers what this turn goes out with — pictures (copied into

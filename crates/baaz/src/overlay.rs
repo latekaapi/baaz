@@ -1269,7 +1269,7 @@ impl Harness {
                 if let Some(&index) = walk.get(next) {
                     // Enter opens the highlighted row once the arrows moved
                     // it (`commit_browse_address`), not the typed text.
-                    this.browser.update(cx, |browser, cx| browser.highlight_omnibox_row(index, false, cx));
+                    this.browser.update(cx, |browser, cx| browser.move_omnibox(crate::browser::OmniboxStep::Arrow { index, forget_completion: false }, cx));
                 }
             }
             "tab" => this.complete_omnibox(window, cx),
@@ -1295,7 +1295,7 @@ impl Harness {
             .placeholder(if scoped { "Search bookmarks" } else { "Search or type a URL" })
             .on_hover(move |shown, _, cx| {
                 let Some(&index) = order.get(shown) else { return };
-                let _ = hover.update(cx, |this, cx| this.browser.update(cx, |browser, cx| browser.hover_omnibox(index, cx)));
+                let _ = hover.update(cx, |this, cx| this.browser.update(cx, |browser, cx| browser.move_omnibox(crate::browser::OmniboxStep::Hover(index), cx)));
             })
             .on_intent(move |intent, _, cx| {
                 let _ = baaz.update(cx, |this, cx| match intent {
@@ -1307,7 +1307,7 @@ impl Harness {
                     FieldIntent::Complete => this.run_on_main(cx, |this, window, cx| this.complete_omnibox(window, cx)),
                     FieldIntent::Close => this.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
                     FieldIntent::Unscope => {
-                        this.browser.update(cx, |browser, cx| browser.set_field_scope(None, cx));
+                        this.browser.update(cx, |browser, cx| browser.move_omnibox(crate::browser::OmniboxStep::Scope(None), cx));
                     }
                     FieldIntent::SearchExact(_) => {}
                 });

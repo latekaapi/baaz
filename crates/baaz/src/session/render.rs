@@ -166,11 +166,7 @@ impl SessionView {
         if self.list_state.is_scrolled_to_end().unwrap_or(true) || self.cached_turns.is_empty() || self.runtime.read(cx).waiting_on_you().is_some() {
             return None;
         }
-        let jump = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            this.follow = true;
-            this.list_state.scroll_to_end();
-            cx.notify();
-        });
+        let jump = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.jump_list(super::ListJump::Tail, cx));
         Some(
             div()
                 .absolute()
@@ -817,9 +813,7 @@ impl SessionView {
         let changed = self.list_height.is_some_and(|last| (last - height).abs() > 0.5);
         self.list_height = Some(height);
         if changed && self.at_end_before {
-            self.follow = true;
-            self.list_state.scroll_to_end();
-            cx.notify();
+            self.jump_list(super::ListJump::Tail, cx);
         }
     }
 
@@ -2507,15 +2501,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             ComposerIntent::TogglePlus => {
                 this.toggle_plus_menu(cx);
             }
-            ComposerIntent::RemoveChip(id) => {
-                this.runtime.update(cx, |rt, _| {
-                    rt.images.retain(|image| image.id != id.as_ref());
-                    rt.files.retain(|file| file.id != id.as_ref());
-                    rt.quotes.retain(|quote| quote.id != id.as_ref());
-                    rt.failed_chips.retain(|(chip, _, _)| chip != id.as_ref());
-                });
-                cx.notify();
-            }
+            ComposerIntent::RemoveChip(id) => this.runtime.update(cx, |rt, cx| rt.remove_chip(id, cx)),
         });
         let plus = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
             this.close_plus_menu(cx);
@@ -2525,7 +2511,6 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 "commands" => this.insert_sigil("/", window, cx),
                 _ => {}
             }
-            cx.notify();
         });
         // An outside press reports here through the menu's occluding
         // catcher, so a click on `+` while open closes instead of

@@ -177,7 +177,7 @@ impl SessionRuntime {
             Some(BannerAction::RetryShell(command)) => self.run_user_shell(command, cx),
             Some(BannerAction::OpenProviders) => cx.emit(SessionEvent::OpenProviders),
             Some(BannerAction::RetryNow) => self.retry_lost_child(cx),
-            None => cx.notify(),
+            None => cx.emit(RuntimeEvent::BannerChanged),
         }
     }
 
@@ -196,7 +196,7 @@ impl SessionRuntime {
         self.banner = Some(message.to_owned());
         self.banner_action = action;
         self.banner_is_mode_fallback = false;
-        cx.notify();
+        cx.emit(RuntimeEvent::BannerChanged);
     }
 
     /// The banner saying a model pick left Auto for Ask: the one banner a
@@ -213,7 +213,7 @@ impl SessionRuntime {
             self.banner_is_mode_fallback = false;
             self.banner = None;
             self.banner_action = None;
-            cx.notify();
+            cx.emit(RuntimeEvent::BannerChanged);
         }
     }
 
@@ -306,7 +306,6 @@ impl SessionRuntime {
                 }
             });
         }
-        cx.notify();
     }
 
     /// Decide the inline approval card on a provider lane: the card's own
@@ -372,7 +371,6 @@ impl SessionRuntime {
                 }
             });
         }
-        cx.notify();
     }
 }
 
@@ -416,7 +414,6 @@ impl SessionRuntime {
             self.announce_landed(&landed, cx);
         }
         cx.emit(super::SessionEvent::ProviderApprovalsChanged { session_id: self.session_id.clone() });
-        cx.notify();
     }
 
     /// Settle an external approval from the server's notification: the

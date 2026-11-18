@@ -362,14 +362,10 @@ impl Harness {
         let (to, step) = rest.split_once(',').unwrap_or((rest, "4"));
         let to: f32 = to.trim().parse().map_err(|_| format!("`{to}` is not a width"))?;
         let step: f32 = step.trim().parse().map_err(|_| format!("`{step}` is not a step in px"))?;
-        self.sidebar_pane.update(cx, |pane, _| pane.user_owns_list());
-        self.resize.sweep = Some(crate::resize::ResizeSweep::new(to, step));
-        self.resize.active = true;
-        self.resize.scripted = true;
+        self.sidebar_pane.update(cx, |pane, cx| pane.start_resize_sweep(crate::resize::ResizeSweep::new(to, step), cx));
         // One tick per frame, from the frame this step draws
         // ([`Harness::resize_sweep_tick`]).
         cx.on_next_frame(window, |this, window, cx| this.resize_sweep_tick(window, cx));
-        cx.notify();
         Ok(())
     }
 
@@ -391,7 +387,6 @@ impl Harness {
         let (dy, finger, tail) = parse_scroll_sweep(rest)?;
         let sweep = crate::resize::ScrollSweep::new(dy, finger, tail);
         self.sidebar_pane.update(cx, |pane, cx| pane.start_scroll_sweep(sweep, cx));
-        cx.notify();
         Ok(())
     }
 
@@ -426,7 +421,7 @@ impl Harness {
                 // rule (`Harness::on_window_activation`: a release outside
                 // the window) must not end it between steps (a headless
                 // window is never active).
-                self.resize.scripted = true;
+                self.sidebar_pane.update(cx, |pane, _| pane.mark_resize_scripted());
             }
             "move" => self.drag_resize(x, cx),
             _ => self.end_resize(cx),
@@ -440,12 +435,12 @@ impl Harness {
         };
         crate::baaz_log!(
             "rsdrag {phase} w={} sidebar_ix={}+{:.1} reveal={:?} scrolled={} ract={}",
-            self.resize.width,
+            self.sidebar_width(cx),
             top.item_ix,
             f32::from(top.offset_in_item),
             reveal,
             scrolled,
-            self.resize.active
+            self.sidebar_resizing(cx)
         );
         Ok(())
     }
@@ -455,10 +450,7 @@ impl Harness {
     /// An unparseable width fails the step.
     pub(crate) fn step_sidebar_width(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let width = rest.trim().parse::<f32>().map_err(|_| format!("`{rest}` is not a width"))?;
-        self.resize.width = clamp_sidebar_width(width);
-        self.resize.active = false;
-        self.resize.persist(cx);
-        cx.notify();
+        self.sidebar_pane.update(cx, |pane, cx| pane.settle_width(width, cx));
         Ok(())
     }
 

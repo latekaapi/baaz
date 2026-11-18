@@ -61,9 +61,9 @@ impl SessionRuntime {
     /// runs on the UI thread any more.
     pub fn load_history(&mut self, cx: &mut Context<Self>) {
         let key = self.workspace_key.clone();
-        self.wire_call(cx, move || history::read(&key), |this: &mut Self, entries, cx| {
+        self.wire_call(cx, move || history::read(&key), |this: &mut Self, entries, _cx| {
+            // Nothing draws the cursor (only ↑/↓ read it): no redraw.
             this.history.set(entries);
-            cx.notify();
         });
     }
 
@@ -73,9 +73,8 @@ impl SessionRuntime {
     /// still reached the wire first — history is a convenience, not a record.
     pub(super) fn append_history(&mut self, text: String, cx: &mut Context<Self>) {
         let key = self.workspace_key.clone();
-        self.wire_call(cx, move || history::append(&key, &text), |this: &mut Self, entries, cx| {
+        self.wire_call(cx, move || history::append(&key, &text), |this: &mut Self, entries, _cx| {
             this.history.set(entries);
-            cx.notify();
         });
     }
 
@@ -87,7 +86,7 @@ impl SessionRuntime {
     /// gallery's mock uses for deferred focus.
     pub(super) fn restore_prompt(&mut self, text: String, cx: &mut Context<Self>) {
         self.pending_prompt = Some(text);
-        cx.notify();
+        cx.emit(RuntimeEvent::ComposerChanged);
     }
 
     /// A view opened for an existing session starts loading its history on
@@ -98,7 +97,7 @@ impl SessionRuntime {
     /// zero turns.
     pub fn mark_history_loading(&mut self, cx: &mut Context<Self>) {
         self.loading_history = true;
-        cx.notify();
+        cx.emit(RuntimeEvent::HistoryChanged);
     }
 }
 
@@ -117,7 +116,7 @@ impl SessionRuntime {
         self.loading_history = true;
         self.backfill_running = true;
         self.backfill_stale_retried = false;
-        cx.notify();
+        cx.emit(RuntimeEvent::HistoryChanged);
         self.backfill_lane_page(None, FIRST_PAGE_LIMIT, true, cx);
     }
 
@@ -178,7 +177,7 @@ impl SessionRuntime {
                 crate::baaz_log!("history paged in: session={} turns={turns}", self.session_id);
             }
         }
-        cx.notify();
+        cx.emit(RuntimeEvent::HistoryChanged);
     }
 }
 

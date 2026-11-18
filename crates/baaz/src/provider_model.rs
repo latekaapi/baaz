@@ -113,31 +113,31 @@ impl ProviderStatusModel {
     /// is the clock. A visible change re-derives the banners, notifies the
     /// observers and tells the root ([`ProviderModelEvent::Changed`]).
     pub(crate) fn sync(&mut self, cx: &mut Context<Self>) {
-        if crate::runtime::providers_scripted() {
+        let fresh = if crate::runtime::providers_scripted() {
             let fresh = initial_connect_statuses();
-            if fresh != self.statuses {
-                self.statuses = fresh;
-                self.sync_banners();
-                cx.notify();
-                cx.emit(ProviderModelEvent::Changed);
+            if fresh == self.statuses {
+                return;
             }
-            return;
-        }
-        let stamp = status_stamp();
-        if stamp == self.stamp {
-            return;
-        }
-        self.stamp = stamp;
-        // Before the no-visible-change return: a Re-check that found what
-        // the card already showed still owes the person its answer.
-        self.settle_busy(cx);
-        let fresh = initial_connect_statuses();
-        // A re-probe that found what the window already shows moves only
-        // `checked_at`: nothing to redraw (nothing renders at rest, P0).
-        if visible(&fresh) == visible(&self.statuses) {
-            self.statuses = fresh;
-            return;
-        }
+            fresh
+        } else {
+            let stamp = status_stamp();
+            if stamp == self.stamp {
+                return;
+            }
+            self.stamp = stamp;
+            // Before the no-visible-change return: a Re-check that found
+            // what the card already showed still owes the person its answer.
+            self.settle_busy(cx);
+            let fresh = initial_connect_statuses();
+            // A re-probe that found what the window already shows moves
+            // only `checked_at`: nothing to redraw (nothing renders at
+            // rest, P0).
+            if visible(&fresh) == visible(&self.statuses) {
+                self.statuses = fresh;
+                return;
+            }
+            fresh
+        };
         self.statuses = fresh;
         self.sync_banners();
         cx.notify();
@@ -171,10 +171,11 @@ impl ProviderStatusModel {
     /// A typed credential failure (D5 B5, the `signed-out` step verb): the
     /// banner on `id`'s composer, kept through re-probes that still read
     /// Connected until the person signs in. The banner is the composer's,
-    /// which the root draws: its callers redraw the root.
-    pub(crate) fn raise_typed_signed_out(&mut self, id: ProviderId) {
+    /// which the root draws from this model: the notify redraws it.
+    pub(crate) fn raise_typed_signed_out(&mut self, id: ProviderId, cx: &mut Context<Self>) {
         self.banners.insert(id, signed_out_banner_text(id));
         self.typed_signed_out.insert(id);
+        cx.notify();
     }
 
     /// The person acts on a banner (its Sign in): from here the status
@@ -202,13 +203,11 @@ impl ProviderStatusModel {
     /// Re-probe `id` with its card saying so; [`Self::settle_busy`] clears
     /// it and names the result once the probe lands.
     pub(crate) fn recheck_with_feedback(&mut self, id: ProviderId, after_sign_out: bool, cx: &mut Context<Self>) {
-        if crate::runtime::providers_scripted() {
-            // Captures probe nothing: the scripted status is the answer.
-            crate::provider_status::recheck_provider(id);
-            cx.notify();
-            return;
+        // Captures probe nothing: the scripted status is the answer, and no
+        // card waits on it.
+        if !crate::runtime::providers_scripted() {
+            self.busy.insert(id, ProviderBusy::Checking { after_sign_out });
         }
-        self.busy.insert(id, ProviderBusy::Checking { after_sign_out });
         crate::provider_status::recheck_provider(id);
         cx.notify();
     }
@@ -316,14 +315,23 @@ impl ProviderStatusModel {
     /// that state with sample values, for captures. Starts nothing. Any
     /// other state is an `Err` and leaves the sign-in as it was.
     pub(crate) fn step_codex_login(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        self.codex_login = match rest.trim() {
+        let state = match rest.trim() {
             "waiting" => CodexLogin::Waiting { auth_url: "https://example.invalid/oauth/authorize".into() },
             "device" => CodexLogin::Device { url: "https://auth.openai.com/codex/device".into(), code: "K7QX-9P2M".into() },
             "failed" => CodexLogin::Failed { reason: "The sign-in timed out.".into() },
             other => return Err(format!("unknown codex-login state {other:?} (expected waiting, device or failed)")),
         };
-        cx.notify();
+        self.set_codex_login(state, cx);
         Ok(())
+    }
+
+    /// Move Codex's sign-in to `state` (the row, the card and the assist
+    /// line draw it), redrawn when it moved.
+    fn set_codex_login(&mut self, state: CodexLogin, cx: &mut Context<Self>) {
+        if self.codex_login != state {
+            self.codex_login = state;
+            cx.notify();
+        }
     }
 
     /// Start the Codex Sign in flow: the Waiting row applies at once, the
@@ -337,8 +345,7 @@ impl ProviderStatusModel {
         let program = crate::providers::resolve_program(ProviderId::Codex)
             .map(|program| program.to_string_lossy().into_owned());
         let Some(program) = program else {
-            self.codex_login = CodexLogin::Failed { reason: "Codex is not installed — Install first.".into() };
-            cx.notify();
+            self.set_codex_login(CodexLogin::Failed { reason: "Codex is not installed — Install first.".into() }, cx);
             return;
         };
         // A running flow is abandoned: its thread sees the old flag.
@@ -347,8 +354,7 @@ impl ProviderStatusModel {
         let cancel = Arc::clone(&self.codex_cancel);
         self.codex_generation += 1;
         let generation = self.codex_generation;
-        self.codex_login = CodexLogin::Waiting { auth_url: String::new() };
-        cx.notify();
+        self.set_codex_login(CodexLogin::Waiting { auth_url: String::new() }, cx);
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<CodexLogin>();
         cx.background_spawn(async move {
             let progress = tx.clone();
@@ -368,8 +374,7 @@ impl ProviderStatusModel {
                     if state == CodexLogin::Completed {
                         crate::provider_status::reprobe_provider(ProviderId::Codex);
                     }
-                    this.codex_login = state;
-                    cx.notify();
+                    this.set_codex_login(state, cx);
                 });
                 if alive.is_err() {
                     break;

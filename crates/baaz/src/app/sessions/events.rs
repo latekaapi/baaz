@@ -34,9 +34,8 @@ impl Harness {
             // re-probe so every surface agrees (D5 B5). No dialog.
             SessionEvent::SignedOut => {
                 let id = runtime.read(cx).provider_kind();
-                self.provider_model.update(cx, |model, _| model.raise_typed_signed_out(id));
+                self.provider_model.update(cx, |model, cx| model.raise_typed_signed_out(id, cx));
                 crate::provider_status::reprobe_provider(id);
-                cx.notify();
             }
             // The child's exit already reached the hub's connection stream,
             // whose handler owns the reconnect.
@@ -134,14 +133,10 @@ impl Harness {
             // The reply is whole and the provider is only saving memories:
             // the row stops reading `Working`. Titles and bylines still wait
             // for the turn's own settle.
-            SessionEvent::ReplyComplete { session_id } => {
-                self.sync_row_live(session_id, false, cx);
-                cx.notify();
-            }
-            SessionEvent::ProviderApprovalsChanged { session_id } => {
-                self.sync_row_live(session_id, false, cx);
-                cx.notify();
-            }
+            // The row's change notifies the list (`invalidate_row`); the
+            // view redraws on the runtime's own event for the same change.
+            SessionEvent::ReplyComplete { session_id } => self.sync_row_live(session_id, false, cx),
+            SessionEvent::ProviderApprovalsChanged { session_id } => self.sync_row_live(session_id, false, cx),
             // A provider lane settled a turn: the free byline lands, the
             // ledger gains its tagged row, and the record counts the turn —
             // the lane's `turn/completed`.

@@ -51,7 +51,7 @@ pub(crate) struct WindowSync {
     floats_queued: bool,
     /// The browser chat's runtime, watched while it is the browser chat:
     /// its turn and its asks move the agent line.
-    browser_chat_watch: Option<(gpui::EntityId, Subscription)>,
+    browser_chat_watch: Option<(gpui::EntityId, [Subscription; 2])>,
     /// The observations behind the settle, the floats and the title. Made
     /// once when the root is built, never cleared.
     observers: Vec<Subscription>,
@@ -263,14 +263,10 @@ impl Harness {
             // regained focus (a switch made in System Settings shows without
             // a restart).
             self.browser.update(cx, |browser, cx| browser.refresh_default_browser_cache(cx));
-        } else if self.resize.active && !self.resize.scripted {
+        } else {
             // A release outside the window never reaches the overlay: a drag
-            // still armed as the window goes inactive is over, settled where
-            // it stands. A scripted drag has no pointer to release, so only
-            // its own `resize-end` settles it.
-            self.resize.active = false;
-            self.resize.persist(cx);
-            cx.notify();
+            // still armed as the window goes inactive is over.
+            self.settle_resize_on_deactivate(cx);
         }
         self.queue_settle(cx);
     }
@@ -328,11 +324,17 @@ impl Harness {
             return;
         }
         self.window_sync.browser_chat_watch = runtime.map(|runtime| {
-            let watch = cx.observe(&runtime, |this, _, cx| {
+            // The runtime names its own changes as events; a write made
+            // through `as_mut` (the view's) notifies it instead.
+            let events = cx.subscribe(&runtime, |this, _, _: &crate::session::RuntimeEvent, cx| {
                 this.settle_agent_line(cx);
                 this.queue_floats(cx);
             });
-            (runtime.entity_id(), watch)
+            let writes = cx.observe(&runtime, |this, _, cx| {
+                this.settle_agent_line(cx);
+                this.queue_floats(cx);
+            });
+            (runtime.entity_id(), [events, writes])
         });
         self.queue_floats(cx);
     }
@@ -368,39 +370,6 @@ impl Harness {
         if !self.browser.read(cx).fake && !crate::runtime::captures() && self.args.screenshot.is_none() {
             self.defer_browser_prewarm(cx);
         }
-    }
-
-    #[cfg(feature = "probe")]
-    /// One tick of a `resize-sweep:` (scripting only): the divider marches
-    /// one step, and the tick logs its width plus the renders and re-hint
-    /// the frame before it cost, so per-tick resize cost is readable off a
-    /// scripted run. Like a real drag it owns the list (no reveal installs
-    /// while active); unlike one it never persists — a measurement, not a
-    /// choice. The next tick waits for the frame this one asks for.
-    pub(crate) fn resize_sweep_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.resize.sweep.is_none() {
-            return;
-        }
-        let from = self.resize.width;
-        let next = self.resize.sweep.as_mut().map(|sweep| sweep.advance(from)).unwrap_or(from);
-        self.resize.width = next;
-        let ticks = self.resize.sweep.as_ref().map(|sweep| sweep.ticks).unwrap_or(0);
-        let pane = crate::sidebar_view::take_sidebar_pane_renders();
-        let root = crate::sidebar_view::take_baaz_root_renders();
-        let rehint = self.active.clone().map(|view| view.update(cx, |view, _| view.take_trace_rehint())).unwrap_or(false);
-        crate::baaz_log!("rssweep w={next:.1} pane={pane} root={root} rehint={}", rehint as u8);
-        // Done at the target, when the clamp stops all progress, or past
-        // any reasonable drag: settle without persisting.
-        if next == from || (self.resize.sweep.as_ref().is_some_and(|sweep| next == sweep.target)) || ticks > 10_000 {
-            let done = self.resize.width;
-            self.resize.sweep = None;
-            self.resize.active = false;
-            self.resize.scripted = false;
-            crate::baaz_log!("rssweep done w={done:.1}");
-        } else {
-            cx.on_next_frame(window, |this, window, cx| this.resize_sweep_tick(window, cx));
-        }
-        cx.notify();
     }
 
     #[cfg(feature = "probe")]
@@ -447,8 +416,8 @@ impl Harness {
         session::note_root_frame_trace(
             top.item_ix,
             f32::from(top.offset_in_item),
-            self.resize.width,
-            self.resize.active,
+            self.sidebar_width(cx),
+            self.sidebar_resizing(cx),
             transcript,
             self.sidebar_gesture_active(cx),
             rehint,
