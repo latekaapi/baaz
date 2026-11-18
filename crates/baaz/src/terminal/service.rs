@@ -2907,7 +2907,7 @@ mod tests {
             cx.new(|cx| {
                 crate::app::Harness::new(
                     harness_args(dir),
-                    crate::shot::CaptureToken::default(),
+                    crate::runtime::CaptureToken::default(),
                     window,
                     cx,
                 )

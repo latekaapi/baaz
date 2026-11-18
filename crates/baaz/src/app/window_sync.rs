@@ -170,6 +170,7 @@ impl Harness {
             self.sync_provider_state(cx);
             // Window verbs (the setup sheet, the footer menu) script the
             // connect screen's captures; nothing else runs here.
+            #[cfg(feature = "probe")]
             if crate::steps::all_window_steps(&self.args.steps) {
                 self.maybe_run_steps(window, cx);
             }
@@ -185,6 +186,7 @@ impl Harness {
         // Both are idempotent (consumed args, drained list), so the repeated
         // call is a gate, not a loop.
         self.ensure_boot_session(window, cx);
+        #[cfg(feature = "probe")]
         self.maybe_run_steps(window, cx);
         // A deterministic capture never takes keyboard focus: a focused
         // composer paints the textarea's blinking caret, which lands on a
@@ -194,7 +196,7 @@ impl Harness {
         // any arm raised mid-switch. The landing view arms its own focus
         // through `activate`.
         if std::mem::take(&mut self.window_sync.focus_composer)
-            && !crate::clock::deterministic()
+            && !crate::runtime::captures()
             && self.pending_switch_dest(cx).is_none()
         {
             if let Some(view) = self.active.clone() {
@@ -233,7 +235,7 @@ impl Harness {
         let focused = window.focused(cx);
         let free = focused.is_none() || focused == restore.held || focused.as_ref() == Some(&self.focus_root);
         if free || restore.force {
-            let to = restore.to.filter(|_| !crate::clock::deterministic()).unwrap_or_else(|| self.focus_root.clone());
+            let to = restore.to.filter(|_| !crate::runtime::captures()).unwrap_or_else(|| self.focus_root.clone());
             window.focus(&to, cx);
         }
         true
@@ -363,11 +365,12 @@ impl Harness {
             return;
         }
         self.browser.update(cx, |browser, _| browser.browser_idle_warmed = true);
-        if !self.browser.read(cx).fake && !crate::clock::deterministic() && self.args.screenshot.is_none() {
+        if !self.browser.read(cx).fake && !crate::runtime::captures() && self.args.screenshot.is_none() {
             self.defer_browser_prewarm(cx);
         }
     }
 
+    #[cfg(feature = "probe")]
     /// One tick of a `resize-sweep:` (scripting only): the divider marches
     /// one step, and the tick logs its width plus the renders and re-hint
     /// the frame before it cost, so per-tick resize cost is readable off a
@@ -400,6 +403,7 @@ impl Harness {
         cx.notify();
     }
 
+    #[cfg(feature = "probe")]
     /// One tick of a `transcript-scroll-sweep:` (scripting only): the
     /// transcript's twin of the sidebar pane's own sweep, one push into the
     /// active session's accumulator (`SessionView::push_wheel`) per frame.
@@ -462,7 +466,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let mut args = lane_args(dir);
         args.login = crate::LoginSample::SignedIn;
-        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::runtime::CaptureToken::default(), window, cx));
         vc.run_until_parked();
         (baaz, vc)
     }

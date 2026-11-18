@@ -230,7 +230,7 @@ const CONNECT_H: f32 = 81.0;
 /// presence, so two heroes on different surfaces do not share a state.
 fn mascot_hero_element(path: &'static str, id: &'static str, (w, h): (f32, f32), window: &mut Window, cx: &mut App) -> AnyElement {
     // Pinned for reduced motion and for deterministic captures alike.
-    let style = if cx.reduce_motion() || crate::clock::deterministic() {
+    let style = if cx.reduce_motion() || crate::runtime::captures() {
         PresenceStyle { opacity: 1.0, offset_y: px(0.0), scale: 1.0 }
     } else {
         let timing = EnterExit {

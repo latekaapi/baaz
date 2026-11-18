@@ -40,6 +40,7 @@ mod app;
 mod attention;
 mod attachments;
 mod auth;
+#[cfg(feature = "probe")]
 mod bench;
 mod billing;
 mod browser;
@@ -76,8 +77,10 @@ mod newtab_ground;
 mod overlay;
 mod overlay_stack;
 mod overlays;
+#[cfg(feature = "probe")]
 mod perf_budget;
 mod picker;
+#[cfg(feature = "probe")]
 mod perf_turn;
 mod palette;
 mod plan;
@@ -98,6 +101,7 @@ mod right_page;
 mod right_pane;
 mod right_views;
 mod right_watch;
+mod runtime;
 mod utility;
 mod search;
 mod sent;
@@ -107,12 +111,14 @@ mod sessions;
 mod settings;
 mod settings_providers;
 mod setup;
+#[cfg(feature = "probe")]
 mod shot;
 mod sidebar;
 mod sidebar_view;
 mod session_list;
 mod skills;
 mod skills_page;
+#[cfg(feature = "probe")]
 mod steps;
 mod store;
 mod terminal;
@@ -124,6 +130,7 @@ mod watchdog;
 mod wire;
 
 use std::path::PathBuf;
+#[cfg(feature = "probe")]
 use std::time::Duration;
 
 use aui_tokens::ThemeKind;
@@ -141,6 +148,7 @@ const WINDOW_MIN_W: f32 = 900.0;
 const WINDOW_MIN_H: f32 = 600.0;
 /// How long a `--screenshot` render waits for fonts, layout and the first
 /// frames to settle.
+#[cfg(feature = "probe")]
 const SHOT_DELAY: Duration = Duration::from_millis(600);
 
 /// Which login-screen state `--no-connect` boots into, for captures. Only
@@ -185,6 +193,7 @@ pub struct Args {
     /// `--screenshot <png>`: render, save and quit.
     pub screenshot: Option<PathBuf>,
     /// How long to wait before that capture.
+    #[cfg(feature = "probe")]
     pub delay: Duration,
     /// `--session <id>`: resume this session at boot; `latest` (scripting
     /// only — a screenshot cannot know a session id in advance) picks the
@@ -268,30 +277,38 @@ pub struct Args {
     /// element, frame and fold-apply timing plus peak RSS. Free: no child,
     /// no server (implies `--no-connect`), and it implies
     /// `BAAZ_FRAME_STATS`. See `docs/02-app.md` §6.
+    #[cfg(feature = "probe")]
     pub bench: Option<PathBuf>,
     /// `--bench-cadence-ms <ms>`: the delay between streamed events.
+    #[cfg(feature = "probe")]
     pub bench_cadence: Duration,
     /// `--bench-scroll top|mid|tail|sweep|wheel`: how the list is driven.
     /// `wheel` dispatches real `ScrollEvent`s at the transcript centre
     /// after the stream lands (the scroll-jank instrument); the rest drive
     /// `scroll_to` while the stream lands. See `docs/02-app.md` §6.
+    #[cfg(feature = "probe")]
     pub bench_scroll: bench::BenchScroll,
     /// `--bench-frames <n>`: the minimum frames to observe before stopping.
+    #[cfg(feature = "probe")]
     pub bench_frames: usize,
     /// `--bench-out <file.json>`: write the numbers as one JSON object.
+    #[cfg(feature = "probe")]
     pub bench_out: Option<PathBuf>,
     /// `--bench-open-turn`: stop the stream before the capture's last
     /// `turn/completed`, so the idle window is measured with a turn still
     /// running (finding `performance-13`).
+    #[cfg(feature = "probe")]
     pub bench_open_turn: bool,
     /// `--bench-bare`: drive the transcript alone (`BenchRoot`) instead of
     /// the normal shell. Without it `--bench` opens the normal `Harness`
     /// root with the replayed session active, so `bench-draw` includes the
     /// sidebar, header and composer. See `docs/02-app.md` §6.
+    #[cfg(feature = "probe")]
     pub bench_bare: bool,
     /// Set internally when `--bench` boots the shell: the replayed view
     /// opens in bench-replay state for the driver to stream into, rather
     /// than folding the capture at once. Not a CLI flag.
+    #[cfg(feature = "probe")]
     pub bench_shell: bool,
     /// `--sidebar-fixture <json>`: a scripted session list merged into the
     /// sidebar as if the wire had listed it — `{ "sessionId",
@@ -313,6 +330,7 @@ pub struct Args {
     pub terminal_socket_dir: Option<PathBuf>,
 }
 
+#[cfg(feature = "probe")]
 impl Args {
     /// An offline, scripted window's arguments for the headless
     /// `--perf-turn` measurements: no provider, no project, the given
@@ -370,6 +388,7 @@ fn parse_args() -> Args {
         program: std::env::var("BAAZ_MUSE").unwrap_or_else(|_| "muse".into()),
         theme: None,
         screenshot: None,
+        #[cfg(feature = "probe")]
         delay: SHOT_DELAY,
         session: None,
         send: None,
@@ -381,13 +400,21 @@ fn parse_args() -> Args {
         approval_mode: None,
         login: LoginSample::Choose,
         login_steps: Vec::new(),
+        #[cfg(feature = "probe")]
         bench: None,
+        #[cfg(feature = "probe")]
         bench_cadence: Duration::from_millis(4),
+        #[cfg(feature = "probe")]
         bench_scroll: bench::BenchScroll::Sweep,
+        #[cfg(feature = "probe")]
         bench_frames: 600,
+        #[cfg(feature = "probe")]
         bench_out: None,
+        #[cfg(feature = "probe")]
         bench_open_turn: false,
+        #[cfg(feature = "probe")]
         bench_bare: false,
+        #[cfg(feature = "probe")]
         bench_shell: false,
         sidebar_fixture: None,
         no_project: false,
@@ -413,36 +440,7 @@ fn parse_args() -> Args {
                 let value = args.next().unwrap_or_default();
                 out.theme = Some(ThemeKind::parse(&value).unwrap_or_else(|| usage(&format!("unknown theme `{value}`"))));
             }
-            "--screenshot" => {
-                let value = args.next().unwrap_or_else(|| usage("--screenshot needs <out.png>"));
-                out.screenshot = Some(PathBuf::from(value));
-            }
-            "--screenshot-delay" => {
-                let value = args.next().unwrap_or_default();
-                let ms: u64 = value.parse().unwrap_or_else(|_| usage("--screenshot-delay needs milliseconds"));
-                out.delay = Duration::from_millis(ms);
-            }
             "--session" => out.session = Some(args.next().unwrap_or_else(|| usage("--session needs an id or `latest`"))),
-            "--send" => out.send = Some(args.next().unwrap_or_else(|| usage("--send needs the prompt text"))),
-            "--steps" => {
-                let value = args.next().unwrap_or_else(|| usage("--steps needs `;`-separated steps"));
-                out.steps = value.split(';').filter(|s| !s.is_empty()).map(str::to_owned).collect();
-            }
-            "--tier" => {
-                let value = args.next().unwrap_or_default();
-                out.tier = Some(match value.as_str() {
-                    "subscription" => tier::Tier::Subscription {
-                        plan: "Muse Code High Usage".into(),
-                        current_pct: Some(2),
-                        weekly_pct: Some(2),
-                        resets: vec!["Resets at 3:00 PM".into(), "Resets Monday".into()],
-                        usage_unavailable: false,
-                    },
-                    "payg" => tier::Tier::PayAsYouGo,
-                    "unknown" => tier::Tier::Unavailable("scripted".into()),
-                    other => usage(&format!("--tier takes subscription|payg|unknown, not `{other}`")),
-                });
-            }
             "--print-tier" => out.print_tier = true,
             "--approval-mode" => {
                 let value = args.next().unwrap_or_default();
@@ -451,57 +449,20 @@ fn parse_args() -> Args {
                         .unwrap_or_else(|| usage(&format!("unknown approval mode `{value}`"))),
                 );
             }
-            "--login" => {
-                let value = args.next().unwrap_or_default();
-                out.login = match value.as_str() {
-                    "choose" => LoginSample::Choose,
-                    "signed-in" => LoginSample::SignedIn,
-                    "connect" => LoginSample::Connect,
-                    other => usage(&format!("--login takes choose|device|apikey|apikey-error|validating|error|signed-in|connect, not `{other}`")),
-                };
-            }
-            "--login-steps" => {
-                let value = args.next().unwrap_or_else(|| usage("--login-steps needs `;`-separated steps"));
-                out.login_steps = value.split(';').filter(|s| !s.is_empty()).map(str::to_owned).collect();
-            }
-            "--no-connect" => out.offline = true,
-            "--replay" => {
-                let value = args.next().unwrap_or_else(|| usage("--replay needs <capture.jsonl>"));
-                out.replay = Some(PathBuf::from(shellexpand(&value)));
-                out.offline = true;
-            }
-            "--bench" => {
-                let value = args.next().unwrap_or_else(|| usage("--bench needs <capture.jsonl>"));
-                out.bench = Some(PathBuf::from(shellexpand(&value)));
-                out.offline = true;
-            }
-            "--bench-cadence-ms" => {
-                let value = args.next().unwrap_or_default();
-                let ms: u64 = value.parse().unwrap_or_else(|_| usage("--bench-cadence-ms needs milliseconds"));
-                out.bench_cadence = Duration::from_millis(ms);
-            }
-            "--bench-scroll" => {
-                let value = args.next().unwrap_or_default();
-                out.bench_scroll = bench::BenchScroll::parse(&value)
-                    .unwrap_or_else(|| usage("--bench-scroll takes top|mid|tail|sweep|wheel"));
-            }
-            "--bench-frames" => {
-                let value = args.next().unwrap_or_default();
-                out.bench_frames = value.parse().unwrap_or_else(|_| usage("--bench-frames needs a frame count"));
-            }
-            "--bench-open-turn" => out.bench_open_turn = true,
-            "--bench-bare" => out.bench_bare = true,
-            "--sidebar-fixture" => {
-                let value = args.next().unwrap_or_else(|| usage("--sidebar-fixture needs <fixture.json>"));
-                out.sidebar_fixture = Some(PathBuf::from(shellexpand(&value)));
-            }
-            "--no-project" => out.no_project = true,
-            "--bench-out" => {
-                let value = args.next().unwrap_or_else(|| usage("--bench-out needs <file.json>"));
-                out.bench_out = Some(PathBuf::from(value));
-            }
             "-h" | "--help" => usage(""),
-            other => usage(&format!("unknown argument `{other}`")),
+            other => {
+                #[cfg(feature = "probe")]
+                if parse_probe_flag(other, &mut args, &mut out) {
+                    continue;
+                }
+                if PROBE_FLAGS.contains(&other) {
+                    usage(&format!(
+                        "`{other}` is a probe flag, and this build has no probe \
+                         (build with the default features: `cargo build -p baaz`)"
+                    ));
+                }
+                usage(&format!("unknown argument `{other}`"))
+            }
         }
     }
     out.workspace = canonical(out.workspace);
@@ -509,6 +470,7 @@ fn parse_args() -> Args {
     // A bench run is its own window: it streams rather than replaying, so a
     // screenshot, a step list, a send and a second capture make no sense
     // beside it. Fail loudly rather than silently ignoring them.
+    #[cfg(feature = "probe")]
     if out.bench.is_some() {
         if out.screenshot.is_some() {
             usage("--bench takes no --screenshot");
@@ -547,10 +509,116 @@ fn parse_args() -> Args {
     out
 }
 
+/// Every flag that exists only for the probe (captures, scripted runs,
+/// benches): a build without the `probe` feature refuses each one by name,
+/// loudly, instead of running a window that ignores it.
+const PROBE_FLAGS: &[&str] = &[
+    "--screenshot", "--screenshot-delay", "--send", "--steps", "--tier", "--login", "--login-steps",
+    "--no-connect", "--replay", "--bench", "--bench-cadence-ms", "--bench-scroll", "--bench-frames",
+    "--bench-open-turn", "--bench-bare", "--sidebar-fixture", "--no-project", "--bench-out",
+    "--perf-store", "--perf-turn",
+];
+
+/// One probe flag into `out`, taking its value from `args`; `false` when
+/// `flag` is not one.
+#[cfg(feature = "probe")]
+fn parse_probe_flag(flag: &str, args: &mut impl Iterator<Item = String>, out: &mut Args) -> bool {
+    match flag {
+        "--screenshot" => {
+            let value = args.next().unwrap_or_else(|| usage("--screenshot needs <out.png>"));
+            out.screenshot = Some(PathBuf::from(value));
+        }
+        "--screenshot-delay" => {
+            let value = args.next().unwrap_or_default();
+            let ms: u64 = value.parse().unwrap_or_else(|_| usage("--screenshot-delay needs milliseconds"));
+            out.delay = Duration::from_millis(ms);
+        }
+        "--send" => out.send = Some(args.next().unwrap_or_else(|| usage("--send needs the prompt text"))),
+        "--steps" => {
+            let value = args.next().unwrap_or_else(|| usage("--steps needs `;`-separated steps"));
+            out.steps = value.split(';').filter(|s| !s.is_empty()).map(str::to_owned).collect();
+        }
+        "--tier" => {
+            let value = args.next().unwrap_or_default();
+            out.tier = Some(match value.as_str() {
+                "subscription" => tier::Tier::Subscription {
+                    plan: "Muse Code High Usage".into(),
+                    current_pct: Some(2),
+                    weekly_pct: Some(2),
+                    resets: vec!["Resets at 3:00 PM".into(), "Resets Monday".into()],
+                    usage_unavailable: false,
+                },
+                "payg" => tier::Tier::PayAsYouGo,
+                "unknown" => tier::Tier::Unavailable("scripted".into()),
+                other => usage(&format!("--tier takes subscription|payg|unknown, not `{other}`")),
+            });
+        }
+        "--login" => {
+            let value = args.next().unwrap_or_default();
+            out.login = match value.as_str() {
+                "choose" => LoginSample::Choose,
+                "signed-in" => LoginSample::SignedIn,
+                "connect" => LoginSample::Connect,
+                other => usage(&format!("--login takes choose|device|apikey|apikey-error|validating|error|signed-in|connect, not `{other}`")),
+            };
+        }
+        "--login-steps" => {
+            let value = args.next().unwrap_or_else(|| usage("--login-steps needs `;`-separated steps"));
+            out.login_steps = value.split(';').filter(|s| !s.is_empty()).map(str::to_owned).collect();
+        }
+        "--no-connect" => out.offline = true,
+        "--replay" => {
+            let value = args.next().unwrap_or_else(|| usage("--replay needs <capture.jsonl>"));
+            out.replay = Some(PathBuf::from(shellexpand(&value)));
+            out.offline = true;
+        }
+        "--bench" => {
+            let value = args.next().unwrap_or_else(|| usage("--bench needs <capture.jsonl>"));
+            out.bench = Some(PathBuf::from(shellexpand(&value)));
+            out.offline = true;
+        }
+        "--bench-cadence-ms" => {
+            let value = args.next().unwrap_or_default();
+            let ms: u64 = value.parse().unwrap_or_else(|_| usage("--bench-cadence-ms needs milliseconds"));
+            out.bench_cadence = Duration::from_millis(ms);
+        }
+        "--bench-scroll" => {
+            let value = args.next().unwrap_or_default();
+            out.bench_scroll = bench::BenchScroll::parse(&value)
+                .unwrap_or_else(|| usage("--bench-scroll takes top|mid|tail|sweep|wheel"));
+        }
+        "--bench-frames" => {
+            let value = args.next().unwrap_or_default();
+            out.bench_frames = value.parse().unwrap_or_else(|_| usage("--bench-frames needs a frame count"));
+        }
+        "--bench-open-turn" => out.bench_open_turn = true,
+        "--bench-bare" => out.bench_bare = true,
+        "--sidebar-fixture" => {
+            let value = args.next().unwrap_or_else(|| usage("--sidebar-fixture needs <fixture.json>"));
+            out.sidebar_fixture = Some(PathBuf::from(shellexpand(&value)));
+        }
+        "--no-project" => out.no_project = true,
+        "--bench-out" => {
+            let value = args.next().unwrap_or_else(|| usage("--bench-out needs <file.json>"));
+            out.bench_out = Some(PathBuf::from(value));
+        }
+        _ => return false,
+    }
+    true
+}
+
 fn usage(err: &str) -> ! {
     if !err.is_empty() {
         eprintln!("error: {err}\n");
     }
+    #[cfg(not(feature = "probe"))]
+    eprintln!(
+        "usage: baaz [--workspace <path>] [--provider <id>] [--theme light|dark]\n\
+         \x20              [--session <id>|latest] [--print-tier] [--approval-mode <mode>]\n\n\
+         This build has no probe: the capture and scripting flags (--steps,\n\
+         \x20              --screenshot, --replay, --bench, ...) need the default features."
+    );
+    #[cfg(feature = "probe")]
     eprintln!(
         "usage: baaz [--workspace <path>] [--provider <id>] [--theme light|dark]\n\
          \x20              [--session <id>|latest] [--send <text>] [--steps <a;b;c>]\n\
@@ -570,6 +638,7 @@ fn usage(err: &str) -> ! {
     std::process::exit(if err.is_empty() { 0 } else { 2 });
 }
 
+#[cfg(feature = "probe")]
 /// `--bench`: boot the bench window — one replayed session, streamed on a
 /// timer — and drive it. The boot order is the library's contract, exactly as
 /// in [`main`]: assets, `aui::init`, density and text size, keys, menus, then the
@@ -601,7 +670,7 @@ fn run_bench(args: Args) {
         crate::settings::boot_type(cx);
         // Same reduced-motion hold as the shell boot: a deterministic bench
         // measures stable numbers.
-        if crate::clock::deterministic() {
+        if crate::runtime::captures() {
             cx.set_reduce_motion(true);
         }
         app::bind_keys(cx);
@@ -652,7 +721,7 @@ fn run_bench(args: Args) {
             let stashed: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<app::Harness>>>> =
                 std::rc::Rc::new(std::cell::RefCell::new(None));
             let capture_stash = stashed.clone();
-            let capture = crate::shot::CaptureToken::default();
+            let capture = crate::runtime::CaptureToken::default();
             let handle = cx
                 .open_window(options, move |window, cx| {
                     let view = cx.new(|cx| app::Harness::new(shell_args.clone(), capture.clone(), window, cx));
@@ -701,7 +770,7 @@ fn shellexpand(path: &str) -> String {
 /// window and the `muse serve` child survive, so Cmd-Tab and the Dock bring
 /// the same session back. Quitting still goes through the app-quit hook, and
 /// `--screenshot` runs quit themselves through [`shot::capture_and_quit`].
-fn open_shell_window(args: &Args, cx: &mut App) -> (WindowHandle<Root>, shot::CaptureToken) {
+fn open_shell_window(args: &Args, cx: &mut App) -> (WindowHandle<Root>, crate::runtime::CaptureToken) {
     let bounds = match args.screenshot {
         // A capture renders at the display's top-left, away from the
         // pointer, so no hover state leaks into the PNG.
@@ -730,7 +799,7 @@ fn open_shell_window(args: &Args, cx: &mut App) -> (WindowHandle<Root>, shot::Ca
     };
     // One token per window: the capture's waits are this window's, not the
     // process's (finding `support-16`).
-    let capture = shot::CaptureToken::default();
+    let capture = crate::runtime::CaptureToken::default();
     let handle = cx
         .open_window(options, {
             let capture = capture.clone();
@@ -798,6 +867,7 @@ fn main() {
     {
         let mut argv = std::env::args().skip(1);
         match argv.next().as_deref() {
+            #[cfg(feature = "probe")]
             Some("--perf-store") => {
                 let dir =
                     argv.next().map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("baaz-perf-store"));
@@ -806,6 +876,7 @@ fn main() {
             }
             // `--perf-turn`: the per-turn UI-thread budgets (docs/51 §10),
             // headless on gpui's test platform; one JSON line, then exit.
+            #[cfg(feature = "probe")]
             Some("--perf-turn") => {
                 perf_turn::run();
                 return;
@@ -826,6 +897,17 @@ fn main() {
             _ => {}
         }
     }
+    // A capture's environment in a build with no probe: refuse it, loudly,
+    // rather than run the person's app against a capture's expectations.
+    #[cfg(not(feature = "probe"))]
+    if std::env::var_os("BAAZ_DETERMINISTIC").is_some_and(|value| value == "1") {
+        usage("BAAZ_DETERMINISTIC=1 is a probe run, and this build has no probe");
+    }
+    let args = parse_args();
+    // The runtime this process runs against (state dir, clock, provider
+    // source, browser backend, capture hooks), decided once before anything
+    // reads state.
+    crate::runtime::install(crate::runtime::Runtime::new(&args));
     // The product renamed (harness → Baaz) with its state directory: move the
     // old default aside once, before anything reads state.
     crate::store::migrate_legacy_support_dir();
@@ -888,7 +970,6 @@ fn main() {
     // The provider status service (Y4): read the cache, log the statuses,
     // and probe every backend in the background — never gating the window.
     crate::provider_status::boot();
-    let args = parse_args();
     // The billing probe with no window: it drives the `muse` TUI in a pty,
     // prints the plan and leaves. Nothing here needs gpui.
     if args.print_tier {
@@ -896,13 +977,17 @@ fn main() {
     }
     // The bench is its own window (one replayed session, streamed): it never
     // reaches the shell below.
+    #[cfg(feature = "probe")]
     if args.bench.is_some() {
         run_bench(args);
         return;
     }
-    let (theme, screenshot, delay) = (args.theme, args.screenshot.clone(), args.delay);
+    let theme = args.theme;
+    #[cfg(feature = "probe")]
+    let (screenshot, delay) = (args.screenshot.clone(), args.delay);
     // A `shell:` step raises a real approval over a live wire, which does not
     // land inside a fixed delay (finding F9).
+    #[cfg(feature = "probe")]
     let waits = shot::CaptureWaits {
         steps: !args.steps.is_empty() || !args.login_steps.is_empty(),
         approval: args.steps.iter().any(|step| step.starts_with("shell:")),
@@ -946,7 +1031,7 @@ fn main() {
         // every motion primitive (loops, tweens, presence, springs, the
         // streaming caret) resolves to its resting state, so spinners and
         // shimmers with no `at_rest` of their own still paint one frame.
-        if crate::clock::deterministic() {
+        if crate::runtime::captures() {
             cx.set_reduce_motion(true);
         }
         // 4. The app's own keys, then the native menu bar: macOS reads each
@@ -963,7 +1048,7 @@ fn main() {
         // The stall watchdog (writes to `logs/` when the UI thread goes
         // quiet past 500 ms). Not for deterministic captures: their shots
         // never need it and a capture's own startup would only add noise.
-        if !crate::clock::deterministic() {
+        if !crate::runtime::captures() {
             crate::watchdog::start(crate::store::support_dir().join("logs"), cx);
         }
         // The frame that actually reached the screen, not the request for it.
@@ -1044,9 +1129,13 @@ fn main() {
             }
         })
         .detach();
-        match screenshot {
-            Some(path) => shot::capture_and_quit(handle, path, delay, waits, capture, cx),
-            None => cx.activate(true),
+        #[cfg(feature = "probe")]
+        if let Some(path) = screenshot {
+            shot::capture_and_quit(handle, path, delay, waits, capture, cx);
+            return;
         }
+        #[cfg(not(feature = "probe"))]
+        let _ = (handle, capture);
+        cx.activate(true);
     });
 }

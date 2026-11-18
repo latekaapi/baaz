@@ -37,57 +37,7 @@ impl Harness {
     /// it. An empty payload is an `Err`. A blank URL focuses the
     /// address field, like a by-hand open. Free: no turn, no wire.
     pub(crate) fn step_tab_new(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let url = rest.trim();
-        if url.is_empty() {
-            return Err("no URL given".into());
-        }
-        // A real page opening ends any open address edit (the blank tab
-        // entering Browse opens one), exactly as selecting a tab does.
-        if url != BLANK {
-            self.leave_browse_address(window, cx);
-        }
-        self.ensure_tabs_loaded(cx);
-        // B2a-H2b: in Browse a new tab is always the person's, even with
-        // a session open behind the mode — the session's tabs belong to
-        // Sessions.
-        let owner = if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
-            Owner::Person
-        } else {
-            self.shown_tab_owner(cx)
-        };
-        let space = self.browser.read(cx).browse_space();
-        let after = self.browser.read(cx).tabs.active_of(&owner, space.as_deref());
-        // D6 (owner 2026-10-17): a session has one page — a new page for a
-        // session navigates the one it has instead of opening a second.
-        if let (Owner::Session(_), Some(id)) = (&owner, after) {
-            if url != BLANK {
-                if let Some(state) = self.browser.read(cx).states.get(&id).cloned() {
-                    state.update(cx, |state, _| state.navigate(url));
-                    if self.browser.update(cx, |browser, _| browser.tabs.set_url_title(id, url, url)) {
-                        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
-                    }
-                    cx.notify();
-                    return Ok(());
-                }
-            }
-        }
-        let id = self.browser.update(cx, |browser, _| browser.tabs.open(space, owner.clone(), url, after));
-        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
-        // In Browse the person's new tab is what the centre shows next, over
-        // any session tab it held.
-        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
-            self.browser.update(cx, |browser, cx| browser.set_session_tab(None, cx));
-        }
-        let key = match &owner {
-            Owner::Person => HOME_KEY.to_owned(),
-            Owner::Session(_) => self.browser_key(cx),
-        };
-        let state = self.ensure_tab_page(&key, id, window, cx);
-        if url == BLANK {
-            state.update(cx, |state, cx| state.begin_editing(window, cx));
-        }
-        cx.notify();
-        Ok(())
+        self.open_new_tab(rest, window, cx)
     }
 
     /// `tab-select:<n>`: select the n-th tab of the shown strip (1-based).
@@ -221,24 +171,6 @@ impl Harness {
         self.discard_hidden_tabs(true, shown, centre, cx);
         cx.notify();
         Ok(())
-    }
-
-    /// Step the find to the next (`forward`) or previous match: Enter, the
-    /// ↑/↓ buttons. A no-op with no open strip or no query.
-    pub(crate) fn step_browse_find(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else { return };
-        let Some((query, match_case)) = self.browser.update(cx, |browser, _| {
-            let strip = browser.find_strips.for_tab(id);
-            if !strip.open || strip.query.is_empty() {
-                return None;
-            }
-            Some((strip.query.clone(), strip.match_case))
-        }) else {
-            return;
-        };
-        if let Some(state) = self.browse_centre_state(cx) {
-            state.update(cx, |state, _| state.find(&query, forward, match_case));
-        }
     }
 
     /// `history:<url>|<title>|<days ago>|<page words>`: record a visit to

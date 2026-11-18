@@ -248,7 +248,7 @@ impl SetupHost {
     ) {
         let Some(command) = kind.command(id) else { return };
         let session = self.setup_terminal(id, command, cx);
-        if !crate::provider_status::deterministic() {
+        if !crate::runtime::providers_scripted() {
             self.type_when_ready(id, session, command, PROMPT_WAIT, cx);
         }
         self.show(SetupSheet { provider: id, kind }, cx);
@@ -325,7 +325,7 @@ impl SetupHost {
         let Some(command) = SetupKind::SignIn.command(sheet.provider) else { return };
         self.show(SetupSheet { provider: sheet.provider, kind: SetupKind::SignIn }, cx);
         if let Some(session) = self.terminals.sessions.get(&sheet.provider).cloned() {
-            if !crate::provider_status::deterministic() {
+            if !crate::runtime::providers_scripted() {
                 // The installer may still be printing: wait for its prompt.
                 self.type_when_ready(sheet.provider, session, command, CHAIN_WAIT, cx);
             }
@@ -341,7 +341,7 @@ impl SetupHost {
         if let Some(session) = self.terminals.sessions.get(&id) {
             return session.clone();
         }
-        let session = if crate::provider_status::deterministic() {
+        let session = if crate::runtime::providers_scripted() {
             TerminalSession::new(Box::new(crate::terminal::host::ScriptBackend::new(scripted_terminal(command))), 80, 7)
         } else {
             let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
@@ -367,6 +367,7 @@ impl SetupHost {
         entity
     }
 
+    #[cfg(feature = "probe")]
     /// `setup:<provider>:<install|signin|update>` (`--steps`): open the sheet
     /// as its button would. Deterministic runs show a scripted terminal.
     /// `Err` for a provider id no registry entry owns (never the Muse
@@ -466,6 +467,7 @@ impl Harness {
     }
 
 
+    #[cfg(feature = "probe")]
     /// `setup:<provider>:<stage>` ([`SetupHost::step`]).
     pub(crate) fn step_setup(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.setup.update(cx, |setup, cx| setup.step(rest, window, cx))

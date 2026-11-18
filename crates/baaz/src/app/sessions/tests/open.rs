@@ -372,7 +372,7 @@ fn quit_asks_when_a_turn_is_running(cx: &mut gpui::TestAppContext) {
                 provider_id: ProviderId::Codex.as_str().to_owned(),
                 workspace: harness.workspace(cx),
                 overlays: harness.overlays.clone(),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             let view = cx.new(|cx| SessionView::new("s-quit".to_owned(), host, window, cx));
@@ -413,7 +413,7 @@ fn a_busy_parked_session_is_never_evicted(cx: &mut gpui::TestAppContext) {
                 provider_id: ProviderId::Codex.as_str().to_owned(),
                 workspace: harness.workspace(cx),
                 overlays: harness.overlays.clone(),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             let view = cx.new(|cx| SessionView::new(busy_id.clone(), host, window, cx));
@@ -435,7 +435,7 @@ fn a_busy_parked_session_is_never_evicted(cx: &mut gpui::TestAppContext) {
                     provider_id: ProviderId::Codex.as_str().to_owned(),
                     workspace: harness.workspace(cx),
                     overlays: harness.overlays.clone(),
-                    capture: crate::shot::CaptureToken::default(),
+                    capture: crate::runtime::CaptureToken::default(),
                     terminal_host: None,
                 };
                 let other = cx.new(|cx| SessionView::new(format!("s-idle-{n}"), host, window, cx));
@@ -483,7 +483,7 @@ fn a_busy_parked_session_is_never_evicted(cx: &mut gpui::TestAppContext) {
                 provider_id: ProviderId::Codex.as_str().to_owned(),
                 workspace: harness.workspace(cx),
                 overlays: harness.overlays.clone(),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             let next = cx.new(|cx| SessionView::new("s-after".to_owned(), host, window, cx));
@@ -889,7 +889,7 @@ fn b2fix_project(
                     provider_id: ProviderId::Muse.as_str().to_owned(),
                     workspace: workspace.clone(),
                     overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                    capture: crate::shot::CaptureToken::default(),
+                    capture: crate::runtime::CaptureToken::default(),
                     terminal_host: None,
                 },
                 window,

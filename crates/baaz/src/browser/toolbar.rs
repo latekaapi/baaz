@@ -34,6 +34,7 @@ impl SearchEngine {
     pub(crate) const ALL: [SearchEngine; 4] =
         [SearchEngine::Google, SearchEngine::DuckDuckGo, SearchEngine::Bing, SearchEngine::Kagi];
 
+    #[cfg(feature = "probe")]
     /// The engine for its machine name (what `layout.json` stores, serde's
     /// lowercase): `None` for an unknown string, so a hand-edited file reads as Google, never an error.
     pub(crate) fn parse(s: &str) -> Option<SearchEngine> {

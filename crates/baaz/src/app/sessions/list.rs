@@ -7,6 +7,7 @@
 
 use super::*;
 
+#[cfg(feature = "probe")]
 /// One `--sidebar-fixture` row: the wire's shape, spelled as JSON.
 ///
 /// `label` stands in for the index title a live row would carry.
@@ -75,11 +76,13 @@ pub(super) struct FixtureSession {
     provider: Option<String>,
 }
 
+#[cfg(feature = "probe")]
 /// [`FixtureSession::status`] without the field: settled, never running.
 fn fixture_settled() -> String {
     "idle".to_owned()
 }
 
+#[cfg(feature = "probe")]
 /// A fixture row as the wire would have listed it: joined through
 /// [`SessionEntry::join`] with a synthetic `Session`, so resolution and
 /// grouping read exactly what a live list would have given them — then
@@ -514,6 +517,7 @@ impl Harness {
         });
     }
 
+    #[cfg(feature = "probe")]
     /// `--sidebar-fixture`: merge scripted rows into the session list as if
     /// the wire had listed them. A missing or unparseable file is no rows,
     /// like an empty list reply — a capture aid must never fail a boot.
@@ -577,6 +581,7 @@ impl Harness {
         self.session_list.read(cx).chain_members(session_id)
     }
 
+    #[cfg(feature = "probe")]
     /// Re-derive the chain heads when a link is in play
     /// ([`SessionList::collapse_handoff_chains`]).
     pub(crate) fn collapse_handoff_chains(&mut self, cx: &mut gpui::App) -> bool {

@@ -34,7 +34,9 @@ the number measured on the reference machine beside it. A budget missed is
 exit 1; a run that could not measure is exit 2 (never a pass).
 
     python3 scripts/perf-budgets.py                 # debug binary, all groups
-    python3 scripts/perf-budgets.py --binary target/release/baaz
+    python3 scripts/perf-budgets.py --binary target/release/baaz   # `cargo build --release -p baaz`
+                                                    # (default features: the probe;
+                                                    # the bundle's release build has none)
     python3 scripts/perf-budgets.py --only store --slack 3   # CI
     python3 scripts/perf-budgets.py --json          # one JSON object on stdout
 """

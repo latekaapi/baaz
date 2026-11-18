@@ -433,3 +433,109 @@ impl SessionRuntime {
         settled
     }
 }
+
+impl SessionView {
+    /// The newest approval still awaiting a decision, and its current choices.
+    ///
+    /// Read from the transcript rather than from the pending map, because the
+    /// transcript is in wire order and "newest" is a question about order —
+    /// but read from the render cache rather than re-scanned, because the
+    /// answer only changes when the fold does (finding `performance-2`).
+    /// [`Self::refresh_render_cache`] fills it, and every fold change sets
+    /// `follow`, so the cache is refreshed before the frame that could show a
+    /// new card and before any keystroke that frame's reader could send.
+    pub(super) fn newest_pending_approval(
+        &self,
+    ) -> Option<&(String, Vec<aui_protocol::ApprovalChoice>)> {
+        self.cached_pending_approval.as_ref()
+    }
+}
+
+impl SessionRuntime {
+    /// The newest question still awaiting an answer, and its option labels.
+    pub(super) fn newest_pending_question(&self) -> Option<(String, Vec<String>)> {
+        let session = self.session()?;
+        session.turns.iter().rev().flat_map(|turn| turn.blocks().iter().rev()).find_map(|block| match block {
+            Block::Question { id, options, answer: None, .. } => {
+                Some((id.clone(), options.iter().map(|o| o.label.clone()).collect()))
+            }
+            _ => None,
+        })
+    }
+
+    /// F10. The transcript's own first user prompt, as a title: a session is
+    /// named after what the person said, never after a command the agent
+    /// ran. The newest submission is not the question — the earliest is —
+    /// so this reads the fold's map oldest-first where `first_prompt_text`
+    /// reads it newest-first for the local row.
+    ///
+    /// The fold is already in memory, so this costs nothing at all — and it
+    /// reaches the case `session/read` cannot, because the history of a session
+    /// nobody has loaded is not served.
+    pub fn first_user_title(&self) -> Option<String> {
+        let session = self.session()?;
+        let mut submissions: Vec<&str> = Vec::new();
+        submissions.extend(self.store.command_ids().filter_map(|id| self.store.command_text(id)));
+        crate::sessions::first_user_title(&submissions, &session.turns)
+    }
+
+    /// F10. The first shell command in this session's transcript, as a title.
+    ///
+    /// Only the fallback for a session with no user text at all (a
+    /// shell-only session): [`Self::first_user_title`] answers first.
+    ///
+    /// The fold is already in memory, so this costs nothing at all — and it
+    /// reaches the case `session/read` cannot, because the history of a session
+    /// nobody has loaded is not served.
+    pub fn first_shell_title(&self) -> Option<String> {
+        let session = self.session()?;
+        session
+            .turns
+            .iter()
+            .flat_map(|turn| turn.blocks().iter())
+            .find_map(|block| match block {
+                Block::ToolCall { kind: aui_protocol::ToolKind::Shell, target, .. } => {
+                    crate::sessions::shell_title(target)
+                }
+                _ => None,
+            })
+    }
+
+}
+
+impl SessionView {
+    /// Press the `n`-th choice (from 1) of the newest pending approval —
+    /// the digits on the card, and the `choose:<n>` step. With no muse card
+    /// pending, a parked provider tap answers to the same digits (V1) —
+    /// the newest undecided one, in the card's own choice order. A choice
+    /// that takes feedback opens its field on the first press (the second
+    /// sends). Fails with nothing pending or a number past the card's
+    /// choices.
+    pub(crate) fn choose(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        if n == 0 {
+            return Err("choices are numbered from 1".into());
+        }
+        if let Some((approval_id, choices)) = self.newest_pending_approval() {
+            let choice = choices
+                .get(n - 1)
+                .ok_or_else(|| format!("the pending approval has {} choices, not {n}", choices.len()))?;
+            let (approval_id, choice) = (approval_id.clone(), choice.clone());
+            if choice.accepts_feedback && self.feedback_open.is_none() {
+                // The same two-press dance a person does: the first press
+                // opens the field, `feedback:` fills it, the second sends.
+                self.toggle_feedback(approval_id, Some(choice.id.clone()), window, cx);
+                return Ok(());
+            }
+            let feedback = self.feedback_open.is_some().then(|| self.feedback.read(cx).value().to_string());
+            self.runtime.update(cx, |rt, cx| rt.decide_approval(approval_id, choice.id.clone(), feedback, cx));
+            return Ok(());
+        }
+        let tap = self.runtime.read(cx).external_approvals.pending().last().cloned().cloned().ok_or("no approval is pending")?;
+        let choices = crate::providers::ApprovalChoice::all();
+        let choice = choices
+            .get(n - 1)
+            .ok_or_else(|| format!("the pending approval has {} choices, not {n}", choices.len()))?;
+        self.runtime.update(cx, |rt, cx| rt.decide_external_approval(tap.id.clone(), *choice, None, cx));
+        Ok(())
+    }
+}

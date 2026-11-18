@@ -112,7 +112,7 @@ fn sanitize(id: &str) -> String {
 /// the provider-session store follows: a capture must not paint the owner's
 /// real transcripts anywhere.
 pub fn write_snapshot(destination: &str, snapshot: &HandoffSnapshot) {
-    if deterministic() {
+    if crate::runtime::state_isolated() {
         return;
     }
     let mut bounded = snapshot.clone();
@@ -129,7 +129,7 @@ pub fn write_snapshot(destination: &str, snapshot: &HandoffSnapshot) {
 /// unbounded file is bounded here too. Both are idempotent, so a file that
 /// already went through either reads back unchanged.
 pub fn read_snapshot(destination: &str) -> Option<HandoffSnapshot> {
-    if deterministic() {
+    if crate::runtime::state_isolated() {
         return None;
     }
     let text = std::fs::read_to_string(path_for(destination)).ok()?;
@@ -141,11 +141,6 @@ pub fn read_snapshot(destination: &str) -> Option<HandoffSnapshot> {
         turns: bound_turns(without_handoff_cards(snapshot.turns)),
         ..snapshot
     })
-}
-
-/// Whether this is a deterministic capture (see [`write_snapshot`]).
-fn deterministic() -> bool {
-    std::env::var("BAAZ_DETERMINISTIC").as_deref() == Ok("1")
 }
 
 /// The divider's text: "Handed off from \<From> to \<To>", plus the

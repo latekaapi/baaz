@@ -9,12 +9,14 @@
 
 use super::*;
 
+mod boot;
 mod list;
 mod open;
 mod provider_open;
 mod switch;
 mod events;
 mod handoff;
+#[cfg(feature = "probe")]
 mod steps;
 mod state;
 
@@ -24,6 +26,7 @@ pub(crate) use state::{HandoffState, OpenState};
 /// Named from outside the app module: the parked-MRU rule the registry
 /// applies and the step drain the login script shares.
 pub(crate) use open::evict_parked;
+#[cfg(feature = "probe")]
 pub(crate) use steps::drain_steps;
 
 #[cfg(test)]

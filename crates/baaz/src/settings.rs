@@ -212,6 +212,7 @@ pub(crate) fn normalize_settings_target(raw: &str, last_visited: &str) -> String
     "general".to_owned()
 }
 
+#[cfg(feature = "probe")]
 /// Whether `settings:<raw>` names something the page can open: empty (the
 /// last-visited section), a section id, a provider sub-page, a row id with
 /// a home page, or the legacy `sidebar`. Everything
@@ -770,12 +771,14 @@ impl SettingsPage {
         step
     }
 
+    #[cfg(feature = "probe")]
     /// Open a provider card's Details (the `details:` step verb).
     pub(crate) fn open_details(&mut self, id: ProviderId, cx: &mut Context<Self>) {
         self.details_open.insert(id);
         cx.notify();
     }
 
+    #[cfg(feature = "probe")]
     /// Open the "New sessions start in" menu (the `connect-menu` step verb
     /// while Settings stands open). `false` when the page is shut.
     pub(crate) fn open_default_menu(&mut self, cx: &mut Context<Self>) -> bool {
@@ -860,7 +863,7 @@ impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The page takes the keyboard the frame after it opens. Skipped in
         // deterministic captures, like the composer's own focus.
-        if std::mem::take(&mut self.focus_armed) && self.state.open && !crate::clock::deterministic() {
+        if std::mem::take(&mut self.focus_armed) && self.state.open && !crate::runtime::captures() {
             window.focus(&self.focus, cx);
         }
         self.render_content(window, cx)
@@ -2173,6 +2176,7 @@ impl Harness {
         self.settings_page.update(cx, |page, cx| page.exit_for_navigation(cx));
     }
 
+    #[cfg(feature = "probe")]
     /// `settings[:<section>]`: open the page, optionally at that section
     /// (`settings:sidebar`, `settings:providers/codex`, or a row id that
     /// names its home page). Empty reopens the last-visited section
@@ -2307,13 +2311,14 @@ impl Harness {
         match existing {
             Some(id) => self.select_browse_sidebar_tab(id, window, cx),
             None => {
-                if let Err(reason) = self.step_tab_new(CHROMIUM_SETTINGS_URL, window, cx) {
+                if let Err(reason) = self.open_new_tab(CHROMIUM_SETTINGS_URL, window, cx) {
                     crate::baaz_log!("open_chromium_settings: no tab opened: {reason}");
                 }
             }
         }
     }
 
+    #[cfg(feature = "probe")]
     /// `settings-set:<key>=<value>`: the scripted twin of the Settings
     /// rows that are not plain switches. `search-engine=<name>`,
     /// `summary-line=<on|off>`, `theme=<system|light|dark>`,
@@ -2367,6 +2372,7 @@ impl Harness {
         }
     }
 
+    #[cfg(feature = "probe")]
     /// `auto-title`: flip the automatic-naming switch and persist it. The
     /// switch itself lives on the Settings page's General section; this
     /// verb is what captures flip. Off means no title model call ever.
@@ -2380,6 +2386,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `auto-summary`: flip the sidebar-summaries switch and persist it.
     /// See [`Self::step_auto_title`]. Off means no rewrite model call ever;
     /// the ladder's preview rung still fills every second line. Always flips: `Ok`.

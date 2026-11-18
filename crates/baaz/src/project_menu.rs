@@ -24,6 +24,7 @@ use gpui::{div, prelude::*, AnyElement, Context, Focusable, Window};
 use crate::app::Harness;
 use crate::overlays::{Menu, MenuKind};
 use crate::projects;
+#[cfg(feature = "probe")]
 use crate::steps::StepResult;
 
 /// The eight label-ramp slots as the Colour submenu names them, in token
@@ -281,12 +282,14 @@ impl Harness {
         self.arm_composer_focus(cx);
     }
 
+    #[cfg(feature = "probe")]
     /// `projects`: the Projects palette, over whatever is open.
     pub(crate) fn step_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) -> StepResult {
         self.open_projects(false, window, cx);
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `project:<path>`: adopt the path and make it current — no panel, no
     /// session. Relative paths resolve against the launch directory, like
     /// the fixture's roots. An empty path, or one that is not a directory
@@ -306,6 +309,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `project-menu`: the current project's menu, seated at its group row.
     /// `project-menu:<name>`: the group row menu for the project named.
     /// No current project, or no project by that name, fails the step.
@@ -327,6 +331,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `project-close:<name>`: close the group of the project named, so its
     /// header shows the strongest state of the sessions it hides (task
     /// 3.2). A setter, never a toggle: a capture's second run finds it
@@ -346,6 +351,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `project-colour:<n>`: the current project's colour slot, 1–8.
     /// Anything else is not a slot and fails the step, as does no current
     /// project. With no payload, open the Colour submenu instead (opening
@@ -382,6 +388,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `group-by:<date|project>`: persist the sidebar grouping and regroup.
     /// Any other payload fails the step.
     pub(crate) fn step_group_by(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
@@ -395,6 +402,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `group-bar`: flip the current-project accent bar flag and persist it.
     /// The flag no longer draws anything (see `Layout::group_bar`).
     pub(crate) fn step_group_bar(&mut self, cx: &mut Context<Self>) -> StepResult {
@@ -403,6 +411,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `group-branch`: flip the trailing-branch flag and persist it, as the
     /// Settings › Sidebar switch does.
     pub(crate) fn step_group_branch(&mut self, cx: &mut Context<Self>) -> StepResult {
@@ -411,6 +420,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `remove-project:<name>`: raise the removal dialog for the project
     /// named. No project by that name fails the step.
     pub(crate) fn step_remove_project(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
@@ -426,6 +436,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `remove-confirm`: confirm the open removal dialog. No removal
     /// dialog open, or one whose project is no longer adopted, fails the
     /// step.

@@ -71,6 +71,7 @@ mod omnibox;
 mod page_actions;
 mod pages;
 mod permissions;
+#[cfg(feature = "probe")]
 mod steps;
 mod sync;
 mod tabs_actions;
@@ -1069,7 +1070,7 @@ mod tests {
         let (baaz, vc) = cx.add_window_view(|window, cx| {
             crate::app::Harness::new(
                 routing_args(&state.2),
-                crate::shot::CaptureToken::default(),
+                crate::runtime::CaptureToken::default(),
                 window,
                 cx,
             )
@@ -1116,7 +1117,7 @@ mod tests {
         let (baaz, vc) = cx.add_window_view(|window, cx| {
             crate::app::Harness::new(
                 routing_args(&state.2),
-                crate::shot::CaptureToken::default(),
+                crate::runtime::CaptureToken::default(),
                 window,
                 cx,
             )
@@ -1164,7 +1165,7 @@ mod tests {
         let (baaz, vc) = cx.add_window_view(|window, cx| {
             crate::app::Harness::new(
                 routing_args(&state.2),
-                crate::shot::CaptureToken::default(),
+                crate::runtime::CaptureToken::default(),
                 window,
                 cx,
             )
@@ -1216,7 +1217,7 @@ mod tests {
         let (baaz, vc) = cx.add_window_view(|window, cx| {
             crate::app::Harness::new(
                 routing_args(&state.2),
-                crate::shot::CaptureToken::default(),
+                crate::runtime::CaptureToken::default(),
                 window,
                 cx,
             )
@@ -1292,7 +1293,7 @@ mod tests {
         let (baaz, vc) = cx.add_window_view(|window, cx| {
             crate::app::Harness::new(
                 routing_args(&state.2),
-                crate::shot::CaptureToken::default(),
+                crate::runtime::CaptureToken::default(),
                 window,
                 cx,
             )
@@ -1319,7 +1320,7 @@ mod tests {
         let (baaz, vc) = cx.add_window_view(|window, cx| {
             crate::app::Harness::new(
                 routing_args(&state.2),
-                crate::shot::CaptureToken::default(),
+                crate::runtime::CaptureToken::default(),
                 window,
                 cx,
             )
@@ -1416,7 +1417,7 @@ mod tests {
         let (baaz, vc) = cx.add_window_view(|window, cx| {
             crate::app::Harness::new(
                 routing_args(&state.2),
-                crate::shot::CaptureToken::default(),
+                crate::runtime::CaptureToken::default(),
                 window,
                 cx,
             )
@@ -1493,7 +1494,7 @@ mod tests {
         let (baaz, vc) = cx.add_window_view(|window, cx| {
             crate::app::Harness::new(
                 routing_args(&state.2),
-                crate::shot::CaptureToken::default(),
+                crate::runtime::CaptureToken::default(),
                 window,
                 cx,
             )

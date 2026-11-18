@@ -33,43 +33,20 @@ pub fn state_dir_override() -> Option<PathBuf> {
 }
 
 /// `~/Library/Application Support/baaz`, honouring `BAAZ_STATE_DIR` so a
-/// test can point the whole store somewhere disposable.
+/// test can point the whole store somewhere disposable: the run's
+/// [`crate::runtime::StateDir`] (a capture with no state dir of its own gets
+/// a throwaway one, a unit test a per-process temp dir).
 pub fn support_dir() -> PathBuf {
-    if let Some(dir) = state_dir_override() {
-        return dir;
-    }
-    // A test that forgot to point the store somewhere disposable must never
-    // write the person's real state: `cargo test` once rewrote their
-    // `projects.json`. Unit tests fall back to a per-process temp dir.
-    #[cfg(test)]
-    {
-        return std::env::temp_dir().join(format!("baaz-test-state-{}", std::process::id()));
-    }
-    // The same rule for a deterministic capture (the visual probe): an entry
-    // that names no state dir of its own must never write the person's real
-    // store. Before this, `composer-*`, `lane-*` and `reopen-failed` captures
-    // left probe prompts in the owner's history and set `provider.json`.
-    #[allow(unreachable_code)]
-    if crate::clock::deterministic() {
-        return capture_state_dir();
-    }
-    #[allow(unreachable_code)]
-    default_support_dir()
-}
-
-/// The throwaway store a deterministic capture with no `BAAZ_STATE_DIR`
-/// uses: one fresh directory per process, so two shots of the same entry
-/// start from the same (empty) state.
-fn capture_state_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("baaz-capture-state-{}", std::process::id()))
+    crate::runtime::state_dir().path
 }
 
 /// Removes this capture's throwaway store as the capture ends. Tier V makes one
 /// per shot, and 1,079 had piled up before this. Only ever the capture dir:
 /// a capture with its own `BAAZ_STATE_DIR` and every real run are untouched.
 pub fn remove_capture_state() {
-    if crate::clock::deterministic() && state_dir_override().is_none() {
-        let _ = std::fs::remove_dir_all(capture_state_dir());
+    let state = crate::runtime::state_dir();
+    if state.throwaway {
+        let _ = std::fs::remove_dir_all(state.path);
     }
 }
 

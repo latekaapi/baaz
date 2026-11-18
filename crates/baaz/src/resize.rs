@@ -49,6 +49,8 @@ pub(crate) struct ResizeDrag {
     /// (`Harness::on_window_activation`) leaves it alone and only
     /// `end_resize` settles it. Never set by the strip.
     pub(crate) scripted: bool,
+    // Set only by the probe's `resize-sweep:` step.
+    #[cfg_attr(not(feature = "probe"), allow(dead_code))]
     /// A frame-paced width sweep (`resize-sweep` step, scripting only): the
     /// divider marches toward the target width one step per rendered frame —
     /// the display link's pace on a real display — so per-tick resize cost
@@ -57,6 +59,8 @@ pub(crate) struct ResizeDrag {
     pub(crate) sweep: Option<ResizeSweep>,
 }
 
+// Built only by the probe's `resize-sweep:` step.
+#[cfg_attr(not(feature = "probe"), allow(dead_code))]
 /// One frame-paced width sweep: march [`ResizeDrag::width`] toward `target`
 /// by at most `step` per rendered frame.
 #[derive(Debug)]
@@ -67,10 +71,12 @@ pub(crate) struct ResizeSweep {
 }
 
 impl ResizeSweep {
+    #[cfg(feature = "probe")]
     pub(crate) fn new(target: f32, step: f32) -> Self {
         Self { target, step: step.abs().max(0.5), ticks: 0 }
     }
 
+    #[cfg(feature = "probe")]
     /// The next width toward the target, clamped to the divider's range.
     pub(crate) fn advance(&mut self, from: f32) -> f32 {
         self.ticks += 1;
@@ -101,6 +107,7 @@ pub(crate) struct ScrollSweep {
 }
 
 impl ScrollSweep {
+    #[cfg(feature = "probe")]
     pub(crate) fn new(dy: f32, finger: u32, tail: u32) -> Self {
         Self { dy, finger_left: finger, tail_left: tail, tail_total: tail.max(1), ticks: 0 }
     }

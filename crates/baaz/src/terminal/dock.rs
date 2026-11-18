@@ -225,6 +225,7 @@ impl TerminalDock {
         crate::layout::Layout::save(cx);
     }
 
+    #[cfg(feature = "probe")]
     /// The `--steps` verb's dock: open it over a FakePty-backed tab named
     /// `title` on `root` and drain its script at once, so the capture
     /// replays the same bytes on every run.

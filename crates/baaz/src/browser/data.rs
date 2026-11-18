@@ -71,6 +71,8 @@ pub(crate) enum Op {
     ClearHistory,
     SearchHistory { query: String },
     AddBookmark { provisional: i64, url: String, title: String, folder: i64, now: u64 },
+    // Issued only by the probe's `bookmark:` step.
+    #[cfg_attr(not(feature = "probe"), allow(dead_code))]
     AddFolder { provisional: i64, name: String, parent: Option<i64>, source: String },
     UpdateBookmark { id: i64, title: String, folder: i64 },
     RemoveBookmark { id: i64 },
@@ -133,6 +135,8 @@ pub(crate) struct Front {
     pub history_len: u64,
 }
 
+// Issued only by the probe's `bookmark:` step.
+#[cfg_attr(not(feature = "probe"), allow(dead_code))]
 /// A front write, kept while a snapshot is in flight so it can be replayed
 /// over it.
 #[derive(Clone, Debug)]
@@ -557,6 +561,7 @@ impl BrowserData {
         &self.front.excluded
     }
 
+    #[cfg(feature = "probe")]
     /// Whether `url`'s site is on the never-remember list.
     pub(crate) fn is_excluded(&self, url: &str) -> bool {
         let host = history::host_of(url);
@@ -585,6 +590,7 @@ impl BrowserData {
         self.history_changed();
     }
 
+    #[cfg(feature = "probe")]
     /// A visit recorded outside the recorder (the `history:` step).
     pub(crate) fn record_visit(&mut self, url: &str, title: &str, now: u64) {
         self.writer().record_visit(url, title, now);
@@ -643,6 +649,7 @@ impl BrowserData {
         mark
     }
 
+    #[cfg(feature = "probe")]
     /// Make a folder (the person's own): its provisional id.
     pub(crate) fn add_folder(&mut self, name: &str, parent: Option<i64>, cx: &mut Context<Self>) -> i64 {
         let parent = parent.map(|p| self.resolve(p));

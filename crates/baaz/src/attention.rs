@@ -234,6 +234,7 @@ impl Harness {
         self.invalidate_list(cx);
     }
 
+    #[cfg(feature = "probe")]
     /// `needs-you-filter:<on|off>`: the filter set, not toggled, so a
     /// capture's second run changes nothing.
     pub(crate) fn step_needs_you_filter(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
@@ -248,6 +249,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `row-needs-you:<label>`: the sidebar row with that label starts
     /// waiting for an approval, as a wire status would make it, and the app
     /// takes its look. Offline: the live check's only way to make a real
@@ -295,7 +297,7 @@ impl Harness {
 /// Whether Baaz is the frontmost app: a session "in front" is only being
 /// looked at while it is.
 fn app_is_active() -> bool {
-    if cfg!(test) || crate::provider_status::deterministic() {
+    if cfg!(test) || crate::runtime::captures() {
         return false;
     }
     #[cfg(target_os = "macos")]
@@ -332,7 +334,7 @@ fn app_is_active() -> bool {
 /// Outside an app bundle `UNUserNotificationCenter` aborts the process
 /// (gpui guards the same way), so a bare binary — every capture — skips it.
 fn ask_permission() {
-    if cfg!(test) || crate::provider_status::deterministic() {
+    if cfg!(test) || crate::runtime::captures() {
         return;
     }
     #[cfg(target_os = "macos")]
@@ -372,7 +374,7 @@ fn ask_permission() {
 }
 
 fn set_dock_badge(count: usize) {
-    if cfg!(test) || crate::provider_status::deterministic() {
+    if cfg!(test) || crate::runtime::captures() {
         return;
     }
     #[cfg(target_os = "macos")]
@@ -403,7 +405,7 @@ fn set_dock_badge(count: usize) {
 
 /// The system's short notification sound, for Settings' sound switch.
 fn play_sound() {
-    if cfg!(test) || crate::provider_status::deterministic() {
+    if cfg!(test) || crate::runtime::captures() {
         return;
     }
     #[cfg(target_os = "macos")]

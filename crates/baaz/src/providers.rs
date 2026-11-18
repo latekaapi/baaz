@@ -491,18 +491,98 @@ fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
-/// How [`crate::app::Harness::open_on_provider`] connects: wrapped in a
-/// factory so tests can inject a scripted provider instead of spawning a
-/// real child. The default spawns nothing on the UI thread — resolving,
-/// spawning and shaking hands all block, so the caller runs this on the
-/// background executor.
-pub(crate) type ProviderFactory = Arc<dyn Fn(ProviderId) -> Result<Provider, ProviderError> + Send + Sync>;
+/// How a window's session lanes connect (the runtime's
+/// [`crate::runtime::ProviderSource`] made concrete for one window): every
+/// open — new, reopen, fork, a disabled provider's lane — goes through one,
+/// so a scripted run takes the same open path as a real one with a scripted
+/// factory in it, and tests inject theirs the same way.
+///
+/// The open itself blocks — resolving, spawning and shaking hands — so the
+/// open path runs it on the background executor; a factory whose opens
+/// [land inline](Self::lands_inline) (the scripted stand-in: no child,
+/// nothing that blocks) runs it on the spot instead, so a scripted open
+/// lands in the same update as its click.
+#[derive(Clone)]
+pub(crate) struct ProviderFactory {
+    open: Arc<dyn Fn(ProviderId) -> Result<Provider, ProviderError> + Send + Sync>,
+    kind: FactoryKind,
+}
+
+#[derive(Clone)]
+enum FactoryKind {
+    /// Opens spawn (or wait for) a child: off the UI thread.
+    Spawn,
+    /// The scripted stand-in, always (a disabled provider's lane).
+    Scripted,
+    /// The scripted stand-in until this Muse slot is up, then the spawning
+    /// factory: a `--no-connect` / `--replay` window. Tests that install a
+    /// Muse client keep reaching the real lane path.
+    ScriptedUntil(MuseSlot),
+}
+
+impl ProviderFactory {
+    /// A factory that opens through `open`, off the UI thread.
+    pub(crate) fn new(open: impl Fn(ProviderId) -> Result<Provider, ProviderError> + Send + Sync + 'static) -> Self {
+        Self { open: Arc::new(open), kind: FactoryKind::Spawn }
+    }
+
+    /// The window's factory for `lanes`, around its terminal socket and its
+    /// Muse slot.
+    pub(crate) fn for_window(lanes: crate::runtime::Lanes, socket: PathBuf, muse: MuseSlot) -> Self {
+        let spawn = default_provider_factory(socket, muse.clone());
+        match lanes {
+            crate::runtime::Lanes::Spawn => spawn,
+            crate::runtime::Lanes::Scripted => {
+                let slot = muse.clone();
+                Self {
+                    open: Arc::new(move |id| if slot.is_ready() { spawn.open(id) } else { scripted_lane() }),
+                    kind: FactoryKind::ScriptedUntil(muse),
+                }
+            }
+        }
+    }
+
+    /// The scripted stand-in alone: what a disabled provider's lane opens
+    /// over — readable, resumable, and sending nothing anywhere.
+    pub(crate) fn scripted() -> Self {
+        Self { open: Arc::new(|_| scripted_lane()), kind: FactoryKind::Scripted }
+    }
+
+    /// Connect a provider for `id`. Blocking unless [`Self::lands_inline`].
+    pub(crate) fn open(&self, id: ProviderId) -> Result<Provider, ProviderError> {
+        (self.open)(id)
+    }
+
+    /// Whether an open through this factory runs on the UI thread now: the
+    /// scripted stand-in (a window's own scripted factory only while Muse
+    /// is not up). Such an open spawns nothing and never blocks.
+    pub(crate) fn lands_inline(&self) -> bool {
+        match &self.kind {
+            FactoryKind::Spawn => false,
+            FactoryKind::Scripted => true,
+            FactoryKind::ScriptedUntil(muse) => !muse.is_ready(),
+        }
+    }
+}
+
+/// One connected scripted stand-in. Each its own session: the first keeps
+/// `s-scripted` (probe entries reopen it by that id), later ones are
+/// numbered.
+fn scripted_lane() -> Result<Provider, ProviderError> {
+    use provider::ProviderAdapter as _;
+    static SCRIPTED_LANES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SCRIPTED_LANES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let session_id = if n == 0 { "s-scripted".to_owned() } else { format!("s-scripted-{}", n + 1) };
+    let mut adapter = provider::scripted::ScriptedProvider::with_session_id(session_id);
+    adapter.connect(&crate::conn::connect_info())?;
+    Ok(Provider::new(adapter))
+}
 
 /// The production factory: resolve the CLI, hold its adapter behind the
 /// gate, and shake hands. The session itself opens later, with
 /// `Command::OpenSession` on the same background turn.
 pub(crate) fn default_provider_factory(socket: PathBuf, muse: MuseSlot) -> ProviderFactory {
-    Arc::new(move |id| match id {
+    ProviderFactory::new(move |id| match id {
         ProviderId::Muse => muse.lane(),
         other => open_provider(other, &socket),
     })
@@ -774,20 +854,12 @@ fn claude_code_last_model_path() -> std::path::PathBuf {
     crate::store::support_dir().join(CLAUDE_CODE_LAST_MODEL_FILE)
 }
 
-/// Whether this is a deterministic capture: the last-reported model then
-/// reads as nothing and never writes, the same hermeticity rule the
-/// provider-session store follows, so a capture never paints the owner's
-/// real model into the chip.
-fn claude_code_seed_deterministic() -> bool {
-    std::env::var("BAAZ_DETERMINISTIC").as_deref() == Ok("1")
-}
-
 /// The last model a Claude Code init/result frame reported on this
 /// machine, as [`write_claude_code_last_reported_model`] stored it. `None`
 /// when nothing was ever reported, the file names no model, or this is a
 /// deterministic capture.
 pub fn read_claude_code_last_reported_model() -> Option<String> {
-    if claude_code_seed_deterministic() {
+    if crate::runtime::state_isolated() {
         return None;
     }
     let stored: LastClaudeCodeModel = crate::store::read_json(&claude_code_last_model_path());
@@ -801,7 +873,7 @@ pub fn read_claude_code_last_reported_model() -> Option<String> {
 /// model already stored: the read is cheaper than the atomic write it
 /// saves on every settle (docs/81 A F14).
 pub fn write_claude_code_last_reported_model(model: &str) {
-    if claude_code_seed_deterministic() {
+    if crate::runtime::state_isolated() {
         return;
     }
     let model = model.trim();

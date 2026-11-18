@@ -211,8 +211,8 @@ impl Harness {
         let wanted = ProviderId::parse(&self.new_provider);
         // Every provider opens on its lane; Muse too, live — its lane rides
         // the shared child, which the open waits for while it starts. Only
-        // scripted chrome keeps Muse's local draft.
-        if !(wanted.scripted_draft_is_local() && self.scripted_chrome()) {
+        // a window on the scripted stand-in keeps Muse's local draft.
+        if !(wanted.scripted_draft_is_local() && self.provider_factory.lands_inline()) {
             let root = current
                 .as_deref()
                 .and_then(|id| self.session_list.read(cx).projects.find_available(id))
@@ -225,7 +225,7 @@ impl Harness {
             self.open_new_on_provider(wanted, current.clone(), workspace, switch, window, cx);
             return;
         }
-        // Scripted chrome (`--no-connect` / `--replay`): no child to
+        // The scripted stand-in (`--no-connect` / `--replay`): no child to
         // start a session on, so the draft opens as a local view. Its id
         // is deterministic per project so captures read the same.
         // Live, with Muse not running yet: bring it up for the next
@@ -234,6 +234,7 @@ impl Harness {
         self.open_local_draft(window, cx);
     }
 
+    #[cfg(feature = "probe")]
     /// `session/start` in `root`, which is never adopted: no project
     /// defaults, no `projects.current` pointer, no `drafts` entry. The
     /// session groups nowhere (`Projects::resolve` finds no adoption for
@@ -261,6 +262,7 @@ impl Harness {
         self.new_session_in_root_open(root, window, cx, None);
     }
 
+    #[cfg(feature = "probe")]
     fn new_session_in_root_open(
         &mut self,
         root: &std::path::Path,
@@ -272,12 +274,12 @@ impl Harness {
         // Same lane branch as `new_session_in`: an unadopted root on a
         // provider pick opens on the provider lane, never as `session/start`.
         let wanted = ProviderId::parse(&self.new_provider);
-        if !(wanted.scripted_draft_is_local() && self.scripted_chrome()) {
+        if !(wanted.scripted_draft_is_local() && self.provider_factory.lands_inline()) {
             self.ensure_provider_started(wanted, cx);
             self.open_new_on_provider(wanted, None, root.to_string_lossy().into_owned(), switch, window, cx);
             return;
         }
-        // Scripted chrome (`--no-connect` / `--replay`): no child to
+        // The scripted stand-in (`--no-connect` / `--replay`): no child to
         // start a session on, so the draft opens as a local view.
         // Live, with Muse not running yet: bring it up for the next
         // send (docs/50 P1); offline chrome is a no-op here.
@@ -393,7 +395,7 @@ impl Harness {
         view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.load_history(cx)));
         // Live, Muse is starting under this draft: the chip and the model
         // menu say so (the promotion replaces the view once it is up).
-        let starting = !self.scripted_chrome()
+        let starting = !self.provider_factory.lands_inline()
             && !self.muse_slot.is_ready()
             && matches!(self.wire, crate::app::Wire::Connecting | crate::app::Wire::Reconnecting);
         view.read(cx).runtime().clone().update(cx, |rt, cx| rt.set_muse_starting(starting, cx));
@@ -457,6 +459,7 @@ impl Harness {
         self.resume_inner(session_id, true, false, window, cx);
     }
 
+    #[cfg(feature = "probe")]
     /// Whether `session_id` names a session this window knows: a sidebar
     /// row, a provider record, a local index entry, or an open or parked
     /// view. What the `open:`/`click:`/`pin:` steps check before acting,
@@ -779,7 +782,7 @@ impl Harness {
     /// entirely in deterministic mode, where the scripted statuses are
     /// the cards.
     pub(crate) fn refresh_account_usage(&mut self, cx: &mut Context<Self>) {
-        if crate::provider_status::deterministic() {
+        if crate::runtime::providers_scripted() {
             return;
         }
         let targets =
@@ -1075,6 +1078,7 @@ impl Harness {
             let next = crate::browser::toolbar::ask_draft_text(&existing, &ask.query);
             view.update(cx, |view, cx| view.set_draft(next, window, cx));
         }
+        #[cfg(feature = "probe")]
         self.send_scripted(window, cx);
         // No `maybe_run_steps` here: activations fire on every swap,
         // including swaps the script itself causes, and draining the list
@@ -1169,6 +1173,7 @@ impl Harness {
         Some(runtime)
     }
 
+    #[cfg(feature = "probe")]
     /// Whether any session this window has open — the active one, or one
     /// parked in the MRU (with its view or without) — has a turn in flight
     /// ([`SessionRuntime::is_sending`]: submitted and no `turn/started` yet, or

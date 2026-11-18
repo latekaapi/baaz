@@ -347,6 +347,7 @@ fn is_baaz_client(name: &str) -> bool {
 }
 
 impl SessionEntry {
+    #[cfg(feature = "probe")]
     /// Join one `session/list` row with what the index and the store know.
     ///
     /// The title, best first (finding F10). Since muse 1.2.1 the row itself
@@ -661,6 +662,7 @@ impl SessionEntry {
         }
     }
 
+    #[cfg(feature = "probe")]
     /// The one row a `--replay` window shows: the capture it is reading.
     ///
     /// It is labelled by the file rather than by the index, because a replayed
@@ -1002,6 +1004,7 @@ impl SessionEntry {
     }
 }
 
+#[cfg(feature = "probe")]
 /// The `workspace_root` a `--replay` capture ran in: the first `session/…`
 /// line's, or `None` when it carries none.
 ///
@@ -1643,7 +1646,7 @@ pub fn collapse_with_index(
 /// `support-3`), and the window keys its grouping cache on the minute of it
 /// (finding `support-2`), which is the finest thing an elapsed tag says.
 pub fn grouping_now(entries: &[SessionEntry]) -> DateTime<Local> {
-    if crate::clock::deterministic() {
+    if crate::runtime::clock().is_frozen() {
         entries.iter().map(|e| e.updated).max().unwrap_or_else(crate::clock::now_local)
     } else {
         Local::now()

@@ -160,7 +160,7 @@ fn the_stack_sits_above_the_composer_and_over_the_page() {
 }
 
 /// The toast's contract: newest only with `+N`, Undo as its one action,
-/// a close, settled under a deterministic capture.
+/// a close, settled in a capture (`crate::runtime::captures`).
 #[test]
 fn the_toast_is_the_newest_with_its_queue() {
     let dialogs = source("dialogs.rs");
@@ -169,5 +169,5 @@ fn the_toast_is_the_newest_with_its_queue() {
     assert!(pill.contains(".queued(queued)"), "+N while several queue");
     assert!(pill.contains("undo_newest"), "the one action is Undo");
     assert!(pill.contains(".on_close("), "dismissable");
-    assert!(pill.contains("at_rest(crate::clock::deterministic())"), "captures draw it settled");
+    assert!(pill.contains("at_rest(crate::runtime::captures())"), "captures draw it settled");
 }

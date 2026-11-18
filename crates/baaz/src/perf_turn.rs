@@ -210,7 +210,7 @@ fn stress_view(window: &mut gpui::Window, cx: &mut gpui::App) -> gpui::Entity<cr
         provider_id: "meta".to_owned(),
         workspace: "/tmp/perf-turn".to_owned(),
         overlays: cx.new(|_| crate::overlays::Overlays::default()),
-        capture: crate::shot::CaptureToken::default(),
+        capture: crate::runtime::CaptureToken::default(),
         terminal_host: None,
     };
     cx.new(|cx| crate::session::SessionView::new("synthetic-stress-300".to_owned(), host, window, cx))
@@ -365,7 +365,7 @@ pub fn run() -> serde_json::Value {
         out.insert("long_answer_chunk_p99_us".into(), serde_json::json!(p99));
         out.insert("long_answer_chunk_p50_us".into(), serde_json::json!(p50));
         let args = crate::Args::perf(dir.clone());
-        let harness = cx.new(|cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        let harness = cx.new(|cx| Harness::new(args, crate::runtime::CaptureToken::default(), window, cx));
         harness.update(cx, |harness, cx| {
             let (sessions, index) = sidebar_fixture();
             harness.session_list.update(cx, |list, _| list.sessions = sessions);

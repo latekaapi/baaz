@@ -218,7 +218,7 @@ impl Harness {
             self.set_mode(crate::layout::Mode::Browse, window, cx);
         }
         for url in urls {
-            if let Err(reason) = self.step_tab_new(url, window, cx) {
+            if let Err(reason) = self.open_new_tab(url, window, cx) {
                 crate::baaz_log!("open-url: no tab opened for {url}: {reason}");
             }
         }
@@ -274,6 +274,7 @@ impl Harness {
         self.flush_pending_external_urls(window, cx);
     }
 
+    #[cfg(feature = "probe")]
     /// `open-url:<url>`: the scripted form of a real open-URL event —
     /// the same classify/queue/open path `on_open_urls` drains into, so
     /// the probe exercises what a click in another app triggers. An empty
@@ -422,7 +423,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -473,7 +474,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {

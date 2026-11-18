@@ -108,7 +108,7 @@ impl BrowserDb {
     /// The owner's store, or an in-memory one under captures and tests and
     /// when the file cannot be opened (then nothing persists this run).
     pub(crate) fn open() -> Self {
-        if crate::clock::deterministic() || cfg!(test) {
+        if crate::runtime::browser_backend().in_memory() || cfg!(test) {
             return Self::memory();
         }
         match Self::open_at(&path()) {

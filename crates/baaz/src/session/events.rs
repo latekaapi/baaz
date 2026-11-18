@@ -363,7 +363,7 @@ for line in sys.stdin:
                 provider_id: "meta".to_owned(),
                 workspace: workspace.to_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             cx.new(|cx| SessionView::new_on_provider("s-1".to_owned(), provider, events, host, window, cx))

@@ -306,7 +306,7 @@ impl RightPane {
         // Tests never start one either: its fsevents thread wakes the test
         // scheduler from outside, which the scheduler refuses as
         // nondeterministic (`right_watch` tests the watch itself).
-        if crate::clock::deterministic() || cfg!(test) {
+        if crate::runtime::captures() || cfg!(test) {
             return;
         }
         if self.refresh.watch.as_ref().is_some_and(|(watch, _)| watch.root() == root) {
@@ -347,7 +347,7 @@ impl RightPane {
         // The walk draws around this: a re-read never collapses a toggled
         // directory or drops the preview's tree.
         let expanded = self.cache.expanded_for(&root);
-        if crate::clock::deterministic() {
+        if crate::runtime::captures() {
             let at = std::time::Instant::now();
             let snapshot = {
                 let dir_cache = self.cache.dir_cache_for_root(&root);

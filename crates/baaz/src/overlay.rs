@@ -1286,7 +1286,7 @@ impl Harness {
                 if let Some(&index) = walk.get(next) {
                     // Enter opens the highlighted row once the arrows moved
                     // it (`commit_browse_address`), not the typed text.
-                    this.browser.update(cx, |browser, cx| browser.step_omnibox(index, false, cx));
+                    this.browser.update(cx, |browser, cx| browser.highlight_omnibox_row(index, false, cx));
                 }
             }
             "tab" => this.complete_omnibox(window, cx),

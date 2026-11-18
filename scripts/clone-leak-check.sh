@@ -4,9 +4,12 @@
 #
 #   scripts/clone-leak-check.sh [--reps N] [path/to/Baaz.app]
 #
-# Default bundle: a copy of target/check/Baaz.app or target/bundle/Baaz.app. It
-# is copied and renamed to the bundle ID sh.baaz.leaktest, so this only ever
-# touches that ID's clone directory, and only ever kills pids it started.
+# Default bundle: a copy of target/check/Baaz.app (`scripts/baaz-check.sh
+# build`). The bundle must carry the probe — every scenario is a
+# `--no-connect --screenshot` capture — so the owner's target/bundle, built
+# without it (docs/82 4.10), is never a candidate. It is copied and renamed to
+# the bundle ID sh.baaz.leaktest, so this only ever touches that ID's clone
+# directory, and only ever kills pids it started.
 # Exit 0 pass · 1 a scenario failed · 0 with SKIP where there is no CEF to test.
 set -u
 
@@ -23,7 +26,7 @@ done
 skip() { echo "SKIP: $1"; exit 0; }
 [ "$(uname)" = Darwin ] || skip "not macOS"
 if [ -z "$SRC" ]; then
-    for candidate in "$ROOT/target/check/Baaz.app" "$ROOT/target/bundle/Baaz.app"; do
+    for candidate in "$ROOT/target/check/Baaz.app"; do
         [ -d "$candidate/Contents/Frameworks/Chromium Embedded Framework.framework" ] && SRC="$candidate" && break
     done
 fi

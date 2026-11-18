@@ -38,6 +38,7 @@ impl Harness {
         self.session_list.read(cx).visible(&self.list_facts(cx), cx)
     }
 
+    #[cfg(feature = "probe")]
     /// The sidebar's grouping ([`SessionList::grouping`]) for this window's facts.
     pub(crate) fn sidebar_grouping(&self, cx: &gpui::App) -> Rc<sidebar::Grouping> {
         self.session_list.read(cx).grouping(&self.list_facts(cx), cx)

@@ -652,7 +652,7 @@ pub(crate) fn initial_connect_statuses() -> Vec<ProviderStatus> {
         .into_iter()
         .map(|id| (id, ProviderStatus::checking(id)))
         .collect();
-    if crate::provider_status::deterministic() {
+    if crate::runtime::providers_scripted() {
         if let Some(scripted) = crate::provider_status::scripted_statuses() {
             for status in scripted {
                 statuses.insert(status.provider, status);
@@ -672,7 +672,7 @@ pub(crate) fn initial_connect_statuses() -> Vec<ProviderStatus> {
 /// the cache was never written (or in deterministic mode, where no file is
 /// ever read).
 pub(crate) fn status_stamp() -> StatusStamp {
-    if crate::provider_status::deterministic() {
+    if crate::runtime::providers_scripted() {
         return (None, 0);
     }
     let mtime = std::fs::metadata(crate::provider_status::cache_path())
@@ -780,6 +780,7 @@ impl ConnectScreen {
         self.set_menu(false, cx);
     }
 
+    #[cfg(feature = "probe")]
     /// Open the footer's menu (the `connect-menu` step verb). `false` while
     /// the screen is shut.
     pub(crate) fn open_menu(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1015,6 +1016,7 @@ impl Harness {
         cx.notify();
     }
 
+    #[cfg(feature = "probe")]
     /// `connect-menu`: open the "New sessions start in" menu on whichever
     /// screen draws it — the connect footer, else Settings › Providers. An
     /// `Err` when neither is up: the menu would open nowhere.
@@ -1679,7 +1681,7 @@ mod tests {
             cx.new(|cx| {
                 crate::app::Harness::new(
                     harness_args(&dir, crate::LoginSample::Connect),
-                    crate::shot::CaptureToken::default(),
+                    crate::runtime::CaptureToken::default(),
                     window,
                     cx,
                 )
@@ -1741,7 +1743,7 @@ mod tests {
             cx.new(|cx| {
                 crate::app::Harness::new(
                     harness_args(&dir, crate::LoginSample::Connect),
-                    crate::shot::CaptureToken::default(),
+                    crate::runtime::CaptureToken::default(),
                     window,
                     cx,
                 )
@@ -1790,7 +1792,7 @@ mod tests {
             cx.new(|cx| {
                 crate::app::Harness::new(
                     harness_args(&dir, crate::LoginSample::Connect),
-                    crate::shot::CaptureToken::default(),
+                    crate::runtime::CaptureToken::default(),
                     window,
                     cx,
                 )
@@ -1823,7 +1825,7 @@ mod tests {
             cx.new(|cx| {
                 crate::app::Harness::new(
                     harness_args(&dir, crate::LoginSample::SignedIn),
-                    crate::shot::CaptureToken::default(),
+                    crate::runtime::CaptureToken::default(),
                     window,
                     cx,
                 )

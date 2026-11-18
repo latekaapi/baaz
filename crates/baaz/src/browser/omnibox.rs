@@ -320,7 +320,7 @@ impl Harness {
         }
         let len = rows.len() as isize;
         let next = (self.browser.read(cx).browse_omnibox_selected as isize + delta).rem_euclid(len);
-        self.browser.update(cx, |browser, cx| browser.step_omnibox(next as usize, true, cx));
+        self.browser.update(cx, |browser, cx| browser.highlight_omnibox_row(next as usize, true, cx));
     }
 
     /// Complete the highlighted row's text into the field (Tab): tabs write
@@ -530,7 +530,7 @@ impl BrowserView {
     /// The highlight on row `index`, put there by the arrows: it owns
     /// Enter now (`commit_browse_address`). `forget_completion` drops a Tab
     /// completion, which the highlight supersedes.
-    pub(crate) fn step_omnibox(&mut self, index: usize, forget_completion: bool, cx: &mut Context<Self>) {
+    pub(crate) fn highlight_omnibox_row(&mut self, index: usize, forget_completion: bool, cx: &mut Context<Self>) {
         self.browse_omnibox_selected = index;
         self.browse_omnibox_moved = true;
         if forget_completion {

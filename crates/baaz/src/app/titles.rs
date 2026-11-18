@@ -191,12 +191,13 @@ impl Harness {
     }
 
     /// Whether `provider` can write a title, byline or summary now: Muse
-    /// through its connection, the others through their CLIs while enabled.
+    /// through its connection, the others through their CLIs while enabled
+    /// — never while the window's lanes are the scripted stand-in.
     pub(crate) fn utility_available(&self, provider: crate::providers::ProviderId) -> bool {
         if provider.completes_in_side_session() {
             return self.muse_slot.is_ready();
         }
-        !self.scripted_chrome()
+        !self.provider_factory.lands_inline()
             && crate::utility::supports(provider)
             && crate::provider_status::provider_enabled(provider)
     }
@@ -282,6 +283,7 @@ impl Harness {
         self.wire_tasks().push(task);
     }
 
+    #[cfg(feature = "probe")]
     /// `title-pending`: capture aid — the active session reads as if its
     /// generation were in flight, so a `--replay` run screenshots the
     /// `Naming this session…` row without spending a turn. No open
@@ -298,6 +300,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `title-timeout`: capture aid — stand the active session's generation
     /// down through the watchdog's own path, so a `--replay` run screenshots
     /// the `Naming this session…` fallback to the first prompt without
@@ -309,6 +312,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `title-land:<text>`: capture aid — land `<text>` as the active
     /// session's generated title, so a `--replay` run screenshots the
     /// placeholder-to-title update in the row and the crumb, free. After a

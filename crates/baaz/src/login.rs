@@ -51,6 +51,7 @@ use crate::auth::{self, Identity};
 use crate::overlays::{Dialog, DialogAction};
 use crate::tier::Tier;
 use crate::wire::WireCall;
+#[cfg(feature = "probe")]
 use crate::LoginSample;
 
 /// Where the boot probe got to: sign-in is on the wire now,
@@ -197,6 +198,7 @@ impl Harness {
                 this.tier_retry_settled();
                 this.auth = Auth::SignedOut;
                 this.login.reset_to_choose();
+                #[cfg(feature = "probe")]
                 this.run_login_steps(cx);
                 cx.notify();
             }
@@ -271,6 +273,7 @@ impl Harness {
                 } else if was_in {
                     self.provider_model.update(cx, |model, _| model.muse_signed_out());
                 }
+                #[cfg(feature = "probe")]
                 self.run_login_steps(cx);
                 cx.notify();
             }
@@ -601,6 +604,7 @@ impl Harness {
         }
     }
 
+    #[cfg(feature = "probe")]
     /// `--login-steps <a;b;c>`: drive the login screen from the command line
     /// so a signed-in capture is reproducible without a pointer. Honoured
     /// only when the app is really connected — the offline and replay boots
@@ -612,6 +616,7 @@ impl Harness {
         crate::steps::run_login_steps(self, cx);
     }
 
+    #[cfg(feature = "probe")]
     /// `--login-steps` and `--steps`, taken out of the arguments so a later
     /// re-probe or refresh cannot replay them. Drains through the same
     /// [`crate::app::sessions::drain_steps`] as `--steps`: the first caller
@@ -620,6 +625,7 @@ impl Harness {
         crate::app::sessions::drain_steps(&mut self.args.login_steps)
     }
 
+    #[cfg(feature = "probe")]
     /// `key-from-env:<VAR>`: put the value of an environment variable into
     /// the API-key field.
     ///
@@ -640,6 +646,7 @@ impl Harness {
         }
     }
 
+    #[cfg(feature = "probe")]
     /// `--no-connect --login <state>`: sample state for captures — the
     /// signed-in shell with sample identity, or the first-run connect
     /// screen. (The whole-window Muse login screen and its five sample
@@ -791,7 +798,7 @@ impl Render for MuseSheetView {
             .api_key_field(field)
             .on_intent(intent)
             .sheet();
-        let card = if crate::clock::deterministic() { card.at_rest() } else { card };
+        let card = if crate::runtime::captures() { card.at_rest() } else { card };
         let escape = cx.listener(|_: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
             if event.keystroke.key == "escape" {
                 cx.emit(gpui::DismissEvent);

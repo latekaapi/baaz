@@ -1504,7 +1504,7 @@ fn footer_model_label(model: &str) -> String {
 /// run to run however old the fixture is. The same discipline as
 /// [`crate::sidebar::grouping_now`], the sibling formatter's clock.
 pub fn transcript_now_ms(turns: &[Rc<Turn>]) -> u64 {
-    if crate::clock::deterministic() {
+    if crate::runtime::clock().is_frozen() {
         turns
             .iter()
             .filter_map(|turn| turn.timestamp())

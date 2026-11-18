@@ -319,7 +319,7 @@ impl RightPane {
         let root = root.to_path_buf();
         cx.spawn(async move |this, cx| {
             let path = change.path.clone();
-            let diff = if crate::clock::deterministic() {
+            let diff = if crate::runtime::captures() {
                 Some(crate::right::fixture_diff_for(&path))
             } else {
                 let root = root.clone();
@@ -355,7 +355,7 @@ impl RightPane {
         let root = root.to_path_buf();
         cx.spawn(async move |this, cx| {
             let p = path.clone();
-            let lines = if crate::clock::deterministic() {
+            let lines = if crate::runtime::captures() {
                 (range.start..range.end).map(|n| format!("        // line {n}")).collect()
             } else {
                 cx.background_executor().spawn(async move { git_ops::read_lines(&root, &p, range) }).await
@@ -590,6 +590,7 @@ impl RightPane {
         cx.notify();
     }
 
+    #[cfg(feature = "probe")]
     /// `changes-open`'s pane half: open the changed row `path` (idempotent).
     /// Not a changed row is an `Err`; a row already open succeeds.
     pub(crate) fn open_change_row(&mut self, root: &Path, path: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
@@ -626,7 +627,7 @@ impl Harness {
             return;
         }
         self.set_mode(crate::layout::Mode::Browse, window, cx);
-        if let Err(reason) = self.step_tab_new(&url, window, cx) {
+        if let Err(reason) = self.open_new_tab(&url, window, cx) {
             crate::baaz_log!("view_pull_request: no tab opened: {reason}");
         }
     }
@@ -681,6 +682,7 @@ impl Harness {
         self.with_right_pane(cx, |pane, cx| pane.open_turn_files(&root, &files, cx));
     }
 
+    #[cfg(feature = "probe")]
     /// `changes-open:<path>`: open that row's diff (idempotent), refreshing
     /// first so the tree is there. No project for the pane, or a path that
     /// is not a changed row, is an `Err`; a row already open succeeds.

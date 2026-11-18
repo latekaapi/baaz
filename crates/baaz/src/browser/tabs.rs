@@ -46,15 +46,6 @@ pub(crate) fn active_key(owner: &Owner, space: Option<&str>) -> String {
     }
 }
 
-/// Whether the tab store must stay untouched: under
-/// `BAAZ_DETERMINISTIC=1` (every capture) the tab model neither reads nor
-/// writes `tabs.json` — exactly like `layout::read` returns defaults — so
-/// captures are repeatable and never touch the owner's tabs. Read from the
-/// environment on every call (not cached) so tests can flip it.
-pub(crate) fn deterministic() -> bool {
-    std::env::var("BAAZ_DETERMINISTIC").as_deref() == Ok("1")
-}
-
 /// One browser tab: where it lives, who owns it, and what it shows.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Tab {
@@ -823,7 +814,7 @@ static STORE: crate::store::JsonStore<Tabs> =
     crate::store::JsonStore::new("Browser/tabs.json").with_encoding(encode);
 
 fn encode(tabs: &Tabs) -> Option<Vec<u8>> {
-    if deterministic() {
+    if crate::runtime::browser_backend().in_memory() {
         return None;
     }
     serde_json::to_vec_pretty(tabs).ok()
@@ -854,7 +845,7 @@ pub(crate) fn write(tabs: &Tabs) {
 /// would wrongly read as long-hidden — nothing is due before its first
 /// show in this run.
 pub(crate) fn load() -> Tabs {
-    if deterministic() {
+    if crate::runtime::browser_backend().in_memory() {
         return Tabs::default();
     }
     let mut tabs: Tabs = STORE.read();

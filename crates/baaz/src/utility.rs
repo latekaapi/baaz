@@ -81,7 +81,7 @@ pub(crate) fn complete(
         });
     }
     #[allow(unreachable_code)]
-    if crate::clock::deterministic() {
+    if crate::runtime::providers_scripted() {
         return Err("no completions in a deterministic capture".into());
     }
     if provider == ProviderId::Muse {

@@ -70,7 +70,7 @@ pub(in crate::app) fn lane_restore(
 /// seam: what the lane tests drive without spawning a child.
 pub(super) fn scripted_factory() -> crate::providers::ProviderFactory {
     use provider::ProviderAdapter as _;
-    std::sync::Arc::new(|_: ProviderId| {
+    crate::providers::ProviderFactory::new(|_: ProviderId| {
         let mut adapter = provider::scripted::ScriptedProvider::new();
         adapter.connect(&conn::connect_info())?;
         Ok(provider::Provider::new(adapter))
@@ -151,7 +151,7 @@ pub(super) fn resumable_factory() -> crate::providers::ProviderFactory {
         }
         fn shutdown(&mut self) {}
     }
-    std::sync::Arc::new(|_: ProviderId| {
+    crate::providers::ProviderFactory::new(|_: ProviderId| {
         let (_, rx) = crossbeam_channel::unbounded::<provider::ProviderEvent>();
         let mut adapter = Resumable { rx, connected: false };
         adapter.connect(&conn::connect_info())?;
@@ -162,7 +162,7 @@ pub(super) fn resumable_factory() -> crate::providers::ProviderFactory {
 /// A factory that never connects: the failed-open path.
 pub(super) fn failing_factory(reason: &str) -> crate::providers::ProviderFactory {
     let reason = reason.to_owned();
-    std::sync::Arc::new(move |_: ProviderId| {
+    crate::providers::ProviderFactory::new(move |_: ProviderId| {
         Err(provider::ProviderError::Unavailable { reason: reason.clone() })
     })
 }
@@ -183,7 +183,7 @@ pub(super) fn lane_harness(
     dir: &std::path::Path,
 ) -> gpui::Entity<Harness> {
     vc.update(|window, cx| {
-        cx.new(|cx| Harness::new(lane_args(dir), crate::shot::CaptureToken::default(), window, cx))
+        cx.new(|cx| Harness::new(lane_args(dir), crate::runtime::CaptureToken::default(), window, cx))
     })
 }
 
@@ -225,7 +225,7 @@ pub(super) fn counting_factory() -> (crate::providers::ProviderFactory, std::syn
     use provider::ProviderAdapter as _;
     let opens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let factory_opens = opens.clone();
-    let factory: crate::providers::ProviderFactory = std::sync::Arc::new(move |_: ProviderId| {
+    let factory: crate::providers::ProviderFactory = crate::providers::ProviderFactory::new(move |_: ProviderId| {
         factory_opens.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut adapter = provider::scripted::ScriptedProvider::new();
         adapter.connect(&conn::connect_info())?;
@@ -252,7 +252,7 @@ pub(super) fn provider_draft_window<'a>(
     let mut args = lane_args(dir);
     args.login = crate::LoginSample::SignedIn;
     let (baaz, vc) =
-        cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        cx.add_window_view(|window, cx| Harness::new(args, crate::runtime::CaptureToken::default(), window, cx));
     vc.run_until_parked();
     let project = vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
@@ -343,7 +343,7 @@ pub(super) fn parking_factory() -> crate::providers::ProviderFactory {
         fn shutdown(&mut self) {}
     }
     let next = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
-    std::sync::Arc::new(move |_: ProviderId| {
+    crate::providers::ProviderFactory::new(move |_: ProviderId| {
         let (_, rx) = crossbeam_channel::unbounded::<provider::ProviderEvent>();
         let mut adapter = Quiet { rx, connected: false, next: next.clone() };
         adapter.connect(&conn::connect_info())?;
@@ -414,7 +414,7 @@ pub(super) fn y2b2_factory() -> (crate::providers::ProviderFactory, Y2b2Shared) 
         })),
     };
     let factory_shared = shared.clone();
-    let factory = std::sync::Arc::new(move |_: ProviderId| {
+    let factory = crate::providers::ProviderFactory::new(move |_: ProviderId| {
         let (_, rx) = crossbeam_channel::unbounded::<provider::ProviderEvent>();
         let mut adapter = Y2b2Adapter {
             rx,
@@ -673,7 +673,7 @@ pub(super) fn recording_resumable_factory_replying(
     }
     let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let factory_commands = commands.clone();
-    let factory = std::sync::Arc::new(move |_: ProviderId| {
+    let factory = crate::providers::ProviderFactory::new(move |_: ProviderId| {
         let (tx, rx) = crossbeam_channel::unbounded::<provider::ProviderEvent>();
         let mut adapter = RecordingResumable {
             tx,

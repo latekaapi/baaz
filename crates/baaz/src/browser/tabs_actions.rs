@@ -5,6 +5,66 @@
 use super::*;
 
 impl Harness {
+    /// Open a tab on `url` — a person tab in Browse mode, otherwise a tab
+    /// for the shown owner (a session tab in the active session, a person
+    /// tab with no session open) — and select it: links from other apps,
+    /// the Changes pane's PR link, Settings' Chromium page, and the
+    /// `tab-new:` step. An empty `url` is an `Err`. A blank URL focuses the
+    /// address field, like a by-hand open.
+    pub(crate) fn open_new_tab(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        let url = rest.trim();
+        if url.is_empty() {
+            return Err("no URL given".into());
+        }
+        // A real page opening ends any open address edit (the blank tab
+        // entering Browse opens one), exactly as selecting a tab does.
+        if url != BLANK {
+            self.leave_browse_address(window, cx);
+        }
+        self.ensure_tabs_loaded(cx);
+        // B2a-H2b: in Browse a new tab is always the person's, even with
+        // a session open behind the mode — the session's tabs belong to
+        // Sessions.
+        let owner = if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
+            Owner::Person
+        } else {
+            self.shown_tab_owner(cx)
+        };
+        let space = self.browser.read(cx).browse_space();
+        let after = self.browser.read(cx).tabs.active_of(&owner, space.as_deref());
+        // D6 (owner 2026-10-17): a session has one page — a new page for a
+        // session navigates the one it has instead of opening a second.
+        if let (Owner::Session(_), Some(id)) = (&owner, after) {
+            if url != BLANK {
+                if let Some(state) = self.browser.read(cx).states.get(&id).cloned() {
+                    state.update(cx, |state, _| state.navigate(url));
+                    if self.browser.update(cx, |browser, _| browser.tabs.set_url_title(id, url, url)) {
+                        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
+                    }
+                    cx.notify();
+                    return Ok(());
+                }
+            }
+        }
+        let id = self.browser.update(cx, |browser, _| browser.tabs.open(space, owner.clone(), url, after));
+        self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
+        // In Browse the person's new tab is what the centre shows next, over
+        // any session tab it held.
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
+            self.browser.update(cx, |browser, cx| browser.set_session_tab(None, cx));
+        }
+        let key = match &owner {
+            Owner::Person => HOME_KEY.to_owned(),
+            Owner::Session(_) => self.browser_key(cx),
+        };
+        let state = self.ensure_tab_page(&key, id, window, cx);
+        if url == BLANK {
+            state.update(cx, |state, cx| state.begin_editing(window, cx));
+        }
+        cx.notify();
+        Ok(())
+    }
+
     /// The registry key whose webview the pane shows: the active session's
     /// id, or the home key with no session open.
     pub(crate) fn browser_key(&self, cx: &gpui::App) -> String {
@@ -255,6 +315,7 @@ impl Harness {
         self.close_tab(HOME_KEY, id, window, cx);
     }
 
+    #[cfg(feature = "probe")]
     /// Pin or unpin the person tab `id`: the tab menu's Pin/Unpin row
     /// and the `tab-pin:<n>` step. A closed or session-owned `id` is a
     /// no-op. Answers the new pinned state.
@@ -338,6 +399,7 @@ impl Harness {
         }
     }
 
+    #[cfg(feature = "probe")]
     /// Select `id` for its owner: the model activates, the page builds when
     /// discarded, and the agent tools re-register onto it. A closed `id`
     /// is a no-op, so a × click racing the row's own select never

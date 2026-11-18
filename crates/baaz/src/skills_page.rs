@@ -311,6 +311,7 @@ pub fn import_summary_text(rows: &[ImportRow]) -> String {
     format!("Adds {} tokens · {selected} {noun}", format_tokens(tokens))
 }
 
+#[cfg(feature = "probe")]
 /// The deterministic import rows the scripted capture draws (S3): no CLI.
 pub fn fixture_import_rows() -> Vec<ImportDialogRow> {
     vec![
@@ -608,6 +609,7 @@ pub(crate) fn skills_provider_line(lane: crate::providers::ProviderId) -> Option
     }
 }
 
+#[cfg(feature = "probe")]
 /// Fixture catalogs for the scripted captures (S3): no CLI, deterministic.
 /// `which` is `page` (every scope, one shadowed pair, one diagnostic) or
 /// `empty` (no project skills: the empty-project state).
@@ -1494,6 +1496,7 @@ impl SkillsPage {
         cx.notify();
     }
 
+    #[cfg(feature = "probe")]
     /// `skills[:page|empty|add-menu|import-preview|new]`: open the page on
     /// a fixture catalog — no CLI, deterministic, offline (S3). The K3
     /// fixtures open the Add menu, the import preview and the New dialog
@@ -2726,6 +2729,7 @@ impl Harness {
         self.skills_page.update(cx, |page, cx| page.leave(cx));
     }
 
+    #[cfg(feature = "probe")]
     /// The `skills[:…]` step verb ([`SkillsPage::step_skills`]).
     pub(crate) fn step_skills(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.with_skills_page(cx, |page, cx| page.step_skills(rest, window, cx))

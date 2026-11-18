@@ -84,8 +84,19 @@ pub fn to_logical(full: &RgbaImage, scale: f32) -> RgbaImage {
 
 /// Render the window at device pixels. Callers own refresh/frame timing:
 /// refresh first and render on a later frame, as `--screenshot` does.
+///
+/// `Window::render_to_image` is gpui's `test-support`, which the
+/// `window-capture` feature turns on — the release bundle sets it, and the
+/// `probe` implies it. A build without it saves the note without a picture
+/// and says so in the log.
 pub fn render_window(window: &mut gpui::Window) -> anyhow::Result<RgbaImage> {
-    window.render_to_image()
+    #[cfg(feature = "window-capture")]
+    return window.render_to_image();
+    #[cfg(not(feature = "window-capture"))]
+    {
+        let _ = window;
+        anyhow::bail!("window capture needs the window-capture feature (gpui test-support)")
+    }
 }
 
 /// A non-positive or non-finite scale would divide by zero or empty the

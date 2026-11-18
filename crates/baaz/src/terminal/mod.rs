@@ -15,5 +15,7 @@ pub mod service;
 
 pub use dock::{clamp_dock_height, DOCK_DEFAULT_HEIGHT};
 pub(crate) use dock::{DockFacts, TerminalDock, TerminalDockEvent};
-pub use host::{Pick, TabOwner, TerminalHost, deterministic_script, title_from_command};
+pub use host::{Pick, TabOwner, TerminalHost, title_from_command};
+#[cfg(feature = "probe")]
+pub use host::deterministic_script;
 pub use service::TerminalService;

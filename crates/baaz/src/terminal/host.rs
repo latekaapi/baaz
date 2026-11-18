@@ -93,11 +93,13 @@ pub fn pick_tab(
     }
 }
 
+#[cfg(feature = "probe")]
 /// One deterministic chunk: bytes handed to the grid on the first poll.
 fn chunk(bytes: Vec<u8>) -> ScriptChunk {
     ScriptChunk { at: std::time::Duration::from_millis(0), bytes }
 }
 
+#[cfg(feature = "probe")]
 /// The `--steps` verb's script: two finished blocks and a fresh prompt,
 /// every marker carrying `k=<nonce>`.
 ///
@@ -342,6 +344,7 @@ impl TerminalHost {
         self.push(project_root, cwd, title, owner, origin_session, session, cx)
     }
 
+    #[cfg(feature = "probe")]
     /// Open a tab over a scripted backend: the `--steps` verb's route, so
     /// captures replay the same bytes every run. Markers in `script` must
     /// carry `k=<nonce>`; anything else never becomes a block.
@@ -385,6 +388,7 @@ impl TerminalHost {
         self.push(project_root, project_root, title, owner, origin_session, session, cx)
     }
 
+    #[cfg(feature = "probe")]
     /// Drive one tab's backend until its script is spent, synchronously.
     ///
     /// The `--steps` verb drains a deterministic tab the moment it opens,

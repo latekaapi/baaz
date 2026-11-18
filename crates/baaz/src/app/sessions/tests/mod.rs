@@ -2,7 +2,7 @@
 //! shared harnesses and factories are [`support`].
 
 use super::*;
-use super::{list::*, open::*, steps::*};
+use super::{boot::*, list::*, open::*, steps::*};
 use support::*;
 
 pub(in crate::app) mod support;

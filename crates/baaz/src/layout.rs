@@ -55,6 +55,7 @@ impl ThemePref {
         }
     }
 
+    #[cfg(feature = "probe")]
     /// `system` / `light` / `dark` (case-insensitive), as the store and the
     /// `settings-set:theme=` step spell them.
     pub fn parse(text: &str) -> Option<Self> {
@@ -109,6 +110,7 @@ impl DensityPref {
         self.density().label()
     }
 
+    #[cfg(feature = "probe")]
     /// `comfortable` / `compact` (case-insensitive), as the store and the
     /// `settings-set:density=` step spell them.
     pub fn parse(text: &str) -> Option<Self> {
@@ -150,6 +152,7 @@ impl TextSizePref {
         self.text_size().label()
     }
 
+    #[cfg(feature = "probe")]
     /// `default` / `large` (case-insensitive), as the store and the
     /// `settings-set:text-size=` step spell them.
     pub fn parse(text: &str) -> Option<Self> {
@@ -285,6 +288,7 @@ pub enum Mode {
 }
 
 impl Mode {
+    #[cfg(feature = "probe")]
     /// The machine name: what `layout.json` stores and `mode:` parses.
     pub fn slug(self) -> &'static str {
         match self {
@@ -688,7 +692,7 @@ static STORE: crate::store::JsonStore<Layout> =
     crate::store::JsonStore::new("layout.json").with_encoding(encode);
 
 fn encode(layout: &Layout) -> Option<Vec<u8>> {
-    if crate::clock::deterministic() {
+    if crate::runtime::state_isolated() {
         return None;
     }
     serde_json::to_vec_pretty(layout).ok()
@@ -704,7 +708,7 @@ pub fn read() -> Layout {
     // committed baseline, with no code change between the runs. A baseline
     // that depends on user state is not a regression detector, it is a
     // record of one machine's afternoon.
-    if crate::clock::deterministic() {
+    if crate::runtime::state_isolated() {
         return Layout::default();
     }
     STORE.read()

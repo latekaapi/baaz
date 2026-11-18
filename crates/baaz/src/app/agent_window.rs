@@ -14,7 +14,9 @@
 //! - While the chat (or any session) acts on the tab on screen, the line is
 //!   the driving bar (R2), whatever this module's own state.
 
-use gpui::{AppContext as _, Context, Window};
+#[cfg(feature = "probe")]
+use gpui::AppContext as _;
+use gpui::{Context, Window};
 
 use super::Harness;
 
@@ -216,11 +218,11 @@ pub(crate) fn agent_transcript(
                     }
                     match block {
                         aui_protocol::Block::ToolCall { verb, target, status, .. } => {
-                            steps.push(Step::new(step_text(verb, target), step_state(status)));
+                            steps.push(Step::new(agent_step_text(verb, target), agent_step_state(status)));
                         }
                         aui_protocol::Block::ToolGroup { calls, .. } => {
                             for call in calls {
-                                steps.push(Step::new(step_text(&call.verb, &call.target), step_state(&call.status)));
+                                steps.push(Step::new(agent_step_text(&call.verb, &call.target), agent_step_state(&call.status)));
                             }
                         }
                         aui_protocol::Block::Text { text, .. } => {
@@ -273,7 +275,7 @@ pub(crate) fn strip_page_prompt(text: &str) -> &str {
 
 /// One step row: the verb and its target on one line, short — a long shell
 /// command wrapped over the rows below it (seen live 8 Nov).
-fn step_text(verb: &str, target: &str) -> String {
+fn agent_step_text(verb: &str, target: &str) -> String {
     let target = target.lines().next().unwrap_or("").trim();
     let text = if target.is_empty() { verb.to_owned() } else { format!("{verb} {target}") };
     // One line in the steps card's narrow header, whatever the command.
@@ -295,7 +297,7 @@ pub(crate) fn pending_call_detail(session: &aui_protocol::Session) -> Option<Str
     })
 }
 
-fn step_state(status: &aui_protocol::ToolStatus) -> aui::browse::agent_window::StepState {
+fn agent_step_state(status: &aui_protocol::ToolStatus) -> aui::browse::agent_window::StepState {
     use aui::browse::agent_window::StepState;
     match status {
         aui_protocol::ToolStatus::Running | aui_protocol::ToolStatus::Pending => StepState::Running,
@@ -657,6 +659,7 @@ impl Harness {
 }
 
 impl Harness {
+    #[cfg(feature = "probe")]
     /// `browser-chat-fixture:<answer|steps|draft>` (free: no turn, no wire):
     /// a read-only browser chat whose transcript is canned, made the line's
     /// chat. `answer` lands the line in its inline answer, `steps` opens the

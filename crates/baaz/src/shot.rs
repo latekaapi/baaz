@@ -5,88 +5,12 @@
 //! baaz PNG and a gallery PNG are the same kind of image: 1×, no window
 //! chrome, no pointer.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::{path::PathBuf, time::Duration};
 
 use gpui::{App, AsyncApp, WindowHandle};
 use gpui_kit::component::Root;
 
-/// The two facts a `--screenshot` wait needs out of the window it is capturing.
-///
-/// A token rather than a callback because the capture runs outside the entity
-/// tree: [`capture_and_quit`] holds a `WindowHandle`, not the session. A token
-/// rather than a pair of process globals because a second window would then
-/// corrupt the first one's wait (finding `support-16`): [`crate::app::Harness`]
-/// owns one, hands the same one to every session view it opens, and `main`
-/// hands the same one to [`capture_and_quit`], so each window waits on its own
-/// flags.
-#[derive(Clone, Default)]
-pub struct CaptureToken(std::sync::Arc<Flags>);
-
-#[derive(Default)]
-pub struct Flags {
-    /// Whether the open session is showing a pending approval right now. The
-    /// session sets it on every frame it renders.
-    pending_approval: AtomicBool,
-    /// Whether a `--steps` list is still running.
-    ///
-    /// A scripted capture used to race its own script: the delay is measured
-    /// from the first frame, and a step list containing a `wait:` outlives it,
-    /// so the PNG showed the window before the steps that were the point of
-    /// taking it.
-    steps_running: AtomicBool,
-    /// Whether the app can execute a `--steps` list at all: the window is
-    /// open, the wire is connected (or the run has none), and the boot
-    /// session has been decided. Set just before the drain, so the capture
-    /// can tell "not ready yet" apart from "ready, and the script already
-    /// finished between two polls".
-    steps_ready: AtomicBool,
-    /// Whether the `--steps`/`--login-steps` task reached the end of its
-    /// list. Set on every exit path, including the early ones, so the
-    /// capture can tell "the script ran to completion" apart from "the drain
-    /// never happened".
-    steps_done: AtomicBool,
-}
-
-impl CaptureToken {
-    /// Called by the session view each frame: is a card waiting on the person?
-    pub fn set_pending_approval(&self, pending: bool) {
-        self.0.pending_approval.store(pending, Ordering::Relaxed);
-    }
-
-    fn pending_approval(&self) -> bool {
-        self.0.pending_approval.load(Ordering::Relaxed)
-    }
-
-    /// Called by the application around its `--steps` and `--login-steps` loops.
-    pub fn set_steps_running(&self, running: bool) {
-        self.0.steps_running.store(running, Ordering::Relaxed);
-    }
-
-    fn steps_running(&self) -> bool {
-        self.0.steps_running.load(Ordering::Relaxed)
-    }
-
-    /// Called by the application when it first becomes able to execute a
-    /// `--steps` list (see [`Flags::steps_ready`]).
-    pub fn set_steps_ready(&self, ready: bool) {
-        self.0.steps_ready.store(ready, Ordering::Relaxed);
-    }
-
-    fn steps_ready(&self) -> bool {
-        self.0.steps_ready.load(Ordering::Relaxed)
-    }
-
-    /// Called by the application when its `--steps`/`--login-steps` task
-    /// ends, on every exit path (see [`Flags::steps_done`]).
-    pub fn set_steps_done(&self, done: bool) {
-        self.0.steps_done.store(done, Ordering::Relaxed);
-    }
-
-    fn steps_done(&self) -> bool {
-        self.0.steps_done.load(Ordering::Relaxed)
-    }
-}
+use crate::runtime::CaptureToken;
 
 /// How long a capture that is waiting for an approval will wait.
 const APPROVAL_CEILING: Duration = Duration::from_secs(15);
@@ -489,46 +413,6 @@ pub fn capture_and_quit(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The scheduling loops above all start from this: a step list that has
-    /// not been armed yet reads exactly like one that already finished, so
-    /// [`capture_and_quit`]'s first wait ("has it started") has to exist at
-    /// all — this is the state it is waiting to see flip.
-    #[test]
-    fn a_fresh_capture_token_has_nothing_running_or_pending() {
-        let token = CaptureToken::default();
-        assert!(!token.pending_approval());
-        assert!(!token.steps_running());
-        assert!(!token.steps_ready());
-        assert!(!token.steps_done());
-    }
-
-    #[test]
-    fn steps_running_round_trips() {
-        let token = CaptureToken::default();
-        token.set_steps_running(true);
-        assert!(token.steps_running());
-        token.set_steps_running(false);
-        assert!(!token.steps_running());
-    }
-
-    #[test]
-    fn steps_ready_and_done_round_trip() {
-        let token = CaptureToken::default();
-        token.set_steps_ready(true);
-        assert!(token.steps_ready());
-        token.set_steps_done(true);
-        assert!(token.steps_done());
-    }
-
-    #[test]
-    fn pending_approval_round_trips() {
-        let token = CaptureToken::default();
-        token.set_pending_approval(true);
-        assert!(token.pending_approval());
-        token.set_pending_approval(false);
-        assert!(!token.pending_approval());
-    }
 
     /// Pins the actual bug: the steps wait used to share `APPROVAL_CEILING`
     /// (15 s), and a script's own `wait:` steps routinely add up to far more

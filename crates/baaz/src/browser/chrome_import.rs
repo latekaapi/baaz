@@ -54,7 +54,7 @@ pub(crate) fn chrome_root() -> Option<PathBuf> {
         let root = PathBuf::from(root);
         return root.is_dir().then_some(root);
     }
-    if crate::clock::deterministic() || cfg!(test) {
+    if crate::runtime::browser_backend().in_memory() || cfg!(test) {
         return None;
     }
     let home = std::env::var_os("HOME")?;

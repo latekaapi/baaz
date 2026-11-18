@@ -256,6 +256,7 @@ impl Harness {
     }
 
 
+    #[cfg(feature = "probe")]
     /// `peek:<url>` / `split:<url>`: the ⇧/⌥-click on the shown tab's link,
     /// without a page to click (captures). A URL that is not a web page,
     /// or no tab shown in the Browse centre, is an `Err`. Free.

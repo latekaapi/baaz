@@ -194,7 +194,7 @@ impl SessionView {
     pub fn render_drop_overlay(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<AnyElement> {
         self.dragging.then(|| {
             let overlay = aui::composer::drop_overlay("drop", true);
-            if crate::clock::deterministic() {
+            if crate::runtime::captures() {
                 overlay.at_rest()
             } else {
                 overlay
@@ -268,7 +268,7 @@ impl SessionView {
                 });
             }));
         }
-        self.step_quote_scroll(window);
+        self.advance_quote_scroll(window);
         let quote_bar = self.render_quote_bar(window, cx);
         let element = self.transcript_list(folds, quote_bar, cx);
         record_frame_stats(frame_start.elapsed());
@@ -288,7 +288,7 @@ impl SessionView {
                 let from = self.list_state.scroll_px_offset_for_scrollbar();
                 self.list_state.scroll_to(target);
                 let to = self.list_state.scroll_px_offset_for_scrollbar();
-                if cx.reduce_motion() || crate::clock::deterministic() || (f32::from(to.y) - f32::from(from.y)).abs() < 1.0 {
+                if cx.reduce_motion() || crate::runtime::captures() || (f32::from(to.y) - f32::from(from.y)).abs() < 1.0 {
                     self.quote_scroll = None;
                 } else {
                     self.list_state.set_offset_from_scrollbar(from);
@@ -331,7 +331,7 @@ impl SessionView {
     }
 
     /// One frame of a quote's scroll back to its source.
-    pub(super) fn step_quote_scroll(&mut self, window: &mut Window) {
+    pub(super) fn advance_quote_scroll(&mut self, window: &mut Window) {
         let Some((at, from, to, target)) = self.quote_scroll else { return };
         let t = (at.elapsed().as_secs_f32() / 0.26).min(1.0);
         if t >= 1.0 {
@@ -1022,7 +1022,7 @@ impl SessionView {
                             // entrance animation dimmed the reply, its
                             // actions and its meta row forever.
                             let settled =
-                                turn_ix != last_turn || crate::clock::deterministic() || idle;
+                                turn_ix != last_turn || crate::runtime::captures() || idle;
                             item.child(transcript::turn_row(turn, row, settled, &folds, window, cx)).into_any_element()
                         })
                         .flex_1()
@@ -1063,11 +1063,13 @@ impl SessionView {
         self.refresh_render_full(dirty, fold, cx);
     }
 
+    #[cfg(feature = "probe")]
     /// How many turns the render cache holds (`--perf-turn`).
     pub(crate) fn cached_turn_count(&self) -> usize {
         self.cached_turns.len()
     }
 
+    #[cfg(feature = "probe")]
     /// The newest assistant turn's last text block as the render cache
     /// holds it: the markdown the transcript draws for a streaming answer
     /// (`--perf-turn`).
@@ -1202,7 +1204,7 @@ impl SessionView {
             self.row_counts.iter().map(|(_, n)| n).sum()
         };
         let last_turn = self.cached_turns.len().saturating_sub(1);
-        let live_tail = self.runtime.read(cx).working() && !crate::clock::deterministic();
+        let live_tail = self.runtime.read(cx).working() && !crate::runtime::captures();
         self.row_counts.truncate(from);
         let rows = Rc::make_mut(&mut self.rows);
         rows.truncate(offset);
@@ -1328,7 +1330,7 @@ impl SessionView {
     /// turn timestamp, kept as a prefix maximum so a streaming refresh
     /// walks only the turns it rebuilt (speed S4); otherwise wall time.
     fn frame_clock_ms(&mut self, from: usize) -> u64 {
-        if !crate::clock::deterministic() {
+        if !crate::runtime::clock().is_frozen() {
             return transcript::transcript_now_ms(&self.cached_turns);
         }
         let from = if self.ts_prefix.len() > from { from } else { 0 };
@@ -1634,6 +1636,7 @@ impl SessionView {
         }
     }
 
+    #[cfg(feature = "probe")]
     /// The turn's own markdown source for the scripted selection steps: a
     /// user turn is one view, an assistant turn's first text block is the
     /// source the step holds. `None` for a turn with no text to hold.
@@ -1649,6 +1652,7 @@ impl SessionView {
         })
     }
 
+    #[cfg(feature = "probe")]
     /// `--steps select-text:<turn>:<from>-<to>`: hold a scripted selection
     /// over the turn's first paragraph (`p0`), for the selection screenshot.
     /// `<turn>` is the turn's index in the live transcript; the range is
@@ -1687,6 +1691,7 @@ impl SessionView {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `--steps select-span:<turn>`: hold the whole turn — first non-empty
     /// cell to last — for the cross-block highlight screenshot (a paragraph,
     /// a list and a code block in one drag's span). `<turn>` is the turn's
@@ -1706,6 +1711,7 @@ impl SessionView {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `--steps copy:<turn>`: press the turn's copy button for the copy-tick
     /// screenshot. `<turn>` is the turn's index in the live transcript, like
     /// `select-span`; it travels the same button arms a press would, so the
@@ -1729,6 +1735,7 @@ impl SessionView {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// Open every tool group for a screenshot: group keys default closed, so
     /// marking them toggled opens them; calls default open.
     pub(crate) fn expand_all_groups(&mut self, cx: &mut Context<Self>) {
@@ -2202,7 +2209,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             cx.notify();
         });
         let banner = needs_you_banner("needs-you", self.runtime.read(cx).provider_kind().waiting_headline(), detail);
-        let banner = if crate::clock::deterministic() { banner.at_rest() } else { banner };
+        let banner = if crate::runtime::captures() { banner.at_rest() } else { banner };
         Some(
             div()
                 .w_full()
@@ -2334,7 +2341,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     this.select_command(id, window, cx);
                 });
                 let menu = command_menu("command-menu", format!("/{filter}"), sections, selected).max_rows_height(max_rows);
-                let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
+                let menu = if crate::runtime::captures() { menu.at_rest() } else { menu };
                 menu.on_select(move |id, window, cx| pick(id, window, cx)).on_hover(hover).into_any_element()
             }
             MenuKind::Mention => {
@@ -2536,7 +2543,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         )
         .on_activate(move |id, window, cx| plus(id, window, cx))
         .on_close(move |window, cx| plus_close(&(), window, cx));
-        let plus_item = if crate::clock::deterministic() { plus_item.at_rest() } else { plus_item };
+        let plus_item = if crate::runtime::captures() { plus_item.at_rest() } else { plus_item };
         // The chip wears the session's own provider mark: a Codex session
         // never shows the Muse "M".
         // v3 (canvas "Baaz v3", Composer A): one raised card with text
@@ -2730,7 +2737,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     .on_change(move |id, window, cx| change(id, window, cx))
                     .on_pick(move |id, window, cx| pick_default(id, window, cx))
                     .on_close(move |window, cx| close(&(), window, cx));
-                let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
+                let menu = if crate::runtime::captures() { menu.at_rest() } else { menu };
                 vec![(ComposerChipAnchor::Effort, menu.into_any_element())]
             }
             MenuKind::Effort => {
@@ -2801,7 +2808,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     .align_end(true)
                     .on_pick(move |id, window, cx| pick(id, window, cx))
                     .on_close(move |window, cx| close(&(), window, cx));
-                let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
+                let menu = if crate::runtime::captures() { menu.at_rest() } else { menu };
                 vec![(ComposerChipAnchor::Effort, menu.into_any_element())]
             }
             MenuKind::Mode => {
@@ -2827,7 +2834,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     .align_end(true)
                     .on_pick(move |id, window, cx| pick(id, window, cx))
                     .on_close(move |window, cx| close(&(), window, cx));
-                let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
+                let menu = if crate::runtime::captures() { menu.at_rest() } else { menu };
                 vec![(ComposerChipAnchor::Mode, menu.into_any_element())]
             }
             MenuKind::Provider => {
@@ -2839,7 +2846,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 let menu = provider_menu("provider-menu", rows, selected, true)
                     .on_pick(move |id, window, cx| pick(id, window, cx))
                     .on_close(move |window, cx| close(&(), window, cx));
-                let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
+                let menu = if crate::runtime::captures() { menu.at_rest() } else { menu };
                 vec![(ComposerChipAnchor::Provider, menu.into_any_element())]
             }
             MenuKind::Command
@@ -3242,7 +3249,7 @@ mod tests {
                 provider_id: "meta".to_owned(),
                 workspace: "/tmp/streamed-refresh".to_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             let view = cx.new(|cx| crate::session::SessionView::new("synthetic-stress-300".to_owned(), host, window, cx));
@@ -3307,7 +3314,7 @@ mod tests {
                     provider_id: "meta".to_owned(),
                     workspace: "/tmp/bench-render-cache".to_owned(),
                     overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                    capture: crate::shot::CaptureToken::default(),
+                    capture: crate::runtime::CaptureToken::default(),
                     terminal_host: None,
                 };
                 // The capture's own session id: any other folds nothing.
@@ -3599,7 +3606,7 @@ mod tests {
                 provider_id: "echo".to_owned(),
                 workspace: std::env::temp_dir().to_string_lossy().into_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx))
@@ -3640,7 +3647,7 @@ mod tests {
                 provider_id: "muse".to_owned(),
                 workspace: std::env::temp_dir().to_string_lossy().into_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx))
@@ -3674,7 +3681,7 @@ mod tests {
                 provider_id: "muse".to_owned(),
                 workspace: std::env::temp_dir().to_string_lossy().into_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx))
@@ -3720,7 +3727,7 @@ mod tests {
                 provider_id: "echo".to_owned(),
                 workspace: std::env::temp_dir().to_string_lossy().into_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx))
@@ -3772,7 +3779,7 @@ mod tests {
                 provider_id: "echo".to_owned(),
                 workspace: root.to_string_lossy().into_owned(),
                 overlays: overlays.clone(),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx))
@@ -3830,7 +3837,7 @@ mod tests {
                 provider_id: "echo".to_owned(),
                 workspace: root.to_string_lossy().into_owned(),
                 overlays: overlays.clone(),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx))
@@ -3889,7 +3896,7 @@ mod tests {
                 provider_id: "echo".to_owned(),
                 workspace: root.to_string_lossy().into_owned(),
                 overlays: overlays.clone(),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             let view = cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx));
@@ -3972,7 +3979,7 @@ mod tests {
                 provider_id: provider_id.to_owned(),
                 workspace: "/tmp/ws".to_owned(),
                 overlays,
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             cx.new(|cx| crate::session::SessionView::new(session_id.to_owned(), host, window, cx))
@@ -4581,6 +4588,7 @@ impl SessionView {
         self.add_quote_with_span(text, Some(turn_id), code, Some((owner, span)), window, cx);
     }
 
+    #[cfg(feature = "probe")]
     /// `quote`: the selection bar's Quote, for scripted captures. Fails,
     /// quoting nothing, when no selection is held or the held span selects
     /// no text.

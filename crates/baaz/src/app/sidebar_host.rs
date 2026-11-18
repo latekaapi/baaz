@@ -563,6 +563,7 @@ impl Harness {
         cx.notify();
     }
 
+    #[cfg(feature = "probe")]
     /// Whether `kind` was dismissed by the press of the click now arriving:
     /// a trigger's own click after an outside-press close toggles it shut,
     /// never back open.
@@ -574,6 +575,7 @@ impl Harness {
         self.sidebar_pane.update(cx, |pane, cx| pane.hover_step(id, cx))
     }
 
+    #[cfg(feature = "probe")]
     /// `row-menu:<id>`: open `id`'s row menu (never a toggle). An id with
     /// no session fails the step.
     pub(crate) fn step_row_menu(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {

@@ -35,10 +35,11 @@ struct ProviderOpen {
     lease_held: bool,
 }
 
-/// The background half of every fresh provider open: spawn the child
-/// through the factory and ask it for a session with `OpenSession`,
-/// carrying `request_id` (Claude Code's `--session-id`; Codex mints its
-/// own thread id). Blocks, so it runs inside `wire_call_in`.
+/// The work of every fresh provider open: spawn the child through the
+/// factory and ask it for a session with `OpenSession`, carrying
+/// `request_id` (Claude Code's `--session-id`; Codex mints its own thread
+/// id). Blocks unless the factory lands inline, so it runs through
+/// [`Harness::run_open`].
 #[allow(clippy::too_many_arguments)]
 fn provider_open_work(
     factory: crate::providers::ProviderFactory,
@@ -51,7 +52,7 @@ fn provider_open_work(
     epoch: u64,
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<ProviderOpen, crate::app::OpenFailed> {
-    let provider = factory(provider_id)?;
+    let provider = factory.open(provider_id)?;
     let OpenExtras { model_provider, mode } = extras;
     #[cfg(not(test))]
     let (provider, events) = conn::gate(provider);
@@ -99,12 +100,6 @@ fn provider_open_work(
         }
         .into()),
     }
-}
-
-/// A scripted stand-in's open failure (already in words): typed from the
-/// provider's status alone, with no stderr — there is no child.
-fn scripted_failure(reason: String) -> crate::app::OpenFailed {
-    crate::app::OpenFailed { error: provider::ProviderError::Rejected { reason }, stderr: Vec::new() }
 }
 
 /// What one `OpenSession` carries beyond its workspace, per the provider's
@@ -211,23 +206,13 @@ impl Harness {
         // ask's epoch travels into the background work, and
         // `finish_provider_open` drops any finish that is no longer current.
         let epoch = self.open_state.begin_open();
-        // A disabled provider opens with no child: the scripted lane plus
-        // the quiet banner, like offline chrome — readable, resumable,
-        // and sending nothing anywhere.
-        if !crate::provider_status::provider_enabled(provider_id) {
-            self.open_state.pending_disabled_notice = Some(provider_id);
-            self.open_scripted_lane(provider_id, project, workspace, epoch, window, cx);
-            return;
-        }
-        // Scripted chrome (`--no-connect` / `--replay`): no child to spawn,
-        // so the lane opens over a connected scripted provider — the same
-        // stand-in `open_local_draft` uses for muse, and what lets
-        // `new;setprovider:claude-code` end on a provider lane offline.
-        if self.scripted_chrome() {
-            self.open_scripted_lane(provider_id, project, workspace, epoch, window, cx);
-            return;
-        }
-        let factory = self.provider_factory.clone();
+        // The window's factory (on `--no-connect` / `--replay`, the scripted
+        // stand-in: what lets `new;setprovider:claude-code` end on a
+        // provider lane offline). A disabled provider opens over the
+        // stand-in too, plus the quiet banner — readable, resumable, and
+        // sending nothing anywhere.
+        let factory = self.lane_factory(provider_id);
+        let inline = factory.lands_inline();
         let workspace_bg = workspace.clone();
         let mode = self.provider_open_mode(Some(&workspace), project.as_deref(), cx);
         // The terminal relay's route: the request id is the session id the
@@ -255,7 +240,7 @@ impl Harness {
         let work = move || {
             provider_open_work(factory, provider_id, request_id, workspace_bg, extras, project, workspace, epoch, Some(cancelled))
         };
-        self.wire_call_in(cx, work, move |this, result, window, cx| match result {
+        self.run_open(inline, work, move |this, result, window, cx| match result {
             Ok(open) => {
                 this.terminal_service.alias_session(&alias_from, &open.session_id);
                 this.finish_provider_open(open, window, cx);
@@ -276,84 +261,37 @@ impl Harness {
                 crate::baaz_log!("provider open failed ({}): {error}", provider_id.label());
                 this.fail_provider_open(provider_id, error, retry_new, None, window, cx);
             }
-        });
+        }, window, cx);
     }
 
-    /// The `--no-connect` half of [`Self::open_on_provider`]: a connected
-    /// scripted provider stands in for the CLI child, synchronously — a
-    /// scripted provider never blocks, so no background turn is needed.
-    fn open_scripted_lane(
-        &mut self,
-        provider_id: ProviderId,
-        project: Option<String>,
-        workspace: String,
-        epoch: u64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        use provider::ProviderAdapter as _;
-        let mode = self.provider_open_mode(Some(&workspace), project.as_deref(), cx);
-        // Each scripted lane its own session: the first keeps `s-scripted`
-        // (probe entries reopen it by that id), later ones are numbered.
-        static SCRIPTED_LANES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = SCRIPTED_LANES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let scripted_id = if n == 0 { "s-scripted".to_owned() } else { format!("s-scripted-{}", n + 1) };
-        let mut adapter = provider::scripted::ScriptedProvider::with_session_id(scripted_id);
-        let bridged = adapter
-            .connect(&conn::connect_info())
-            .map_err(|error| error.to_string())
-            .and_then(|_| {
-                let provider = provider::Provider::new(adapter);
-                let ack = provider
-                    .send(provider::Command::OpenSession {
-                        request_id: provider::new_request_id(),
-                        workspace: Some(workspace.clone()),
-                        model: None,
-                        model_provider: None,
-                        mode: Some(mode),
-                    })
-                    .map_err(|error| error.to_string())?;
-                match ack {
-                    provider::Ack::Session { session_id, title, .. } => Ok((provider, session_id, title)),
-                    other => Err(format!("OpenSession answered {other:?} instead of a session")),
-                }
-            })
-            .map(|(provider, session_id, title)| {
-                // The send above already ran: drain it synchronously in
-                // tests so no forwarding thread wakes the lane task.
-                #[cfg(test)]
-                let (provider, events) = conn::gate_sync(provider);
-                #[cfg(not(test))]
-                let (provider, events) = conn::gate(provider);
-                (provider, events, session_id, title)
-            });
-        match bridged {
-            Ok((provider, events, session_id, title)) => {
-                self.finish_provider_open(
-                    ProviderOpen { provider_id, provider, events, session_id, project, workspace, title, epoch, lease_held: false },
-                    window,
-                    cx,
-                );
-            }
-            Err(reason) => {
-                // Stale, like the wired arm below: nobody waits, nobody is
-                // dialogued.
-                if !self.open_state.is_current_open(epoch) {
-                    crate::baaz_log!(
-                        "scripted provider open failed for a stale ask ({}): {reason}",
-                        provider_id.label()
-                    );
-                    self.browser.update(cx, |browser, _| browser.drop_pending_ask());
-                    return;
-                }
-                crate::baaz_log!("scripted provider open failed ({}): {reason}", provider_id.label());
-                let retry = ProviderOpenRetry::OpenNew {
-                    project: project.clone(),
-                    workspace: workspace.clone(),
-                    draft: String::new(),
-                };
-                self.fail_provider_open(provider_id, scripted_failure(reason), retry, None, window, cx);
-            }
+    /// The factory an open on `provider_id` runs through: the window's, or
+    /// — for a provider switched off in Settings — the scripted stand-in,
+    /// with the quiet banner noted for the landing view.
+    fn lane_factory(&mut self, provider_id: ProviderId) -> crate::providers::ProviderFactory {
+        if crate::provider_status::provider_enabled(provider_id) {
+            return self.provider_factory.clone();
+        }
+        self.open_state.pending_disabled_notice = Some(provider_id);
+        crate::providers::ProviderFactory::scripted()
+    }
+
+    /// Run an open's `work` and land its result in `then`. Off the UI
+    /// thread (`wire_call_in`): every open spawns or waits for a child and
+    /// blocks. Inline, in this update, when the factory
+    /// [lands inline](crate::providers::ProviderFactory::lands_inline): the
+    /// scripted stand-in never blocks, and a scripted open has always landed
+    /// in the same update as its click — the same work, the same landing.
+    fn run_open<T, W, F>(&mut self, inline: bool, work: W, then: F, window: &mut Window, cx: &mut Context<Self>)
+    where
+        T: Send + 'static,
+        W: FnOnce() -> T + Send + 'static,
+        F: FnOnce(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
+    {
+        if inline {
+            let result = work();
+            then(self, result, window, cx);
+        } else {
+            self.wire_call_in(cx, work, then);
         }
     }
 
@@ -556,7 +494,7 @@ impl Harness {
         let switching = switch.is_some_and(|epoch| self.open_state.replaces_under(epoch));
         let early = (switching || (switch.is_none() && !self.open_state.is_replacing()))
             && self.handoff_state.pending.is_none()
-            && !self.scripted_chrome()
+            && !self.provider_factory.lands_inline()
             && crate::provider_status::provider_enabled(provider_id);
         if !early {
             self.open_on_provider(provider_id, project, workspace, window, cx);
@@ -1019,105 +957,17 @@ impl Harness {
         // switch is cancelled and the previous pane is restored as it
         // was; only the rendered centre moves now.
         // A disabled provider reopens with no child either: the scripted
-        // resume below replays the stored transcript read-only, and the
-        // landing view wears the quiet banner.
-        let disabled = !crate::provider_status::provider_enabled(provider_id);
-        if disabled {
-            self.open_state.pending_disabled_notice = Some(provider_id);
-        }
-        // Scripted chrome (`--no-connect` / `--replay`): the stand-in
+        // stand-in's resume below replays the stored transcript read-only,
+        // and the landing view wears the quiet banner. On the window's
+        // scripted stand-in (`--no-connect` / `--replay`) the stand-in
         // answers `OpenSession` but no resume — the reopen still goes
-        // through `ResumeSession` so the failure is the honest one.
-        if self.scripted_chrome() || disabled {
-            // The consent gate for this offline branch only: it never
-            // reaches the background `work` below, so its admitted move
-            // runs here, synchronously — in tests and captures the
-            // owner-side set is tiny or absent. Before the person's Move
-            // click an old session resumes from its original location
-            // and nothing moves. The connected path gates inside `work`,
-            // off the UI thread.
-            let owner = crate::session_migration::owner_home();
-            let state = crate::store::support_dir();
-            match crate::session_migration::gate_resume(
-                &owner,
-                &state,
-                &self.session_list.read(cx).provider_sessions,
-                &record.provider,
-                &record.session_id,
-            ) {
-                crate::session_migration::ResumeGate::LegacyOwner => {
-                    crate::session_migration::pin_legacy_resume_for(&record);
-                }
-                crate::session_migration::ResumeGate::LazyMove => {
-                    let moved = crate::session_migration::ensure_session_moved(
-                        &owner,
-                        &state,
-                        &record.provider,
-                        &record.session_id,
-                    );
-                    if moved > 0 {
-                        crate::session_migration::clear_legacy_resume(&record.provider, &record.session_id);
-                    }
-                }
-                crate::session_migration::ResumeGate::BaazHome => {}
-            }
-            use provider::ProviderAdapter as _;
-            let mode = self.provider_open_mode(record.workspace.as_deref(), record.project.as_deref(), cx);
-            let mut resumed = provider::scripted::ScriptedProvider::new();
-            let bridged = resumed
-                .connect(&conn::connect_info())
-                .map_err(|error| error.to_string())
-                .and_then(|_| {
-                    let provider = provider::Provider::new(resumed);
-                    let session_id =
-                        crate::provider_sessions::send_resume(&provider, &record, &provider::new_request_id(), Some(mode))
-                            .map_err(|error| error.to_string())?;
-                    #[cfg(test)]
-                    let (provider, events) = conn::gate_sync(provider);
-                    #[cfg(not(test))]
-                    let (provider, events) = conn::gate(provider);
-                    Ok((provider, events, session_id))
-                });
-            match bridged {
-                Ok((provider, events, session_id)) => {
-                    let workspace =
-                        record.workspace.clone().unwrap_or_else(|| self.workspace(cx));
-                    self.finish_provider_open(
-                        ProviderOpen {
-                            provider_id,
-                            provider,
-                            events,
-                            session_id,
-                            project: record.project.clone(),
-                            workspace,
-                            title: record.title.clone(),
-                            epoch,
-                            lease_held: false,
-                        },
-                        window,
-                        cx,
-                    );
-                }
-                Err(reason) => {
-                    if !self.open_state.is_current_open(epoch) {
-                        crate::baaz_log!(
-                            "scripted provider resume failed for a stale ask ({}): {reason}",
-                            provider_id.label()
-                        );
-                        return;
-                    }
-                    crate::baaz_log!("scripted provider resume failed ({}): {reason}", provider_id.label());
-                    let session_id = record.session_id.clone();
-                    let retry = ProviderOpenRetry::Reopen(Box::new(record.clone()));
-                    self.fail_provider_open(provider_id, scripted_failure(reason), retry, Some(session_id), window, cx);
-                }
-            }
-            return;
-        }
+        // through `ResumeSession`, the same work as a live one, so the
+        // failure is the honest one.
+        let factory = self.lane_factory(provider_id);
+        let inline = factory.lands_inline();
         // A provider whose sessions share one child: the window starts it
         // now, and the factory below waits while it comes up.
         self.ensure_provider_started(provider_id, cx);
-        let factory = self.provider_factory.clone();
         let workspace = record.workspace.clone().unwrap_or_else(|| self.workspace(cx));
         // The terminal relay's route: the resumed session's bridge answers
         // for the stored id, so it is (re-)registered BEFORE the resume
@@ -1182,7 +1032,7 @@ impl Harness {
             }
             crate::log::trace_mark("reopen gate done");
             let result = (|| -> Result<ProviderOpen, crate::app::OpenFailed> {
-                let provider = factory(provider_id)?;
+                let provider = factory.open(provider_id)?;
                 crate::log::trace_mark("reopen adapter connected");
                 #[cfg(not(test))]
                 let (provider, events) = conn::gate(provider);
@@ -1226,7 +1076,7 @@ impl Harness {
             })();
             (result, moved)
         };
-        self.wire_call_in(cx, work, move |this, outcome, window, cx| {
+        self.run_open(inline, work, move |this, outcome, window, cx| {
             let (result, moved) = outcome;
             // The move changed what waits: refresh the cached plan off the
             // UI thread so the Providers row follows the lazy move.
@@ -1262,7 +1112,7 @@ impl Harness {
                 );
             }
             }
-        });
+        }, window, cx);
     }
 
     /// Forget a provider session for good: the record, its row and its
@@ -1315,81 +1165,12 @@ impl Harness {
         // A fork is an ask like any other: it joins the last-wins epoch.
         let epoch = self.open_state.begin_open();
         let mode = self.provider_open_mode(Some(&workspace), None, cx);
-        // Scripted chrome (`--no-connect` / `--replay`): the stand-in
-        // answers `OpenSession` but no resume — the fork still goes
-        // through `ResumeSession` so the failure is the honest one.
-        if self.scripted_chrome() {
-            use provider::ProviderAdapter as _;
-            let mut resumed = provider::scripted::ScriptedProvider::new();
-            let bridged = resumed
-                .connect(&conn::connect_info())
-                .map_err(|error| error.to_string())
-                .and_then(|_| {
-                    let provider = provider::Provider::new(resumed);
-                    let ack = provider
-                        .send(provider::Command::ResumeSession {
-                            request_id: provider::new_request_id(),
-                            session_id: session_id.clone(),
-                            cursor: None,
-                            metadata_only: false,
-                            mode: Some(mode),
-                        })
-                        .map_err(|error| error.to_string())?;
-                    match ack {
-                        provider::Ack::Session { session_id, title, .. } => {
-                            #[cfg(test)]
-                            let (provider, events) = conn::gate_sync(provider);
-                            #[cfg(not(test))]
-                            let (provider, events) = conn::gate(provider);
-                            Ok((provider, events, session_id, title))
-                        }
-                        other => Err(format!("ResumeSession answered {other:?} instead of a session")),
-                    }
-                });
-            match bridged {
-                Ok((provider, events, session_id, title)) => {
-                    self.finish_provider_open(
-                        ProviderOpen {
-                            provider_id,
-                            provider,
-                            events,
-                            session_id,
-                            project: None,
-                            workspace,
-                            title,
-                            epoch,
-                            lease_held: false,
-                        },
-                        window,
-                        cx,
-                    );
-                }
-                Err(reason) => {
-                    if !self.open_state.is_current_open(epoch) {
-                        crate::baaz_log!(
-                            "scripted fork resume failed for a stale ask ({}): {reason}",
-                            provider_id.label()
-                        );
-                        return;
-                    }
-                    crate::baaz_log!("scripted fork resume failed ({}): {reason}", provider_id.label());
-                    self.abandon_switch(cx);
-                    self.set_dialog(
-                        cx,
-                        Dialog {
-                            title: format!("Couldn't start {}", provider_id.label()),
-                            detail: reason,
-                            kind: DialogKind::Error,
-                            primary: "Dismiss",
-                            action: DialogAction::Dismiss,
-                            archive_target: None,
-                        },
-                    );
-                }
-            }
-            return;
-        }
+        // On the scripted stand-in (`--no-connect` / `--replay`) the
+        // stand-in answers `OpenSession` but no resume — the fork still
+        // goes through `ResumeSession`, the same work as a live one, so the
+        // failure is the honest one.
         let factory = self.provider_factory.clone();
+        let inline = factory.lands_inline();
         let workspace_bg = workspace.clone();
         // The terminal relay's route: the fork's bridge answers for the
         // fork-minted id, registered BEFORE the resume runs.
@@ -1401,7 +1182,7 @@ impl Harness {
         );
         let registered = session_id.clone();
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
-            let provider = factory(provider_id)?;
+            let provider = factory.open(provider_id)?;
             #[cfg(not(test))]
             let (provider, events) = conn::gate(provider);
             let ack = provider.send(provider::Command::ResumeSession {
@@ -1434,7 +1215,7 @@ impl Harness {
                 }),
             }
         };
-        self.wire_call_in(cx, work, move |this, result, window, cx| match result {
+        self.run_open(inline, work, move |this, result, window, cx| match result {
             Ok(open) => {
                 // As on a reopen: a resume that answers another id keeps
                 // the fork's bridge reaching this session.
@@ -1465,6 +1246,6 @@ impl Harness {
                     },
                 );
             }
-        });
+        }, window, cx);
     }
 }

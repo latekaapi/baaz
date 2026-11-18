@@ -425,7 +425,7 @@ impl BenchRoot {
             provider_id: provider,
             workspace,
             overlays: cx.new(|_| crate::overlays::Overlays::default()),
-            capture: crate::shot::CaptureToken::default(),
+            capture: crate::runtime::CaptureToken::default(),
             terminal_host: None,
         };
         let view = cx.new(|cx| SessionView::new("bench".to_owned(), host, window, cx));

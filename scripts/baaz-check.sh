@@ -3,7 +3,8 @@
 # that always leaves nothing behind (docs/74 §1). The owner's target/bundle is
 # never read, written or quit.
 #
-#   scripts/baaz-check.sh build            # target/check/Baaz.app
+#   scripts/baaz-check.sh build            # target/check/Baaz.app, with the
+#                                          # probe (`--steps` drives it)
 #   scripts/baaz-check.sh run [baaz args]  # foreground; own temp state unless
 #                                          # BAAZ_STATE_DIR is set
 #
@@ -18,7 +19,9 @@ BIN="$APP/Contents/MacOS/Baaz"
 
 case "${1:-}" in
 build)
-    BAAZ_BUNDLE_DIR="$DIR" BAAZ_BUNDLE_ID=sh.baaz.check exec "$ROOT/scripts/bundle.sh"
+    # The check build is driven by `--steps`: it keeps the probe the
+    # owner's bundle leaves out (docs/82 4.10).
+    BAAZ_PROBE=1 BAAZ_BUNDLE_DIR="$DIR" BAAZ_BUNDLE_ID=sh.baaz.check exec "$ROOT/scripts/bundle.sh"
     ;;
 run)
     shift

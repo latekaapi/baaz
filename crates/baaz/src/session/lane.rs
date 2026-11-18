@@ -805,6 +805,7 @@ impl SessionRuntime {
         self.child_failure.as_ref()
     }
 
+    #[cfg(feature = "probe")]
     /// `child-lost` (captures, live checks): fold the loss the adapter
     /// would report, with no child behind it — and, since there is no
     /// child to have said anything, sample stderr lines for the failure's
@@ -1443,7 +1444,7 @@ mod tests {
                 provider_id: provider_id.to_owned(),
                 workspace: "/tmp/w1-lane".to_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
             
                 terminal_host: None,
 };
@@ -2440,7 +2441,7 @@ mod tests {
                 provider_id,
                 workspace: "/tmp/w3-lane".to_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
             
                 terminal_host: None,
 };
@@ -4415,7 +4416,7 @@ mod tests {
 
     /// V1: the digits decide a parked provider tap the way they decide a
     /// muse card — whenever a card is pending and the draft is empty.
-    /// `card_has_keys` and `step_choose` only saw fold cards, so `1` on a
+    /// `card_has_keys` and `choose` only saw fold cards, so `1` on a
     /// tap-only approval did nothing. Drop either arm and the tap keeps
     /// its digits (the first assert) or swallows the press (the second).
     #[gpui::test]
@@ -5046,7 +5047,7 @@ mod tests {
         cx.update(crate::app::bind_keys);
         let args = harness_args(sandbox.state_dir());
         let (baaz, vc) = cx.add_window_view(|window, cx| {
-            crate::app::Harness::new(args, crate::shot::CaptureToken::default(), window, cx)
+            crate::app::Harness::new(args, crate::runtime::CaptureToken::default(), window, cx)
         });
         vc.run_until_parked();
         let (adapter, handle) = RecordingProvider::new();
@@ -5509,7 +5510,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let args = harness_args(sandbox.state_dir());
         let (baaz, vc) = cx.add_window_view(|window, cx| {
-            crate::app::Harness::new(args, crate::shot::CaptureToken::default(), window, cx)
+            crate::app::Harness::new(args, crate::runtime::CaptureToken::default(), window, cx)
         });
         vc.run_until_parked();
         let replay = |vc: &mut gpui::VisualTestContext| {
@@ -5519,7 +5520,7 @@ mod tests {
                     provider_id: "meta".to_owned(),
                     workspace: "/tmp/layout-global-readers".to_owned(),
                     overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                    capture: crate::shot::CaptureToken::default(),
+                    capture: crate::runtime::CaptureToken::default(),
                     terminal_host: None,
                 };
                 let view = cx.new(|cx| SessionView::new("synthetic-full".to_owned(), host, window, cx));

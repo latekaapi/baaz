@@ -98,6 +98,8 @@ pub(crate) enum Layer {
     Downloads,
     /// Browse's extensions popover.
     Extensions,
+    // Opened only by a probe step.
+    #[cfg_attr(not(feature = "probe"), allow(dead_code))]
     /// Browse's ⋯ popover.
     More,
     /// The right pane's Files row menu.
@@ -128,6 +130,8 @@ pub(crate) enum Layer {
     SkillsAddMenu,
     /// The Skills page detail's ⋯ menu.
     SkillsOverflow,
+    // Opened only by a probe step.
+    #[cfg_attr(not(feature = "probe"), allow(dead_code))]
     /// The context meter's breakdown, pinned open (a scripted capture's
     /// `meter` verb).
     Meter,

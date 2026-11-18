@@ -105,7 +105,7 @@ fn dir() -> PathBuf {
 
 /// One list's text: the downloaded copy when present, else the bundled one.
 fn list_text(name: &str, bundled: &[u8]) -> String {
-    if !(crate::clock::deterministic() || cfg!(test)) {
+    if !(crate::runtime::browser_backend().in_memory() || cfg!(test)) {
         if let Ok(text) = std::fs::read_to_string(dir().join(format!("{name}.txt"))) {
             if text.starts_with("[Adblock") {
                 return text;
@@ -203,7 +203,7 @@ s.id = 'baaz-adblock'; s.textContent = {css}; \
 pub fn start(prefs: &AdblockPrefs) {
     static STARTED: OnceLock<()> = OnceLock::new();
     apply(prefs);
-    if crate::clock::deterministic() || cfg!(test) || STARTED.set(()).is_err() {
+    if crate::runtime::browser_backend().in_memory() || cfg!(test) || STARTED.set(()).is_err() {
         return;
     }
     std::thread::Builder::new()

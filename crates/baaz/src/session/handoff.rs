@@ -310,6 +310,7 @@ impl SessionRuntime {
         cx.notify();
     }
 
+    #[cfg(feature = "probe")]
     /// `handoff:<provider>`: the step verb for live runs. The same
     /// [`SessionView::pick_provider`] path the menu uses, forced onto the
     /// handoff row, and headless — the command line already asked, so no

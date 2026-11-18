@@ -46,8 +46,10 @@ use aui::composer::{
 use aui::data::{ContextMeterState, ContextPressure};
 use aui::feedback::{banner, BannerActionStyle, BannerKind, BannerRun};
 use aui::overlay::popover_layer;
+#[cfg(feature = "probe")]
+use aui::transcript::{MessageSelection, SelectionKey, TextSelection};
 use aui::transcript::{
-    AssistantTurnAction, LinkTarget, MessageSelection, SelectionKey, SpanEvent, TextSelection,
+    AssistantTurnAction, LinkTarget, SpanEvent,
     ToolCardIntent, ToolGroupIntent, UserTurnAction, needs_you_banner, retry_row, status_row,
     StatusLead,
 };
@@ -66,7 +68,7 @@ use gpui_kit::base::{h_flex, v_flex};
 use crate::overlays::{Command, Menu, MenuKind, Overlays, MODES};
 use crate::transcript::{self, Cards, Folds, FullOutput, FullOutputState, PlanAction};
 use crate::providers::{ExternalApprovalStore, ProviderId};
-use crate::shot::CaptureToken;
+use crate::runtime::CaptureToken;
 use crate::wire::WireCall;
 use provider::Command as ProviderCommand;
 use crate::{attachments, files, full_output, history, images, plan, search, skills};
@@ -219,6 +221,7 @@ mod runtime;
 pub(crate) mod pickers;
 mod questions;
 pub(crate) mod render;
+#[cfg(feature = "probe")]
 mod scripting;
 mod shell;
 pub(crate) mod spans;
@@ -1228,6 +1231,7 @@ impl SessionRuntime {
         self.fold_provider_events(events, cx);
     }
 
+    #[cfg(feature = "probe")]
     /// Fold provider events as the lane task would: a replayed capture,
     /// folded at once on this update, and tests.
     pub(crate) fn fold_provider_events(&mut self, events: Vec<provider::ProviderEvent>, cx: &mut Context<Self>) {
@@ -1716,6 +1720,7 @@ impl SessionRuntime {
         self.last_tick_secs = None;
     }
 
+    #[cfg(feature = "probe")]
     /// Load a canned transcript into a read-only view (the
     /// `browser-chat-fixture` step: the agent card and line with no turn).
     pub(crate) fn load_fixture(&mut self, session: aui_protocol::Session, cx: &mut Context<Self>) {
@@ -1999,7 +2004,7 @@ impl SessionView {
             let wanted = |d: &D| if allow { matches!(d, D::Once | D::ApprovedForSession) } else { matches!(d, D::Deny) };
             let Some(index) = choices.iter().position(|c| wanted(&c.decision)) else { return false };
             // A press on a choice that exists: the step cannot fail here.
-            let _ = self.step_choose(&(index + 1).to_string(), window, cx);
+            let _ = self.choose(index + 1, window, cx);
             return true;
         }
         if self.runtime.read(cx).external_approvals.pending().is_empty() {
@@ -2007,7 +2012,7 @@ impl SessionView {
         }
         let wanted = if allow { crate::providers::ApprovalChoice::Accept } else { crate::providers::ApprovalChoice::Decline };
         let Some(index) = crate::providers::ApprovalChoice::all().iter().position(|c| *c == wanted) else { return false };
-        let _ = self.step_choose(&(index + 1).to_string(), window, cx);
+        let _ = self.choose(index + 1, window, cx);
         true
     }
 
@@ -2016,7 +2021,7 @@ impl SessionView {
         // The same handler the `choose:<n>` step reaches, with the same
         // 1-based numbering the digits on the card carry. A digit past the
         // card's choices, or with nothing pending, presses nothing.
-        let _ = self.step_choose(&(index + 1).to_string(), window, cx);
+        let _ = self.choose(index + 1, window, cx);
     }
 }
 
@@ -2177,6 +2182,7 @@ impl SessionView {
 }
 
 impl SessionRuntime {
+    #[cfg(feature = "probe")]
     /// Fold a capture into this view: `--replay` (decision A0). The capture
     /// folds through the same translation a live Muse lane does, at once and
     /// with no child and no wire, so screenshots cost nothing. The view
@@ -2196,6 +2202,7 @@ impl SessionRuntime {
         cx.emit(RuntimeEvent::EntriesAppended);
     }
 
+    #[cfg(feature = "probe")]
     /// Start a `--bench` run over a capture: read-only like a replay, but the
     /// events are fed one per cadence tick by the bench driver rather than
     /// folded all at once, so streaming cost is real.
@@ -2211,6 +2218,7 @@ impl SessionRuntime {
 }
 
 impl SessionView {
+    #[cfg(feature = "probe")]
     /// Drive the transcript list to `frac` of the folded turns (0 = top,
     /// 1 = tail) without touching the pointer, for `--bench --bench-scroll`.
     pub fn bench_scroll_to(&mut self, frac: f32, cx: &mut Context<Self>) {
@@ -2223,6 +2231,7 @@ impl SessionView {
         cx.notify();
     }
 
+    #[cfg(feature = "probe")]
     /// Pin the transcript to the tail, for `--bench --bench-scroll tail`.
     pub fn bench_scroll_tail(&mut self, cx: &mut Context<Self>) {
         self.follow = true;
@@ -2230,6 +2239,7 @@ impl SessionView {
         cx.notify();
     }
 
+    #[cfg(feature = "probe")]
     /// The transcript list's current scroll offset, sampled once per frame by
     /// `--bench --bench-scroll wheel`.
     pub fn bench_list_top(&self) -> gpui::ListOffset {
@@ -2250,6 +2260,7 @@ impl SessionView {
         f32::from(self.list_state.scroll_px_offset_for_scrollbar().y)
     }
 
+    #[cfg(feature = "probe")]
     /// Whether the transcript list is pinned at its tail, sampled with the
     /// offset above: a wheel event that leaves the position unchanged *at*
     /// the limit is clamped, not stalled. Mirrors the app's own follow
@@ -2643,6 +2654,7 @@ fn pressure(level: provider::facts::ContextPressure) -> ContextPressure {
     }
 }
 
+#[cfg(feature = "probe")]
 /// `used/window/pressure`, the `--steps context:` payload.
 fn parse_context(spec: &str) -> Option<provider::facts::ContextReading> {
     let mut parts = spec.split('/');
@@ -2673,6 +2685,7 @@ fn frame_stats_enabled() -> bool {
     })
 }
 
+#[cfg(feature = "probe")]
 /// Set by `--bench` before the window boots: frame stats are on, and the
 /// periodic stderr percentiles stay quiet — the bench prints its own table
 /// from the full sample at the end.
@@ -2729,6 +2742,7 @@ fn record_frame_stats(elapsed: std::time::Duration) {
     }
 }
 
+#[cfg(feature = "probe")]
 /// How many `render_transcript` constructions have been recorded. Every frame
 /// renders the transcript, so the delta over a quiet window is the frame
 /// count there — the bench's idle assertion.
@@ -2736,6 +2750,7 @@ pub(crate) fn frame_sample_count() -> u64 {
     FRAME_SAMPLE_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+#[cfg(feature = "probe")]
 /// Drain the recorded element-construction samples (microseconds), for the
 /// bench's end-of-run table.
 pub(crate) fn take_frame_samples() -> Vec<u128> {
@@ -2743,6 +2758,7 @@ pub(crate) fn take_frame_samples() -> Vec<u128> {
     samples.lock().map(|mut samples| std::mem::take(&mut *samples)).unwrap_or_default()
 }
 
+#[cfg(feature = "probe")]
 /// Drain the recorded paint timestamps, for the bench's frame-interval table.
 pub(crate) fn take_frame_times() -> Vec<std::time::Instant> {
     let times = FRAME_TIMES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
@@ -2813,6 +2829,7 @@ fn note_draw_end() {
     }
 }
 
+#[cfg(feature = "probe")]
 /// Drain the recorded whole-frame samples (microseconds), for the bench's
 /// end-of-run table.
 pub(crate) fn take_draw_samples() -> Vec<u128> {
@@ -2848,6 +2865,7 @@ const GESTURE_HORIZON: Duration = Duration::from_millis(150);
 /// per-frame work no longer growing with the event rate.
 static WHEEL_SCROLL_BYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+#[cfg(feature = "probe")]
 /// Drain the applied-drain count above, for the bench's end-of-run report.
 pub(crate) fn take_wheel_scroll_bys() -> u64 {
     WHEEL_SCROLL_BYS.swap(0, std::sync::atomic::Ordering::SeqCst)
@@ -2870,6 +2888,7 @@ pub(crate) fn note_centre_loading_paint() {
     CENTRE_LOADING_PAINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+#[cfg(feature = "probe")]
 /// Drain both counts above, for the `centre` report.
 pub(crate) fn take_centre_paints() -> (u64, u64) {
     (
@@ -2892,6 +2911,7 @@ pub(crate) fn note_centre_render() {
     }
 }
 
+#[cfg(feature = "probe")]
 /// Drain the count above, for the `sbwheel` report.
 pub(crate) fn take_centre_renders() -> u64 {
     CENTRE_RENDERS.swap(0, std::sync::atomic::Ordering::Relaxed)
@@ -3298,7 +3318,7 @@ mod tests {
                 provider_id: "muse".to_owned(),
                 workspace: "/tmp/b9-muse-chip".to_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             cx.new(|cx| SessionView::new("s-b9".to_owned(), host, window, cx))
@@ -3368,7 +3388,7 @@ mod tests {
                 provider_id: "muse".to_owned(),
                 workspace: "/tmp/b2-model-menu".to_owned(),
                 overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             cx.new(|cx| SessionView::new("s-b2".to_owned(), host, window, cx))

@@ -15,14 +15,29 @@ description = "Baaz: a native macOS workspace for Claude Code, Codex and Muse Co
 publish = false
 
 [features]
+# On by default so every probe entry point (`cargo build -p baaz`,
+# `cargo test`, `scripts/uiprobe.py`, `scripts/baaz-check.sh`, the perf
+# scripts) keeps working as documented. The release bundle
+# (`scripts/bundle.sh`) builds with `--no-default-features`, so the app a
+# person runs carries no probe; `tests/probe_ratchet.rs` fails if it stops.
+default = ["probe"]
 # The Chromium page engine; without it the browser pane is WKWebView.
 cef = ["dep:aui-cef"]
+# The capture and scripting surface (docs/82 4.10): `--steps`,
+# `--screenshot`, `--bench`, `--replay`, `--perf-*` and every other flag
+# that exists only for them, the step verbs, the fixtures, and gpui's
+# `test-support`, whose `Window::render_to_image` `--screenshot` uses,
+# exactly as the gallery's own capture path does. A build without it
+# refuses those flags and `BAAZ_DETERMINISTIC` (exit 2).
+# Feedback Mode's note crop: `Window::render_to_image` is gpui's
+# `test-support`. The release bundle turns this on (and nothing else of the
+# probe) so a note taken in the shipped app keeps its window picture.
+window-capture = ["gpui/test-support"]
+probe = ["window-capture", "dep:gpui_platform", "gpui_platform/test-support"]
 
 [dependencies]
-# `test-support` exposes `Window::render_to_image`, which `--screenshot` uses,
-# exactly as the gallery's own capture path does.
-gpui = { workspace = true, features = ["test-support"] }
-gpui_platform = { workspace = true, features = ["test-support"] }
+gpui.workspace = true
+gpui_platform = { workspace = true, optional = true }
 gpui-kit.workspace = true
 aui = { workspace = true, features = ["tree-sitter"] }
 aui-protocol.workspace = true
@@ -78,6 +93,9 @@ raw-window-handle = "0.6"
 # the code it would time. No plots, no rayon.
 [dev-dependencies]
 criterion = { version = "0.5.1", default-features = false }
+# The test platform (`TestAppContext`, `VisualTestContext`): unit tests get it
+# whether or not `probe` is on.
+gpui = { workspace = true, features = ["test-support"] }
 
 [package.metadata.cargo-machete]
 # `gpui_platform` has no direct `use` in this crate's source, so cargo-machete

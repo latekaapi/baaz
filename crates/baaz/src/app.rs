@@ -49,6 +49,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(feature = "probe")]
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -58,25 +59,27 @@ use aui::data::{button, icon_button};
 use aui::feedback::{banner, BannerKind, BannerRun};
 use aui::keys::{Cancel, FocusNext, FocusPrev, TogglePalette, ToggleSidebar};
 use aui::overlay::DialogKind;
-use aui::shell::{
-    RESIZE_HANDLE_W, app_shell, clamp_sidebar_width, drag_capture_overlay,
-    resize_handle,
-};
+use aui::shell::{RESIZE_HANDLE_W, app_shell, drag_capture_overlay, resize_handle};
+#[cfg(feature = "probe")]
+use aui::shell::clamp_sidebar_width;
 use aui_icons::{icon, IconName};
 use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use gpui::{
-    Pixels, PlatformInput, ScrollDelta, ScrollEvent, StatefulInteractiveElement as _,
-    StyleRefinement, Styled as _, actions, div, point, prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths,
+    Pixels, StatefulInteractiveElement as _,
+    StyleRefinement, Styled as _, actions, div, prelude::*, px, AnyElement, App, Context, Entity, ExternalPaths,
     FocusHandle, Focusable, SharedString, Subscription, Task, Window,
 };
+#[cfg(feature = "probe")]
+use gpui::{point, PlatformInput, ScrollDelta, ScrollEvent};
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use aui::interact::{dismiss_layer, interactive, menu_panel, MENU_ROW_H, ROW_GAP};
 use aui::util::{h_flex, v_flex};
 use gpui_kit::component::Root;
 use provider::ProviderEvent;
 
+#[cfg(feature = "probe")]
 use crate::auth::Identity;
 use crate::conn;
 use crate::index::{self, IndexEntry};
@@ -86,7 +89,7 @@ use crate::providers::ProviderId;
 use crate::region::Region as _;
 use crate::resize::ResizeDrag;
 use crate::right;
-use crate::shot::CaptureToken;
+use crate::runtime::CaptureToken;
 use crate::session::{self, Draft, SessionEvent, SessionHost, SessionRuntime, SessionView};
 use crate::tier::Tier;
 use crate::sessions::SessionMeta;
@@ -755,8 +758,6 @@ pub struct Harness {
     /// view, seats its tab row, and maps its events
     /// ([`crate::right_pane::RightPaneEvent`]).
     pub(crate) right_pane: Entity<crate::right_pane::RightPane>,
-    /// The `peek` step's hold: the v3 peek open with no hover (captures).
-    pub(crate) peek_pinned: bool,
     /// Whether the window's traffic lights are hidden now (closed sidebar,
     /// no peek), so the native call runs only on a change.
     pub(crate) lights_hidden: bool,
@@ -769,10 +770,11 @@ pub struct Harness {
     /// ([`crate::browser::BrowserView`]). It asks the root through
     /// [`crate::browser::BrowserEvent`]s (`Harness::on_browser_event`).
     pub(crate) browser: Entity<crate::browser::BrowserView>,
-    /// The two flags a `--screenshot` wait reads out of this window (see
-    /// [`crate::shot::CaptureToken`]). Handed to every session view this
+    /// The capture hooks a `--screenshot` wait reads out of this window and
+    /// the `--steps` runner sets (see [`crate::runtime::CaptureToken`]),
+    /// the `sidebar-peek` hold among them. Handed to every session view this
     /// window opens and to `capture_and_quit`, so a second window would wait
-    /// on its own.
+    /// on its own. Empty without the `probe` feature.
     pub(crate) capture: CaptureToken,
     /// Whether `initialize` granted `sessionMcp` (muse ≥ 1.3). Requested
     /// in `conn::connect`; a server that did not grant it opens sessions
@@ -965,6 +967,12 @@ impl Harness {
         let browser_fake = args.screenshot.is_some();
         let browser = cx.new(|cx| crate::browser::BrowserView::new(browser_fake, overlays.clone(), cx));
         let muse_slot = crate::providers::MuseSlot::default();
+        // The runtime's provider source, made concrete for this window.
+        let provider_factory = crate::providers::ProviderFactory::for_window(
+            crate::runtime::lanes_for(&args),
+            terminal_service.socket_path().to_path_buf(),
+            muse_slot.clone(),
+        );
         let focus_root = cx.focus_handle();
         let feedback = cx.new(|cx| {
             feedback_ui::FeedbackUi::new(feedback_ui::FeedbackUi::probe_for(), overlays.clone(), focus_root.clone(), cx)
@@ -979,11 +987,8 @@ impl Harness {
             new_provider,
             args,
             muse_hub: None,
-            muse_slot: muse_slot.clone(),
-            provider_factory: crate::providers::default_provider_factory(
-                terminal_service.socket_path().to_path_buf(),
-                muse_slot,
-            ),
+            muse_slot,
+            provider_factory,
             wire: Wire::Connecting,
             auth: Auth::Probing,
             login: Login::new(api_key.clone()),
@@ -1001,7 +1006,6 @@ impl Harness {
             resize: ResizeDrag::restored(restored),
             right_pane,
             browser,
-            peek_pinned: false,
             lights_hidden: false,
             capture,
             session_mcp: false,
@@ -1252,6 +1256,9 @@ impl Harness {
         // The window's lifecycle runs from its causes, never from a frame
         // (task 4.9): the settle, the floats, the title, focus, activation.
         this.install_window_sync(window, cx);
+        // The two capture boots (`probe` builds only: without it neither
+        // flag parses).
+        #[cfg(feature = "probe")]
         if this.args.replay.is_some() {
             // `--replay`: a capture, folded, with no child and no credential.
             // The shell is the point — the transcript is what is being looked
@@ -1272,6 +1279,7 @@ impl Harness {
             this.open_replay(window, cx);
             return this;
         }
+        #[cfg(feature = "probe")]
         if this.args.offline {
             // `--no-connect`: the chrome without a child, for a screenshot of
             // the login screen with sample data (`--login` picks the state).
@@ -1543,20 +1551,6 @@ impl Harness {
         });
     }
 
-    /// Muse is not running (off, missing, or failed to start): the sidebar
-    /// settles on what the local and provider records hold instead of
-    /// waiting for a `session/list` that will never come, and the other
-    /// providers' rows show at once.
-    /// Scripted chrome (`--no-connect` / `--replay` with no client):
-    /// provider lanes open over the scripted stand-in instead of spawning a
-    /// child. A missing Muse client alone no longer means "scripted" — that
-    /// handed a person with no Muse (or a click before Muse connected) a
-    /// Claude Code or Codex lane that never sent anything (docs/50 P1).
-    /// Tests that install a client keep reaching the real lane path.
-    pub(crate) fn scripted_chrome(&self) -> bool {
-        (self.args.offline || self.args.replay.is_some()) && !self.muse_slot.is_ready()
-    }
-
     /// Whether the shell is on screen: not behind the connect screen. What
     /// links from other apps wait for. (The capture-only whole-window login
     /// screen is gone, docs/82 0.16: no launch ever showed it.)
@@ -1564,6 +1558,10 @@ impl Harness {
         !self.connect_open(cx)
     }
 
+    /// Muse is not running (off, missing, or failed to start): the sidebar
+    /// settles on what the local and provider records hold instead of
+    /// waiting for a `session/list` that will never come, and the other
+    /// providers' rows show at once.
     pub(crate) fn muse_unavailable(&mut self, reason: String, cx: &mut Context<Self>) {
         self.muse_slot.set_down(reason.clone());
         self.wire = Wire::Down(reason);
@@ -1771,7 +1769,7 @@ impl Harness {
     /// (`BAAZ_DETERMINISTIC=1`), which is always a static composition even
     /// without a screenshot on the end.
     pub(crate) fn still(&self) -> bool {
-        self.args.screenshot.is_some() || crate::clock::deterministic()
+        self.args.screenshot.is_some() || crate::runtime::captures()
     }
 
     /// The sidebar's collapse toggle (⌘B): the rail is the column at zero
@@ -2233,6 +2231,7 @@ impl Harness {
         self.with_terminal_dock(cx, |dock, cx| dock.open_tab(tab, window, cx));
     }
 
+    #[cfg(feature = "probe")]
     /// The `--steps` verb's route: open the dock over a FakePty-backed tab
     /// and drain its script at once, so the capture replays the same bytes
     /// on every run. The payload names the tab; empty is "terminal". Fails
@@ -2506,7 +2505,7 @@ impl Harness {
         // the input never also sees it and emits its own forward PressEnter.
         let back = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _window, cx| {
             if event.keystroke.key.as_str() == "enter" && event.keystroke.modifiers.shift {
-                this.step_browse_find(false, cx);
+                this.find_next(false, cx);
                 cx.stop_propagation();
             }
         });
@@ -2566,14 +2565,14 @@ impl Harness {
             .sm()
             .accessibility_label("Previous match")
             .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.step_browse_find(false, cx);
+                this.find_next(false, cx);
             }));
         let next = button("browse-find-next", "↓")
             .ghost()
             .sm()
             .accessibility_label("Next match")
             .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.step_browse_find(true, cx);
+                this.find_next(true, cx);
             }));
         let case = button("browse-find-case", "Match case")
             .sm()
@@ -3235,8 +3234,9 @@ impl Harness {
         )
     }
 
-    /// `--replay`: open one session out of a capture file, once, on the first
-    /// frame that has a `Window` to build a composer with.
+    /// `--replay`: open one session out of a capture file, once, while the
+    /// root is built (`Harness::new`), so frame one draws the folded rows.
+    #[cfg(feature = "probe")]
     fn open_replay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.args.replay.take() else { return };
         // The open-at-length mark (docs/51 M): parse and fold the whole
@@ -3362,6 +3362,7 @@ impl Harness {
         // empty draft over the replay, and the header named the draft ("New
         // session") above the replayed transcript.
         self.open_boot_session(window, cx);
+        #[cfg(feature = "probe")]
         self.maybe_run_steps(window, cx);
         cx.notify();
     }
@@ -3578,7 +3579,7 @@ impl Harness {
             return;
         }
         self.browser.update(cx, |browser, _| browser.newtab_ground_asked = true);
-        let source = if crate::clock::deterministic() { None } else { crate::newtab_ground::current_source() };
+        let source = if crate::runtime::captures() { None } else { crate::newtab_ground::current_source() };
         let bake = cx.background_executor().spawn(async move { crate::newtab_ground::bake(source) });
         cx.spawn(async move |this, cx| {
             let baked = bake.await;
@@ -4101,8 +4102,8 @@ impl Harness {
             }))
             .on_action(cx.listener(|this, _: &MenuUp, _, cx| this.move_menu(-1, cx)))
             .on_action(cx.listener(|this, _: &MenuDown, _, cx| this.move_menu(1, cx)))
-            .on_action(cx.listener(|this, _: &MenuLeft, _, cx| this.step_menu(-1, cx)))
-            .on_action(cx.listener(|this, _: &MenuRight, _, cx| this.step_menu(1, cx)))
+            .on_action(cx.listener(|this, _: &MenuLeft, _, cx| this.menu_sideways(-1, cx)))
+            .on_action(cx.listener(|this, _: &MenuRight, _, cx| this.menu_sideways(1, cx)))
             .on_action(cx.listener(|this, _: &HistoryPrev, window, cx| {
                 this.with_session(cx, |view, cx| view.history_prev(window, cx));
             }))
@@ -4261,7 +4262,7 @@ impl Harness {
     /// off (not installed then, or switched off) brings it up the first time
     /// the person reaches for it, instead of handing them a dead draft.
     pub(crate) fn ensure_muse_started(&mut self, cx: &mut Context<Self>) {
-        if self.muse_slot.is_ready() || self.scripted_chrome() || self.args.offline || self.args.replay.is_some() {
+        if self.muse_slot.is_ready() || self.args.offline || self.args.replay.is_some() {
             return;
         }
         if matches!(self.wire, Wire::Connecting | Wire::Reconnecting) {
@@ -4717,7 +4718,7 @@ impl Render for Harness {
                 .right_open(right_open)
                 .sidebar(sidebar)
                 .chrome_lead(chrome.lead)
-                .peek_open(self.peek_pinned)
+                .peek_open(self.capture.peek_pinned())
                 .on_hover_zones({
                     let zones_to = cx.entity().downgrade();
                     move |zones, _, cx| {
@@ -5496,7 +5497,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
         assert!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_open));
@@ -5527,7 +5528,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         let root = state.2.clone();
         vc.update(|_, cx| {
@@ -5590,7 +5591,7 @@ mod tests {
                     provider_id: "echo".to_owned(),
                     workspace: workspace.to_string_lossy().into_owned(),
                     overlays: h.overlays.clone(),
-                    capture: crate::shot::CaptureToken::default(),
+                    capture: crate::runtime::CaptureToken::default(),
                     terminal_host: None,
                 };
                 let view = cx.new(|cx| {
@@ -5619,7 +5620,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -5658,7 +5659,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         let (id, weak) = vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -5686,7 +5687,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -5747,7 +5748,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -5783,7 +5784,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         let start = vc.update(|_, cx| crate::layout::Layout::get(cx).right_open);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
@@ -5811,7 +5812,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("general", cx)));
@@ -5873,7 +5874,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         // Two scripted tabs on the project (FakePty: no shell runs).
         for title in ["one", "two"] {
@@ -5913,7 +5914,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         let opened = vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_skills("add-menu", window, cx)));
         assert!(opened.is_ok(), "the fixture page opens: {opened:?}");
@@ -5953,7 +5954,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         let opened = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings("shortcuts", cx)));
         assert!(opened.is_ok(), "the page opens: {opened:?}");
@@ -6023,7 +6024,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new("https://a.example/", window, cx)))
@@ -6077,7 +6078,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("sidebar", cx)));
@@ -6111,7 +6112,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("sidebar", cx)));
@@ -6124,7 +6125,7 @@ mod tests {
                     provider_id: "echo".to_owned(),
                     workspace: state.2.to_string_lossy().into_owned(),
                     overlays: h.overlays.clone(),
-                    capture: crate::shot::CaptureToken::default(),
+                    capture: crate::runtime::CaptureToken::default(),
                     terminal_host: None,
                 };
                 let view = cx.new(|cx| crate::session::SessionView::new("s-2".to_owned(), host, window, cx));
@@ -6154,7 +6155,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -6200,7 +6201,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
         Harness::reset_search_rebuild_count();
@@ -6262,7 +6263,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx)));
@@ -6310,7 +6311,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -6378,7 +6379,7 @@ mod tests {
         let state = hermetic_state("ask-keyed");
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         adopt_test_project(&mut *vc, &baaz, &state.2);
         open_test_session(&mut *vc, &baaz, &state.2);
@@ -6425,7 +6426,7 @@ mod tests {
         let state = hermetic_state("ask-waits");
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
         let view_a = vc.update(|_, cx| baaz.read(cx).active.clone().expect("a session is open"));
@@ -6435,7 +6436,7 @@ mod tests {
                     provider_id: "echo".to_owned(),
                     workspace: state.2.to_string_lossy().into_owned(),
                     overlays: h.overlays.clone(),
-                    capture: crate::shot::CaptureToken::default(),
+                    capture: crate::runtime::CaptureToken::default(),
                     terminal_host: None,
                 };
                 cx.new(|cx| crate::session::SessionView::new("s-2".to_owned(), host, window, cx))
@@ -6484,7 +6485,7 @@ mod tests {
         let state = hermetic_state("back-history-pure");
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.ensure_browse_tab(window, cx)));
@@ -6529,7 +6530,7 @@ mod tests {
         let state = hermetic_state("field-keyboard");
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         let page = vc.update(|window, cx| {
@@ -6559,7 +6560,7 @@ mod tests {
         let state = hermetic_state("complete-row");
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         // Two person tabs whose URLs match different queries.
@@ -6630,7 +6631,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         macro_rules! open {
             () => {
@@ -6679,7 +6680,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(RightKind::Files, cx)));
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_fixture_session("Fix ledger chart", window, cx)))
@@ -6723,7 +6724,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_settings_set("search-engine=kagi", cx)))
             .expect("the verb lands on Kagi");
@@ -6762,7 +6763,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -6791,7 +6792,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -6833,7 +6834,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -6864,7 +6865,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         // A real window root (not `draw_shell`'s free element): the panel
         // rides a deferred draw, which needs the window's own frame.
-        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx));
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
                 h.args.login = crate::LoginSample::SignedIn;
@@ -6909,7 +6910,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -6947,7 +6948,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -6984,7 +6985,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -7026,7 +7027,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -7072,7 +7073,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -7114,7 +7115,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -7146,7 +7147,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -7182,7 +7183,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| {
             baaz.update(cx, |h, cx| {
@@ -7233,7 +7234,7 @@ mod tests {
         let state = hermetic_state("blur-no-steal");
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         vc.update(|window, cx| {
@@ -7282,7 +7283,7 @@ mod tests {
         let state = hermetic_state("select-new-page");
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
         let (first, second) = vc.update(|_, cx| {
@@ -7331,7 +7332,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
         // Arm the debounced pane save, then rename inside its window: the
@@ -7373,7 +7374,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.show_right(crate::layout::RightKind::Changes, cx)));
@@ -7424,7 +7425,7 @@ mod tests {
             let (baaz, vc) = cx.add_window_view(|window, cx| {
                 let mut args = test_args(&state.2);
                 args.no_project = no_project;
-                Harness::new(args, crate::shot::CaptureToken::default(), window, cx)
+                Harness::new(args, crate::runtime::CaptureToken::default(), window, cx)
             });
             // The boot lands on the login screen; the hero only renders in
             // the signed-in shell, so step past it with the sample identity
@@ -7483,7 +7484,7 @@ mod tests {
         let state = hermetic_state("long-title");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = cx.add_window_view(|window, cx| {
-            Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
+            Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx)
         });
         let long = "w".repeat(2000);
         vc.update(|_, cx| {
@@ -7522,7 +7523,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "no session is open");
         for kind in crate::layout::RightKind::ALL {
@@ -7566,7 +7567,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "no session is open");
         for kind in crate::layout::RightKind::ALL {
@@ -7637,7 +7638,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         // The shell (and its snap-consuming frame) only renders signed in.
         vc.update(|window, cx| {
@@ -7732,7 +7733,7 @@ mod tests {
             })
         );
         let baaz2 = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|window, cx| baaz2.update(cx, |h, cx| h.resume("sess-a".to_owned(), window, cx)));
         assert!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_open), "A restores Changes after restart");
@@ -7776,7 +7777,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         let dir = std::env::temp_dir().join(format!("baaz-right-pure-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -7830,7 +7831,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| harness.show_right(crate::layout::RightKind::Files, cx))
@@ -7868,7 +7869,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| harness.show_right(crate::layout::RightKind::Files, cx))
@@ -7914,7 +7915,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
         let view = vc.update(|_, cx| baaz.read(cx).active.clone().expect("a session"));
@@ -7958,7 +7959,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         let root = vc
             .update(|_, cx| baaz.read(cx).right_project(cx).map(|(root, _)| root))
@@ -7970,7 +7971,7 @@ mod tests {
                     provider_id: "echo".to_owned(),
                     workspace: root.to_string_lossy().into_owned(),
                     overlays: harness.overlays.clone(),
-                    capture: crate::shot::CaptureToken::default(),
+                    capture: crate::runtime::CaptureToken::default(),
                     terminal_host: None,
                 };
                 let view = cx.new(|cx| {
@@ -8025,7 +8026,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         let root = vc
             .update(|_, cx| baaz.read(cx).right_project(cx).map(|(root, _)| root))
@@ -8038,7 +8039,7 @@ mod tests {
                     provider_id: "echo".to_owned(),
                     workspace: root.to_string_lossy().into_owned(),
                     overlays: harness.overlays.clone(),
-                    capture: crate::shot::CaptureToken::default(),
+                    capture: crate::runtime::CaptureToken::default(),
                     terminal_host: None,
                 };
                 let view = cx.new(|cx| {
@@ -8089,7 +8090,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         let root = vc
             .update(|_, cx| baaz.read(cx).right_project(cx).map(|(root, _)| root))
@@ -8102,7 +8103,7 @@ mod tests {
                     provider_id: "echo".to_owned(),
                     workspace: root.to_string_lossy().into_owned(),
                     overlays: harness.overlays.clone(),
-                    capture: crate::shot::CaptureToken::default(),
+                    capture: crate::runtime::CaptureToken::default(),
                     terminal_host: None,
                 };
                 let view = cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx));
@@ -8143,7 +8144,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         let root = vc
             .update(|_, cx| baaz.read(cx).right_project(cx).map(|(root, _)| root))
@@ -8181,7 +8182,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         vc.update(|_, cx| {
             baaz.update(cx, |h, cx| {
@@ -8326,7 +8327,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(dir), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(dir), crate::runtime::CaptureToken::default(), window, cx))
         });
         (vc, baaz)
     }
@@ -8445,7 +8446,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         let row = |baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext| {
             vc.update(|_, cx| baaz.read(cx).session_list.read(cx).sessions.iter().find(|e| e.id == "s-bg").cloned().expect("the row"))
@@ -8515,7 +8516,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         open_test_session(&mut *vc, &baaz, &state.2);
         fn idle_row(id: &str) -> crate::sidebar::SessionEntry {

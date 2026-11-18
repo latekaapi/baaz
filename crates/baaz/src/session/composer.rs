@@ -514,7 +514,7 @@ impl SessionRuntime {
 
 impl SessionView {
     /// ← / → in the open menu (D4).
-    pub fn step_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
+    pub fn menu_sideways(&mut self, delta: isize, cx: &mut Context<Self>) {
         let kind = self.overlays.read(cx).menu().map(|m| m.kind);
         match kind {
             Some(MenuKind::Effort) => {

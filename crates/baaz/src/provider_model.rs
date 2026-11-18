@@ -113,7 +113,7 @@ impl ProviderStatusModel {
     /// is the clock. A visible change re-derives the banners, notifies the
     /// observers and tells the root ([`ProviderModelEvent::Changed`]).
     pub(crate) fn sync(&mut self, cx: &mut Context<Self>) {
-        if crate::provider_status::deterministic() {
+        if crate::runtime::providers_scripted() {
             let fresh = initial_connect_statuses();
             if fresh != self.statuses {
                 self.statuses = fresh;
@@ -202,7 +202,7 @@ impl ProviderStatusModel {
     /// Re-probe `id` with its card saying so; [`Self::settle_busy`] clears
     /// it and names the result once the probe lands.
     pub(crate) fn recheck_with_feedback(&mut self, id: ProviderId, after_sign_out: bool, cx: &mut Context<Self>) {
-        if crate::provider_status::deterministic() {
+        if crate::runtime::providers_scripted() {
             // Captures probe nothing: the scripted status is the answer.
             crate::provider_status::recheck_provider(id);
             cx.notify();
@@ -311,6 +311,7 @@ impl ProviderStatusModel {
         }
     }
 
+    #[cfg(feature = "probe")]
     /// `codex-login:<waiting|device|failed>` (`--steps`): Codex's sign-in in
     /// that state with sample values, for captures. Starts nothing. Any
     /// other state is an `Err` and leaves the sign-in as it was.

@@ -121,7 +121,7 @@ fn a_missing_cli_fails_the_open_typed_not_installed(cx: &mut gpui::TestAppContex
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = std::sync::Arc::new(|id: ProviderId| {
+            harness.provider_factory = crate::providers::ProviderFactory::new(|id: ProviderId| {
                 Err(provider::ProviderError::launch_refusal(
                     provider::RefusalHint::NotInstalled,
                     format!("{} isn't installed", id.label()),
@@ -468,7 +468,7 @@ fn an_opening_provider_draft_is_never_evicted(cx: &mut gpui::TestAppContext) {
                     provider_id: ProviderId::Muse.as_str().to_owned(),
                     workspace: workspace.clone(),
                     overlays: harness.overlays.clone(),
-                    capture: crate::shot::CaptureToken::default(),
+                    capture: crate::runtime::CaptureToken::default(),
                     terminal_host: None,
                 };
                 let other = cx.new(|cx| SessionView::new(format!("s-park-{n}"), host, window, cx));

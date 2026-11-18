@@ -99,6 +99,7 @@ pub fn span_copy_text(held: &HashMap<String, HeldSpan>) -> Option<String> {
     aui::transcript::turn_span_selected_text(source, span)
 }
 
+#[cfg(feature = "probe")]
 /// Hold `span` over `turn_id`, clearing whatever was held — the scripted
 /// equivalent of a committed drag (`select-text:`, `select-span:`).
 /// Returns whether held state changed.

@@ -5,6 +5,24 @@ use super::*;
 
 impl Harness {
 
+    /// Step the find to the next (`forward`) or previous match: Enter, the
+    /// ↑/↓ buttons. A no-op with no open strip or no query.
+    pub(crate) fn find_next(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else { return };
+        let Some((query, match_case)) = self.browser.update(cx, |browser, _| {
+            let strip = browser.find_strips.for_tab(id);
+            if !strip.open || strip.query.is_empty() {
+                return None;
+            }
+            Some((strip.query.clone(), strip.match_case))
+        }) else {
+            return;
+        };
+        if let Some(state) = self.browse_centre_state(cx) {
+            state.update(cx, |state, _| state.find(&query, forward, match_case));
+        }
+    }
+
     /// Open the find strip on the shown tab (B2a-H5): ⌘F in Browse with a
     /// page shown, or the ⋯ menu's "Find in page". Focuses the input
     /// prefilled with the tab's kept query; a stored query re-searches.
@@ -71,7 +89,7 @@ impl Harness {
         if let Some(shown) = shown {
             self.sync_find_input_to_tab(shown, window, cx);
             if self.browser.read(cx).find_strips.visible(Some(shown)).is_some() {
-                self.step_browse_find(true, cx);
+                self.find_next(true, cx);
             }
         }
     }
@@ -97,7 +115,7 @@ impl Harness {
         let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else { return };
         let research = self.browser.update(cx, |browser, _| browser.find_strips.for_tab(id).toggle_case());
         if research {
-            self.step_browse_find(true, cx);
+            self.find_next(true, cx);
         }
         cx.notify();
     }
@@ -126,7 +144,7 @@ impl Harness {
                     input.focus(window, cx);
                 });
                 let sub = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, _, cx| match event {
-                    InputEvent::PressEnter { .. } => this.step_browse_find(true, cx),
+                    InputEvent::PressEnter { .. } => this.find_next(true, cx),
                     InputEvent::Change => this.find_input_changed(cx),
                     InputEvent::Blur | InputEvent::Focus => {}
                 });
@@ -155,7 +173,7 @@ impl Harness {
                 if this.browser.read(cx).find_strips.armed_current(id, generation)
                     && this.browser.read(cx).browse_centre_shown(cx) == Some(id)
                 {
-                    this.step_browse_find(true, cx);
+                    this.find_next(true, cx);
                 }
             });
         })

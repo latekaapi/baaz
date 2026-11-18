@@ -31,6 +31,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The app a person runs is built without the probe (docs/82 4.10,
+      # `scripts/bundle.sh`): no step verbs, no capture flags, no gpui
+      # test-support. That build must stay warning-free on its own.
+      - name: Clippy (no probe, as the bundle builds)
+        run: cargo clippy -p baaz --no-default-features -- -D warnings
+
       # docs/51 step M: the per-turn store costs (index refresh, search
       # sync, provider transcript reads) on a synthetic 2,600-session store.
       # Store only: the windowed budgets need a display and this machine's

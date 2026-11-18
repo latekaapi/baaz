@@ -279,7 +279,7 @@ fn ask_draft_lands_on_arrival_never_sent() {
 #[test]
 fn held_session_tab_clears_everywhere() {
     let browser = browser_source();
-    for name in ["select_browse_sidebar_tab", "new_browse_sidebar_tab", "step_tab_new"] {
+    for name in ["select_browse_sidebar_tab", "new_browse_sidebar_tab", "open_new_tab"] {
         assert!(
             fn_body(&browser, name).contains("set_session_tab(None"),
             "{name} clears the held tab"

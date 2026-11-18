@@ -81,6 +81,7 @@ impl SessionRegistry {
         self.parked.iter().find(|parked| parked.id == id).and_then(|parked| parked.view.clone())
     }
 
+    #[cfg(feature = "probe")]
     /// Whether `id` is parked, with or without its view.
     pub(crate) fn is_parked(&self, id: &str) -> bool {
         self.parked.iter().any(|parked| parked.id == id)

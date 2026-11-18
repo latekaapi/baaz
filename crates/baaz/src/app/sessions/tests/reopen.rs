@@ -592,7 +592,7 @@ fn muse_resume_factory(
     }
     let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let factory_commands = commands.clone();
-    let factory: crate::providers::ProviderFactory = std::sync::Arc::new(move |id: ProviderId| {
+    let factory: crate::providers::ProviderFactory = crate::providers::ProviderFactory::new(move |id: ProviderId| {
         assert!(id.lists_sessions(), "only the listing provider is asked for a lane here");
         let (_, rx) = crossbeam_channel::unbounded::<provider::ProviderEvent>();
         let mut adapter = MuseDouble { rx, answer, commands: factory_commands.clone() };

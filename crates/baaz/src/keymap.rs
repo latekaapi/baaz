@@ -694,17 +694,6 @@ struct UserBlock {
     bindings: std::collections::BTreeMap<String, Option<String>>,
 }
 
-/// Whether the user file is ignored: `BAAZ_DETERMINISTIC=1`.
-///
-/// The same predicate `crate::clock::deterministic` checks, but read live
-/// from the environment rather than once behind a `OnceLock`: the clock's
-/// flag cannot be flipped back in-process, so a test could never turn a
-/// deterministic load on, while this one can (under
-/// [`crate::store::test_env_lock`]).
-fn deterministic() -> bool {
-    std::env::var("BAAZ_DETERMINISTIC").as_deref() == Ok("1")
-}
-
 /// What [`load`] installed: the defaults plus the accepted user bindings, in
 /// the order gpui should see them, and one warning per refused entry.
 pub struct LoadedKeymap {
@@ -725,7 +714,7 @@ pub struct LoadedKeymap {
 /// default. Under `BAAZ_DETERMINISTIC=1` the user file is ignored entirely.
 /// Blocking; call it off the UI thread.
 pub fn load() -> LoadedKeymap {
-    load_from_path(&path(), deterministic())
+    load_from_path(&path(), crate::runtime::state_isolated())
 }
 
 /// [`load`] against an explicit file, so tests never touch `HOME` or the
@@ -1159,7 +1148,7 @@ pub fn effective_bindings() -> Vec<EffectiveBinding> {
         .map(|row| (row.action.to_string(), normalise_keystroke(row.keystroke), normalise_context(row.context)))
         .collect();
     let blocks = read_blocks(&path());
-    let (accepted, _) = if deterministic() {
+    let (accepted, _) = if crate::runtime::state_isolated() {
         (Vec::new(), Vec::new())
     } else {
         resolve_user_blocks(&blocks)

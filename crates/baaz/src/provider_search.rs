@@ -118,6 +118,7 @@ fn collect(
     }
 }
 
+#[cfg(feature = "probe")]
 /// Write `count` deterministic provider transcripts under `dir` — half
 /// Claude Code, half Codex — in each provider's real on-disk shape, and
 /// return the homes and sources that find them. The perf budget's fixture.

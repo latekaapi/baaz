@@ -687,7 +687,7 @@ fn chat_view(
         provider_id: ProviderId::Codex.as_str().to_owned(),
         workspace: harness.workspace(cx),
         overlays: harness.overlays.clone(),
-        capture: crate::shot::CaptureToken::default(),
+        capture: crate::runtime::CaptureToken::default(),
         terminal_host: None,
     };
     harness.set_override(id, |meta| {
@@ -1081,7 +1081,7 @@ fn b3b_lane_view(
             provider_id: "codex".to_owned(),
             workspace: "/tmp/b3b-lane".to_owned(),
             overlays: cx.new(|_| crate::overlays::Overlays::default()),
-            capture: crate::shot::CaptureToken::default(),
+            capture: crate::runtime::CaptureToken::default(),
             terminal_host: None,
         };
         cx.new(|cx| SessionView::new_on_provider(session_id, provider, rx, host, window, cx))

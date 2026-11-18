@@ -559,7 +559,7 @@ const PR_FIELDS: &str = "number,title,url,state,isDraft,statusCheckRollup";
 /// The open (or last) PR for the checked-out branch, through `gh`. Never
 /// runs under test.
 pub(crate) fn pr_for_branch(root: &Path) -> Option<PullRequest> {
-    if cfg!(test) || crate::clock::deterministic() {
+    if cfg!(test) || crate::runtime::captures() {
         return None;
     }
     let deadline = Instant::now() + Duration::from_secs(10);

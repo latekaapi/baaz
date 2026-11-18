@@ -31,12 +31,6 @@ pub const CODEX_TIMEOUT: Duration = Duration::from_secs(12);
 /// Window-focus re-probes run at most this often per provider.
 pub const FOCUS_THROTTLE: Duration = Duration::from_secs(15);
 
-/// Whether this is a deterministic capture: no probe, no cache read, no
-/// cache write — statuses come from [`scripted_statuses`].
-pub fn deterministic() -> bool {
-    std::env::var("BAAZ_DETERMINISTIC").as_deref() == Ok("1")
-}
-
 /// Which provider `program` names, for routing scripted runs.
 #[cfg(test)]
 pub fn provider_for_program(program: &str) -> ProviderId {
@@ -441,7 +435,7 @@ pub fn cache_path() -> PathBuf {
 /// Read the cached statuses. Best-effort like every store read, and never
 /// read at all under `BAAZ_DETERMINISTIC=1`.
 pub fn read_cache() -> Vec<ProviderStatus> {
-    if deterministic() {
+    if crate::runtime::providers_scripted() {
         return Vec::new();
     }
     let text = match std::fs::read_to_string(cache_path()) {
@@ -455,7 +449,7 @@ pub fn read_cache() -> Vec<ProviderStatus> {
 /// `BAAZ_DETERMINISTIC=1`: a capture never paints the owner's real
 /// logins into the store.
 pub fn write_cache(statuses: &[ProviderStatus]) {
-    if deterministic() {
+    if crate::runtime::providers_scripted() {
         return;
     }
     if let Ok(text) = serde_json::to_string_pretty(statuses) {
@@ -860,7 +854,7 @@ impl Service {
     /// cache after. In deterministic mode this only applies the scripted
     /// source — no binary is resolved, no command runs.
     pub fn probe_one(&mut self, id: ProviderId) {
-        if deterministic() {
+        if crate::runtime::providers_scripted() {
             self.apply_scripted();
             return;
         }
@@ -912,7 +906,7 @@ impl Service {
     /// source.
     #[cfg(test)]
     pub fn probe_all(&mut self) {
-        if deterministic() {
+        if crate::runtime::providers_scripted() {
             self.apply_scripted();
             return;
         }
@@ -1253,7 +1247,7 @@ pub fn onboarding_completed_path() -> PathBuf {
 /// Set the first-run flag. Best-effort, and never in deterministic mode.
 /// Settable by the later first-run screen; nothing sets it yet.
 pub fn set_onboarding_completed() {
-    if deterministic() {
+    if crate::runtime::providers_scripted() {
         return;
     }
     let _ = std::fs::create_dir_all(crate::store::support_dir());
@@ -1313,7 +1307,7 @@ fn boot_statuses() -> HashMap<ProviderId, ProviderStatus> {
         .into_iter()
         .map(|id| (id, ProviderStatus::checking(id)))
         .collect();
-    if deterministic() {
+    if crate::runtime::providers_scripted() {
         if let Some(scripted) = scripted_statuses() {
             for status in scripted {
                 statuses.insert(status.provider, status);
@@ -1808,7 +1802,7 @@ pub fn set_provider_enabled(id: ProviderId, on: bool) {
 /// Re-probe one provider in the background (the card's Re-check), and
 /// re-log the line when it lands. Read-only probes only.
 pub fn recheck_provider(id: ProviderId) {
-    if deterministic() {
+    if crate::runtime::providers_scripted() {
         live_service().service.recheck(id);
         return;
     }
@@ -1926,7 +1920,7 @@ pub const SETUP_WATCH_FOR: Duration = Duration::from_secs(600);
 /// only a re-probe is (docs/65 §3.1 #6). One watch per provider; a second
 /// call while one runs extends nothing and starts nothing.
 pub fn watch_setup(id: ProviderId) {
-    if deterministic() {
+    if crate::runtime::providers_scripted() {
         return;
     }
     watch_setup_with(id, SETUP_WATCH_EVERY, SETUP_WATCH_FOR, Probes::real);
@@ -1993,7 +1987,7 @@ fn probes_in_flight() -> bool {
 /// the logged line follows sign-in and sign-out. A no-op in
 /// deterministic mode.
 pub fn refresh_muse_status() {
-    if deterministic() {
+    if crate::runtime::providers_scripted() {
         return;
     }
     refresh_in_background(vec![ProviderId::Muse]);
@@ -2003,7 +1997,7 @@ pub fn refresh_muse_status() {
 /// Re-check, and the re-probe after a sign-in). A no-op in deterministic
 /// mode: captures never probe.
 pub fn reprobe_provider(id: crate::providers::ProviderId) {
-    if deterministic() {
+    if crate::runtime::providers_scripted() {
         return;
     }
     refresh_in_background(vec![id]);
@@ -2015,7 +2009,7 @@ pub fn reprobe_provider(id: crate::providers::ProviderId) {
 /// per provider) off this thread and re-logs the line. A repeated state does
 /// nothing; deterministic runs do nothing at all.
 pub fn note_window_active(active: bool) {
-    if deterministic() {
+    if crate::runtime::providers_scripted() {
         return;
     }
     let due = {
@@ -2051,7 +2045,7 @@ pub fn boot() {
     let first_run = is_first_run();
     let _ = FIRST_RUN_AT_BOOT.set(first_run);
     eprintln!("baaz: first_run={first_run}");
-    if deterministic() {
+    if crate::runtime::providers_scripted() {
         return;
     }
     // Every enabled provider, each on its own thread, through the one

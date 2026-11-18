@@ -156,7 +156,7 @@ impl DialogView {
         .on_primary(emitter(cx, move || DialogEvent::Primary { action, target: target.clone() }))
         .on_secondary(emitter(cx, move || DialogEvent::Secondary { action }))
         .on_dismiss(emitter(cx, || gpui::DismissEvent));
-        let card = if crate::clock::deterministic() { card.at_rest() } else { card };
+        let card = if crate::runtime::captures() { card.at_rest() } else { card };
         self.layer(card.into_any_element(), cx)
     }
 }
@@ -806,9 +806,9 @@ impl Harness {
     /// ← / → in the open composer menu (D4): the effort slider steps a
     /// level; on the model picker → opens the selected row's effort submenu
     /// and ← closes it.
-    pub(crate) fn step_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
+    pub(crate) fn menu_sideways(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(view) = self.active.clone() else { return };
-        view.update(cx, |view, cx| view.step_menu(delta, cx));
+        view.update(cx, |view, cx| view.menu_sideways(delta, cx));
     }
 
     pub(crate) fn move_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -825,7 +825,7 @@ impl Harness {
     /// right after, in this same frame) — or `None` when none is up.
     pub(crate) fn compose_dialog(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let view = self.overlays.read(cx).stack.view_as::<DialogView>(crate::overlay_stack::LayerKind::Dialog)?;
-        let facts = DialogFacts { handoff: self.handoff_state.confirm.clone(), still: self.still() || crate::clock::deterministic() };
+        let facts = DialogFacts { handoff: self.handoff_state.confirm.clone(), still: self.still() || crate::runtime::captures() };
         view.update(cx, |dialog, _| dialog.facts = facts);
         Some(view.into_any_element())
     }
@@ -938,6 +938,7 @@ impl Harness {
         }
     }
 
+    #[cfg(feature = "probe")]
     /// `error-dialog:<offline|blocked|sorry>`: capture aid that raises a
     /// critical error dialog through the same [`Self::set_dialog`] path a
     /// real failure takes, so the screenshot shows the production render —
@@ -1070,7 +1071,7 @@ impl Harness {
         // Keyed by the toast, so a new one plays its own enter.
         let mut chip = aui::feedback::toast_chip(gpui::ElementId::Name(format!("toast-chip-{newest_id}").into()), tone, newest.title.clone(), newest.body.clone())
             .queued(queued)
-            .at_rest(crate::clock::deterministic())
+            .at_rest(crate::runtime::captures())
             .on_close(close);
         if let Some(first) = newest.actions.first() {
             let action = newest_id;
@@ -1083,6 +1084,7 @@ impl Harness {
         Some(chip.into_any_element())
     }
 
+    #[cfg(feature = "probe")]
     /// `toast:<title>|<body>`: capture aid that raises a toast through the
     /// same [`Overlays::toast`](crate::overlays::Overlays::toast) path a
     /// production note takes, so the screenshot shows the production
@@ -1215,7 +1217,7 @@ mod tests {
             (Command::RightFiles, RightKind::Files),
         ] {
             let baaz = vc.update(|window, cx| {
-                cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+                cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
             });
             assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "{command:?} runs with no session open");
             let handled = vc.update(|window, cx| {
@@ -1231,7 +1233,7 @@ mod tests {
         }
         for command in [Command::Terminal, Command::NewTerminalCmd] {
             let baaz = vc.update(|window, cx| {
-                cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+                cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
             });
             assert!(vc.update(|_, cx| baaz.read(cx).active.is_none()), "{command:?} runs with no session open");
             let handled = vc.update(|window, cx| {
@@ -1259,7 +1261,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         let mut window_count = 0;
         for command in Command::ALL {
@@ -1297,7 +1299,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         // The event the composer emits for a window command, delivered the way
         // the session would deliver it.
@@ -1332,7 +1334,7 @@ mod tests {
         // is never rendered has no element tree, so no dispatch path and no
         // handlers. `add_empty_window` + `cx.new` gives exactly that.
         let (baaz, vc) = cx.add_window_view(|window, cx| {
-            Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
+            Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx)
         });
         let is_open = |vc: &mut gpui::VisualTestContext| {
             vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette().is_some())
@@ -1372,7 +1374,7 @@ mod tests {
         cx.update(crate::app::bind_keys);
         let mut args = test_args(&state.2);
         args.replay = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp/synthetic-markdown.jsonl"));
-        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::runtime::CaptureToken::default(), window, cx));
         vc.run_until_parked();
         let view = vc.update(|_, cx| baaz.read(cx).active.clone()).expect("the replay opens a session");
         vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
@@ -1409,7 +1411,7 @@ mod tests {
         for open in ["first", "second"] {
             let mut args = test_args(&state.2);
             args.replay = Some(capture.clone());
-            let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+            let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::runtime::CaptureToken::default(), window, cx));
             vc.run_until_parked();
             let label = vc.update(|_, cx| baaz.read(cx).session_list.read(cx).sessions.first().map(|row| row.label.clone()));
             assert_eq!(label.as_deref(), Some(want), "the {open} open's row");
@@ -1429,7 +1431,7 @@ mod tests {
         let mut args = test_args(&state.2);
         args.replay = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp/synthetic-full.jsonl"));
         args.steps = vec!["top".to_owned()];
-        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::runtime::CaptureToken::default(), window, cx));
         vc.run_until_parked();
         let (pending, drafts, header, row) = vc.update(|_, cx| {
             let b = baaz.read(cx);
@@ -1452,7 +1454,7 @@ mod tests {
         cx.update(crate::app::bind_keys);
         let mut args = test_args(&state.2);
         args.replay = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp/synthetic-markdown.jsonl"));
-        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::runtime::CaptureToken::default(), window, cx));
         vc.run_until_parked();
         let view = vc.update(|_, cx| baaz.read(cx).active.clone()).expect("the replay opens a session");
         vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
@@ -1507,7 +1509,7 @@ mod tests {
         cx.update(crate::app::bind_keys);
         let mut args = test_args(&state.2);
         args.replay = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp/synthetic-markdown.jsonl"));
-        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::runtime::CaptureToken::default(), window, cx));
         vc.run_until_parked();
         let view = vc.update(|_, cx| baaz.read(cx).active.clone()).expect("the replay opens a session");
         vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
@@ -1539,7 +1541,7 @@ mod tests {
         cx.update(crate::app::bind_keys);
         let mut args = test_args(&state.2);
         args.replay = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp/synthetic-markdown.jsonl"));
-        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::runtime::CaptureToken::default(), window, cx));
         vc.run_until_parked();
         let view = vc.update(|_, cx| baaz.read(cx).active.clone()).expect("the replay opens a session");
         // The `@` picker's rows: a walked root, seeded rather than walked.
@@ -1609,7 +1611,7 @@ mod tests {
         // an entity made with `cx.new` — an unrendered entity has no element
         // tree, so no dispatch path and no handlers.
         let (baaz, vc) = cx.add_window_view(|window, cx| {
-            Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
+            Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx)
         });
         let selected = |vc: &mut gpui::VisualTestContext| {
             vc.update(|_, cx| baaz.read(cx).palette_selected(cx))
@@ -1763,7 +1765,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         cx.update(crate::app::bind_keys);
         let (baaz, vc) = cx.add_window_view(|window, cx| {
-            Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
+            Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx)
         });
         vc.simulate_keystrokes("cmd-k");
         vc.simulate_keystrokes("down down");
@@ -1791,7 +1793,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         cx.update(crate::app::bind_keys);
         let (baaz, vc) = cx.add_window_view(|window, cx| {
-            Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
+            Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx)
         });
         // Projects has a query field; Commands has one too. Resume and Fork
         // do not, but they are empty without sessions, so Projects is the
@@ -1871,7 +1873,7 @@ mod tests {
         let state = hermetic_state("commands-query");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = cx.add_window_view(|window, cx| {
-            Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
+            Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx)
         });
         // The field is the palette's own, made on its first frame.
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_palette(PaletteKind::Commands, cx)));
@@ -1915,14 +1917,14 @@ mod tests {
         state_dir: &std::path::Path,
     ) -> (gpui::Entity<Harness>, gpui::Entity<SessionView>) {
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(state_dir), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(state_dir), crate::runtime::CaptureToken::default(), window, cx))
         });
         let view = vc.update(|window, cx| {
             let host = SessionHost {
                 provider_id: "echo".to_owned(),
                 workspace: state_dir.to_string_lossy().into_owned(),
                 overlays: baaz.read(cx).overlays.clone(),
-                capture: crate::shot::CaptureToken::default(),
+                capture: crate::runtime::CaptureToken::default(),
                 terminal_host: None,
             };
             cx.new(|cx| SessionView::new("s-plus".to_owned(), host, window, cx))
@@ -2021,7 +2023,7 @@ mod tests {
         state_dir: &std::path::Path,
     ) -> gpui::Entity<Harness> {
         vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(state_dir), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(test_args(state_dir), crate::runtime::CaptureToken::default(), window, cx))
         })
     }
 
@@ -2104,7 +2106,7 @@ mod tests {
         cx.update(crate::app::bind_keys);
         let mut args = test_args(dir);
         args.replay = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp/synthetic-markdown.jsonl"));
-        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::runtime::CaptureToken::default(), window, cx));
         vc.run_until_parked();
         let view = vc.update(|_, cx| baaz.read(cx).active.clone()).expect("the replay opens a session");
         vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
@@ -2274,7 +2276,7 @@ mod tests {
         use crate::overlay_stack::{Entry, Layer};
         let state = hermetic_state("stack-covers");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx));
         vc.run_until_parked();
         let covered = |vc: &mut gpui::VisualTestContext| vc.update(|window, cx| baaz.read(cx).page_covers(window, cx).base.overlay_open);
         assert!(!covered(vc), "nothing open, nothing covers");

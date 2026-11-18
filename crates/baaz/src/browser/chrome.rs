@@ -427,6 +427,8 @@ fn restore_active(tabs: &mut Tabs, opener_tab: &Tab, active: Option<TabId>) {
 /// behaviourally against the scripted backend below.)
 #[derive(Clone, Debug)]
 pub(crate) enum FakePageScript {
+    // Scripted only by the probe's page steps.
+    #[cfg_attr(not(feature = "probe"), allow(dead_code))]
     /// A find result for `query` ("3 of 12" with the defaults).
     Find {
         /// What was searched for.
@@ -436,6 +438,8 @@ pub(crate) enum FakePageScript {
         /// How many matches the page holds.
         total: u32,
     },
+    // Scripted only by the probe's page steps.
+    #[cfg_attr(not(feature = "probe"), allow(dead_code))]
     /// A permission ask waiting for an answer.
     Permission {
         /// The engine's id for the ask.
@@ -445,8 +449,12 @@ pub(crate) enum FakePageScript {
         /// What it asked for.
         kinds: Vec<PermissionKind>,
     },
+    // Scripted only by the probe's page steps.
+    #[cfg_attr(not(feature = "probe"), allow(dead_code))]
     /// A download's latest state.
     Download(DownloadState),
+    // Scripted only by the probe's page steps.
+    #[cfg_attr(not(feature = "probe"), allow(dead_code))]
     /// The renderer went away; the tab reads as crashed until the next
     /// successful navigation.
     Crashed(String),
@@ -465,6 +473,7 @@ impl FakePageScript {
     }
 }
 
+#[cfg(feature = "probe")]
 /// Parse a `permission:<kinds>` verb rest (`camera,microphone`) into the
 /// asked kinds. Unknown names answer `None` and the verb records a step
 /// failure instead of scripting a request the sentence never names.

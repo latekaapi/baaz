@@ -97,6 +97,7 @@ impl SessionView {
 }
 
 impl SessionRuntime {
+    #[cfg(feature = "probe")]
     /// Send `text` without touching the composer — the scripting hook.
     pub fn send_text(&mut self, text: String, cx: &mut Context<Self>) {
         self.submit(text, cx);

@@ -176,6 +176,7 @@ impl OpenState {
         self.provider_open_error = None;
     }
 
+    #[cfg(feature = "probe")]
     /// Whether a session the scripted verbs should wait for is still
     /// opening: a switch in flight, or a new session whose view is up while
     /// its open is still on the wire.

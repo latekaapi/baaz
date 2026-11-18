@@ -68,6 +68,7 @@ pub(crate) const FEEDBACK_PROBE_WARM: Duration = Duration::from_secs(1);
 /// Hover hit-tests run at most this often: every ≥ 2 px move past this
 /// interval re-tests, anything sooner keeps the last outline.
 pub(crate) const FEEDBACK_HOVER_THROTTLE: Duration = Duration::from_millis(30);
+#[cfg(feature = "probe")]
 /// A queued `note:`/`click:`/`drag:` step waits this long for the popover
 /// (or the idle shell) before it fails loudly instead of racing the
 /// async capture.
@@ -170,6 +171,8 @@ pub(crate) struct PendingClick {
     pub since: Instant,
 }
 
+// Queued only by the probe's `feedback:` verb.
+#[cfg_attr(not(feature = "probe"), allow(dead_code))]
 /// A step-driven action waiting behind an in-flight capture or an earlier
 /// queued step: a `click:`/`drag:` issued while a capture is pending queues
 /// here instead of cancelling it, a `note:` waits here for its popover,
@@ -558,15 +561,17 @@ impl FeedbackUi {
         if self.phase == FeedbackPhase::Active && !self.saving {
             self.clear_transient();
             while let Some((queued, _)) = self.step_queue.pop_front() {
-                crate::steps::record_step_failure(queued.step());
+                fail_queued_step(queued.step());
             }
             self.disarm_discard();
             self.phase = FeedbackPhase::Paused;
         }
     }
 
-    /// The header icon while Paused, or the `resume` verb: Paused →
-    /// Active, else a no-op — and always a no-op while [`Self::saving`].
+    #[cfg(feature = "probe")]
+    /// The `resume` verb (the header icon goes through [`Self::toggle`]):
+    /// Paused → Active, else a no-op — and always a no-op while
+    /// [`Self::saving`].
     pub fn resume(&mut self) {
         if self.phase == FeedbackPhase::Paused && !self.saving {
             self.disarm_discard();
@@ -613,6 +618,7 @@ impl FeedbackUi {
         }
     }
 
+    #[cfg(feature = "probe")]
     /// Discard arm + confirm in one go, for the `discard` step verb. A
     /// no-op while [`Self::saving`].
     pub fn discard_all(&mut self) {
@@ -857,6 +863,7 @@ pub fn feedback_build_string() -> String {
     )
 }
 
+#[cfg(feature = "probe")]
 /// Parse an `x,y` window-logical point for the `hover:`/`click:` step
 /// subs. `None` on anything unparseable (or non-finite).
 fn parse_feedback_point(payload: &str) -> Option<Point<Pixels>> {
@@ -869,6 +876,7 @@ fn parse_feedback_point(payload: &str) -> Option<Point<Pixels>> {
     }
 }
 
+#[cfg(feature = "probe")]
 /// Parse an `x1,y1,x2,y2` drag for the `drag:` step sub: corner to corner
 /// in window-logical pixels. `None` on anything unparseable (or
 /// non-finite).
@@ -1146,6 +1154,7 @@ impl FeedbackUi {
         cx.notify();
     }
 
+    #[cfg(feature = "probe")]
     /// `feedback-mode:<sub>`: `on` parks the run-only [`Self::forced_on`]
     /// flag (never `layout.feedback_mode`) and enters Active; `pause` /
     /// `resume` move between Active and Paused; `off` clears the run's
@@ -1191,6 +1200,7 @@ impl FeedbackUi {
         result
     }
 
+    #[cfg(feature = "probe")]
     /// [`Self::step_feedback`]'s body: what the sub does, before its redraw.
     fn run_step(&mut self, screen: Screen<'_>, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         if self.saving {
@@ -1364,6 +1374,7 @@ impl FeedbackUi {
         }
     }
 
+    #[cfg(feature = "probe")]
     /// Whether a control sub (`pause`/`resume`/`done`/`discard`) must wait
     /// its turn: anything is still resolving — an in-flight capture, a
     /// parked cold-tree retry, or an earlier queued step.
@@ -1373,6 +1384,7 @@ impl FeedbackUi {
             || !self.step_queue.is_empty()
     }
 
+    #[cfg(feature = "probe")]
     /// Run a step `click:`/`drag:` now when the shell is idle, or queue it
     /// behind the in-flight capture (or the already-queued steps) instead
     /// of cancelling them the way an interactive press would.
@@ -1406,6 +1418,7 @@ impl FeedbackUi {
         }
     }
 
+    #[cfg(feature = "probe")]
     /// Push a step onto the queue: the frame loop's poll drains it from
     /// there, so no task is ever spawned for it.
     pub(crate) fn queue_step(&mut self, step: QueuedStep, cx: &mut Context<Self>) {
@@ -1413,6 +1426,7 @@ impl FeedbackUi {
         cx.notify();
     }
 
+    #[cfg(feature = "probe")]
     /// Run one queued control sub (`pause`/`resume`/`done`/`discard`) with
     /// the same effect as its immediate step verb. Unlike the interrupting
     /// [`Self::pause`], this never fails the steps queued behind it:
@@ -1446,6 +1460,7 @@ impl FeedbackUi {
         cx.notify();
     }
 
+    #[cfg(feature = "probe")]
     /// Whether the queue's front is a control sub.
     fn front_is_control(&self) -> bool {
         matches!(
@@ -1460,6 +1475,7 @@ impl FeedbackUi {
         )
     }
 
+    #[cfg(feature = "probe")]
     /// One pump tick, driven by the layer's per-frame poll (never a task,
     /// so queued steps resolve wherever frames do — the real window, a
     /// headless `--steps` run, or a test draw). A `note:` fills and saves
@@ -1479,7 +1495,7 @@ impl FeedbackUi {
                 return;
             }
             while let Some((queued, _)) = self.step_queue.pop_front() {
-                crate::steps::record_step_failure(queued.step());
+                fail_queued_step(queued.step());
             }
             cx.notify();
             return;
@@ -1489,7 +1505,7 @@ impl FeedbackUi {
         };
         if since.elapsed() >= FEEDBACK_STEP_WAIT {
             let (queued, _) = self.step_queue.pop_front().expect("front checked");
-            crate::steps::record_step_failure(queued.step());
+            fail_queued_step(queued.step());
             cx.notify();
             return;
         }
@@ -1530,7 +1546,7 @@ impl FeedbackUi {
         let (queued, _) = self.step_queue.pop_front().expect("front checked");
         match queued {
             QueuedStep::Note { step, .. } => {
-                crate::steps::record_step_failure(&step);
+                fail_queued_step(&step);
             }
             QueuedStep::Click { point, .. } => {
                 self.feedback_press_at(point, window, cx);
@@ -1797,6 +1813,7 @@ impl FeedbackUi {
         if self.phase != FeedbackPhase::Active {
             return;
         }
+        #[cfg(feature = "probe")]
         if !self.step_queue.is_empty() {
             self.step_pump_tick(screen, window, cx);
         }
@@ -1967,6 +1984,7 @@ impl FeedbackUi {
         cx.notify();
     }
 
+    #[cfg(feature = "probe")]
     /// Fill the open popover's field without saving, for the `note:` step.
     pub(crate) fn fill_feedback_note(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(note) = self.popover.as_ref() else {
@@ -2017,6 +2035,7 @@ impl crate::app::Harness {
         self.feedback.update(cx, |feedback, cx| feedback.feedback_setting_off(cx));
     }
 
+    #[cfg(feature = "probe")]
     pub(crate) fn step_feedback(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let feedback = self.feedback.clone();
         let screen = |window: &mut Window, cx: &gpui::App| self.feedback_context(window, cx);
@@ -2917,6 +2936,17 @@ impl gpui::Render for FeedbackTip {
     }
 }
 
+
+/// A queued feedback step that never resolved fails the `--steps` run under
+/// its own step name. Only the probe's `feedback:` verb queues one, so
+/// without the `probe` feature there is nothing to fail.
+fn fail_queued_step(step: &str) {
+    #[cfg(feature = "probe")]
+    crate::steps::record_step_failure(step);
+    #[cfg(not(feature = "probe"))]
+    let _ = step;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3137,7 +3167,7 @@ mod tests {
             cx.new(|cx| {
                 crate::app::Harness::new(
                     test_args(dir),
-                    crate::shot::CaptureToken::default(),
+                    crate::runtime::CaptureToken::default(),
                     window,
                     cx,
                 )
@@ -3231,7 +3261,7 @@ mod tests {
         cx.add_window_view(|window, cx| {
             crate::app::Harness::new(
                 test_args(dir),
-                crate::shot::CaptureToken::default(),
+                crate::runtime::CaptureToken::default(),
                 window,
                 cx,
             )
@@ -3366,7 +3396,7 @@ mod tests {
             cx.new(|cx| {
                 crate::app::Harness::new(
                     test_args(dir),
-                    crate::shot::CaptureToken::default(),
+                    crate::runtime::CaptureToken::default(),
                     window,
                     cx,
                 )
@@ -3406,7 +3436,7 @@ mod tests {
         let (baaz, vc) = cx.add_window_view(|window, cx| {
             crate::app::Harness::new(
                 test_args(dir),
-                crate::shot::CaptureToken::default(),
+                crate::runtime::CaptureToken::default(),
                 window,
                 cx,
             )
@@ -4040,7 +4070,7 @@ mod tests {
             cx.new(|cx| {
                 crate::app::Harness::new(
                     test_args(&state.2),
-                    crate::shot::CaptureToken::default(),
+                    crate::runtime::CaptureToken::default(),
                     window,
                     cx,
                 )

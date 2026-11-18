@@ -123,7 +123,7 @@ impl ImportUi {
     /// The boot state: the journal (empty in a capture, which never writes
     /// it either).
     pub(crate) fn boot() -> Self {
-        let journal = if crate::clock::deterministic() {
+        let journal = if crate::runtime::state_isolated() {
             import::Journal::default()
         } else {
             import::read_journal(&crate::store::support_dir())
@@ -354,6 +354,7 @@ impl Harness {
         self.import.cache = Some(ImportCache { plan, computed_at: std::time::Instant::now() });
     }
 
+    #[cfg(feature = "probe")]
     /// The scan, synchronously: the `--steps` verbs only (fixture homes),
     /// so a scripted capture never races the background scan.
     fn scan_import_now(&mut self, cx: &mut Context<Self>) {
@@ -484,7 +485,7 @@ impl Harness {
         }
         // A capture stamps the run with the newest session it imports, not
         // the wall clock, so "N imported <date>" reads the same every day.
-        let at_ms = if crate::clock::deterministic() {
+        let at_ms = if crate::runtime::clock().is_frozen() {
             queue.iter().map(|(found, _)| found.updated_ms).max().unwrap_or(0)
         } else {
             crate::usage::now_ms()
@@ -638,7 +639,7 @@ impl Harness {
 
     /// The journal to disk, never in a capture.
     fn write_import_journal(&self) {
-        if crate::clock::deterministic() {
+        if crate::runtime::state_isolated() {
             return;
         }
         import::write_journal(&crate::store::support_dir(), &self.import.journal);
@@ -660,6 +661,7 @@ impl Harness {
 
     // ---------------------------------------------------------------- steps
 
+    #[cfg(feature = "probe")]
     /// `import-open`: the sheet, on a plan scanned now (fixture homes). A
     /// sheet that did not open with a choice is an `Err`.
     pub(crate) fn step_import_open(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
@@ -680,6 +682,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `import-toggle:<folder>`: flip one folder (its name or cwd), or
     /// `scripted` for the "Skip scripted runs" box. No open sheet, or no
     /// such folder in the plan, is an `Err`.
@@ -703,6 +706,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `import-run[:<n>]`: press Import; with `n`, hold after `n` sessions.
     /// An unparseable `n`, or a press that starts no new run (one already
     /// running, no sheet or plan, nothing chosen left to import), is an
@@ -721,6 +725,7 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(feature = "probe")]
     /// `import-undo`: the toast's Undo for the newest run. No run in the
     /// journal is an `Err`.
     pub(crate) fn step_import_undo(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {

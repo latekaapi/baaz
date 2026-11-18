@@ -113,7 +113,7 @@ static STORE: crate::store::JsonStore<ProviderSessionStore> =
     crate::store::JsonStore::new("provider-sessions.json").with_encoding(encode);
 
 fn encode(store: &ProviderSessionStore) -> Option<Vec<u8>> {
-    if deterministic() {
+    if crate::runtime::state_isolated() {
         return None;
     }
     serde_json::to_vec_pretty(store).ok()
@@ -129,15 +129,10 @@ fn encode(store: &ProviderSessionStore) -> Option<Vec<u8>> {
 /// (`scripts/uiprobe.py`'s `migrate-sessions`): the registry it reads is
 /// the fixture in the temp state dir, never the owner's.
 pub fn read() -> ProviderSessionStore {
-    if deterministic() && std::env::var_os("BAAZ_MIGRATION_FIXTURE").is_none() {
+    if crate::runtime::state_isolated() && std::env::var_os("BAAZ_MIGRATION_FIXTURE").is_none() {
         return ProviderSessionStore::new();
     }
     crate::store::read_json_map(&path())
-}
-
-/// Whether this is a deterministic capture (see [`read`]).
-fn deterministic() -> bool {
-    std::env::var("BAAZ_DETERMINISTIC").as_deref() == Ok("1")
 }
 
 /// Write the records now, in order with every queued save. Blocking: the

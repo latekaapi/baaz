@@ -68,7 +68,7 @@ pub fn owner_home() -> PathBuf {
 /// `BAAZ_DETERMINISTIC=1` only with a fixture owner home, so a capture never
 /// reads (or paints) the real `~/.claude` and `~/.codex`.
 pub fn scan_allowed() -> bool {
-    !crate::clock::deterministic() || std::env::var_os("BAAZ_IMPORT_OWNER_HOME").is_some_and(|dir| !dir.is_empty())
+    !crate::runtime::state_isolated() || std::env::var_os("BAAZ_IMPORT_OWNER_HOME").is_some_and(|dir| !dir.is_empty())
 }
 
 // ------------------------------------------------------------------- scan
@@ -819,6 +819,7 @@ pub fn print_dry_run() {
 
 // ------------------------------------------------------------- fixtures
 
+#[cfg(feature = "probe")]
 /// Write `count` sessions into a fixture owner home, in each CLI's real
 /// on-disk shape: Claude Code transcripts under `.claude/projects/<slug>/`
 /// and Codex rollouts under `.codex/sessions/2026/10/…`, spread over

@@ -151,16 +151,17 @@ fn close_and_keyboard_follow_the_shown_tab_not_the_project() {
 }
 
 /// Captures never touch the owner's tabs: the store is skipped in both
-/// directions under `BAAZ_DETERMINISTIC=1`, like `layout::read`.
+/// directions on the runtime's in-memory browser backend (every capture),
+/// like `layout::read` on an isolated state dir.
 #[test]
-fn deterministic_captures_never_touch_tabs_json() {
+fn captures_never_touch_tabs_json() {
     let tabs = source("browser/tabs.rs");
     assert!(
-        tabs.contains("if deterministic() {\n        return Tabs::default();"),
-        "deterministic loads read nothing"
+        tabs.contains("if crate::runtime::browser_backend().in_memory() {\n        return Tabs::default();"),
+        "in-memory loads read nothing"
     );
     assert!(
-        tabs.contains("if deterministic() {\n        return None;"),
-        "deterministic saves write nothing"
+        tabs.contains("if crate::runtime::browser_backend().in_memory() {\n        return None;"),
+        "in-memory saves write nothing"
     );
 }

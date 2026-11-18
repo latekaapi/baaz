@@ -271,6 +271,7 @@ impl EventEmitter<SidebarEvent> for SidebarPane {}
 static SIDEBAR_PANE_RENDERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static BAAZ_ROOT_RENDERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+#[cfg(feature = "probe")]
 /// Drain the pane-render count above, for the `sidebar-wheel:` report.
 pub(crate) fn take_sidebar_pane_renders() -> u64 {
     SIDEBAR_PANE_RENDERS.swap(0, std::sync::atomic::Ordering::Relaxed)
@@ -287,6 +288,7 @@ pub(crate) fn take_trace_pane_ticks() -> u64 {
     TRACE_PANE_TICKS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
+#[cfg(feature = "probe")]
 /// Drain the root-render count below, for the `sidebar-wheel:` report.
 pub(crate) fn take_baaz_root_renders() -> u64 {
     BAAZ_ROOT_RENDERS.swap(0, std::sync::atomic::Ordering::Relaxed)
@@ -410,6 +412,7 @@ pub(crate) fn reveal_head_row(
 /// event before. Drained per `sidebar-wheel:` line, like `take_wheel_scroll_bys`.
 static SIDEBAR_WHEEL_DRAINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+#[cfg(feature = "probe")]
 /// Drain the applied-drain count above, for the `sidebar-wheel:` report.
 pub(crate) fn take_sidebar_wheel_drains() -> u64 {
     SIDEBAR_WHEEL_DRAINS.swap(0, std::sync::atomic::Ordering::Relaxed)
@@ -585,6 +588,7 @@ impl SidebarPane {
         self.mode_fade_since = Some(at);
     }
 
+    #[cfg(feature = "probe")]
     /// Start a frame-paced wheel sweep (`sidebar-scroll-sweep:`).
     pub(crate) fn start_scroll_sweep(&mut self, sweep: crate::resize::ScrollSweep, cx: &mut Context<Self>) {
         self.scroll_sweep = Some(sweep);
@@ -719,6 +723,7 @@ impl SidebarPane {
         }
     }
 
+    #[cfg(feature = "probe")]
     /// `sidebar-hover:<id>`: stand the pointer state on `id`'s row, as its
     /// own hover report would (the hover card is not armed). An id with no
     /// session fails the step.
@@ -1681,7 +1686,7 @@ mod tests {
                         provider_id: "muse".to_owned(),
                         workspace,
                         overlays: cx.new(|_| crate::overlays::Overlays::default()),
-                        capture: crate::shot::CaptureToken::default(),
+                        capture: crate::runtime::CaptureToken::default(),
                         terminal_host: None,
                     },
                     window,
@@ -2116,7 +2121,7 @@ mod tests {
     fn b3c_window(vc: &mut gpui::VisualTestContext, args: crate::Args) -> Entity<Harness> {
         vc.update(|window, cx| {
             let baaz =
-                cx.new(|cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+                cx.new(|cx| Harness::new(args, crate::runtime::CaptureToken::default(), window, cx));
             baaz.update(cx, |h, _| {
                 h.auth = crate::login::Auth::SignedIn(crate::auth::Identity {
                     lane: provider::AccountLane::AccountLogin,
@@ -2538,7 +2543,7 @@ mod tests {
                     provider_id: "echo".into(),
                     workspace: workspace.clone(),
                     overlays: h.overlays.clone(),
-                    capture: crate::shot::CaptureToken::default(),
+                    capture: crate::runtime::CaptureToken::default(),
                     terminal_host: None,
                 };
                 let view =
@@ -2593,7 +2598,7 @@ mod tests {
                     provider_id: "echo".into(),
                     workspace: workspace.clone(),
                     overlays: h.overlays.clone(),
-                    capture: crate::shot::CaptureToken::default(),
+                    capture: crate::runtime::CaptureToken::default(),
                     terminal_host: None,
                 };
                 let view =
@@ -2631,7 +2636,7 @@ mod tests {
                     provider_id: "echo".into(),
                     workspace: workspace.clone(),
                     overlays: h.overlays.clone(),
-                    capture: crate::shot::CaptureToken::default(),
+                    capture: crate::runtime::CaptureToken::default(),
                     terminal_host: None,
                 };
                 let view =
@@ -2869,7 +2874,7 @@ mod tests {
         args: crate::Args,
     ) -> (Entity<Harness>, Entity<SidebarPane>, &mut gpui::VisualTestContext) {
         let (baaz, vc) =
-            cx.add_window_view(|window, cx| Harness::new(args, crate::shot::CaptureToken::default(), window, cx));
+            cx.add_window_view(|window, cx| Harness::new(args, crate::runtime::CaptureToken::default(), window, cx));
         vc.run_until_parked();
         let pane = vc.update(|_, cx| baaz.read(cx).sidebar_pane.clone());
         (baaz, pane, vc)

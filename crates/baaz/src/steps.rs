@@ -425,7 +425,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     },
     WindowVerb { verb: "sidebar", run: |this, _, _, cx| { this.toggle_sidebar(cx); Ok(()) } },
     // Was `peek`, which the Browse link verb above shadowed, so it never ran.
-    WindowVerb { verb: "sidebar-peek", run: |this, _, _, cx| { this.peek_pinned = !this.peek_pinned; cx.notify(); Ok(()) } },
+    WindowVerb { verb: "sidebar-peek", run: |this, _, _, cx| { this.capture.toggle_peek_pinned(); cx.notify(); Ok(()) } },
     WindowVerb { verb: "overflow", run: |this, _, _, cx| { this.open_menu(MenuKind::Overflow, cx); Ok(()) } },
     WindowVerb { verb: "view-menu", run: |this, _, _, cx| { this.open_menu(MenuKind::ViewOptions, cx); Ok(()) } },
     WindowVerb { verb: "account", run: |this, _, _, cx| { this.open_menu(MenuKind::Account, cx); Ok(()) } },
@@ -1595,7 +1595,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(step_test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(step_test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         for kind in crate::layout::RightKind::ALL {
             vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right(kind.slug(), cx))).expect("a known kind opens");
@@ -1616,7 +1616,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(step_test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(step_test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         let start = vc.update(|_, cx| crate::layout::Layout::get(cx).right_open);
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("", cx))).expect("empty toggles");
@@ -1651,7 +1651,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(step_test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(step_test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
         });
         // Start somewhere the default is NOT, or the assertion below passes
         // whether or not the verb touches the field — the hermetic state opens

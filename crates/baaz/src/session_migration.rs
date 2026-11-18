@@ -1064,7 +1064,7 @@ impl BaazHarness {
     /// a missing or stale cache kicks a background recompute and offers
     /// when it lands, so the walk never runs on the UI thread.
     pub(crate) fn maybe_offer_session_migration(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.connect_open(cx) || crate::clock::deterministic() {
+        if self.connect_open(cx) || crate::runtime::captures() {
             return;
         }
         let state = crate::store::support_dir();

@@ -482,7 +482,7 @@ pub(crate) fn read_snapshot_for_cached(
     dir_cache: &mut DirListCache,
 ) -> RightSnapshot {
     dir_cache.for_root(root);
-    if crate::clock::deterministic() {
+    if crate::runtime::captures() {
         let (files, files_truncated) =
             walk_root_expanded_cached(root, FILE_WALK_CAP, expanded, dir_cache);
         return RightSnapshot {
@@ -2907,7 +2907,7 @@ mod tests {
             cx.new(|cx| {
                 Harness::new(
                     harness_args(&state.2),
-                    crate::shot::CaptureToken::default(),
+                    crate::runtime::CaptureToken::default(),
                     window,
                     cx,
                 )
@@ -3021,7 +3021,7 @@ mod tests {
         });
         let vc = cx.add_empty_window();
         let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(harness_args(&repo), crate::shot::CaptureToken::default(), window, cx))
+            cx.new(|cx| Harness::new(harness_args(&repo), crate::runtime::CaptureToken::default(), window, cx))
         });
         macro_rules! draw {
             () => {
@@ -3082,7 +3082,7 @@ mod tests {
         let state = hermetic_harness_dir("files-wrap");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let (baaz, vc) = cx.add_window_view(|window, cx| {
-            Harness::new(harness_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
+            Harness::new(harness_args(&state.2), crate::runtime::CaptureToken::default(), window, cx)
         });
         std::fs::write(state.2.join("long.py"), format!("x = {}\n", "1 + ".repeat(200))).unwrap();
         vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.show_right(crate::layout::RightKind::Files, cx)));

@@ -450,6 +450,7 @@ impl Harness {
     }
 
 
+    #[cfg(feature = "probe")]
     /// Rebuild the shown tab's page, consuming queued fake-backend scripts
     /// (the `--steps` capture seam; production never queues). Answers
     /// whether a page was rebuilt.

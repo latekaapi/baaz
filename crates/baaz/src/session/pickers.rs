@@ -69,7 +69,7 @@ impl PickerDelegate for ModelDelegate {
             .on_pick(move |id, window, cx| select(id, window, cx))
             .on_pick_nested(nested)
             .on_close(move |window, cx| dismiss(window, cx));
-        let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
+        let menu = if crate::runtime::captures() { menu.at_rest() } else { menu };
         menu.into_any_element()
     }
 }
@@ -119,7 +119,7 @@ impl PickerDelegate for MentionDelegate {
         let (select, hover) = (frame.select.clone(), frame.hover.clone());
         let picker = mention_picker("mention-picker", self.filter.clone(), vec![MentionSection::new("Files", rows)], frame.selected)
             .max_rows_height(self.max_rows);
-        let picker = if crate::clock::deterministic() { picker.at_rest() } else { picker };
+        let picker = if crate::runtime::captures() { picker.at_rest() } else { picker };
         // The pointer moving over a row makes it the selection, so an arrow
         // continues from the row that is lit (the library only reports a
         // real move, so a resting pointer never takes the highlight).
