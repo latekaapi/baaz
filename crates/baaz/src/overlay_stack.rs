@@ -18,20 +18,27 @@
 //!
 //! An entry carries its content where the content is small (the menu's
 //! selection, the rename's target, the sheet's stage), so "is it open" and
-//! "what does it show" are one value and cannot disagree. The views that draw
-//! an entry read it from here; what they keep is the content of their own
-//! widgets (an input's text, a scroll offset). One entry per [`LayerKind`]:
+//! "what does it show" are one value and cannot disagree. A dialog, a sheet,
+//! a palette or a picker is its own view (plan 4.6b): the entry holds that
+//! view ([`Entry::view`]), the hosts draw it from here, and the view keeps
+//! the content of its own widgets (a query field, the selection, a folder
+//! list standing open) and redraws itself. One entry per [`LayerKind`]:
 //! opening a kind that is open replaces it in place at the top.
 //!
-//! What closes an entry other than Escape (a row picked, a click outside, a
-//! mode switch) closes it by kind ([`OverlayStack::close`]); the same restore
-//! applies. Escape additionally runs the entry's own `on_close`, for the few
-//! entries whose closing does more than drop the entry (a sheet that hands
-//! the keyboard back, a rename that refocuses the composer).
+//! A view closes itself one way: it emits [`gpui::DismissEvent`] (its
+//! Escape, its ✕, a click away, its panel losing the keyboard), and the root
+//! pops the stack newest-first (`Harness::dismiss_overlay_view`) — a menu
+//! opened over a sheet closes before the sheet does. What closes an entry for
+//! a reason of its own (a row picked, a mode switch) closes it by kind
+//! ([`OverlayStack::close`]); the same restore applies. A pop (Escape, a
+//! dismissal) additionally runs the entry's own `on_close`, for the entries
+//! whose closing does more than drop the entry (a sheet that cancels its
+//! flow, a bookmark that keeps what was typed, a rename that refocuses the
+//! composer).
 
 use std::rc::Rc;
 
-use gpui::{Context, EntityId, FocusHandle, Window};
+use gpui::{AnyView, Context, EntityId, FocusHandle, Subscription};
 
 use crate::app::Harness;
 
@@ -63,17 +70,19 @@ impl Host {
     }
 }
 
-/// What Escape runs beyond dropping the entry: it gets the entry's content
-/// back (a bookmark popover keeps what was typed). Escape pops on the root
-/// (`Harness::pop_overlay`), which hands itself in: a hook never updates
-/// the root re-entrantly.
-pub(crate) type OnClose = Rc<dyn Fn(Layer, &mut Harness, &mut Window, &mut Context<Harness>)>;
+/// What Escape (or the entry's own view dismissing itself) runs beyond
+/// dropping the entry: it gets the entry's content back (a bookmark popover
+/// keeps what was typed). The pop runs on the root (`Harness::pop_overlay`,
+/// `Harness::dismiss_overlay_view`), which hands itself in: a hook never
+/// updates the root re-entrantly.
+pub(crate) type OnClose = Rc<dyn Fn(Layer, &mut Harness, &mut Context<Harness>)>;
 
 /// One kind of overlay, with its content.
 pub(crate) enum Layer {
     /// The modal dialog.
     Dialog(Dialog),
-    /// The command palette (⌘K and its lists).
+    /// The command palette (⌘K and its lists): which list; the view
+    /// ([`crate::palette::PaletteView`]) holds the rest.
     Palette(Palette),
     /// A menu on the composer, header, sidebar or pane (the [`MenuKind`]s).
     Menu(Menu),
@@ -82,7 +91,7 @@ pub(crate) enum Layer {
     /// The site-information panel under the address line (overlay window).
     SiteInfo,
     /// The bookmark popover under the address line (overlay window).
-    Bookmark(crate::overlay::BookmarkEdit),
+    Bookmark(gpui::Entity<crate::overlay::BookmarkView>),
     /// Browse's downloads popover.
     Downloads,
     /// Browse's extensions popover.
@@ -113,6 +122,15 @@ pub(crate) enum Layer {
     RenameSession(String),
     /// A project's inline rename: its project id.
     RenameProject(String),
+    /// The Skills page header's Add menu.
+    SkillsAddMenu,
+    /// The Skills page detail's ⋯ menu.
+    SkillsOverflow,
+    /// The context meter's breakdown, pinned open (a scripted capture's
+    /// `meter` verb).
+    Meter,
+    /// The right pane's Create PR form: its base-branch menu.
+    PrBaseMenu,
 }
 
 /// A [`Layer`] without its content: what `is_open` and `close` take.
@@ -139,6 +157,10 @@ pub(crate) enum LayerKind {
     ChromeImport,
     RenameSession,
     RenameProject,
+    SkillsAddMenu,
+    SkillsOverflow,
+    Meter,
+    PrBaseMenu,
 }
 
 impl Layer {
@@ -166,6 +188,10 @@ impl Layer {
             Layer::ChromeImport(_) => LayerKind::ChromeImport,
             Layer::RenameSession(_) => LayerKind::RenameSession,
             Layer::RenameProject(_) => LayerKind::RenameProject,
+            Layer::SkillsAddMenu => LayerKind::SkillsAddMenu,
+            Layer::SkillsOverflow => LayerKind::SkillsOverflow,
+            Layer::Meter => LayerKind::Meter,
+            Layer::PrBaseMenu => LayerKind::PrBaseMenu,
         }
     }
 
@@ -254,10 +280,19 @@ pub(crate) struct Entry {
     /// Where closing it gives the keyboard, whatever held it at open: the
     /// composer's menus hand it to the composer.
     restore_to: Option<FocusHandle>,
-    /// The entity that draws it, notified when Escape pops it.
+    /// The entity that draws it, notified when a pop (Escape, a view's
+    /// dismissal) closes it.
     pub(crate) owner: Option<EntityId>,
     /// What Escape runs beyond dropping it.
     pub(crate) on_close: Option<OnClose>,
+    /// The view that draws it, when it is its own view (a dialog, a sheet,
+    /// a palette, a picker): the hosts draw this, and its
+    /// [`gpui::DismissEvent`] pops the entry ([`Self::view`]).
+    pub(crate) view: Option<AnyView>,
+    /// The root's subscriptions to the view (its `DismissEvent`, its picks,
+    /// its typed events), held as long as the entry: a closed entry hears
+    /// nothing more.
+    _kept: Vec<Subscription>,
 }
 
 impl Entry {
@@ -272,7 +307,24 @@ impl Entry {
             restore_to: None,
             owner: None,
             on_close: None,
+            view: None,
+            _kept: Vec::new(),
         }
+    }
+
+    /// Hold `subscription` (to the entry's view) as long as the entry.
+    pub(crate) fn keep(mut self, subscription: Subscription) -> Self {
+        self._kept.push(subscription);
+        self
+    }
+
+    /// Drawn by `view`. Its `DismissEvent` reaches the root through a
+    /// subscription the root holds — kept on the entry
+    /// (`Harness::push_overlay_view`), or the root's own for a view that
+    /// outlives its entries (the setup sheet's host).
+    pub(crate) fn view(mut self, view: AnyView) -> Self {
+        self.view = Some(view);
+        self
     }
 
     /// Give the keyboard to `focus` when it closes (and the keyboard is
@@ -289,7 +341,7 @@ impl Entry {
     }
 
     /// Run `close` when Escape pops it.
-    pub(crate) fn on_close(mut self, close: impl Fn(Layer, &mut Harness, &mut Window, &mut Context<Harness>) + 'static) -> Self {
+    pub(crate) fn on_close(mut self, close: impl Fn(Layer, &mut Harness, &mut Context<Harness>) + 'static) -> Self {
         self.on_close = Some(Rc::new(close));
         self
     }
@@ -418,6 +470,21 @@ impl OverlayStack {
         self.entries.last().map(Entry::kind)
     }
 
+    /// The view drawing the entry of `kind`, when that entry is a view.
+    pub(crate) fn view(&self, kind: LayerKind) -> Option<AnyView> {
+        self.entry(kind).and_then(|open| open.view.clone())
+    }
+
+    /// The view drawing the entry of `kind`, as its own type.
+    pub(crate) fn view_as<V: 'static>(&self, kind: LayerKind) -> Option<gpui::Entity<V>> {
+        self.view(kind).and_then(|view| view.downcast::<V>().ok())
+    }
+
+    /// Whether an open entry is drawn by the view `id`.
+    pub(crate) fn holds_view(&self, id: EntityId) -> bool {
+        self.entries.iter().any(|open| open.view.as_ref().is_some_and(|view| view.entity_id() == id))
+    }
+
     /// The entry of `kind`, if open.
     pub(crate) fn entry(&self, kind: LayerKind) -> Option<&Entry> {
         self.entries.iter().find(|open| open.kind() == kind)
@@ -521,7 +588,7 @@ content!(dialog, dialog_mut, Dialog, Dialog);
 content!(palette, palette_mut, Palette, Palette);
 content!(menu, menu_mut, Menu, Menu);
 content!(browse_menu, browse_menu_mut, BrowseMenu, aui::screens::sidebar::BrowseMenu);
-content!(bookmark, bookmark_mut, Bookmark, crate::overlay::BookmarkEdit);
+content!(bookmark, bookmark_mut, Bookmark, gpui::Entity<crate::overlay::BookmarkView>);
 content!(files_menu, files_menu_mut, FilesMenu, crate::right_files::FilesMenu);
 content!(setup_sheet, setup_sheet_mut, SetupSheet, crate::setup::SetupSheet);
 content!(import_sheet, import_sheet_mut, ImportSheet, crate::import_ui::ImportSheet);
@@ -561,7 +628,7 @@ mod tests {
     fn opening_a_kind_that_is_open_replaces_it_on_top() {
         let mut stack = OverlayStack::default();
         stack.push(Entry::new(Layer::Menu(Menu::picker(MenuKind::Model, 0))));
-        stack.push(Entry::new(Layer::Palette(Palette { kind: PaletteKind::Commands, selected: 0 })));
+        stack.push(Entry::new(Layer::Palette(Palette { kind: PaletteKind::Commands })));
         stack.push(Entry::new(Layer::Menu(Menu::picker(MenuKind::Effort, 2))));
         assert_eq!(stack.top(), Some(LayerKind::Menu));
         assert_eq!(stack.menu().map(|menu| menu.kind), Some(MenuKind::Effort));

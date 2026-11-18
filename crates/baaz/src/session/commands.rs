@@ -765,11 +765,9 @@ impl SessionView {
     /// names Sonnet while the chip read Default (recommended).
     pub(super) fn sync_model_menu_check(&mut self, cx: &mut Context<Self>) {
         let checked = self.model_menu_checked().unwrap_or(self.models.len());
-        self.overlays.update(cx, |overlays, _| {
-            if let Some(menu) = overlays.menu_mut().filter(|menu| menu.kind == MenuKind::Model) {
-                menu.selected = checked;
-            }
-        });
+        if let Some(picker) = self.model_picker(cx) {
+            picker.update(cx, |picker, cx| picker.select(checked, cx));
+        }
     }
 
     /// Record a model pick on the provider lane: the matching row marks

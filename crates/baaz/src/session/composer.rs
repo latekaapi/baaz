@@ -20,29 +20,33 @@ impl SessionView {
         let (draft, caret) = self.draft_and_caret(cx);
         let token = caret_token(&draft, caret);
         let composer = self.composer_focus_handle(cx);
-        self.overlays.update(cx, |overlays, _| {
-            let caret_menu = matches!(
-                overlays.menu().map(|m| m.kind),
-                Some(MenuKind::Command) | Some(MenuKind::Mention)
-            );
-            match token {
-                Some((kind, at, filter)) => {
-                    let same = overlays.menu().is_some_and(|m| m.kind == kind && m.at == at);
-                    if same {
+        let caret_menu = matches!(self.overlays.read(cx).menu().map(|m| m.kind), Some(MenuKind::Command) | Some(MenuKind::Mention));
+        match token {
+            Some((kind, at, filter)) => {
+                let same = self.overlays.read(cx).menu().is_some_and(|m| m.kind == kind && m.at == at);
+                if same {
+                    // The `@` picker narrows to what is typed, its selection
+                    // back on the head; the `/` menu keeps its own.
+                    if let Some(picker) = self.mention_picker(cx) {
+                        picker.update(cx, |picker, cx| picker.set_query(&filter, cx));
+                    }
+                    self.overlays.update(cx, |overlays, _| {
                         if let Some(menu) = overlays.menu_mut() {
                             menu.filter = filter;
                             menu.selected = 0;
                         }
-                    } else {
-                        let mut menu = Menu::caret(kind, at);
-                        menu.filter = filter;
-                        overlays.open_composer_menu(menu, composer);
-                    }
+                    });
+                } else if kind == MenuKind::Mention {
+                    self.open_mention_picker(at, filter, cx);
+                } else {
+                    let mut menu = Menu::caret(kind, at);
+                    menu.filter = filter;
+                    self.overlays.update(cx, |overlays, _| overlays.open_composer_menu(menu, composer));
                 }
-                None if caret_menu => overlays.close_menu(),
-                None => {}
             }
-        });
+            None if caret_menu => self.overlays.update(cx, |overlays, _| overlays.close_menu()),
+            None => {}
+        }
         if let Some(filter) = self
             .overlays
             .read(cx)
@@ -103,8 +107,39 @@ impl SessionView {
                 .unwrap_or(0),
             _ => 0,
         };
-        let composer = self.composer_focus_handle(cx);
-        self.overlays.update(cx, |overlays, _| overlays.open_composer_menu(Menu::picker(kind, selected), composer));
+        if kind == MenuKind::Model {
+            self.open_model_picker(selected, cx);
+        } else {
+            let composer = self.composer_focus_handle(cx);
+            self.overlays.update(cx, |overlays, _| overlays.open_composer_menu(Menu::picker(kind, selected), composer));
+        }
+        cx.notify();
+    }
+
+    /// Where the open composer menu's selection is: the picker's, for the
+    /// model and `@` pickers, else the menu's own.
+    pub(crate) fn menu_selected(&self, cx: &gpui::App) -> Option<usize> {
+        if let Some(picker) = self.model_picker(cx) {
+            return Some(picker.read(cx).selected());
+        }
+        if let Some(picker) = self.mention_picker(cx) {
+            return Some(picker.read(cx).selected());
+        }
+        self.overlays.read(cx).menu().map(|menu| menu.selected)
+    }
+
+    /// ↑ / ↓ in the open composer menu, wrapping over the rows it has.
+    pub fn move_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(picker) = self.model_picker(cx) {
+            picker.update(cx, |picker, cx| picker.move_selection(delta, cx));
+            return;
+        }
+        if let Some(picker) = self.mention_picker(cx) {
+            picker.update(cx, |picker, cx| picker.move_selection(delta, cx));
+            return;
+        }
+        let rows = self.menu_rows(cx);
+        self.overlays.update(cx, |overlays, _| overlays.move_selection(delta, rows));
         cx.notify();
     }
 
@@ -163,6 +198,7 @@ impl SessionView {
         };
         match kind {
             MenuKind::Model => {
+                let selected = self.menu_selected(cx).unwrap_or(selected);
                 if let Some(model) = self.models.get(selected).map(|m| m.model_id.clone()) {
                     self.pick_model(&model, cx);
                 } else if let Some(reason) = self.models_error.clone() {
@@ -213,6 +249,7 @@ impl SessionView {
                 }
             }
             MenuKind::Mention => {
+                let selected = self.menu_selected(cx).unwrap_or(selected);
                 let rows = self.mention_rows(&filter, cx);
                 if let Some(path) = rows.get(selected).cloned() {
                     self.replace_token(&format!("@{path} "), window, cx);

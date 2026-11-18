@@ -165,7 +165,7 @@ impl Harness {
     /// An inline rename on the overlay stack: Escape drops it and hands
     /// the keyboard to the composer.
     pub(crate) fn rename_entry(layer: crate::overlay_stack::Layer) -> crate::overlay_stack::Entry {
-        crate::overlay_stack::Entry::new(layer).on_close(|_, baaz, _, _| baaz.focus_composer = true)
+        crate::overlay_stack::Entry::new(layer).on_close(|_, baaz, _| baaz.focus_composer = true)
     }
 
     /// Open the inline field on a row, seeded with what the row says now.

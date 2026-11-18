@@ -263,9 +263,7 @@ impl SessionView {
     /// highlighted row lists no reasoning levels (it has no submenu to
     /// open).
     pub(crate) fn step_submenu(&mut self, cx: &mut Context<Self>) -> StepResult {
-        let Some(selected) =
-            self.overlays.read(cx).menu().filter(|menu| menu.kind == MenuKind::Model).map(|menu| menu.selected)
-        else {
+        let Some(selected) = self.model_picker(cx).map(|picker| picker.read(cx).selected()) else {
             return Err("the model menu is not open".into());
         };
         if self.models.get(selected).is_none_or(|row| row.efforts.is_empty()) {
@@ -282,7 +280,13 @@ impl SessionView {
 
     /// `meter`: pin the context meter's breakdown open.
     pub(crate) fn step_meter(&mut self, cx: &mut Context<Self>) -> StepResult {
-        self.meter_open = true;
+        // An entry on the overlay stack, drawn by this view's composer.
+        let owner = cx.entity_id();
+        self.overlays.update(cx, |o, _| {
+            if !o.stack.is_open(crate::overlay_stack::LayerKind::Meter) {
+                o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Meter).owner(owner));
+            }
+        });
         cx.notify();
         Ok(())
     }

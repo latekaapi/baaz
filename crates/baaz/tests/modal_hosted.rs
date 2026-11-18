@@ -46,8 +46,14 @@ fn a_hosted_modal_does_not_hide_the_page() {
 #[test]
 fn the_main_window_skips_a_hosted_palette() {
     let app = source("app.rs");
+    // Plan 4.6: the palette and the dialog are their own views; the root
+    // composes them (facts pushed, then the view) only where it hosts them.
     assert!(
-        app.contains("if modal_hosted { None } else { self.render_palette(cx) }"),
+        app.contains("if modal_hosted { None } else { self.compose_palette(cx) }"),
         "the main window does not also draw the hosted palette"
+    );
+    assert!(
+        app.contains("if modal_hosted { None } else { self.compose_dialog(cx) }"),
+        "the main window does not also draw the hosted dialog"
     );
 }

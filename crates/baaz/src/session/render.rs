@@ -2345,22 +2345,16 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 if rows.is_empty() {
                     return None;
                 }
-                let items: Vec<MentionItem> = rows
-                    .iter()
-                    .map(|path| {
-                        let name = path.rsplit('/').next().unwrap_or(path).to_owned();
-                        MentionItem::new(path.clone(), MentionIcon::Glyph(IconName::File), name, path.clone())
-                            .detail_mono()
-                            .matching(&filter)
+                // The `@` picker is its own view (plan 4.6): the ranked rows
+                // are pushed in (it draws right after, in this same frame).
+                let picker = self.mention_picker(cx)?;
+                picker.update(cx, |picker, cx| {
+                    picker.push_facts(cx, |delegate| {
+                        delegate.paths = rows;
+                        delegate.max_rows = max_rows;
                     })
-                    .collect();
-                let pick = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
-                    let insertion = format!("@{id} ");
-                    this.replace_token(&insertion, window, cx);
                 });
-                let picker = mention_picker("mention-picker", filter.clone(), vec![MentionSection::new("Files", items)], selected).max_rows_height(max_rows);
-                let picker = if crate::clock::deterministic() { picker.at_rest() } else { picker };
-                picker.on_select(move |id, window, cx| pick(id, window, cx)).on_hover(hover).into_any_element()
+                picker.into_any_element()
             }
             // The chip pickers are anchored to their chips, and the shell's
             // menus to their own buttons — none of them hangs off the caret.
@@ -2554,7 +2548,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             .mode(self.mode_label())
             .effort(crate::overlays::effort_label(self.effort))
             .context(self.context())
-            .context_open(self.meter_open)
+            .context_open(self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Meter))
             .plan(self.plan)
             .chips(
                 self.images
@@ -2626,6 +2620,64 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// selection two owners — and the check, which marks the session's actual
     /// value, would wander with the mouse. The keyboard owns `selected`; the
     /// pointer owns its own highlight and reports only a click.
+    /// The model picker's rows: the catalog, each model with its effort
+    /// submenu where the provider lists levels (D4), its context limit and
+    /// its `default` / `active` badges; with no catalog and a reason, the
+    /// one reason row (never an empty menu).
+    pub(crate) fn model_menu_rows(&self) -> Vec<PickerRow> {
+        let mut rows: Vec<PickerRow> = self
+            .models
+            .iter()
+            .map(|m| {
+                let mut row = PickerRow::new(
+                    m.model_id.clone(),
+                    m.display_label.clone(),
+                    m.description.clone().unwrap_or_default(),
+                );
+                if let Some(limit) = m.context_limit {
+                    row = row.meta(format!("{} ctx", compact_count(limit)));
+                }
+                // A catalog may flag any number of rows either way, so
+                // both badges are drawn wherever they appear.
+                if m.is_default {
+                    row = row.badge("default");
+                }
+                if m.is_active {
+                    row = row.badge("active");
+                }
+                // D4: a model whose levels the provider lists opens
+                // them as a nested submenu (Default first).
+                if let Some(options) = self.effort_options_for(Some(&m.model_id)).options() {
+                    if options.len() > 1 {
+                        let current = if m.is_active { options.iter().position(|o| o.effort == self.effort) } else { None };
+                        row = row.submenu(PickerSubmenu {
+                            title: format!("Reasoning effort · {}", m.display_label).into(),
+                            rows: options
+                                .iter()
+                                .map(|o| PickerRow::new(crate::overlays::effort_row_id(o.effort), crate::overlays::effort_label(o.effort), o.detail.clone()))
+                                .collect(),
+                            selected: current,
+                        });
+                    }
+                }
+                row
+            })
+            .collect();
+        // No catalog and a reason why: the row carries the typed
+        // reason in its detail line, the way an `Unavailable`
+        // capability explains itself. Never an empty menu.
+        if rows.is_empty() {
+            if let Some(reason) = self.models_error.clone() {
+                rows.push(PickerRow::new(
+                    MODEL_UNAVAILABLE_ROW.to_owned(),
+                    "Models unavailable".to_owned(),
+                    reason,
+                ));
+            }
+        }
+        rows
+    }
+
     pub(super) fn render_pickers(&self, cx: &mut Context<Self>) -> Vec<(ComposerChipAnchor, AnyElement)> {
         let Some((kind, selected)) = self.overlays.read(cx).menu().map(|m| (m.kind, m.selected)) else {
             return Vec::new();
@@ -2633,88 +2685,18 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         let close = cx.listener(|this: &mut Self, _: &(), _, cx| this.close_menu(cx));
         match kind {
             MenuKind::Model => {
+                // The model picker is its own view (plan 4.6): the rows are
+                // pushed in (it draws right after, in this same frame).
+                let Some(picker) = self.model_picker(cx) else { return Vec::new() };
                 let sub_open = self.overlays.read(cx).menu().is_some_and(|m| m.sub_open);
-                let mut rows: Vec<PickerRow> = self
-                    .models
-                    .iter()
-                    .map(|m| {
-                        let mut row = PickerRow::new(
-                            m.model_id.clone(),
-                            m.display_label.clone(),
-                            m.description.clone().unwrap_or_default(),
-                        );
-                        if let Some(limit) = m.context_limit {
-                            row = row.meta(format!("{} ctx", compact_count(limit)));
-                        }
-                        // A catalog may flag any number of rows either way, so
-                        // both badges are drawn wherever they appear.
-                        if m.is_default {
-                            row = row.badge("default");
-                        }
-                        if m.is_active {
-                            row = row.badge("active");
-                        }
-                        // D4: a model whose levels the provider lists opens
-                        // them as a nested submenu (Default first).
-                        if let Some(options) = self.effort_options_for(Some(&m.model_id)).options() {
-                            if options.len() > 1 {
-                                let current = if m.is_active { options.iter().position(|o| o.effort == self.effort) } else { None };
-                                row = row.submenu(PickerSubmenu {
-                                    title: format!("Reasoning effort · {}", m.display_label).into(),
-                                    rows: options
-                                        .iter()
-                                        .map(|o| PickerRow::new(crate::overlays::effort_row_id(o.effort), crate::overlays::effort_label(o.effort), o.detail.clone()))
-                                        .collect(),
-                                    selected: current,
-                                });
-                            }
-                        }
-                        row
+                let rows = self.model_menu_rows();
+                picker.update(cx, |picker, cx| {
+                    picker.push_facts(cx, |delegate| {
+                        delegate.rows = rows;
+                        delegate.sub_open = sub_open;
                     })
-                    .collect();
-                // No catalog and a reason why: the row carries the typed
-                // reason in its detail line, the way an `Unavailable`
-                // capability explains itself. Never an empty menu.
-                if rows.is_empty() {
-                    if let Some(reason) = self.models_error.clone() {
-                        rows.push(PickerRow::new(
-                            MODEL_UNAVAILABLE_ROW.to_owned(),
-                            "Models unavailable".to_owned(),
-                            reason,
-                        ));
-                    }
-                }
-                let pick = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
-                    if id.as_ref() == MODEL_UNAVAILABLE_ROW {
-                        if let Some(reason) = this.models_error.clone() {
-                            this.toast("Models unavailable", reason, cx);
-                        }
-                        this.close_menu(cx);
-                        return;
-                    }
-                    let id = id.to_string();
-                    this.pick_model(&id, cx);
                 });
-                // A nested pick: the model and its level, in one press.
-                let pick_nested = cx.listener(|this: &mut Self, (model, level): &(SharedString, SharedString), _, cx| {
-                    let effort = this
-                        .effort_options_for(Some(model.as_ref()))
-                        .options()
-                        .and_then(|options| options.iter().find(|o| crate::overlays::effort_row_id(o.effort) == level.as_ref()).map(|o| o.effort));
-                    let model = model.to_string();
-                    this.pick_model(&model, cx);
-                    if let Some(effort) = effort {
-                        this.pick_effort(effort, cx);
-                    }
-                });
-                let menu = model_menu("model-menu", rows, selected, true)
-                    .align_end(true)
-                    .open_submenu(sub_open.then_some(selected))
-                    .on_pick(move |id, window, cx| pick(id, window, cx))
-                    .on_pick_nested(move |model, level, window, cx| pick_nested(&(model.clone(), level.clone()), window, cx))
-                    .on_close(move |window, cx| close(&(), window, cx));
-                let menu = if crate::clock::deterministic() { menu.at_rest() } else { menu };
-                vec![(ComposerChipAnchor::Model, menu.into_any_element())]
+                vec![(ComposerChipAnchor::Model, picker.into_any_element())]
             }
             MenuKind::Effort if !self.effort_levels().is_empty() => {
                 // D4 (docs/41 §2.10; the owner chose the slider, 2026-10-14):

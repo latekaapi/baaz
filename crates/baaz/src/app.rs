@@ -79,7 +79,7 @@ use crate::auth::Identity;
 use crate::conn;
 use crate::index::{self, IndexEntry};
 use crate::login::{Auth, Login};
-use crate::overlays::{Dialog, DialogAction, MenuKind, Overlays, Palette, PaletteKind};
+use crate::overlays::{Dialog, DialogAction, MenuKind, Overlays, PaletteKind};
 use crate::providers::ProviderId;
 use crate::region::Region as _;
 use crate::resize::ResizeDrag;
@@ -875,8 +875,6 @@ pub struct Harness {
     /// `session/resume` only on the grant.
     session_mcp: bool,
     pub(crate) focus_root: FocusHandle,
-    pub(crate) focus_dialog: FocusHandle,
-    pub(crate) focus_palette: FocusHandle,
     /// True only while the overlay window draws content the main window
     /// would otherwise draw (the Browse modal): its listeners then run on
     /// the main window ([`Harness::main_listener`]).
@@ -1024,14 +1022,6 @@ pub struct Harness {
     /// rendered and kept afterwards, so a menu opened for a rendered-then-
     /// scrolled group still seats where the row was.
     pub(crate) group_menu_bounds: HashMap<String, Bounds<Pixels>>,
-    /// The Projects palette's query field: the query filters both sections
-    /// by name and path, synchronously — a dozen adopted roots and a dozen
-    /// recent workspaces need no background task.
-    pub(crate) projects_query: Entity<TextareaState>,
-    /// The Commands palette's query field: the query filters every command
-    /// on its slash and its description, synchronously — twenty-three rows
-    /// need no background task.
-    pub(crate) commands_query: Entity<TextareaState>,
     /// Sessions a `session/read` has already been spent on, so a title that
     /// genuinely is not there is not asked for once a frame (finding F10).
     titled: std::collections::HashSet<String>,
@@ -1117,8 +1107,6 @@ impl Harness {
             state
         });
         let search_query = cx.new(|cx| composer_state_rows("Search sessions and created files", 1, 1, window, cx));
-        let projects_query = cx.new(|cx| composer_state_rows("Add or switch project", 1, 1, window, cx));
-        let commands_query = cx.new(|cx| composer_state_rows("Every command in this build", 1, 1, window, cx));
         // The sidebar column's own view: the weak handle
         // is this Baaz entity under construction, which `cx.entity()` already
         // names inside the builder.
@@ -1250,8 +1238,6 @@ impl Harness {
             user_shell: true,
             session_mcp: false,
             focus_root: cx.focus_handle(),
-            focus_dialog: cx.focus_handle(),
-            focus_palette: cx.focus_handle(),
             hosting_overlay: false,
             focus_composer: true,
             tier: None,
@@ -1290,8 +1276,6 @@ impl Harness {
             overflow_bounds: None,
             project_menu_bounds: None,
             group_menu_bounds: HashMap::new(),
-            projects_query: projects_query.clone(),
-            commands_query: commands_query.clone(),
             titled: std::collections::HashSet::new(),
             undo_stack: Vec::new(),
             window_title: None,
@@ -1451,6 +1435,12 @@ impl Harness {
         this.field_subscriptions.push(cx.subscribe_in(&settings, window, Self::on_settings_event));
         let connect = this.connect_screen.clone();
         this.field_subscriptions.push(cx.subscribe_in(&connect, window, Self::on_connect_event));
+        // The setup sheet's host draws every setup sheet (it keeps the
+        // terminals across them): its dismissal pops the overlay stack.
+        let setup = this.setup.clone();
+        this.field_subscriptions.push(cx.subscribe(&setup, |this: &mut Self, setup, _: &gpui::DismissEvent, cx| {
+            this.dismiss_overlay_view(setup.entity_id(), cx);
+        }));
         let model = this.provider_model.clone();
         this.field_subscriptions.push(cx.subscribe(&model, Self::on_provider_model_event));
         // The Browse view's asks (task 4.5b): its pages changed (the root's
@@ -1477,24 +1467,6 @@ impl Harness {
         this.field_subscriptions.push(cx.subscribe(&search_query, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.refresh_search(cx);
-            }
-        }));
-        // Typing in the Projects palette's query only redraws: both sections
-        // are filtered synchronously at render, so the selection is clamped
-        // to the filtered rows here.
-        this.field_subscriptions.push(cx.subscribe(&projects_query, |this: &mut Self, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.clamp_projects_selection(cx);
-                cx.notify();
-            }
-        }));
-        // Typing in the Commands palette's query only redraws: the rows are
-        // filtered synchronously at render, so the selection is clamped to
-        // the filtered rows here.
-        this.field_subscriptions.push(cx.subscribe(&commands_query, |this: &mut Self, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.clamp_commands_selection(cx);
-                cx.notify();
             }
         }));
         // The API-key field: Enter submits, and any change re-renders the
@@ -5215,7 +5187,7 @@ impl Render for Harness {
         // a slow or signed-out Muse never gates the window.
         let body: AnyElement = if self.connect_open(cx) {
             aui::shell::place_native_lights(window, cx);
-            self.compose_connect(window, cx)
+            self.compose_connect(cx)
         } else {
             // The column is its own cached view: clean,
             // gpui reuses its retained subtree and only the centre rebuilds.
@@ -5401,7 +5373,7 @@ impl Render for Harness {
         // In Browse the overlay window hosts the modals over the live page
         // (`OverlayKind::Modal`): the main window draws neither.
         let modal_hosted = self.modal_overlay_wanted(cx);
-        let dialog = if modal_hosted { None } else { self.render_dialog(window, cx) };
+        let dialog = if modal_hosted { None } else { self.compose_dialog(cx) };
         // F2: the feedback capture layer (Active only); it paints above
         // the palette, dialog, settings and menus, with only toasts above
         // it (and toasts hide while a capture reads the window). The
@@ -5421,11 +5393,11 @@ impl Render for Harness {
         // scrim under the first (the window behind went to 25 %).
         let connect_owns_sheets = self.connect_open(cx);
         let muse_sheet = self
-            .render_muse_sheet(window, cx)
+            .render_muse_sheet(cx)
             .or_else(|| if connect_owns_sheets { None } else { self.compose_setup_sheet(cx) })
             .or_else(|| if connect_owns_sheets { None } else { self.render_import_sheet(cx) })
-            .or_else(|| self.render_chrome_import(cx));
-        let palette = if modal_hosted { None } else { self.render_palette(cx) };
+            .or_else(|| self.compose_chrome_import(cx));
+        let palette = if modal_hosted { None } else { self.compose_palette(cx) };
         // Mid-drag the overlay covers the window, so the drag survives the
         // pointer outrunning the 6 px strip; moves alone would go silent.
         // One overlay, not two: the two drags never run together, so it
@@ -5492,35 +5464,15 @@ impl Render for Harness {
         let (palette, dialog, muse_sheet) = (held(palette), held(dialog), held(muse_sheet));
         let (overflow, back_history, project_menu, right_views) = (held(overflow), held(back_history), held(project_menu), held(right_views));
         // The palette takes the keyboard the frame it opens, so the arrows and
-        // the return reach it rather than the composer under it. The search
-        // palette is the exception: its query field owns the keyboard, and the
-        // arrows and the return reach the list through the overlay's own menu
-        // context. The Projects and Commands palettes are the same, each with
-        // its own field.
-        let searching = self.overlays.read(cx).palette().is_some_and(|p| p.kind == PaletteKind::Search);
-        let projecting =
-            self.overlays.read(cx).palette().is_some_and(|p| p.kind == PaletteKind::Projects);
-        let commanding =
-            self.overlays.read(cx).palette().is_some_and(|p| p.kind == PaletteKind::Commands);
-        if modal_hosted {
-            // The overlay window focuses the hosted modal's field itself.
-        } else if searching {
-            let query = self.search_query.focus_handle(cx);
-            if !query.is_focused(window) {
-                window.focus(&query, cx);
+        // the return reach it rather than the composer under it: its query
+        // field where it has one (the keys bubble from the field to the
+        // palette's own menu context), else the palette itself. The overlay
+        // window focuses a hosted palette itself.
+        if let (false, Some(view)) = (modal_hosted, self.palette_view(cx)) {
+            let focus = view.focus_handle(cx);
+            if !focus.is_focused(window) {
+                window.focus(&focus, cx);
             }
-        } else if projecting {
-            let query = self.projects_query.focus_handle(cx);
-            if !query.is_focused(window) {
-                window.focus(&query, cx);
-            }
-        } else if commanding {
-            let query = self.commands_query.focus_handle(cx);
-            if !query.is_focused(window) {
-                window.focus(&query, cx);
-            }
-        } else if palette.is_some() && !self.focus_palette.is_focused(window) {
-            window.focus(&self.focus_palette, cx);
         }
         // An overlay that closes unmounts the element it had focused, and the
         // window goes on reporting that handle as focused: `focused()` is
@@ -5913,7 +5865,42 @@ impl Harness {
     /// tell the view that draws it, and run its own close. The stack queues
     /// the keyboard's way back for the next frame. `false` when nothing was
     /// open.
-    pub(crate) fn pop_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn pop_overlay(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.pop_overlay_entry(cx)
+    }
+
+    /// Open `entry`, drawn by `view`, on the overlay stack: the view's own
+    /// [`gpui::DismissEvent`] is how it closes (its Escape, its ✕, a click
+    /// away, a finished flow), and the stack honours it newest-first
+    /// ([`Self::dismiss_overlay_view`]).
+    pub(crate) fn push_overlay_view<V: gpui::ManagedView>(
+        &mut self,
+        entry: crate::overlay_stack::Entry,
+        view: &Entity<V>,
+        cx: &mut Context<Self>,
+    ) {
+        let dismissed = cx.subscribe(view, |this: &mut Self, view, _: &gpui::DismissEvent, cx| {
+            this.dismiss_overlay_view(view.entity_id(), cx);
+        });
+        let entry = entry.view(view.clone().into()).keep(dismissed);
+        self.overlays.update(cx, |overlays, _| overlays.stack.push(entry));
+        cx.notify();
+    }
+
+    /// A view on the stack asked to be dismissed: the stack pops newest
+    /// first, so an entry standing over the view (a menu opened over a
+    /// sheet) closes before the view does — Escape and a click away close
+    /// the newest overlay wherever the keyboard or the pointer is. A view no
+    /// entry holds any more (closed already) changes nothing.
+    pub(crate) fn dismiss_overlay_view(&mut self, view: gpui::EntityId, cx: &mut Context<Self>) {
+        if self.overlays.read(cx).stack.holds_view(view) {
+            self.pop_overlay_entry(cx);
+        }
+    }
+
+    /// Close the top entry: notify the view that draws it, run its own
+    /// close hook. `false` when nothing was open.
+    pub(crate) fn pop_overlay_entry(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(entry) = self.overlays.update(cx, |overlays, _| overlays.stack.pop()) else {
             return false;
         };
@@ -5923,7 +5910,7 @@ impl Harness {
             app.notify(owner);
         }
         if let Some(on_close) = on_close {
-            on_close(layer, self, window, cx);
+            on_close(layer, self, cx);
         }
         cx.notify();
         true
@@ -6521,7 +6508,7 @@ mod tests {
         assert!(opened.is_ok(), "the fixture page opens: {opened:?}");
         vc.run_until_parked();
         let page = vc.update(|_, cx| baaz.read(cx).skills_page.clone());
-        assert!(vc.update(|_, cx| page.read(cx).add_menu_open), "the fixture opens the Add menu");
+        assert!(vc.update(|_, cx| page.read(cx).add_menu_open(cx)), "the fixture opens the Add menu");
         let (page_notes, root_notes) = (Rc::new(Cell::new(0usize)), Rc::new(Cell::new(0usize)));
         let _watch = vc.update(|_, cx| {
             let (p, r) = (page_notes.clone(), root_notes.clone());
@@ -6532,7 +6519,7 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let shown = page.read(cx);
-            assert!(!shown.add_menu_open, "Esc peeled the menu");
+            assert!(!shown.add_menu_open(cx), "Esc peeled the menu");
             assert!(shown.detail_focused, "Enter moved into the detail");
             assert!(baaz.read(cx).skills_open(cx), "the page itself stays open");
             assert!(crate::region::Region::covers_page(shown, cx), "an open page covers Browse's page");
@@ -8396,6 +8383,7 @@ mod tests {
                             true,
                             400.0,
                             "Muse",
+                            false,
                             cx,
                         );
                     });

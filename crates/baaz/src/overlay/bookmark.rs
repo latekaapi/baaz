@@ -17,14 +17,43 @@ use crate::browser::bookmarks;
 /// The popover's width (the board's 300).
 pub(crate) const BOOKMARK_W: f32 = 300.0;
 
-/// The bookmark being edited: the content of the overlay stack's
-/// `Bookmark` entry.
-pub(crate) struct BookmarkEdit {
-    pub id: i64,
-    pub name: Entity<InputState>,
-    pub folder: i64,
+/// The bookmark popover as its own view (plan 4.6): it owns what is being
+/// edited — the name field, the folder, whether the folder list stands
+/// open — and draws it; the folders come from the root each frame. ↩, Done,
+/// a click away and the panel losing the keyboard dismiss it through the
+/// overlay stack (`DismissEvent`), whose close hook keeps what is typed;
+/// Remove asks the root to delete the bookmark ([`BookmarkEvent`]). The
+/// stack's `Bookmark` entry holds this view.
+pub(crate) struct BookmarkView {
+    /// The bookmark's id.
+    pub(crate) id: i64,
+    /// The name field.
+    pub(crate) name: Entity<InputState>,
+    /// The folder it goes into.
+    pub(crate) folder: i64,
     /// The folder list stands open under the folder row.
-    pub folders_open: bool,
+    folders_open: bool,
+    /// Every folder, pushed by the root.
+    pub(crate) folders: Vec<bookmarks::Folder>,
+    /// ↩ in the name field: Done.
+    _enter: gpui::Subscription,
+}
+
+/// What the bookmark popover asks the root for.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BookmarkEvent {
+    /// Remove: the bookmark goes and the popover closes.
+    Remove,
+}
+
+impl gpui::EventEmitter<BookmarkEvent> for BookmarkView {}
+impl gpui::EventEmitter<gpui::DismissEvent> for BookmarkView {}
+
+impl gpui::Focusable for BookmarkView {
+    /// The name field: the popover types.
+    fn focus_handle(&self, cx: &gpui::App) -> gpui::FocusHandle {
+        gpui::Focusable::focus_handle(self.name.read(cx), cx)
+    }
 }
 
 impl Harness {
@@ -56,26 +85,32 @@ impl Harness {
     }
 
     fn open_bookmark_popover(&mut self, mark: bookmarks::Bookmark, window: &mut Window, cx: &mut Context<Self>) {
-        let name = cx.new(|cx| InputState::new(window, cx));
-        name.update(cx, |input, cx| {
-            input.set_value(mark.title.clone(), window, cx);
-            input.select_all(window, cx);
+        let view = cx.new(|cx| {
+            let name = cx.new(|cx| InputState::new(window, cx));
+            name.update(cx, |input, cx| {
+                input.set_value(mark.title.clone(), window, cx);
+                input.select_all(window, cx);
+            });
+            let enter = cx.subscribe(&name, |_: &mut BookmarkView, _, event: &gpui_kit::base::input::InputEvent, cx| {
+                if matches!(event, gpui_kit::base::input::InputEvent::PressEnter { .. }) {
+                    cx.emit(gpui::DismissEvent);
+                }
+            });
+            BookmarkView { id: mark.id, name, folder: mark.folder, folders_open: false, folders: Vec::new(), _enter: enter }
         });
-        let subscription = cx.subscribe(&name, |this: &mut Self, _, event: &gpui_kit::base::input::InputEvent, cx| {
-            if matches!(event, gpui_kit::base::input::InputEvent::PressEnter { .. }) {
-                this.close_bookmark_popover(cx);
-            }
+        let asked = cx.subscribe(&view, |this: &mut Self, _, event: &BookmarkEvent, cx| match event {
+            BookmarkEvent::Remove => this.remove_bookmark_from_popover(cx),
         });
-        self.browser.update(cx, |browser, _| browser.bookmark_edit_sub = Some(subscription));
-        // Escape (wherever the keyboard is) keeps what is typed, like Done.
-        let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Bookmark(BookmarkEdit { id: mark.id, name, folder: mark.folder, folders_open: false }))
-            .on_close(|layer, baaz, _, cx| {
+        // Dismissing it — Escape (wherever the keyboard is), ↩, Done, a
+        // click away — keeps what is typed.
+        let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Bookmark(view.clone()))
+            .on_close(|layer, baaz, cx| {
                 if let crate::overlay_stack::Layer::Bookmark(edit) = layer {
                     baaz.keep_bookmark_edit(edit, cx);
                 }
-            });
-        self.overlays.update(cx, |o, _| o.stack.push(entry));
-        cx.notify();
+            })
+            .keep(asked);
+        self.push_overlay_view(entry, &view, cx);
     }
 
     /// Keep what is typed and close (Done, ↩, Escape, a click away).
@@ -85,7 +120,7 @@ impl Harness {
     }
 
     /// The open popover's bookmark, closing its entry.
-    fn take_bookmark_edit(&mut self, cx: &mut Context<Self>) -> Option<BookmarkEdit> {
+    fn take_bookmark_edit(&mut self, cx: &mut Context<Self>) -> Option<Entity<BookmarkView>> {
         let entry = self.overlays.update(cx, |o, _| o.stack.close(crate::overlay_stack::LayerKind::Bookmark))?;
         match entry.layer {
             crate::overlay_stack::Layer::Bookmark(edit) => Some(edit),
@@ -94,14 +129,16 @@ impl Harness {
     }
 
     /// Save what the closed popover holds: its name and folder.
-    fn keep_bookmark_edit(&mut self, edit: BookmarkEdit, cx: &mut Context<Self>) {
-        self.browser.update(cx, |browser, _| browser.bookmark_edit_sub = None);
-        let name = edit.name.read(cx).value().trim().to_owned();
+    fn keep_bookmark_edit(&mut self, edit: Entity<BookmarkView>, cx: &mut Context<Self>) {
+        let (id, folder, name) = {
+            let edit = edit.read(cx);
+            (edit.id, edit.folder, edit.name.read(cx).value().trim().to_owned())
+        };
         self.browser.read(cx).data.clone().update(cx, |data, cx| {
             // An emptied name keeps the old one (the folder still moves).
-            let title = if name.is_empty() { data.bookmark_by_id(edit.id).map(|mark| mark.title) } else { Some(name) };
+            let title = if name.is_empty() { data.bookmark_by_id(id).map(|mark| mark.title) } else { Some(name) };
             if let Some(title) = title {
-                data.update_bookmark(edit.id, &title, edit.folder, cx);
+                data.update_bookmark(id, &title, folder, cx);
             }
         });
         cx.notify();
@@ -110,20 +147,29 @@ impl Harness {
     /// Remove: the bookmark goes and the popover closes.
     pub(crate) fn remove_bookmark_from_popover(&mut self, cx: &mut Context<Self>) {
         let Some(edit) = self.take_bookmark_edit(cx) else { return };
-        self.browser.update(cx, |browser, _| browser.bookmark_edit_sub = None);
-        self.browser.read(cx).data.clone().update(cx, |data, cx| data.remove_bookmark(edit.id, cx));
+        let id = edit.read(cx).id;
+        self.browser.read(cx).data.clone().update(cx, |data, cx| data.remove_bookmark(id, cx));
         cx.notify();
     }
 
-    /// The popover's content inside its float.
+    /// The popover inside its float, its folders pushed first (it draws
+    /// right after, in this same frame), or `None` while it is shut.
     pub(crate) fn render_bookmark_popover(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let view = self.overlays.read(cx).stack.bookmark()?.clone();
+        let folders = self.browser.read(cx).data.read(cx).folders();
+        view.update(cx, |view, _| view.folders = folders);
+        Some(view.into_any_element())
+    }
+}
+
+impl Render for BookmarkView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = cx.aui().colors;
         let metrics = cx.aui().metrics;
-        let edit = self.overlays.read(cx).stack.bookmark()?;
-        let name = edit.name.clone();
-        let folder = edit.folder;
-        let folders_open = edit.folders_open;
-        let all = self.browser.read(cx).data.read(cx).folders();
+        let name = self.name.clone();
+        let folder = self.folder;
+        let folders_open = self.folders_open;
+        let all = self.folders.clone();
         let folder_name = bookmarks::folder_path(&all, folder);
         let label = |text: &'static str, cx: &gpui::App| {
             div().px(metrics.item_px).pt(px(scale::SP_2)).pb(px(scale::SP_1)).role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(text)
@@ -142,9 +188,8 @@ impl Harness {
                 .child(inner)
         };
         let toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-            if this.overlays.update(cx, |o, _| o.stack.bookmark_mut().map(|edit| edit.folders_open = !edit.folders_open).is_some()) {
-                cx.notify();
-            }
+            this.folders_open = !this.folders_open;
+            cx.notify();
         });
         let mut panel = v_flex()
             .id("bookmark-popover")
@@ -189,15 +234,9 @@ impl Harness {
                 let id = f.id;
                 let path = bookmarks::folder_path(&all, id);
                 let pick = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                    let picked = this.overlays.update(cx, |o, _| {
-                        o.stack.bookmark_mut().map(|edit| {
-                            edit.folder = id;
-                            edit.folders_open = false;
-                        })
-                    });
-                    if picked.is_some() {
-                        cx.notify();
-                    }
+                    this.folder = id;
+                    this.folders_open = false;
+                    cx.notify();
                 });
                 list = list.child(
                     h_flex()
@@ -217,8 +256,8 @@ impl Harness {
             }
             panel = panel.child(list);
         }
-        let remove = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.remove_bookmark_from_popover(cx));
-        let done = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_bookmark_popover(cx));
+        let remove = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(BookmarkEvent::Remove));
+        let done = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(gpui::DismissEvent));
         panel = panel.child(
             h_flex()
                 .px(metrics.item_px)
@@ -228,16 +267,13 @@ impl Harness {
                 .child(div().flex_1())
                 .child(aui::data::button("bookmark-done", "Done").primary().accessibility_label("Done").on_click(move |e, w, cx| done(e, w, cx))),
         );
-        let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| this.close_bookmark_popover(cx));
-        Some(
-            div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .p(px(SHADOW_PAD))
-                .on_mouse_down(gpui::MouseButton::Left, leave)
-                .child(div().w_full().occlude().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(menu_panel(panel, cx)))
-                .into_any_element(),
-        )
+        let leave = cx.listener(|_: &mut Self, _: &gpui::MouseDownEvent, _, cx| cx.emit(gpui::DismissEvent));
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .p(px(SHADOW_PAD))
+            .on_mouse_down(gpui::MouseButton::Left, leave)
+            .child(div().w_full().occlude().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(menu_panel(panel, cx)))
     }
 }

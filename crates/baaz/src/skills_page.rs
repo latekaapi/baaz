@@ -396,8 +396,6 @@ pub(crate) struct SkillsPage {
     pub(crate) detail_focused: bool,
     /// Whether Built-in shows every row rather than the first two.
     pub(crate) show_all_builtin: bool,
-    /// Whether the detail's ⋯ menu is open.
-    pub(crate) overflow_open: bool,
     /// Whether the window was focused on the last frame: the edge the
     /// focus re-list triggers on.
     pub(crate) window_focused: bool,
@@ -407,8 +405,6 @@ pub(crate) struct SkillsPage {
     pub(crate) detail_body: Option<(String, String)>,
     /// A virtual skill's body is being inspected.
     pub(crate) detail_loading: bool,
-    /// Whether the "Add skill ▾" menu stands open.
-    pub(crate) add_menu_open: bool,
     /// The menu's import trails, counted on open and cached while it lives.
     pub(crate) import_counts: Option<ImportCounts>,
     /// The menu's counts are still being dry-run.
@@ -459,11 +455,9 @@ impl SkillsPage {
             selected: None,
             detail_focused: false,
             show_all_builtin: false,
-            overflow_open: false,
             window_focused: false,
             detail_body: None,
             detail_loading: false,
-            add_menu_open: false,
             import_counts: None,
             import_loading: false,
             dialog: SkillsDialog::Closed,
@@ -652,6 +646,42 @@ impl SkillsPage {
         cx.notify();
     }
 
+    /// Whether the header's Add menu stands open (an entry on the overlay
+    /// stack, so Escape and a click away close it newest-first).
+    pub(crate) fn add_menu_open(&self, cx: &gpui::App) -> bool {
+        self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::SkillsAddMenu)
+    }
+
+    /// Open or close the Add menu.
+    fn set_add_menu(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.set_layer(crate::overlay_stack::Layer::SkillsAddMenu, open, cx);
+    }
+
+    /// Whether the detail's ⋯ menu stands open (an entry on the stack).
+    pub(crate) fn overflow_open(&self, cx: &gpui::App) -> bool {
+        self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::SkillsOverflow)
+    }
+
+    /// Open or close the detail's ⋯ menu.
+    fn set_overflow(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.set_layer(crate::overlay_stack::Layer::SkillsOverflow, open, cx);
+    }
+
+    /// Open (this page drawing it, notified when Escape pops it) or close
+    /// one of the page's menus.
+    fn set_layer(&mut self, layer: crate::overlay_stack::Layer, open: bool, cx: &mut Context<Self>) {
+        let owner = cx.entity_id();
+        self.overlays.update(cx, |o, _| {
+            if open {
+                if !o.stack.is_open(layer.kind()) {
+                    o.stack.push(crate::overlay_stack::Entry::new(layer).owner(owner));
+                }
+            } else {
+                o.stack.close(layer.kind());
+            }
+        });
+    }
+
     /// Esc peels one layer at a time: a dialog, then the menu, then the
     /// page itself (D54). Selecting a session returns outright.
     pub(crate) fn close_skills(&mut self, cx: &mut Context<Self>) {
@@ -660,8 +690,8 @@ impl SkillsPage {
             cx.notify();
             return;
         }
-        if self.add_menu_open {
-            self.add_menu_open = false;
+        if self.add_menu_open(cx) {
+            self.set_add_menu(false, cx);
             cx.notify();
             return;
         }
@@ -715,7 +745,7 @@ impl SkillsPage {
     pub(crate) fn select_skill(&mut self, key: String, cx: &mut Context<Self>) {
         self.selected = Some(key.clone());
         self.detail_body = None;
-        self.overflow_open = false;
+        self.set_overflow(false, cx);
         let root = self.root();
         if let Some(VisibleRow::Live(index)) = self.skills_lookup(&key) {
             let skill = self.catalog.rows[index].clone();
@@ -873,12 +903,12 @@ impl SkillsPage {
     /// Toggle the "Add skill ▾" menu (A1). Opening dry-runs both sources
     /// for the import trails; the counts cache for the menu's life.
     pub(crate) fn toggle_add_menu(&mut self, cx: &mut Context<Self>) {
-        if self.add_menu_open {
-            self.add_menu_open = false;
+        if self.add_menu_open(cx) {
+            self.set_add_menu(false, cx);
             cx.notify();
             return;
         }
-        self.add_menu_open = true;
+        self.set_add_menu(true, cx);
         self.dialog = SkillsDialog::Closed;
         self.import_counts = None;
         self.import_loading = true;
@@ -928,7 +958,7 @@ impl SkillsPage {
 
     /// Open New skill… (A2): fresh fields, This project, no error.
     pub(crate) fn open_new_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_menu_open = false;
+        self.set_add_menu(false, cx);
         self.new_name.update(cx, |state, cx| state.set_value(String::new(), window, cx));
         self.new_desc.update(cx, |state, cx| state.set_value(String::new(), window, cx));
         self.dialog = SkillsDialog::New { scope: TargetScope::Project, error: None };
@@ -1131,7 +1161,7 @@ impl SkillsPage {
     /// Install from folder… (A3): the native picker, then `validate` and
     /// the preview modal.
     pub(crate) fn choose_install_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_menu_open = false;
+        self.set_add_menu(false, cx);
         cx.notify();
         cx.activate(true);
         let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
@@ -1275,7 +1305,7 @@ impl SkillsPage {
     /// Open the import preview for a source (A4): the dry-run, classified
     /// against the landed catalog.
     pub(crate) fn open_import(&mut self, source: skills::ImportSource, cx: &mut Context<Self>) {
-        self.add_menu_open = false;
+        self.set_add_menu(false, cx);
         self.dialog = SkillsDialog::Import { source, rows: Vec::new(), skipped: 0, loading: true, error: None };
         let program = self.program.clone();
         let catalog = self.catalog.clone();
@@ -1408,7 +1438,7 @@ impl SkillsPage {
     /// always on the **muse** lane, whatever the remembered provider — with
     /// the `/create-skill ` draft in the composer, focused, never sent.
     pub(crate) fn ask_muse_to_write(&mut self, cx: &mut Context<Self>) {
-        self.add_menu_open = false;
+        self.set_add_menu(false, cx);
         self.dialog = SkillsDialog::Closed;
         self.pending_create = true;
         cx.emit(SkillsPageEvent::AskMuseToWrite);
@@ -1539,7 +1569,7 @@ impl SkillsPage {
         self.detail_focused = false;
         self.loading = false;
         self.error = None;
-        self.add_menu_open = false;
+        self.set_add_menu(false, cx);
         self.dialog = SkillsDialog::Closed;
         self.import_counts = None;
         self.import_loading = false;
@@ -1549,7 +1579,7 @@ impl SkillsPage {
         // deterministic rows, the New dialog with empty fields.
         match rest.trim() {
             "add-menu" => {
-                self.add_menu_open = true;
+                self.set_add_menu(true, cx);
                 self.import_counts = Some(ImportCounts { claude: 1, codex: 0 });
             }
             "import-preview" => {
@@ -1889,7 +1919,7 @@ impl SkillsPage {
         let mut root = div().flex_1().min_h_0().min_w_0().w_full().overflow_hidden().relative().child(column);
         // The test hook the feedback-mode layout test measures.
         root = root.debug_selector(|| "skills-page".into());
-        if self.add_menu_open {
+        if self.add_menu_open(cx) {
             root = root.child(self.render_add_menu(column_max, column_pad, cx));
         }
         if let Some(overlay) = overlay {
@@ -1927,7 +1957,7 @@ impl SkillsPage {
         // A click outside the card closes the menu. The catcher is
         // transparent, so the page behind it captures unchanged.
         let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.add_menu_open = false;
+            this.set_add_menu(false, cx);
             cx.notify();
         });
         // "Ask Muse to write one" is Muse's own row: it always opens a Muse
@@ -2525,7 +2555,7 @@ impl SkillsPage {
 
         // The ⋯ menu: Validate and Copy path, with the personal line on
         // personal rows (D60, §7).
-        if self.overflow_open {
+        if self.overflow_open(cx) {
             let mut menu = v_flex().w_full().gap(px(scale::SP_2));
             if skill.section() == ScopeSection::Personal {
                 menu = menu.child(
@@ -2536,7 +2566,7 @@ impl SkillsPage {
             if let Some(dir) = disk.as_ref().and_then(|file| file.parent().map(|d| d.to_path_buf())) {
                 let program = self.program.clone();
                 let validate = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                    this.overflow_open = false;
+                    this.set_overflow(false, cx);
                     let program = program.clone();
                     let dir = dir.clone();
                     this.wire_call(cx, move || skills::validate_skill(&program, &dir), |this, result, cx| {
@@ -2559,7 +2589,7 @@ impl SkillsPage {
                 );
             }
             let copy = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.overflow_open = false;
+                this.set_overflow(false, cx);
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone()));
                 cx.notify();
             });
@@ -2572,7 +2602,7 @@ impl SkillsPage {
                 let key = skill.id.clone();
                 let name = skill.name.clone();
                 let remove = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                    this.overflow_open = false;
+                    this.set_overflow(false, cx);
                     this.open_remove_dialog(&key, cx);
                 });
                 menu = menu.child(
@@ -2598,7 +2628,8 @@ impl SkillsPage {
         let on_detail = cx.listener(move |this: &mut Self, intent: &SkillDetailIntent, _, cx| match intent {
             SkillDetailIntent::SetState(state) => this.set_skill_state(&key, *state, cx),
             SkillDetailIntent::Action(action) if action.as_ref() == "overflow" => {
-                this.overflow_open = !this.overflow_open;
+                let open = !this.overflow_open(cx);
+                this.set_overflow(open, cx);
                 cx.notify();
             }
             SkillDetailIntent::Action(action) if action.as_ref() == "reveal" => {

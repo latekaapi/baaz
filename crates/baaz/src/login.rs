@@ -42,7 +42,7 @@
 use aui::data::secret_field;
 use aui::overlay::DialogKind;
 use aui::screens::{login, LoginIntent, LoginMethod, LoginState};
-use gpui::{prelude::*, AnyElement, Context, Entity, Focusable as _, SharedString, Window};
+use gpui::{prelude::*, Context, Entity, Focusable as _, SharedString, Window};
 use gpui_kit::base::input::InputState;
 use provider::{AccountLane, Ack, Command, LoginOutcome, ProviderError};
 
@@ -668,50 +668,6 @@ impl Harness {
             }
         }
     }
-
-    /// The Muse sign-in component over today's login state: the state (with
-    /// the API-key field's live `can_submit`), the field, and the intents.
-    /// The sheet draws it.
-    fn login_component(&self, cx: &mut Context<Self>) -> aui::screens::Login {
-        let intent = cx.listener(|this: &mut Self, intent: &LoginIntent, window, cx| {
-            this.login_intent(*intent, window, cx);
-        });
-        // `can_submit` tracks the field's non-empty trimmed text, recomputed
-        // every frame; the stored bool is only the shape the state needs.
-        let state = match &self.login.state {
-            LoginState::ApiKey { error, .. } => LoginState::ApiKey {
-                can_submit: !self.login.api_key.read(cx).value().trim().is_empty(),
-                error: error.clone(),
-            },
-            other => other.clone(),
-        };
-        // The eye flips the field's masked flag and keeps `revealed` in sync,
-        // so `ToggleReveal` flips from the truth. The component never sees
-        // the key: it only reads the masked flag for the glyph.
-        let baaz = cx.entity().downgrade();
-        let toggle = self.login.api_key.clone();
-        let field = secret_field("login-key", &self.login.api_key)
-            .placeholder("Paste your key")
-            .on_toggle_reveal(move |window, cx| {
-                let next = !toggle.read(cx).presentation().is_masked();
-                toggle.update(cx, |state, cx| state.set_masked(next, window, cx));
-                let _ = baaz.update(cx, |this, _| this.login.revealed = next);
-            });
-        login("login", state)
-            .product("Muse")
-            .headline("Sign in to Muse")
-            .provider(aui_icons::Provider::Muse)
-            .api_key_field(field)
-            .on_intent(move |i, window, cx| intent(&i, window, cx))
-    }
-
-    /// Muse's sign-in drawn as a sheet (D5 B3): no masthead, no second
-    /// mascot, ✕ in the header.
-    pub(crate) fn render_login_sheet(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let card = self.login_component(cx).sheet();
-        let card = if crate::clock::deterministic() { card.at_rest() } else { card };
-        card.into_any_element()
-    }
 }
 
 /// The lane and label an account ack carries.
@@ -752,5 +708,118 @@ fn error_words(error: &ProviderError) -> String {
     match error {
         ProviderError::Refused(refusal) => refusal.reason.clone(),
         other => other.to_string(),
+    }
+}
+
+/// Muse's sign-in sheet as its own view (D5 B3, plan 4.6): the setup
+/// sheet's frame at 460 wide over the 45 % scrim — mark, "Sign in to Muse",
+/// ✕ — with the login's own steps inside. The sign-in itself is the root's
+/// (the `account/*` lane, the field that must never hand the key to
+/// anything but the wire): the root pushes the state and the field in each
+/// frame ([`MuseSheetFacts`]) and runs what the sheet asks for
+/// ([`MuseSheetEvent`]). ✕ and Escape dismiss it through the overlay stack
+/// (`DismissEvent`); the scrim does not.
+pub(crate) struct MuseSheetView {
+    /// What the root pushed this frame.
+    pub(crate) facts: Option<MuseSheetFacts>,
+    focus: gpui::FocusHandle,
+}
+
+/// What the Muse sheet draws, pushed by the root.
+pub(crate) struct MuseSheetFacts {
+    /// The login's state, `can_submit` already worked out.
+    pub(crate) state: LoginState,
+    /// The API-key field (the root's: the key goes from it to the wire).
+    pub(crate) api_key: Entity<InputState>,
+}
+
+/// What the Muse sheet asks the root for.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MuseSheetEvent {
+    /// A login button.
+    Intent(LoginIntent),
+    /// The eye flipped the field's mask to this (revealed when `true`).
+    Revealed(bool),
+}
+
+impl gpui::EventEmitter<MuseSheetEvent> for MuseSheetView {}
+impl gpui::EventEmitter<gpui::DismissEvent> for MuseSheetView {}
+
+impl gpui::Focusable for MuseSheetView {
+    fn focus_handle(&self, _: &gpui::App) -> gpui::FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl MuseSheetView {
+    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+        MuseSheetView { facts: None, focus: cx.focus_handle() }
+    }
+}
+
+impl Render for MuseSheetView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(facts) = self.facts.as_ref() else { return gpui::div().into_any_element() };
+        let me = cx.entity().downgrade();
+        let intent = move |intent: LoginIntent, _: &mut Window, cx: &mut gpui::App| {
+            let _ = me.update(cx, |_, cx| match intent {
+                // ✕ is the sheet's own dismissal: the stack closes it.
+                LoginIntent::Close => cx.emit(gpui::DismissEvent),
+                intent => cx.emit(MuseSheetEvent::Intent(intent)),
+            });
+        };
+        // The eye flips the field's masked flag and tells the root, so the
+        // root's `revealed` flips from the truth. The component never sees
+        // the key: it only reads the masked flag for the glyph.
+        let toggle = facts.api_key.clone();
+        let me = cx.entity().downgrade();
+        let field = secret_field("login-key", &facts.api_key).placeholder("Paste your key").on_toggle_reveal(move |window, cx| {
+            let next = !toggle.read(cx).presentation().is_masked();
+            toggle.update(cx, |state, cx| state.set_masked(next, window, cx));
+            let _ = me.update(cx, |_, cx| cx.emit(MuseSheetEvent::Revealed(next)));
+        });
+        let card = login("login", facts.state.clone())
+            .product("Muse")
+            .headline("Sign in to Muse")
+            .provider(aui_icons::Provider::Muse)
+            .api_key_field(field)
+            .on_intent(intent)
+            .sheet();
+        let card = if crate::clock::deterministic() { card.at_rest() } else { card };
+        let escape = cx.listener(|_: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
+            if event.keystroke.key == "escape" {
+                cx.emit(gpui::DismissEvent);
+                cx.stop_propagation();
+            }
+        });
+        gpui::div()
+            .absolute()
+            .inset_0()
+            .capture_key_down(escape)
+            .child(aui::screens::sheet_scrim("muse-sheet-scrim", card.into_any_element(), None))
+            .into_any_element()
+    }
+}
+
+impl Harness {
+    /// What the Muse sheet draws now: the login's state with `can_submit`
+    /// tracking the field's non-empty trimmed text (recomputed every frame;
+    /// the stored bool is only the shape the state needs).
+    pub(crate) fn muse_sheet_facts(&self, cx: &gpui::App) -> MuseSheetFacts {
+        let state = match &self.login.state {
+            LoginState::ApiKey { error, .. } => {
+                LoginState::ApiKey { can_submit: !self.login.api_key.read(cx).value().trim().is_empty(), error: error.clone() }
+            }
+            other => other.clone(),
+        };
+        MuseSheetFacts { state, api_key: self.login.api_key.clone() }
+    }
+
+    /// What the Muse sheet asked for, on the main window.
+    pub(crate) fn on_muse_sheet_event(&mut self, event: MuseSheetEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            MuseSheetEvent::Intent(intent) => self.login_intent(intent, window, cx),
+            MuseSheetEvent::Revealed(next) => self.login.revealed = next,
+        }
     }
 }

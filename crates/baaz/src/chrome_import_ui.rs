@@ -49,7 +49,10 @@ impl Harness {
     pub(crate) fn open_chrome_import(&mut self, cx: &mut Context<Self>) {
         let profiles = chrome_import::chrome_root().map(|root| chrome_import::profiles(&root)).unwrap_or_default();
         let sheet = ChromeImportSheet { profiles, selected: 0, counts: None, bookmarks: true, history: true, stage: Stage::Choose, epoch: 0, importing: false };
-        self.overlays.update(cx, |o, _| o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::ChromeImport(sheet))));
+        let view = cx.new(|cx| ChromeImportView { sheet: None, focus: cx.focus_handle() });
+        let asked = cx.subscribe(&view, |this: &mut Self, _, event: &ChromeImportEvent, cx| this.on_chrome_import_event(*event, cx));
+        let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::ChromeImport(sheet)).keep(asked);
+        self.push_overlay_view(entry, &view, cx);
         self.count_chrome_profile(cx);
         cx.notify();
     }
@@ -129,15 +132,87 @@ impl Harness {
         self.close_chrome_import(cx);
     }
 
+    /// The sheet for this frame, its content pushed first (it draws right
+    /// after, in this same frame), or `None` while it is shut.
+    pub(crate) fn compose_chrome_import(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let sheet = self.overlays.read(cx).stack.chrome_import().cloned()?;
+        let view = self.overlays.read(cx).stack.view_as::<ChromeImportView>(crate::overlay_stack::LayerKind::ChromeImport)?;
+        view.update(cx, |view, _| view.sheet = Some(sheet));
+        Some(view.into_any_element())
+    }
+
+    /// What the sheet asked for.
+    fn on_chrome_import_event(&mut self, event: ChromeImportEvent, cx: &mut Context<Self>) {
+        match event {
+            ChromeImportEvent::Profile(i) => {
+                self.overlays.update(cx, |o, _| {
+                    if let Some(sheet) = o.stack.chrome_import_mut() {
+                        sheet.selected = i;
+                    }
+                });
+                self.count_chrome_profile(cx);
+            }
+            ChromeImportEvent::Tick { history, on } => {
+                self.overlays.update(cx, |o, _| {
+                    if let Some(sheet) = o.stack.chrome_import_mut() {
+                        if history {
+                            sheet.history = on;
+                        } else {
+                            sheet.bookmarks = on;
+                        }
+                    }
+                });
+            }
+            ChromeImportEvent::Run => self.run_chrome_import(cx),
+            ChromeImportEvent::Undo => self.undo_chrome_import(cx),
+        }
+        cx.notify();
+    }
+}
+
+/// The Chrome import sheet as its own view (plan 4.6): it draws the stack
+/// entry's content, which the root pushes each frame, and asks the root for
+/// the work ([`ChromeImportEvent`]); Escape, ✕, Cancel and Done dismiss it
+/// through the overlay stack (`DismissEvent`).
+pub(crate) struct ChromeImportView {
+    /// The entry's content, pushed by the root.
+    sheet: Option<ChromeImportSheet>,
+    focus: gpui::FocusHandle,
+}
+
+/// What the Chrome import sheet asks the root for.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ChromeImportEvent {
+    /// Count profile `n`.
+    Profile(usize),
+    /// Tick or clear Bookmarks (`history: false`) or History.
+    Tick { history: bool, on: bool },
+    /// Import.
+    Run,
+    /// Undo the import that just landed.
+    Undo,
+}
+
+impl gpui::EventEmitter<ChromeImportEvent> for ChromeImportView {}
+impl gpui::EventEmitter<gpui::DismissEvent> for ChromeImportView {}
+
+impl gpui::Focusable for ChromeImportView {
+    fn focus_handle(&self, _: &gpui::App) -> gpui::FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Render for ChromeImportView {
     /// The sheet, over everything (like the sessions import sheet): the
     /// library's dialog sheet, its body blocks padded like its title.
-    pub(crate) fn render_chrome_import(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let sheet = self.overlays.read(cx).stack.chrome_import().cloned()?;
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(sheet) = self.sheet.clone() else { return div().into_any_element() };
         let sheet = &sheet;
         let p = cx.aui().colors;
-        let escape = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
+        // Escape, ✕, Cancel and Done dismiss it through the overlay stack.
+        let escape = cx.listener(|_: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
             if event.keystroke.key == "escape" {
-                this.close_chrome_import(cx);
+                cx.emit(gpui::DismissEvent);
                 cx.stop_propagation();
             }
         });
@@ -157,7 +232,7 @@ impl Harness {
         match &sheet.stage {
             Stage::Choose if sheet.profiles.is_empty() => {
                 body.push(line("Chrome isn’t on this Mac, or has no profile yet.".into()));
-                let close = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_chrome_import(cx));
+                let close = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(gpui::DismissEvent));
                 actions.push(button("chrome-import-ok", "Close").on_click(move |e, w, cx| close(e, w, cx)).into_any_element());
             }
             Stage::Choose => {
@@ -166,15 +241,7 @@ impl Harness {
                 if sheet.profiles.len() > 1 {
                     let mut list = v_flex().mx(px(SHEET_PAD_X - LIST_INSET)).mt(px(scale::SP_3)).gap(px(ROW_GAP));
                     for (i, profile) in sheet.profiles.iter().enumerate() {
-                        let pick = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                            this.overlays.update(cx, |o, _| {
-                                if let Some(sheet) = o.stack.chrome_import_mut() {
-                                    sheet.selected = i;
-                                }
-                            });
-                            this.count_chrome_profile(cx);
-                            cx.notify();
-                        });
+                        let pick = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(ChromeImportEvent::Profile(i)));
                         let on = i == sheet.selected;
                         list = list.child(
                             list_row(SharedString::from(format!("chrome-profile-{i}")), profile.name.clone())
@@ -190,18 +257,9 @@ impl Harness {
                 let counts = sheet.counts.clone();
                 let word = |n: Option<u64>| n.map(|n| crate::import_ui::thousands(n as usize)).unwrap_or_else(|| "…".into());
                 let tick = |id: &'static str, label: &'static str, detail: &'static str, on: bool, n: Option<u64>, which: u8| {
-                    let flip = cx.listener(move |this: &mut Self, intent: &CheckboxIntent, _, cx| {
+                    let flip = cx.listener(move |_: &mut Self, intent: &CheckboxIntent, _, cx| {
                         let CheckboxIntent::Set(state) = intent;
-                        this.overlays.update(cx, |o, _| {
-                            if let Some(sheet) = o.stack.chrome_import_mut() {
-                                if which == 0 {
-                                    sheet.bookmarks = state.checked();
-                                } else {
-                                    sheet.history = state.checked();
-                                }
-                            }
-                        });
-                        cx.notify();
+                        cx.emit(ChromeImportEvent::Tick { history: which != 0, on: state.checked() });
                     });
                     // A settings row whose control is the count and the box.
                     settings_row(label)
@@ -233,8 +291,8 @@ impl Harness {
                     ));
                 body.push(rows.into_any_element());
                 body.push(line("Passwords and sign-ins are not imported: Chrome keeps them to itself. You sign in to each site once.".into()));
-                let cancel = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_chrome_import(cx));
-                let go = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.run_chrome_import(cx));
+                let cancel = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(gpui::DismissEvent));
+                let go = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(ChromeImportEvent::Run));
                 let ready = counts.is_some() && (sheet.bookmarks || sheet.history);
                 actions.push(button("chrome-import-cancel", "Cancel").on_click(move |e, w, cx| cancel(e, w, cx)).into_any_element());
                 actions.push(button("chrome-import-go", "Import").primary().disabled(!ready).on_click(move |e, w, cx| go(e, w, cx)).into_any_element());
@@ -260,27 +318,25 @@ impl Harness {
                     "No new bookmarks: this profile had none Baaz did not already have. Pages you already had are not counted twice."
                 };
                 body.push(line(note.into()));
-                let undo = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.undo_chrome_import(cx));
-                let ok = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_chrome_import(cx));
+                let undo = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(ChromeImportEvent::Undo));
+                let ok = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(gpui::DismissEvent));
                 actions.push(button("chrome-import-undo", "Undo import").ghost().on_click(move |e, w, cx| undo(e, w, cx)).into_any_element());
                 actions.push(div().flex_1().into_any_element());
                 actions.push(button("chrome-import-done", "Done").primary().on_click(move |e, w, cx| ok(e, w, cx)).into_any_element());
             }
         }
         let mut card = dialog_sheet("chrome-import-sheet", title).width(SHEET_W).on_close(move |_, cx| {
-            let _ = weak.update(cx, |this, cx| this.close_chrome_import(cx));
+            let _ = weak.update(cx, |_, cx| cx.emit(gpui::DismissEvent));
         });
         for block in body {
             card = card.child(block);
         }
         let card = card.actions(actions);
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .capture_key_down(move |event, window, cx| escape(event, window, cx))
-                .child(aui::screens::sheet_scrim("chrome-import-scrim", card, None))
-                .into_any_element(),
-        )
+        div()
+            .absolute()
+            .inset_0()
+            .capture_key_down(move |event, window, cx| escape(event, window, cx))
+            .child(aui::screens::sheet_scrim("chrome-import-scrim", card, None))
+            .into_any_element()
     }
 }

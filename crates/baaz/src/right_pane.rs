@@ -475,6 +475,26 @@ impl RightPane {
         }
     }
 
+    /// Whether the Create PR form's base-branch menu stands open (an entry
+    /// on the overlay stack, so Escape and a click away close it
+    /// newest-first).
+    pub(crate) fn base_menu_open(&self, cx: &gpui::App) -> bool {
+        self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::PrBaseMenu)
+    }
+
+    /// Open (this pane drawing it) or close the base-branch menu.
+    pub(crate) fn set_base_menu(&mut self, open: bool, cx: &mut Context<Self>) {
+        let owner = cx.entity_id();
+        self.overlays.update(cx, |o, _| {
+            if open {
+                o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::PrBaseMenu).owner(owner));
+            } else {
+                o.stack.close(crate::overlay_stack::LayerKind::PrBaseMenu);
+            }
+        });
+        cx.notify();
+    }
+
     /// Whether the Page row's Recent pages menu stands open (an entry on the
     /// overlay stack).
     pub(crate) fn page_menu_open(&self, cx: &gpui::App) -> bool {
@@ -588,6 +608,7 @@ impl Render for RightPane {
                 right_open,
                 width,
                 "Muse",
+                self.base_menu_open(cx),
                 cx,
             );
             // The one body is the pane's landmark, named like a strip
@@ -610,6 +631,7 @@ impl Render for RightPane {
         let agent = self.facts.agent();
         let page = self.facts.page.clone();
         let page_menu = self.page_menu_open(cx);
+        let base_menu = self.base_menu_open(cx);
         let mut screens: Vec<Option<AnyElement>> = Vec::with_capacity(3);
         for (i, screen_kind) in RightKind::ALL.into_iter().enumerate() {
             if !visible(i) {
@@ -629,6 +651,7 @@ impl Render for RightPane {
                 agent,
                 &self.focus,
                 page_menu,
+                base_menu,
                 cx,
             )));
         }

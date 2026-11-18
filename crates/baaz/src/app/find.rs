@@ -28,7 +28,7 @@ impl Harness {
     /// empty query lists recent sessions and recently created files, so the
     /// sidebar's quick-filter is still one keypress away.
     pub(crate) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.overlays.update(cx, |overlays, _| overlays.open_palette(Palette { kind: PaletteKind::Search, selected: 0 }));
+        self.show_palette(PaletteKind::Search, cx);
         self.search_query.update(cx, |state, cx| state.set_value(String::new(), window, cx));
         self.search_sessions.clear();
         self.search_files.clear();
@@ -92,11 +92,9 @@ impl Harness {
             this.search_sessions = sessions;
             this.search_files = files;
             // The selection may point past the new list.
-            this.overlays.update(cx, |overlays, _| {
-                if let Some(palette) = overlays.palette_mut() {
-                    palette.selected = 0;
-                }
-            });
+            if let Some(view) = this.palette_view(cx) {
+                view.update(cx, |palette, cx| palette.select(0, cx));
+            }
             cx.notify();
         });
     }

@@ -108,7 +108,7 @@ pub(crate) enum OverlayKind {
 
 mod bookmark;
 mod card;
-pub(crate) use bookmark::BookmarkEdit;
+pub(crate) use bookmark::BookmarkView;
 
 /// A notes-panel click, run on the main window.
 type NotesClick = std::rc::Rc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
@@ -355,9 +355,9 @@ impl Render for OverlayView {
         // the panel on every render, as the modal's query field is.
         // The bookmark popover's keyboard: its name input.
         if kind == OverlayKind::Bookmark {
-            let input = self.baaz.read_with(cx, |baaz, _| baaz.overlays.read(cx).stack.bookmark().map(|e| e.name.clone())).ok().flatten();
-            if let Some(input) = input {
-                let handle = gpui::Focusable::focus_handle(input.read(cx), cx);
+            let view = self.baaz.read_with(cx, |baaz, _| baaz.overlays.read(cx).stack.bookmark().cloned()).ok().flatten();
+            if let Some(view) = view {
+                let handle = gpui::Focusable::focus_handle(view.read(cx), cx);
                 if !handle.is_focused(window) {
                     window.focus(&handle, cx);
                 }
@@ -1077,26 +1077,29 @@ impl Harness {
         format!("{:?}", self.overlays.read(cx).stack.browse_menu()).hash(&mut hasher);
         self.browser.read(cx).tabs.generation.hash(&mut hasher);
         self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::SiteInfo).hash(&mut hasher);
+        // The bookmark popover is its own view: its edits redraw the panel
+        // through it.
         if let Some(edit) = self.overlays.read(cx).stack.bookmark() {
-            (edit.id, edit.folder, edit.folders_open).hash(&mut hasher);
+            edit.entity_id().hash(&mut hasher);
         }
         self.browser.read(cx).browse_centre_shown(cx).hash(&mut hasher);
         if self.browser.read(cx).browse_address.is_some() {
             self.browser.read(cx).browse_address_text(cx).hash(&mut hasher);
             self.browser.read(cx).browse_omnibox_selected.hash(&mut hasher);
         }
-        // The hosted modal: which palette and row, what is typed, how many
-        // rows the query found (results land later than the keystroke), and
-        // which dialog.
+        // The hosted modal: which palette and the rows the root would push
+        // it now (results land later than the keystroke), and which dialog.
+        // The palette is its own view: its typing, arrows and hover redraw
+        // the panel through it, so only what the root pushes in (the rows,
+        // the search status) is this print's to see.
         let overlays = self.overlays.read(cx);
-        if let Some(palette) = overlays.palette() {
-            format!("{:?}", palette.kind).hash(&mut hasher);
-            palette.selected.hash(&mut hasher);
-            self.palette_rows(palette.kind, cx).len().hash(&mut hasher);
-            self.search_status(cx).hash(&mut hasher);
-            for query in [&self.search_query, &self.projects_query, &self.commands_query] {
-                query.read(cx).value().hash(&mut hasher);
-            }
+        if let Some(view) = self.palette_view(cx) {
+            let kind = view.read(cx).delegate.kind;
+            let mut rows = crate::palette::PaletteDelegate::new(kind, self.palette_facts(kind, cx), true);
+            crate::picker::PickerDelegate::update_matches(&mut rows, &view.read(cx).query(cx));
+            format!("{kind:?}").hash(&mut hasher);
+            rows.ids().hash(&mut hasher);
+            rows.status().hash(&mut hasher);
         }
         if let Some(dialog) = overlays.dialog() {
             dialog.title.hash(&mut hasher);
@@ -1119,18 +1122,13 @@ impl Harness {
     /// The handle the hosted modal's keyboard belongs to: the palette's own
     /// query field where it has one, else the palette or the dialog.
     pub(crate) fn modal_focus(&self, cx: &App) -> Option<FocusHandle> {
-        use crate::overlays::PaletteKind;
         use gpui::Focusable as _;
         let overlays = self.overlays.read(cx);
-        if let Some(palette) = overlays.palette() {
-            return Some(match palette.kind {
-                PaletteKind::Search => self.search_query.focus_handle(cx),
-                PaletteKind::Projects => self.projects_query.focus_handle(cx),
-                PaletteKind::Commands => self.commands_query.focus_handle(cx),
-                _ => self.focus_palette.clone(),
-            });
+        if let Some(view) = self.palette_view(cx) {
+            return Some(view.focus_handle(cx));
         }
-        overlays.dialog().is_some().then(|| self.focus_dialog.clone())
+        let _ = overlays;
+        self.dialog_focus(cx)
     }
 
     /// Whether the Field shows as an overlay: the address is being edited in
@@ -1198,7 +1196,7 @@ impl Harness {
                 // The same elements the main window draws, their listeners
                 // routed back to it (`main_listener`).
                 self.hosting_overlay = true;
-                let modal = self.render_palette(cx).or_else(|| self.render_dialog(window, cx));
+                let modal = self.compose_palette(cx).or_else(|| self.compose_dialog(cx));
                 self.hosting_overlay = false;
                 Some(div().size_full().relative().children(modal).into_any_element())
             }
@@ -1535,16 +1533,23 @@ impl Harness {
                 self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::SiteInfo); });
                 cx.notify();
             }
-            OverlayKind::Bookmark => self.close_bookmark_popover(cx),
+            // The popover's own dismissal (it keeps what is typed).
+            OverlayKind::Bookmark => {
+                if let Some(view) = self.overlays.read(cx).stack.bookmark().cloned() {
+                    view.update(cx, |_, cx| cx.emit(gpui::DismissEvent));
+                }
+            }
             OverlayKind::Downloads => {
                 self.dismiss_browse_popovers(cx);
             }
+            // The hosted modals' own dismissal, palette then dialog.
             OverlayKind::Modal => {
-                self.overlays.update(cx, |overlays, _| overlays.close_palette());
-                if self.overlays.read(cx).dialog().is_some() {
-                    self.close_dialog(cx);
+                for kind in [crate::overlay_stack::LayerKind::Palette, crate::overlay_stack::LayerKind::Dialog] {
+                    let view = self.overlays.read(cx).stack.view(kind);
+                    if let Some(view) = view {
+                        self.dismiss_overlay_view(view.entity_id(), cx);
+                    }
                 }
-                cx.notify();
             }
         }
     }

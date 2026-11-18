@@ -202,9 +202,6 @@ pub(crate) struct BrowserView {
     /// the file the page paints. `newtab_ground_asked` keeps it to one bake
     /// per launch.
     pub(crate) newtab_ground: Option<std::path::PathBuf>,
-    /// R4: the bookmark popover's name-field subscription, while the
-    /// popover (an entry on the overlay stack) stands open.
-    pub(crate) bookmark_edit_sub: Option<gpui::Subscription>,
     pub(crate) newtab_ground_asked: bool,
     /// Whether the highlight moved off the top Ask row (B2a-H4): Enter
     /// activates the highlighted row once moved, and commits the raw text
@@ -383,7 +380,6 @@ impl BrowserView {
             browse_omnibox_selected: 0,
             browse_pickup_hover: None,
             newtab_ground: None,
-            bookmark_edit_sub: None,
             newtab_ground_asked: false,
             browse_omnibox_moved: false,
             back_bounds: None,

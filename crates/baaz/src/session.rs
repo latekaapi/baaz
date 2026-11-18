@@ -206,6 +206,7 @@ mod composer;
 mod events;
 mod handoff;
 mod lane;
+pub(crate) mod pickers;
 mod questions;
 pub(crate) mod render;
 mod scripting;
@@ -1160,8 +1161,6 @@ pub struct SessionView {
     /// Queued turns whose unqueue is in flight, with the intent and the text
     /// captured when the row's button was clicked.
     unqueueing: HashMap<String, PendingUnqueue>,
-    /// Pins the context meter's breakdown open, for a scripted capture.
-    meter_open: bool,
     /// "Show full output" fetches by tool block id: what the server's stored
     /// bytes came back as. The fold keeps the fetch handle (`outputRef`); this
     /// keeps the result, so the card renders fetched lines without the fold
@@ -1454,7 +1453,6 @@ impl SessionView {
             mention_pending: None,
             mention_epoch: 0,
             unqueueing: HashMap::new(),
-            meter_open: false,
             full_outputs: HashMap::new(),
             fake_context: None,
             focus: cx.focus_handle(),
@@ -3620,13 +3618,7 @@ mod tests {
             view.update(cx, |view, cx| view.toggle_picker(MenuKind::Model, cx));
         });
         vc.update(|_, cx| {
-            let selected = view
-                .read(cx)
-                .overlays
-                .read(cx)
-                .menu()
-                .filter(|m| m.kind == MenuKind::Model)
-                .map(|m| m.selected);
+            let selected = view.read(cx).model_picker(cx).map(|picker| picker.read(cx).selected());
             assert_eq!(selected, Some(1), "the menu checks the row the chip names");
             view.update(cx, |view, cx| view.close_menu(cx));
         });
@@ -3643,13 +3635,7 @@ mod tests {
             view.update(cx, |view, cx| view.toggle_picker(MenuKind::Model, cx));
         });
         vc.update(|_, cx| {
-            let selected = view
-                .read(cx)
-                .overlays
-                .read(cx)
-                .menu()
-                .filter(|m| m.kind == MenuKind::Model)
-                .map(|m| m.selected);
+            let selected = view.read(cx).model_picker(cx).map(|picker| picker.read(cx).selected());
             assert_eq!(selected, Some(2), "with no match no row is checked");
         });
     }

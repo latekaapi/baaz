@@ -885,14 +885,12 @@ impl Harness {
     /// (uncached: the facts arrive during this render) — with the sheets
     /// the root owns stacked over it: Muse's sign-in, the setup sheet, the
     /// import sheet.
-    pub(crate) fn compose_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn compose_connect(&mut self, cx: &mut Context<Self>) -> AnyElement {
         use gpui::prelude::*;
         let facts = self.connect_facts(cx);
         self.connect_screen.update(cx, |screen, _| screen.facts = facts);
         let mut stack = gpui::div().size_full().relative().child(self.connect_screen.clone());
-        if self.muse_sheet_open(cx) {
-            stack = stack.child(self.muse_sheet_layer(window, cx));
-        }
+        stack = stack.children(self.compose_muse_sheet(cx));
         stack = stack.children(self.compose_setup_sheet(cx));
         stack = stack.children(self.render_import_sheet(cx));
         stack.into_any_element()
@@ -921,40 +919,30 @@ impl Harness {
     /// The Muse sign-in sheet over the shell (the account menu's Sign in,
     /// Settings, the provider banner). `None` unless the sheet is up outside
     /// the connect screen, which stacks its own.
-    pub(crate) fn render_muse_sheet(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if !self.muse_sheet_open(cx) || self.connect_open(cx) {
+    pub(crate) fn render_muse_sheet(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.connect_open(cx) {
             return None;
         }
-        Some(self.muse_sheet_layer(window, cx))
+        self.compose_muse_sheet(cx)
     }
 
-    /// Muse's sign-in as a sheet (D5 B3): the setup sheet's frame at 460
-    /// wide over the 45 % scrim — mark, "Sign in to Muse", ✕ — with the
-    /// login's own steps inside. ✕ and Escape close it; the scrim does not.
-    fn muse_sheet_layer(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        use gpui::prelude::*;
-        let card = self.render_login_sheet(window, cx);
-        let escape = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, window, cx| {
-            if event.keystroke.key == "escape" {
-                this.close_muse_sheet(window, cx);
-                cx.stop_propagation();
-            }
-        });
-        gpui::div()
-            .absolute()
-            .inset_0()
-            .capture_key_down(move |event, window, cx| escape(event, window, cx))
-            .child(aui::screens::sheet_scrim("muse-sheet-scrim", card, None))
-            .into_any_element()
+    /// Muse's sign-in sheet for this frame, its facts pushed first (it
+    /// draws right after, in this same frame), or `None` when it is down.
+    fn compose_muse_sheet(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let view = self.overlays.read(cx).stack.view_as::<crate::login::MuseSheetView>(crate::overlay_stack::LayerKind::MuseSheet)?;
+        let facts = self.muse_sheet_facts(cx);
+        view.update(cx, |sheet, _| sheet.facts = Some(facts));
+        Some(view.into_any_element())
     }
 
     /// Close Muse's sign-in sheet (✕, Escape): a flow it started is
     /// cancelled with it, so nothing keeps polling behind a closed sheet.
     pub(crate) fn close_muse_sheet(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.close_muse_sheet_now(cx);
+    }
+
+    /// [`Self::close_muse_sheet`] without a window: what the stack's pop runs.
+    pub(crate) fn close_muse_sheet_now(&mut self, cx: &mut Context<Self>) {
         if self.login.flow_running() {
             self.cancel_login_flow(cx);
         }
@@ -962,10 +950,6 @@ impl Harness {
         cx.notify();
     }
 
-    /// Whether Muse's sign-in sheet stands (an entry on the overlay stack).
-    pub(crate) fn muse_sheet_open(&self, cx: &gpui::App) -> bool {
-        self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::MuseSheet)
-    }
 
     /// Take Muse's sign-in sheet off the overlay stack, nothing else.
     pub(crate) fn close_muse_sheet_entry(&mut self, cx: &mut Context<Self>) {
@@ -981,10 +965,18 @@ impl Harness {
     /// (docs/65 §1). The open session stays; it waits on the sign-in.
     pub(crate) fn open_muse_sheet(&mut self, cx: &mut Context<Self>) {
         self.login.reset_to_choose();
-        // Escape off the stack closes it as ✕ does: the flow it started
-        // is cancelled with it.
-        let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::MuseSheet).on_close(|_, baaz, window, cx| baaz.close_muse_sheet(window, cx));
-        self.overlays.update(cx, |o, _| o.stack.push(entry));
+        let view = cx.new(crate::login::MuseSheetView::new);
+        // Its buttons run on the main window (the field focuses there).
+        let asked = cx.subscribe(&view, |this: &mut Self, _, event: &crate::login::MuseSheetEvent, cx| {
+            let event = *event;
+            this.run_on_main(cx, move |this, window, cx| this.on_muse_sheet_event(event, window, cx));
+        });
+        // Dismissing it (✕, Escape) closes it as `close_muse_sheet` does:
+        // the flow it started is cancelled with it.
+        let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::MuseSheet)
+            .on_close(|_, baaz, cx| baaz.close_muse_sheet_now(cx))
+            .keep(asked);
+        self.push_overlay_view(entry, &view, cx);
     }
 
     /// Leave the connect screen: Continue and Skip both set

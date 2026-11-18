@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use aui::screens::{setup_sheet, sheet_scrim, SetupStatus};
 use aui_terminal::{terminal_grid, ScriptChunk, TerminalSession};
-use gpui::{prelude::*, AnyElement, Context, Entity, FocusHandle, Subscription, Window};
+use gpui::{prelude::*, AnyElement, Context, Entity, FocusHandle, Focusable, Subscription, Window};
 
 use crate::app::Harness;
 use crate::provider_model::{ProviderModelEvent, ProviderStatusModel};
@@ -219,17 +219,19 @@ impl SetupHost {
         self.overlays.read(cx).stack.setup_sheet().copied()
     }
 
-    /// Whether a sheet is up.
-    pub(crate) fn is_open(&self, cx: &gpui::App) -> bool {
-        self.sheet(cx).is_some()
-    }
 
     /// Put the sheet up (or change what an open one is for).
     fn show(&mut self, sheet: SetupSheet, cx: &mut Context<Self>) {
         let owner = cx.entity_id();
+        let view: gpui::AnyView = cx.entity().into();
         self.overlays.update(cx, |o, _| match o.stack.setup_sheet_mut() {
             Some(open) => *open = sheet,
-            None => o.stack.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::SetupSheet(sheet)).owner(owner)),
+            // Drawn by this host; its `DismissEvent` reaches the root
+            // through the root's own subscription (the host outlives its
+            // sheets).
+            None => o.stack.push(
+                crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::SetupSheet(sheet)).owner(owner).view(view),
+            ),
         });
     }
 
@@ -408,12 +410,11 @@ impl SetupHost {
         let id = sheet.provider;
         let status = self.model.read(cx).status(id);
         let session = self.terminals.sessions.get(&id)?.clone();
-        let close = cx.listener(|this: &mut Self, _: &(), _, cx| {
-            this.close(cx);
-        });
-        let escape = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
+        // ✕ and Escape dismiss it through the overlay stack, newest first.
+        let close = cx.listener(|_: &mut Self, _: &(), _, cx| cx.emit(gpui::DismissEvent));
+        let escape = cx.listener(|_: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
             if event.keystroke.key == "escape" {
-                this.close(cx);
+                cx.emit(gpui::DismissEvent);
                 cx.stop_propagation();
             }
         });
@@ -443,6 +444,15 @@ impl SetupHost {
     }
 }
 
+impl gpui::EventEmitter<gpui::DismissEvent> for SetupHost {}
+
+impl Focusable for SetupHost {
+    /// The sheet terminal's keyboard.
+    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
 impl Render for SetupHost {
     /// The sheet's layer while one is up; nothing otherwise (the root seats
     /// the view only while a sheet stands).
@@ -459,10 +469,6 @@ impl Harness {
         self.setup.update(cx, |setup, cx| setup.open(id, kind, window, cx));
     }
 
-    /// Whether a setup sheet stands.
-    pub(crate) fn setup_open(&self, cx: &gpui::App) -> bool {
-        self.setup.read(cx).is_open(cx)
-    }
 
     /// `setup:<provider>:<stage>` ([`SetupHost::step`]).
     pub(crate) fn step_setup(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
@@ -472,7 +478,7 @@ impl Harness {
     /// The sheet's view while one stands, for the connect screen's stack
     /// or the shell's.
     pub(crate) fn compose_setup_sheet(&self, cx: &gpui::App) -> Option<AnyElement> {
-        self.setup_open(cx).then(|| self.setup.clone().into_any_element())
+        self.overlays.read(cx).stack.view(crate::overlay_stack::LayerKind::SetupSheet).map(|view| view.into_any_element())
     }
 }
 

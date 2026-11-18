@@ -12,8 +12,102 @@ use gpui::{div, prelude::*, Context, Window};
 use super::Harness;
 use crate::browser::Owner;
 
-/// One picker row and where it hands off to.
-type PickerRow = (HandoffTarget, aui::browse::handoff::HandoffRow);
+/// The hand-off picker: one [`crate::picker::Picker`] over the card.
+pub(crate) type HandoffPicker = crate::picker::Picker<HandoffDelegate>;
+
+/// One row the picker may list, where it hands off to, and the words the
+/// query matches (a session's label and project, a project's name).
+#[derive(Clone)]
+pub(crate) struct Candidate {
+    target: HandoffTarget,
+    row: aui::browse::handoff::HandoffRow,
+    words: Vec<String>,
+}
+
+/// Everything the picker may list, pushed by the root.
+#[derive(Clone, Default)]
+pub(crate) struct HandoffCandidates {
+    sessions: Vec<Candidate>,
+    projects: Vec<Candidate>,
+}
+
+/// The hand-off picker's delegate: recent sessions then projects, each
+/// narrowed by the query (case-insensitive, on label and project) and
+/// capped ([`RECENT_SESSIONS`], [`PROJECTS`]).
+pub(crate) struct HandoffDelegate {
+    candidates: HandoffCandidates,
+    /// The sessions and the projects the query leaves, in order.
+    matches: (Vec<usize>, Vec<usize>),
+}
+
+impl HandoffDelegate {
+    /// Match `ix`, sessions first.
+    fn candidate(&self, ix: usize) -> Option<&Candidate> {
+        let (sessions, projects) = &self.matches;
+        match sessions.get(ix) {
+            Some(at) => self.candidates.sessions.get(*at),
+            None => projects.get(ix - sessions.len()).and_then(|at| self.candidates.projects.get(*at)),
+        }
+    }
+}
+
+impl crate::picker::PickerDelegate for HandoffDelegate {
+    type Row = aui::browse::handoff::HandoffRow;
+    type Pick = HandoffTarget;
+
+    fn match_count(&self) -> usize {
+        self.matches.0.len() + self.matches.1.len()
+    }
+
+    fn update_matches(&mut self, query: &str) {
+        let query = query.trim().to_lowercase();
+        let hit = |c: &Candidate| query.is_empty() || c.words.iter().any(|word| word.to_lowercase().contains(&query));
+        let pick = |list: &[Candidate], cap: usize| list.iter().enumerate().filter(|(_, c)| hit(c)).map(|(at, _)| at).take(cap).collect();
+        self.matches = (pick(&self.candidates.sessions, RECENT_SESSIONS), pick(&self.candidates.projects, PROJECTS));
+    }
+
+    fn match_id(&self, ix: usize) -> Option<gpui::SharedString> {
+        self.candidate(ix).map(|c| c.row.id.clone())
+    }
+
+    fn confirm(&self, ix: usize) -> Option<HandoffTarget> {
+        self.candidate(ix).map(|c| c.target.clone())
+    }
+
+    fn confirm_id(&self, id: &gpui::SharedString) -> Option<HandoffTarget> {
+        HandoffTarget::parse(id)
+    }
+
+    fn render_match(&self, ix: usize, _selected: bool) -> Self::Row {
+        self.candidate(ix).map(|c| c.row.clone()).expect("a match in range")
+    }
+
+    fn render_picker(
+        &self,
+        mut rows: Vec<Self::Row>,
+        frame: crate::picker::PickerFrame,
+        _window: &mut Window,
+        _cx: &mut Context<HandoffPicker>,
+    ) -> gpui::AnyElement {
+        use aui::browse::handoff::HandoffIntent;
+        let projects = rows.split_off(self.matches.0.len().min(rows.len()));
+        let Some(field) = frame.field.clone() else { return div().into_any_element() };
+        let (select, hover, dismiss) = (frame.select.clone(), frame.hover.clone(), frame.dismiss.clone());
+        let picker = aui::browse::handoff::handoff_picker("handoff-picker", &field, rows, projects, frame.selected).on_intent(
+            move |intent, window, cx| match intent {
+                HandoffIntent::Choose(row) => select(&row, window, cx),
+                HandoffIntent::Hover(index) => hover(index, window, cx),
+                HandoffIntent::Close => dismiss(window, cx),
+            },
+        );
+        // Under the card's header, its right edge 70 in from the card's
+        // (the ↗ sits left of Dock and Close).
+        frame
+            .keyed(div().absolute().top(gpui::px(crate::overlay::SHADOW_PAD + 44.0)).right(gpui::px(crate::overlay::SHADOW_PAD + 62.0)))
+            .child(picker)
+            .into_any_element()
+    }
+}
 
 /// How many recent sessions the picker offers.
 const RECENT_SESSIONS: usize = 4;
@@ -85,12 +179,11 @@ pub(crate) fn handoff_draft(title: &str, answer: Option<&str>, pages: &[(String,
 }
 
 impl Harness {
-    /// The picker's rows: recent sessions (not browser chats, not hidden),
-    /// then projects, filtered by `query`.
-    fn handoff_rows(&self, query: &str) -> (Vec<PickerRow>, Vec<PickerRow>) {
+    /// The picker's candidates: recent sessions (not browser chats, not
+    /// hidden), newest first, then projects — each with the words the
+    /// query matches. The picker narrows them ([`HandoffDelegate`]).
+    fn handoff_candidates(&self) -> HandoffCandidates {
         use aui::browse::handoff::HandoffRow;
-        let query = query.trim().to_lowercase();
-        let hit = |text: &str| query.is_empty() || text.to_lowercase().contains(&query);
         let now = chrono::Local::now();
         let mut entries: Vec<&crate::sidebar::SessionEntry> = self
             .sessions
@@ -100,98 +193,56 @@ impl Harness {
         entries.sort_by_key(|e| std::cmp::Reverse(e.updated));
         let sessions = entries
             .into_iter()
-            .filter_map(|e| {
+            .map(|e| {
                 let project = self.project_name_for(&e.id).unwrap_or_default();
-                (hit(&e.label) || hit(&project)).then(|| {
-                    let meta = if project.is_empty() { when_label(e.updated, now) } else { format!("{project} · {}", when_label(e.updated, now)) };
-                    let target = HandoffTarget::Session(e.id.clone());
-                    let row = HandoffRow { id: target.row_id().into(), title: e.label.clone().into(), meta: meta.into(), provider: Some(e.provider.icon()) };
-                    (target, row)
-                })
+                let meta = if project.is_empty() { when_label(e.updated, now) } else { format!("{project} · {}", when_label(e.updated, now)) };
+                let target = HandoffTarget::Session(e.id.clone());
+                let row = HandoffRow { id: target.row_id().into(), title: e.label.clone().into(), meta: meta.into(), provider: Some(e.provider.icon()) };
+                Candidate { target, row, words: vec![e.label.clone(), project] }
             })
-            .take(RECENT_SESSIONS)
             .collect();
         let provider = crate::providers::ProviderId::parse(&self.new_provider);
         let projects = self
             .projects
             .sorted_available()
             .into_iter()
-            .filter(|p| hit(&p.name))
-            .take(PROJECTS)
             .map(|p| {
                 let target = HandoffTarget::Project(p.id.clone());
                 let row = HandoffRow { id: target.row_id().into(), title: p.name.clone().into(), meta: provider.label().into(), provider: None };
-                (target, row)
+                Candidate { target, row, words: vec![p.name.clone()] }
             })
             .collect();
-        (sessions, projects)
+        HandoffCandidates { sessions, projects }
     }
 
-    /// The picker over the card, while it is open: anchored under the
-    /// card's ↗, right-aligned to it.
-    pub(crate) fn render_handoff_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if !self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::HandoffPicker) {
-            return None;
+    /// Open (or close) the picker over the card.
+    pub(crate) fn toggle_handoff_picker(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.handoff_picker_view(cx) {
+            view.update(cx, |picker, cx| picker.dismiss(cx));
+            return;
         }
-        let query = match self.browser.read(cx).agent_window.handoff_query.clone() {
-            Some(query) => query,
-            None => {
-                let query = cx.new(|cx| aui::composer::composer_state_rows("Find a session or project", 1, 1, window, cx));
-                self.browser.update(cx, |browser, _| browser.agent_window.handoff_query = Some(query.clone()));
-                query
-            }
-        };
-        let text = query.read(cx).value().to_string();
-        let (sessions, projects) = self.handoff_rows(&text);
-        let total = sessions.len() + projects.len();
-        let selected = self.browser.read(cx).agent_window.handoff_selected.min(total.saturating_sub(1));
-        let rows_s: Vec<_> = sessions.iter().map(|(_, row)| row.clone()).collect();
-        let rows_p: Vec<_> = projects.iter().map(|(_, row)| row.clone()).collect();
-        let baaz = cx.weak_entity();
-        let picker = aui::browse::handoff::handoff_picker("handoff-picker", &query, rows_s, rows_p, selected).on_intent(move |intent, _, cx| {
-            use aui::browse::handoff::HandoffIntent;
-            let _ = baaz.update(cx, |this, cx| match intent {
-                HandoffIntent::Choose(row) => {
-                    if let Some(target) = HandoffTarget::parse(&row) {
-                        this.run_on_main(cx, move |this, window, cx| this.hand_off_browser_chat(target, window, cx));
-                    }
-                }
-                HandoffIntent::Hover(index) => {
-                    this.browser.update(cx, |browser, _| browser.agent_window.handoff_selected = index);
-                    cx.notify();
-                }
-                HandoffIntent::Close => {
-                    this.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::HandoffPicker); });
-                    cx.notify();
-                }
-            });
+        let delegate = HandoffDelegate { candidates: self.handoff_candidates(), matches: (Vec::new(), Vec::new()) };
+        let view = cx.new(|cx| crate::picker::Picker::with_own_field(delegate, "Find a session or project", cx));
+        let picked = cx.subscribe(&view, |this: &mut Self, _, event: &crate::picker::Picked<HandoffTarget>, cx| {
+            let target = event.0.clone();
+            this.run_on_main(cx, move |this, window, cx| this.hand_off_browser_chat(target, window, cx));
         });
-        let keys = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, _, cx| match event.keystroke.key.as_str() {
-            "up" => {
-                this.browser.update(cx, |browser, _| browser.agent_window.handoff_selected = browser.agent_window.handoff_selected.saturating_sub(1));
-                cx.notify();
-            }
-            "down" => {
-                this.browser.update(cx, |browser, _| browser.agent_window.handoff_selected = (browser.agent_window.handoff_selected + 1).min(total.saturating_sub(1)));
-                cx.notify();
-            }
-            "enter" => {
-                let text = this.browser.read(cx).agent_window.handoff_query.as_ref().map(|q| q.read(cx).value().to_string()).unwrap_or_default();
-                let (sessions, projects) = this.handoff_rows(&text);
-                let target = sessions.into_iter().chain(projects).nth(this.browser.read(cx).agent_window.handoff_selected).map(|(t, _)| t);
-                if let Some(target) = target {
-                    this.run_on_main(cx, move |this, window, cx| this.hand_off_browser_chat(target, window, cx));
-                }
-            }
-            "escape" => {
-                this.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::HandoffPicker); });
-                cx.notify();
-            }
-            _ => {}
-        });
-        // Under the card's header, its right edge 70 in from the card's
-        // (the ↗ sits left of Dock and Close).
-        Some(div().absolute().top(gpui::px(crate::overlay::SHADOW_PAD + 44.0)).right(gpui::px(crate::overlay::SHADOW_PAD + 62.0)).on_key_down(keys).child(picker).into_any_element())
+        let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::HandoffPicker).keep(picked);
+        self.push_overlay_view(entry, &view, cx);
+    }
+
+    /// The open hand-off picker's view.
+    pub(crate) fn handoff_picker_view(&self, cx: &gpui::App) -> Option<gpui::Entity<HandoffPicker>> {
+        self.overlays.read(cx).stack.view_as::<HandoffPicker>(crate::overlay_stack::LayerKind::HandoffPicker)
+    }
+
+    /// The picker over the card, while it is open — its candidates pushed
+    /// first (it draws right after, in this same frame).
+    pub(crate) fn render_handoff_picker(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let view = self.handoff_picker_view(cx)?;
+        let candidates = self.handoff_candidates();
+        view.update(cx, |picker, cx| picker.push_facts(cx, |delegate| delegate.candidates = candidates));
+        Some(view.into_any_element())
     }
 
     /// Hand the browser chat off to `target`: its tabs move to the target's

@@ -391,10 +391,14 @@ impl Harness {
         }
         let choice = self.import.plan().map(Choice::defaults);
         let sheet = ImportSheet { stage, choice, show_unreadable: false };
-        // Escape off the stack closes it as ✕ does.
-        let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::ImportSheet(sheet)).on_close(|_, baaz, _, cx| baaz.import_sheet_closed(cx));
-        self.overlays.update(cx, |o, _| o.stack.push(entry));
-        cx.notify();
+        let view = cx.new(ImportSheetView::new);
+        let asked = cx.subscribe(&view, |this: &mut Self, _, event: &ImportSheetEvent, cx| this.on_import_sheet_event(event, cx));
+        // Dismissing it (✕, Escape, Cancel, Close, Done) closes it as
+        // `close_import_sheet` does: a finished run is done with.
+        let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::ImportSheet(sheet))
+            .on_close(|_, baaz, cx| baaz.import_sheet_closed(cx))
+            .keep(asked);
+        self.push_overlay_view(entry, &view, cx);
     }
 
     /// Close the sheet (✕, Cancel, Close, Done, Escape). A run keeps going.
@@ -774,53 +778,214 @@ impl Harness {
         ]
     }
 
-    /// The sheet over the scrim, or `None` while it is shut.
+    /// The sheet for this frame, its facts pushed first (it draws right
+    /// after, in this same frame), or `None` while it is shut.
     pub(crate) fn render_import_sheet(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let view = self.overlays.read(cx).stack.view_as::<ImportSheetView>(crate::overlay_stack::LayerKind::ImportSheet)?;
+        let facts = self.import_sheet_facts(cx)?;
+        view.update(cx, |view, _| view.facts = Some(facts));
+        Some(view.into_any_element())
+    }
+
+    /// What the sheet draws now, worked out from the plan and the run.
+    fn import_sheet_facts(&self, cx: &gpui::App) -> Option<ImportSheetFacts> {
         let sheet = self.import_sheet(cx)?;
-        let sheet = &sheet;
-        let escape = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
-            if event.keystroke.key == "escape" {
-                this.close_import_sheet(cx);
-                cx.stop_propagation();
+        let choose = match (self.import.plan(), sheet.choice.as_ref()) {
+            (Some(plan), Some(choice)) => {
+                let (listed, rest) = visible_folders(plan, choice);
+                let listed = listed
+                    .iter()
+                    .map(|folder| FolderFacts {
+                        cwd: folder.cwd.clone(),
+                        name: folder.name.clone(),
+                        parent: folder.parent.clone(),
+                        project: folder.project.is_some(),
+                        counts: folder.count(choice.skip_scripted),
+                        on: choice.ticked.contains(&folder.cwd),
+                    })
+                    .collect();
+                let rest = (!rest.is_empty()).then(|| {
+                    let ticked = rest.iter().filter(|f| choice.ticked.contains(&f.cwd)).count();
+                    let state = match ticked {
+                        0 => CheckboxState::Off,
+                        n if n == rest.len() => CheckboxState::On,
+                        _ => CheckboxState::Mixed,
+                    };
+                    let counts = rest.iter().fold((0, 0), |(c, o), f| {
+                        let (fc, fo) = f.count(choice.skip_scripted);
+                        (c + fc, o + fo)
+                    });
+                    RestFacts { len: rest.len(), state, counts }
+                });
+                let chosen = import::chosen(plan, choice)
+                    .into_iter()
+                    .filter(|found| !self.provider_sessions.contains_key(&found.session_id))
+                    .count();
+                Some(ChooseFacts {
+                    listed,
+                    rest,
+                    none_left: plan.sessions.is_empty(),
+                    skip: choice.skip_scripted,
+                    scripted: plan.scripted(),
+                    chosen,
+                })
             }
-        });
-        let title = if sheet.stage == SheetStage::Done { "Import finished" } else { "Import sessions" };
-        let (body, actions) = match sheet.stage {
-            SheetStage::Choose => self.import_choose_body(sheet, cx),
-            SheetStage::Progress => self.import_progress_body(cx),
-            SheetStage::Done => self.import_done_body(sheet, cx),
+            _ => None,
         };
-        let weak = cx.weak_entity();
-        let mut card = dialog_sheet("import-sheet", title).width(SHEET_W).on_close(move |_, cx| {
-            let _ = weak.update(cx, |this, cx| this.close_import_sheet(cx));
+        let progress = self.import.run.as_ref().map(|run| (run.done, run.total, run.folder.clone())).unwrap_or((0, 0, String::new()));
+        let done = self.import.run.as_ref().map(|run| DoneFacts {
+            result: result_line(run),
+            unreadable: run.unreadable.iter().take(UNREADABLE_LISTED).cloned().collect(),
+            unreadable_total: run.unreadable.len(),
+            added: !run.added.is_empty(),
         });
-        for block in body {
-            card = card.child(block);
+        Some(ImportSheetFacts { sheet, choose, progress, done })
+    }
+
+    /// What the sheet asked for.
+    fn on_import_sheet_event(&mut self, event: &ImportSheetEvent, cx: &mut Context<Self>) {
+        match event {
+            ImportSheetEvent::Folder { cwd, on } => self.toggle_import_folder(cwd, *on, cx),
+            ImportSheetEvent::Rest(on) => self.toggle_import_rest(*on, cx),
+            ImportSheetEvent::SkipScripted(on) => self.set_import_skip_scripted(*on, cx),
+            ImportSheetEvent::Start => self.start_import(None, cx),
+            ImportSheetEvent::ToggleUnreadable => {
+                self.with_import_sheet(cx, |sheet| sheet.show_unreadable = !sheet.show_unreadable);
+                cx.notify();
+            }
+            ImportSheetEvent::ShowImported => self.show_imported_in_sidebar(cx),
         }
-        let card = card.actions(actions);
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .capture_key_down(move |event, window, cx| escape(event, window, cx))
-                .child(aui::screens::sheet_scrim("import-sheet-scrim", card, None))
-                .into_any_element(),
-        )
+    }
+}
+
+/// How many unreadable paths the result lists before "and N more".
+const UNREADABLE_LISTED: usize = 12;
+
+/// The import sheet as its own view (plan 4.6): it draws what the root
+/// pushes each frame ([`ImportSheetFacts`]) and asks the root for the work
+/// ([`ImportSheetEvent`]); ✕, Escape, Cancel, Close and Done dismiss it
+/// through the overlay stack (`DismissEvent`) — a run keeps going.
+pub(crate) struct ImportSheetView {
+    facts: Option<ImportSheetFacts>,
+    focus: gpui::FocusHandle,
+}
+
+/// What the import sheet draws, pushed by the root.
+pub(crate) struct ImportSheetFacts {
+    /// The stack entry's content: the stage, the choice, the toggle.
+    sheet: ImportSheet,
+    /// The choose stage's rows, once a plan and a choice are there.
+    choose: Option<ChooseFacts>,
+    /// The progress stage: done, total, the folder in hand.
+    progress: (usize, usize, String),
+    /// The result stage, once a run is there.
+    done: Option<DoneFacts>,
+}
+
+/// The choose stage, worked out.
+struct ChooseFacts {
+    /// The listed folders.
+    listed: Vec<FolderFacts>,
+    /// The folded "N more folders" row.
+    rest: Option<RestFacts>,
+    /// No earlier session at all (rather than only scripted ones).
+    none_left: bool,
+    /// Skip scripted runs is ticked.
+    skip: bool,
+    /// How many scripted runs there are.
+    scripted: usize,
+    /// How many sessions Import would bring in.
+    chosen: usize,
+}
+
+/// One listed folder.
+struct FolderFacts {
+    cwd: String,
+    name: String,
+    parent: String,
+    /// The folder is a Baaz project.
+    project: bool,
+    counts: (usize, usize),
+    on: bool,
+}
+
+/// The folded folders' row.
+struct RestFacts {
+    len: usize,
+    state: CheckboxState,
+    counts: (usize, usize),
+}
+
+/// The result stage.
+struct DoneFacts {
+    result: String,
+    /// The first unreadable paths.
+    unreadable: Vec<PathBuf>,
+    unreadable_total: usize,
+    /// Anything landed (Show in sidebar).
+    added: bool,
+}
+
+/// What the import sheet asks the root for.
+#[derive(Clone, Debug)]
+pub(crate) enum ImportSheetEvent {
+    /// Tick or untick one folder (by cwd).
+    Folder { cwd: String, on: bool },
+    /// Tick or untick the folded folders.
+    Rest(bool),
+    /// Skip scripted runs.
+    SkipScripted(bool),
+    /// Import the chosen sessions.
+    Start,
+    /// Show or hide the unreadable files.
+    ToggleUnreadable,
+    /// Show the imported sessions in the sidebar.
+    ShowImported,
+}
+
+impl gpui::EventEmitter<ImportSheetEvent> for ImportSheetView {}
+impl gpui::EventEmitter<gpui::DismissEvent> for ImportSheetView {}
+
+impl gpui::Focusable for ImportSheetView {
+    fn focus_handle(&self, _: &gpui::App) -> gpui::FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl ImportSheetView {
+    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+        ImportSheetView { facts: None, focus: cx.focus_handle() }
+    }
+
+    /// A click handler that dismisses the sheet through the stack.
+    fn dismiss(cx: &mut Context<Self>) -> impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static {
+        let me = cx.weak_entity();
+        move |_, _, cx| {
+            let _ = me.update(cx, |_, cx| cx.emit(gpui::DismissEvent));
+        }
+    }
+
+    /// A click handler that asks the root for `event`.
+    fn ask(event: ImportSheetEvent, cx: &mut Context<Self>) -> impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static {
+        let me = cx.weak_entity();
+        move |_, _, cx| {
+            let _ = me.update(cx, |_, cx| cx.emit(event.clone()));
+        }
     }
 
     /// The choose stage: intro, folders, the option, the note; Cancel /
     /// Import N sessions.
-    fn import_choose_body(&self, sheet: &ImportSheet, cx: &mut Context<Self>) -> (Vec<AnyElement>, Vec<AnyElement>) {
+    fn import_choose_body(choose: Option<&ChooseFacts>, cx: &mut Context<Self>) -> (Vec<AnyElement>, Vec<AnyElement>) {
         let p = cx.aui().colors;
         let cancel = {
-            let close = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_import_sheet(cx));
+            let close = Self::dismiss(cx);
             button("import-sheet-cancel", "Cancel")
                 .size(ButtonSize::Row)
                 .accessibility_label("Cancel the import")
                 .on_click(move |event, window, cx| close(event, window, cx))
                 .into_any_element()
         };
-        let (Some(plan), Some(choice)) = (self.import.plan(), sheet.choice.as_ref()) else {
+        let Some(choose) = choose else {
             let waiting = div()
                 .px(px(SHEET_PAD_X))
                 .pt(px(scale::SP_4))
@@ -849,7 +1014,7 @@ impl Harness {
                 )
                 .into_any_element(),
         );
-        let (listed, rest) = visible_folders(plan, choice);
+        let (listed, rest) = (&choose.listed, &choose.rest);
         // The folder list is an object on the sheet: one fill step up, no
         // edge (docs/83 §1 rule 3); its rows split by 1 px `line`.
         let mut list = Shape::Container
@@ -883,7 +1048,7 @@ impl Harness {
                     .items_center()
                     .role_in(TextRole::Caption, cx)
                     .text_color(p.fg_muted)
-                    .child(if plan.sessions.is_empty() {
+                    .child(if choose.none_left {
                         "No earlier sessions on this Mac that are not in Baaz already."
                     } else {
                         "Only scripted runs are left. Untick Skip scripted runs to see them."
@@ -891,15 +1056,14 @@ impl Harness {
             );
         }
         for (n, folder) in listed.iter().enumerate() {
-            let on = choice.ticked.contains(&folder.cwd);
-            let (c, o) = folder.count(choice.skip_scripted);
+            let (c, o) = folder.counts;
             let cwd = folder.cwd.clone();
-            let flip = cx.listener(move |this: &mut Self, intent: &CheckboxIntent, _, cx| {
+            let flip = cx.listener(move |_: &mut Self, intent: &CheckboxIntent, _, cx| {
                 let CheckboxIntent::Set(state) = intent;
-                this.toggle_import_folder(&cwd, state.checked(), cx);
+                cx.emit(ImportSheetEvent::Folder { cwd: cwd.clone(), on: state.checked() });
             });
-            let state = if on { CheckboxState::On } else { CheckboxState::Off };
-            let tag = folder.project.is_some().then_some("project");
+            let state = if folder.on { CheckboxState::On } else { CheckboxState::Off };
+            let tag = folder.project.then_some("project");
             list = list.child(folder_row(
                 SharedString::from(format!("import-folder-{n}")),
                 state,
@@ -912,25 +1076,16 @@ impl Harness {
                 cx,
             ));
         }
-        if !rest.is_empty() {
-            let ticked = rest.iter().filter(|f| choice.ticked.contains(&f.cwd)).count();
-            let state = match ticked {
-                0 => CheckboxState::Off,
-                n if n == rest.len() => CheckboxState::On,
-                _ => CheckboxState::Mixed,
-            };
-            let (c, o) = rest.iter().fold((0, 0), |(c, o), f| {
-                let (fc, fo) = f.count(choice.skip_scripted);
-                (c + fc, o + fo)
-            });
-            let flip = cx.listener(move |this: &mut Self, intent: &CheckboxIntent, _, cx| {
+        if let Some(rest) = rest {
+            let (state, (c, o)) = (rest.state, rest.counts);
+            let flip = cx.listener(move |_: &mut Self, intent: &CheckboxIntent, _, cx| {
                 let CheckboxIntent::Set(state) = intent;
-                this.toggle_import_rest(state.checked(), cx);
+                cx.emit(ImportSheetEvent::Rest(state.checked()));
             });
             list = list.child(folder_row(
                 SharedString::from("import-folder-rest"),
                 state,
-                &format!("{} more folders", thousands(rest.len())),
+                &format!("{} more folders", thousands(rest.len)),
                 "",
                 None,
                 (c, o),
@@ -940,11 +1095,10 @@ impl Harness {
             ));
         }
         body.push(list.into_any_element());
-        let scripted = plan.scripted();
-        let skip = choice.skip_scripted;
-        let flip_skip = cx.listener(move |this: &mut Self, intent: &CheckboxIntent, _, cx| {
+        let (scripted, skip) = (choose.scripted, choose.skip);
+        let flip_skip = cx.listener(move |_: &mut Self, intent: &CheckboxIntent, _, cx| {
             let CheckboxIntent::Set(state) = intent;
-            this.set_import_skip_scripted(state.checked(), cx);
+            cx.emit(ImportSheetEvent::SkipScripted(state.checked()));
         });
         body.push(
             h_flex()
@@ -979,13 +1133,10 @@ impl Harness {
                 )
                 .into_any_element(),
         );
-        let n = import::chosen(plan, choice)
-            .into_iter()
-            .filter(|found| !self.provider_sessions.contains_key(&found.session_id))
-            .count();
+        let n = choose.chosen;
         let label = format!("Import {}", plural(n, "session", "sessions"));
         let go = {
-            let start = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.start_import(None, cx));
+            let start = Self::ask(ImportSheetEvent::Start, cx);
             button("import-sheet-go", label.clone())
                 .size(ButtonSize::Row)
                 .primary()
@@ -998,14 +1149,9 @@ impl Harness {
     }
 
     /// The progress stage: the line, the bar, the note; Close.
-    fn import_progress_body(&self, cx: &mut Context<Self>) -> (Vec<AnyElement>, Vec<AnyElement>) {
+    fn import_progress_body(progress: (usize, usize, String), cx: &mut Context<Self>) -> (Vec<AnyElement>, Vec<AnyElement>) {
         let p = cx.aui().colors;
-        let (done, total, folder) = self
-            .import
-            .run
-            .as_ref()
-            .map(|run| (run.done, run.total, run.folder.clone()))
-            .unwrap_or((0, 0, String::new()));
+        let (done, total, folder) = progress;
         let fraction = if total == 0 { 0.0 } else { done as f32 / total as f32 };
         let line = h_flex()
             .id("import-progress-line")
@@ -1037,7 +1183,7 @@ impl Harness {
                 "Reading each session\u{2019}s first prompt and words for search. You can close this; it keeps \
                  going, and the sessions appear in the sidebar as they land.",
             );
-        let close = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_import_sheet(cx));
+        let close = Self::dismiss(cx);
         let close = button("import-sheet-close-run", "Close")
             .size(ButtonSize::Row)
             .accessibility_label("Close, the import keeps going")
@@ -1047,10 +1193,10 @@ impl Harness {
     }
 
     /// The result stage: what landed, what did not; Show in sidebar / Done.
-    fn import_done_body(&self, sheet: &ImportSheet, cx: &mut Context<Self>) -> (Vec<AnyElement>, Vec<AnyElement>) {
+    fn import_done_body(sheet: &ImportSheet, run: Option<&DoneFacts>, cx: &mut Context<Self>) -> (Vec<AnyElement>, Vec<AnyElement>) {
         let p = cx.aui().colors;
-        let Some(run) = self.import.run.as_ref() else { return (Vec::new(), Vec::new()) };
-        let unreadable = run.unreadable.len();
+        let Some(run) = run else { return (Vec::new(), Vec::new()) };
+        let unreadable = run.unreadable_total;
         let mut big = h_flex()
             .id("import-result")
             .flex_wrap()
@@ -1058,7 +1204,7 @@ impl Harness {
             .pt(px(scale::SP_5))
             .gap(px(scale::SP_2))
             .role_in(TextRole::Body, cx)
-            .child(div().text_color(p.ink).child(result_line(run)));
+            .child(div().text_color(p.ink).child(run.result.clone()));
         if unreadable > 0 {
             big = big.child(div().text_color(p.fg_muted).child(format!(
                 "{} couldn\u{2019}t be read and {} left out.",
@@ -1073,10 +1219,7 @@ impl Harness {
             .role_in(TextRole::Caption, cx)
             .text_color(p.ink_4);
         if unreadable > 0 {
-            let toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.with_import_sheet(cx, |sheet| sheet.show_unreadable = !sheet.show_unreadable);
-                cx.notify();
-            });
+            let toggle = Self::ask(ImportSheetEvent::ToggleUnreadable, cx);
             let label = if sheet.show_unreadable {
                 "Hide them".to_owned()
             } else {
@@ -1103,7 +1246,7 @@ impl Harness {
                 .bg(p.surface_3)
                 .role(gpui::Role::List)
                 .aria_label("Files that could not be read");
-            for path in run.unreadable.iter().take(12) {
+            for path in &run.unreadable {
                 list = list.child(
                     div()
                         .truncate()
@@ -1113,15 +1256,15 @@ impl Harness {
                         .child(crate::layout::tilde_path(path)),
                 );
             }
-            if unreadable > 12 {
-                list = list.child(div().role_size(TextRole::Micro).text_color(p.ink_4).child(format!("and {} more", unreadable - 12)));
+            if unreadable > UNREADABLE_LISTED {
+                list = list.child(div().role_size(TextRole::Micro).text_color(p.ink_4).child(format!("and {} more", unreadable - UNREADABLE_LISTED)));
             }
             body.push(list.into_any_element());
         }
-        let show = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.show_imported_in_sidebar(cx));
-        let done = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.close_import_sheet(cx));
+        let show = Self::ask(ImportSheetEvent::ShowImported, cx);
+        let done = Self::dismiss(cx);
         let mut actions = Vec::new();
-        if !run.added.is_empty() {
+        if run.added {
             actions.push(
                 button("import-sheet-show", "Show in sidebar")
                     .size(ButtonSize::Row)
@@ -1139,6 +1282,41 @@ impl Harness {
                 .into_any_element(),
         );
         (body, actions)
+    }
+}
+
+impl Render for ImportSheetView {
+    /// The sheet over the scrim.
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(facts) = self.facts.take() else { return div().into_any_element() };
+        let sheet = &facts.sheet;
+        let escape = cx.listener(|_: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
+            if event.keystroke.key == "escape" {
+                cx.emit(gpui::DismissEvent);
+                cx.stop_propagation();
+            }
+        });
+        let title = if sheet.stage == SheetStage::Done { "Import finished" } else { "Import sessions" };
+        let (body, actions) = match sheet.stage {
+            SheetStage::Choose => Self::import_choose_body(facts.choose.as_ref(), cx),
+            SheetStage::Progress => Self::import_progress_body(facts.progress.clone(), cx),
+            SheetStage::Done => Self::import_done_body(sheet, facts.done.as_ref(), cx),
+        };
+        let weak = cx.weak_entity();
+        let mut card = dialog_sheet("import-sheet", title).width(SHEET_W).on_close(move |_, cx| {
+            let _ = weak.update(cx, |_, cx| cx.emit(gpui::DismissEvent));
+        });
+        for block in body {
+            card = card.child(block);
+        }
+        let card = card.actions(actions);
+        self.facts = Some(facts);
+        div()
+            .absolute()
+            .inset_0()
+            .capture_key_down(move |event, window, cx| escape(event, window, cx))
+            .child(aui::screens::sheet_scrim("import-sheet-scrim", card, None))
+            .into_any_element()
     }
 }
 
@@ -1162,7 +1340,7 @@ fn folder_row(
     counts: (usize, usize),
     hairline: bool,
     on_intent: impl Fn(CheckboxIntent, &mut gpui::Window, &mut gpui::App) + 'static,
-    cx: &mut Context<Harness>,
+    cx: &mut gpui::App,
 ) -> AnyElement {
     let p = cx.aui().colors;
     let label = if parent.is_empty() { name.to_owned() } else { format!("{name}, in {parent}") };

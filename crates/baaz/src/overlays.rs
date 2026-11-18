@@ -5,15 +5,18 @@
 //! selection is, the popovers, the sheets, the inline renames), the toasts
 //! waiting to be shown, and the two lists the menus are built from — the
 //! workspace's files and the CLI's skills, both walked once at boot and both
-//! window-wide rather than per-session. The elements themselves are rendered
-//! by whoever anchors them — the dialog and the toast stack by
-//! [`crate::app::Harness`], the composer's chip menus, caret popovers and `+`
-//! menu by [`crate::session::SessionView`], because the design rule is that a
-//! picker is anchored to the chip that opened it and only the composer knows
-//! where its chips are; the right pane, the Settings page, the connect screen
-//! and the setup sheet draw their own entries. The main window's ones go
-//! through `aui::overlay::popover_layer`, so the paint order is still the
-//! single one the library defines.
+//! window-wide rather than per-session. The elements themselves are drawn by
+//! whoever anchors them. A dialog, a sheet, a palette and a picker are their
+//! own views (plan 4.6: [`crate::dialogs::DialogView`], the sheets, the
+//! [`crate::picker::Picker`]s), held by their stack entry and dismissed
+//! through it; the root seats them and draws the toast stack; the composer's
+//! chip menus, caret popovers and `+` menu are seated by
+//! [`crate::session::SessionView`], because the design rule is that a picker
+//! is anchored to the chip that opened it and only the composer knows where
+//! its chips are; the right pane, the Settings page, the Skills page and the
+//! connect screen draw their own entries. The main window's ones go through
+//! `aui::overlay::popover_layer`, so the paint order is still the single one
+//! the library defines.
 //!
 //! Keeping the state here rather than in the views is what makes "Escape
 //! closes the newest overlay" one pop instead of a negotiation.
@@ -25,6 +28,7 @@ use aui_protocol::{PermissionMode, ReasoningEffort};
 use crate::overlay_stack::{Entry, Layer, LayerKind, OverlayStack};
 
 /// One modal on screen. Only one at a time.
+#[derive(Clone)]
 pub struct Dialog {
     /// Heading.
     pub title: String,
@@ -191,12 +195,12 @@ pub enum PaletteKind {
     Projects,
 }
 
-/// The open command palette: which list, and where the keyboard is in it.
+/// The open command palette: which list. The palette's view
+/// ([`crate::palette::PaletteView`]) keeps the rest — its rows, its query,
+/// where the keyboard is.
 pub struct Palette {
     /// Which list.
     pub kind: PaletteKind,
-    /// The highlighted row, across all sections in order.
-    pub selected: usize,
 }
 
 /// How many roots the `@` index and the skills cache hold: one window over
@@ -230,16 +234,6 @@ impl Overlays {
         self.stack.dialog()
     }
 
-    /// Show `dialog`, replacing the one up; Escape off the stack runs
-    /// `dismissed`.
-    pub(crate) fn open_dialog(
-        &mut self,
-        dialog: Dialog,
-        dismissed: impl Fn(Layer, &mut crate::app::Harness, &mut gpui::Window, &mut gpui::Context<crate::app::Harness>) + 'static,
-    ) {
-        self.stack.push(Entry::new(Layer::Dialog(dialog)).on_close(dismissed));
-    }
-
     /// Dismiss the modal.
     pub fn close_dialog(&mut self) {
         self.stack.close(LayerKind::Dialog);
@@ -248,16 +242,6 @@ impl Overlays {
     /// The open command palette, if any.
     pub fn palette(&self) -> Option<&Palette> {
         self.stack.palette()
-    }
-
-    /// The open command palette, to move its selection.
-    pub fn palette_mut(&mut self) -> Option<&mut Palette> {
-        self.stack.palette_mut()
-    }
-
-    /// Open the palette on `kind`, replacing whatever list it showed.
-    pub fn open_palette(&mut self, palette: Palette) {
-        self.stack.push(Entry::new(Layer::Palette(palette)));
     }
 
     /// Close the palette.
@@ -278,17 +262,6 @@ impl Overlays {
     /// Close the open popover.
     pub fn close_menu(&mut self) {
         self.stack.close(LayerKind::Menu);
-    }
-
-    /// Move the palette's selection by `delta` within `count`, wrapping.
-    pub fn move_palette(&mut self, delta: isize, count: usize) {
-        let Some(palette) = self.palette_mut() else { return };
-        if count == 0 {
-            palette.selected = 0;
-            return;
-        }
-        let count = count as isize;
-        palette.selected = (((palette.selected as isize + delta) % count + count) % count) as usize;
     }
 
     /// Open a menu, replacing whatever menu was open.

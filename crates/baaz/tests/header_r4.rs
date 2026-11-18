@@ -102,8 +102,9 @@ fn switch_project_palette_route_stays() {
         events.contains("this.open_projects(false, window, cx)"),
         "the event still opens the Projects palette"
     );
-    let dialogs = source("dialogs.rs");
-    assert!(dialogs.contains("fn open_projects("), "the Projects palette stays");
+    // The palette moved to its own view (plan 4.6): `palette.rs`.
+    let palette = source("palette.rs");
+    assert!(palette.contains("fn open_projects("), "the Projects palette stays");
 }
 
 /// The empty-state hero still shows the project name with its

@@ -874,11 +874,12 @@ fn a_parked_finish_records_its_own_byline(cx: &mut gpui::TestAppContext) {
     lane_restore(state);
 }
 
-/// F2/F17 (docs/81 A): the boot-time field subscriptions — search
-/// query, Projects and Commands queries, the API-key field — outlive a
-/// session activation. Before the split, `activate` cleared them with
-/// the per-view ones, so typing in ⌘⇧F stopped re-querying, the palette
-/// selections stopped clamping and Enter in the key field did nothing.
+/// F2/F17 (docs/81 A): the boot-time field subscriptions — the search
+/// query, the API-key field — outlive a session activation. Before the
+/// split, `activate` cleared them with the per-view ones, so typing in ⌘⇧F
+/// stopped re-querying and Enter in the key field did nothing. (The
+/// Projects and Commands queries are their palette's own fields since plan
+/// 4.6, subscribed by the palette: `palette_arrows_move_the_selection_with_a_query_field`.)
 #[gpui::test]
 fn field_subscriptions_survive_opening_a_session(cx: &mut gpui::TestAppContext) {
     use gpui_kit::base::input::InputEvent;
@@ -909,27 +910,6 @@ fn field_subscriptions_survive_opening_a_session(cx: &mut gpui::TestAppContext) 
         field.update(cx, |_, cx| cx.emit(InputEvent::Change));
     });
     assert_eq!(vc.update(|_, cx| baaz.read(cx).search_epoch), before + 1, "typing in search re-queries");
-
-    // Projects and Commands: a keystroke clamps a stale selection.
-    for kind in [PaletteKind::Projects, PaletteKind::Commands] {
-        vc.update(|_, cx| {
-            baaz.update(cx, |harness, cx| {
-                harness.open_palette(kind, cx);
-                harness.overlays.update(cx, |overlays, _| {
-                    overlays.palette_mut().expect("the palette opened").selected = 9_999;
-                });
-            });
-            let field = match kind {
-                PaletteKind::Projects => baaz.read(cx).projects_query.clone(),
-                _ => baaz.read(cx).commands_query.clone(),
-            };
-            field.update(cx, |_, cx| cx.emit(InputEvent::Change));
-        });
-        let selected = vc.update(|_, cx| {
-            baaz.read(cx).overlays.read(cx).palette().map(|palette| palette.selected)
-        });
-        assert_eq!(selected, Some(0), "{kind:?}: typing clamps the selection");
-    }
 
     // API key: Enter submits.
     vc.update(|window, cx| {

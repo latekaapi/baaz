@@ -58,7 +58,6 @@ pub(crate) struct PrForm {
     pub title: Entity<InputState>,
     pub body: Entity<TextareaState>,
     pub draft: bool,
-    pub base_menu: bool,
     pub drafting: bool,
 }
 
@@ -485,7 +484,7 @@ impl RightPane {
         });
         let body = cx.new(|cx| aui::composer::composer_state_rows("Describe the change", 6, 16, window, cx));
         let ui = self.changes_ui(root);
-        ui.form = Some(PrForm { base, bases: Vec::new(), title, body: body.clone(), draft: false, base_menu: false, drafting: false });
+        ui.form = Some(PrForm { base, bases: Vec::new(), title, body: body.clone(), draft: false, drafting: false });
         cx.notify();
         let root_buf = root.to_path_buf();
         let files = self.cache.git_for(root).flatten().map(|t| t.files).unwrap_or_default();
@@ -763,6 +762,7 @@ pub(crate) fn changes_screen(
     session_edits: &[String],
     width: f32,
     agent: &str,
+    base_menu: bool,
     window: &mut Window,
     cx: &mut Context<RightPane>,
 ) -> (Option<AnyElement>, AnyElement) {
@@ -778,7 +778,7 @@ pub(crate) fn changes_screen(
     let root_buf = root.to_path_buf();
     let ui = &cache.changes;
     if ui.form.is_some() {
-        return pr_form_view(ui, &root_buf, &tree, window, cx);
+        return pr_form_view(ui, &root_buf, &tree, base_menu, window, cx);
     }
     let expanded = cache.changes_expanded_for(root);
     let p = cx.aui().colors;
@@ -1066,11 +1066,12 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
     }
 }
 
-/// The Create PR pushed view: its row and its body (docs/43 §2.6).
-fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, window: &mut Window, cx: &mut Context<RightPane>) -> (Option<AnyElement>, AnyElement) {
+/// The Create PR pushed view: its row and its body (docs/43 §2.6). `menu`:
+/// the base-branch menu stands open (an entry on the overlay stack).
+fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, menu: bool, window: &mut Window, cx: &mut Context<RightPane>) -> (Option<AnyElement>, AnyElement) {
     let busy = ui.busy;
     let form = ui.form.as_ref().expect("the form stands open");
-    let (base, bases, title, body, draft, menu, drafting) = (form.base.clone(), form.bases.clone(), form.title.clone(), form.body.clone(), form.draft, form.base_menu, form.drafting);
+    let (base, bases, title, body, draft, drafting) = (form.base.clone(), form.bases.clone(), form.title.clone(), form.body.clone(), form.draft, form.drafting);
     let p = cx.aui().colors;
     let back_root = root.to_path_buf();
     let row = pushed_row("right-pr-row", "Create pull request")
@@ -1082,12 +1083,8 @@ fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, window: &mut Window
         .into_any_element();
     let title_focused = gpui::Focusable::focus_handle(title.read(cx), cx).is_focused(window);
     let body_focused = gpui::Focusable::focus_handle(body.read(cx), cx).is_focused(window);
-    let menu_root = root.to_path_buf();
     let mut picker = div().relative().child(base_picker("right-pr-base", base.clone(), cx).on_click(cx.listener(move |this, _, _, cx| {
-        if let Some(f) = this.changes_ui(&menu_root).form.as_mut() {
-            f.base_menu = !f.base_menu;
-        }
-        cx.notify();
+        this.set_base_menu(!menu, cx);
     })));
     if menu && !bases.is_empty() {
         // The base branches: the library's menu, under the picker.
@@ -1100,9 +1097,8 @@ fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, window: &mut Window
                 let _ = weak.update(cx, |this, cx| {
                     if let Some(f) = this.changes_ui(&pick_root).form.as_mut() {
                         f.base = value.clone();
-                        f.base_menu = false;
                     }
-                    cx.notify();
+                    this.set_base_menu(false, cx);
                 });
             }));
         }

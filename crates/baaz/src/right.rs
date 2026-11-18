@@ -557,6 +557,7 @@ pub(crate) fn render(
     pane_open: bool,
     width: f32,
     agent: &str,
+    base_menu: bool,
     cx: &mut Context<RightPane>,
 ) -> AnyElement {
     let pane = cx.weak_entity();
@@ -575,7 +576,7 @@ pub(crate) fn render(
             BrowserPlaceholder::Closed => closed_browser_state(),
         },
         RightKind::Changes => match project {
-            Some((root, _)) => crate::right_changes::changes_screen(cache, &root, cache.git_for(&root), session_edits, width, agent, browser.window, cx).1,
+            Some((root, _)) => crate::right_changes::changes_screen(cache, &root, cache.git_for(&root), session_edits, width, agent, base_menu, browser.window, cx).1,
             None => empty_state("right-changes-empty", "Changes", "No project is open", "Open or adopt a project and its uncommitted changes will be listed here."),
         },
         RightKind::Files => {
@@ -662,6 +663,7 @@ pub(crate) fn render_screen(
     agent: &str,
     files_focus: &gpui::FocusHandle,
     page_menu: bool,
+    base_menu: bool,
     cx: &mut Context<RightPane>,
 ) -> AnyElement {
     let slug = kind.slug();
@@ -694,7 +696,7 @@ pub(crate) fn render_screen(
     } else {
         match (kind, project) {
             (RightKind::Changes, Some((root, _))) => {
-                let (row, body) = crate::right_changes::changes_screen(cache, &root, cache.git_for(&root), session_edits, width, agent, browser.window, cx);
+                let (row, body) = crate::right_changes::changes_screen(cache, &root, cache.git_for(&root), session_edits, width, agent, base_menu, browser.window, cx);
                 let pushed = row.is_some();
                 (row, body, pushed)
             }

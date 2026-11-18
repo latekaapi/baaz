@@ -3183,7 +3183,7 @@ mod tests {
         vc.update(|_, cx| {
             let view = view.read(cx);
             assert_eq!(view.model().as_ref(), "Default (recommended)");
-            let selected = view.overlays.read(cx).menu().map(|menu| menu.selected).expect("open");
+            let selected = view.menu_selected(cx).expect("open");
             assert_eq!(view.models.get(selected).map(|m| m.model_id.as_str()), Some("default"));
         });
     }
@@ -3194,9 +3194,8 @@ mod tests {
         vc.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.toggle_picker(kind, cx);
-                let rows = view.menu_rows(cx);
-                let from = view.overlays.read(cx).menu().map_or(0, |menu| menu.selected);
-                view.overlays.update(cx, |overlays, _| overlays.move_selection(row as isize - from as isize, rows));
+                let from = view.menu_selected(cx).unwrap_or(0);
+                view.move_menu(row as isize - from as isize, cx);
                 view.confirm_menu(window, cx);
             })
         });

@@ -1,10 +1,12 @@
-//! What floats over the window: the modal, the palette, the toast stack and
-//! the header's overflow menu.
+//! What floats over the window: the modal, the toast stack and the header's
+//! menus.
 //!
 //! [`crate::overlays`] owns the state — which modal is up, which menu is open,
-//! where its selection sits, what the menus are built from. This module owns
-//! the elements for the ones the **window** anchors, and the intents that put
-//! them up and take them down. The two the sidebar anchors live in
+//! where its selection sits, what the menus are built from. The modal is its
+//! own view, [`DialogView`] (plan 4.6): this module owns it, the root's side
+//! that opens it and maps its buttons, and the elements of the menus the
+//! **window** anchors. The palette is its own view too
+//! ([`crate::palette`]); the two menus the sidebar anchors live in
 //! [`crate::sidebar_view`], and the composer's own chip menus in
 //! [`crate::session`], because a picker is anchored to the affordance that
 //! opened it and only its owner knows where that is.
@@ -15,26 +17,22 @@
 //! enter presence never lands on the same frame twice.
 
 use aui::feedback::ToastKind;
-use aui_tokens::TextRole;
-use aui::keys::{Cancel, Confirm, SelectNext, SelectPrev};
-use aui::nav::{folder_drop_card, view_menu, MenuRow};
+use aui::keys::Cancel;
+use aui::nav::{view_menu, MenuRow};
 use aui::overlay::{
-    anchored_menu, command_palette, dialog, popover_layer, DialogKind, MenuAlign, MenuSide, PaletteIcon,
-    PaletteItem, PaletteSection,
+    anchored_menu, dialog, popover_layer, DialogKind, MenuAlign, MenuSide,
 };
 use aui::transcript::handoff_confirm;
-use aui_icons::IconName;
 use aui_tokens::scale;
 use gpui::{
-    div, prelude::*, px, AnyElement, App, Context, Focusable, SharedString, Window,
+    div, prelude::*, px, AnyElement, Context, SharedString, Window,
 };
 use aui::interact::dismiss_layer;
 use aui::util::v_flex;
-use gpui_kit::component::input::Textarea;
 
-use crate::app::{Harness, Wire, PALETTE_ROWS};
+use crate::app::{Harness, Wire};
 use crate::layout::{self, RightKind};
-use crate::overlays::{Command, Dialog, DialogAction, Menu, MenuKind, Palette, PaletteKind};
+use crate::overlays::{Command, Dialog, DialogAction, Menu, MenuKind, PaletteKind};
 use crate::wire::WireCall;
 use crate::{files, skills};
 
@@ -65,60 +63,159 @@ fn overflow_rows(feedback_shown: bool, feedback_on: bool) -> (Vec<MenuRow>, Vec<
     (rows, actions)
 }
 
-/// One palette section's rows under one icon.
-fn palette_items(
-    rows: &[(SharedString, SharedString, SharedString)],
-    icon: PaletteIcon,
-) -> Vec<PaletteItem> {
-    rows.iter().map(|(id, label, detail)| PaletteItem::new(id.clone(), icon.clone(), label.clone()).context(detail.clone())).collect()
+
+
+
+
+/// The modal dialog as its own view (plan 4.6): the dialog's content, its
+/// focus, its buttons. The root opens it ([`Harness::set_dialog`]), pushes
+/// what it reads from the root each frame ([`DialogFacts`]), and maps its
+/// buttons ([`DialogEvent`]) onto the root's own work; Escape, the scrim and
+/// ✕ dismiss it through the overlay stack ([`DismissEvent`]).
+pub(crate) struct DialogView {
+    dialog: Dialog,
+    /// What the root pushed this frame.
+    facts: DialogFacts,
+    focus: gpui::FocusHandle,
 }
 
-/// The Commands palette's filter: [`Command::ALL`] narrowed to the query,
-/// matching the slash and the description case-insensitively. The empty
-/// query lists every command. The drawn rows come from
-/// [`Harness::palette_rows`], which reads the palette's own query field,
-/// so the keyboard and the click walk the same filtered list.
-/// A command the open session's provider cannot run is left out
-/// ([`Command::offered_on`]); with no session open, every command shows.
-fn filter_commands(query: &str, provider: Option<crate::providers::ProviderId>) -> Vec<Command> {
-    let needle = query.trim().to_lowercase();
-    Command::ALL
-        .into_iter()
-        .filter(|command| provider.is_none_or(|id| command.offered_on(id)))
-        .filter(|command| {
-            needle.is_empty()
-                || command.slash().to_lowercase().contains(&needle)
-                || command.description().to_lowercase().contains(&needle)
-        })
-        .collect()
+/// What the dialog reads from the root, pushed each frame it draws.
+#[derive(Default)]
+pub(crate) struct DialogFacts {
+    /// The handoff confirm's frozen facts, when the dialog is the handoff
+    /// confirm.
+    handoff: Option<crate::handoff::HandoffConfirmState>,
+    /// Drawn settled (a scripted capture): no rising in.
+    still: bool,
 }
 
-/// One row of the Projects palette: its stable id, whether it belongs to
-/// the Add section, and the drawn item.
-struct ProjectsRow {
-    /// `p:<project id>`, `choose`, or `a:<workspace root>`.
-    id: SharedString,
-    /// Section "Add" rather than section "Projects".
-    add: bool,
-    /// The drawn row: mark or folder glyph, root context, session-count
-    /// badge, and the `⌘⇧O` hint on "Choose folder…".
-    item: PaletteItem,
+/// A dialog button pressed.
+#[derive(Clone, Debug)]
+pub(crate) enum DialogEvent {
+    /// The primary button: `action` on the `target` that rode the dialog.
+    Primary { action: DialogAction, target: Option<String> },
+    /// The secondary button (Cancel, Dismiss, "Not now").
+    Secondary { action: DialogAction },
 }
 
-/// A root with `~` for home, for the Projects section's context line.
-fn tilde_root(root: &str) -> String {
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = home.to_string_lossy().into_owned();
-        if let Some(rest) = root.strip_prefix(home.as_str()) {
-            if rest.is_empty() {
-                return "~".to_owned();
-            }
-            if rest.starts_with('/') {
-                return format!("~{rest}");
+impl gpui::EventEmitter<DialogEvent> for DialogView {}
+
+/// A handler that has the view emit `make()`'s event.
+fn emitter<V: gpui::EventEmitter<E>, E: 'static>(cx: &mut Context<V>, make: impl Fn() -> E + 'static) -> impl Fn(&mut Window, &mut gpui::App) + 'static {
+    let me = cx.entity().downgrade();
+    move |_, cx| {
+        let _ = me.update(cx, |_, cx| cx.emit(make()));
+    }
+}
+impl gpui::EventEmitter<gpui::DismissEvent> for DialogView {}
+
+impl gpui::Focusable for DialogView {
+    fn focus_handle(&self, _: &gpui::App) -> gpui::FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl DialogView {
+    fn new(dialog: Dialog, cx: &mut Context<Self>) -> Self {
+        DialogView { dialog, facts: DialogFacts::default(), focus: cx.focus_handle() }
+    }
+
+    /// The modal layer around `card`: the menu key context on the dialog's
+    /// focus, Escape popping the overlay stack like anywhere else (a menu
+    /// opened over the dialog closes first).
+    fn layer(&self, card: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        popover_layer(
+            div()
+                .absolute()
+                .inset_0()
+                .key_context(aui::keys::MENU_CONTEXT)
+                .track_focus(&self.focus)
+                .on_action(cx.listener(|_, _: &Cancel, _, cx| cx.emit(gpui::DismissEvent)))
+                .child(card),
+        )
+        .into_any_element()
+    }
+
+    /// The handoff confirm: the library's own dialog — the destination row,
+    /// the Carried / Not carried lists the card draws, the pack size and the
+    /// honest fresh-start note — over the same modal layer every other
+    /// dialog uses. Cancel closes it (the frozen facts leave with it); Hand
+    /// off starts the run.
+    fn render_handoff(&self, state: crate::handoff::HandoffConfirmState, cx: &mut Context<Self>) -> AnyElement {
+        let action = self.dialog.action;
+        let target = self.dialog.archive_target.clone();
+        let model = if state.to_model.trim().is_empty() { "provider default".to_owned() } else { state.to_model };
+        let card = handoff_confirm(
+            "handoff-confirm",
+            crate::handoff::wire_provider(state.to),
+            model,
+            &state.carried,
+            &state.lost,
+            Some(state.pack_tokens),
+        )
+        .on_primary(emitter(cx, move || DialogEvent::Primary { action, target: target.clone() }))
+        .on_secondary(emitter(cx, move || DialogEvent::Secondary { action }))
+        .on_dismiss(emitter(cx, || gpui::DismissEvent));
+        let card = if crate::clock::deterministic() { card.at_rest() } else { card };
+        self.layer(card.into_any_element(), cx)
+    }
+}
+
+impl Render for DialogView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.dialog.action == DialogAction::HandoffConfirm {
+            if let Some(state) = self.facts.handoff.clone() {
+                return self.render_handoff(state, cx);
             }
         }
+        let modal = &self.dialog;
+        let (title, detail, kind, primary_label, action, target) =
+            (modal.title.clone(), modal.detail.clone(), modal.kind, modal.primary, modal.action, modal.archive_target.clone());
+        let danger = matches!(
+            action,
+            DialogAction::Archive
+                | DialogAction::RemoveProject
+                | DialogAction::QuitWithWorkRunning
+                | DialogAction::CloseTerminalTab
+                | DialogAction::ProviderSignOut
+                | DialogAction::DeleteSpace
+                | DialogAction::ClearHistory
+        );
+        // A dialog whose primary already dismisses it carries no second
+        // button: "Dismiss  Dismiss" was what a screenshot showed. The danger
+        // dialog keeps Cancel beside Archive; the others keep Dismiss beside
+        // Reconnect / Sign in / Done.
+        let secondary = match (danger, action) {
+            (true, _) => Some("Cancel"),
+            (false, DialogAction::Dismiss) => None,
+            // The migration prompt's opt-out: one click, never asked again
+            // (the Providers row stays while moves remain). The scrim and
+            // Escape beside it only close, so an accidental dismissal
+            // re-asks next launch instead of stranding sessions.
+            (false, DialogAction::MigrateSessions) => Some("Not now"),
+            (false, _) => Some("Dismiss"),
+        };
+        // Critical errors (`DialogKind::Error`) lead the library dialog with
+        // the error mascot (56 pt, at the head of the body) in place of the
+        // kind tile; confirmations keep the tile, and the toast stack stays
+        // text-only.
+        let mascot = (kind == DialogKind::Error).then(|| crate::mascot::error_mascot(crate::mascot::ErrorMascot::classify(&title, &detail)));
+        let mut card = dialog("dialog", title).kind(kind).body(detail).danger(danger).primary(primary_label);
+        if let Some(mascot) = mascot {
+            card = card.leading(mascot);
+        }
+        if let Some(secondary) = secondary {
+            card = card.secondary(secondary);
+        }
+        let card = card
+            .on_primary(emitter(cx, move || DialogEvent::Primary { action, target: target.clone() }))
+            .on_secondary(emitter(cx, move || DialogEvent::Secondary { action }))
+            .on_dismiss(emitter(cx, || gpui::DismissEvent));
+        // A scripted capture draws the dialog settled rather than rising in:
+        // the enter presence never lands on the same frame twice.
+        let card = if self.facts.still { card.at_rest() } else { card };
+        self.layer(card.into_any_element(), cx)
     }
-    root.to_owned()
 }
 
 impl Harness {
@@ -126,11 +223,19 @@ impl Harness {
     /// one replaces the one up). Escape pops the newest entry, so a menu
     /// opened over it closes first.
     pub(crate) fn set_dialog(&mut self, cx: &mut Context<Self>, dialog: Dialog) {
-        // Escape off the stack dismisses it as `close_dialog` does: the
-        // handoff confirm's facts leave with it.
-        let dismissed = |_: crate::overlay_stack::Layer, this: &mut Harness, _: &mut Window, _: &mut Context<Harness>| this.handoff_state.confirm = None;
-        self.overlays.update(cx, |overlays, _| overlays.open_dialog(dialog, dismissed));
-        cx.notify();
+        let view = cx.new(|cx| DialogView::new(dialog.clone(), cx));
+        // Its buttons run on the main window (a dialog Browse hosts in the
+        // overlay window must not open, focus or measure there).
+        let pressed = cx.subscribe(&view, |this: &mut Self, _, event: &DialogEvent, cx| {
+            let event = event.clone();
+            this.run_on_main(cx, move |this, window, cx| this.on_dialog_event(event, window, cx));
+        });
+        // Dismissing it (Escape, the scrim) runs what `close_dialog` does:
+        // the handoff confirm's facts leave with it.
+        let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Dialog(dialog))
+            .on_close(|_, this: &mut Harness, _| this.handoff_state.confirm = None)
+            .keep(pressed);
+        self.push_overlay_view(entry, &view, cx);
     }
 
     pub(crate) fn close_dialog(&mut self, cx: &mut Context<Self>) {
@@ -311,82 +416,15 @@ impl Harness {
         });
     }
 
-    /// Open the palette on one list. Merely opening never exits Settings
-    /// (B11b): only a palette ACTION executed exits — see
-    /// [`Self::run_palette_row`] — so opening and cancelling keeps the
-    /// page exactly where it was.
-    pub(crate) fn open_palette(&mut self, kind: PaletteKind, cx: &mut Context<Self>) {
-        let already = self.overlays.read(cx).palette().is_some_and(|p| p.kind == kind);
-        self.overlays.update(cx, |overlays, _| {
-            if already {
-                overlays.close_palette();
-            } else {
-                overlays.open_palette(Palette { kind, selected: 0 });
-            }
-        });
-        cx.notify();
-    }
 
-    /// Open the Projects palette: adopted projects to start a session in,
-    /// then "Choose folder…" and recent Muse workspaces to adopt. Picking a
-    /// project starts a session there (and makes it current); adopting only
-    /// adopts. `focus_add` starts the selection on "Choose folder…", which
-    /// is where the hero's "Recent workspaces" button points.
-    pub(crate) fn open_projects(&mut self, focus_add: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.projects_query.update(cx, |state, cx| state.set_value(String::new(), window, cx));
-        let rows = self.projects_rows(cx);
-        let selected = if focus_add { rows.iter().position(|row| row.add).unwrap_or(0) } else { 0 };
-        self.overlays.update(cx, |overlays, _| overlays.open_palette(Palette { kind: PaletteKind::Projects, selected }));
-        window.focus(&self.projects_query.focus_handle(cx), cx);
-        cx.notify();
-    }
 
-    /// The Projects palette's query editor, drawn inside the card's own
-    /// query row like the search palette's: the query filters both sections
-    /// by name and path, synchronously.
-    fn projects_query_editor(&self) -> AnyElement {
-        Textarea::new(&self.projects_query)
-            .appearance(false)
-            .bordered(false)
-            .text_size(TextRole::Subtitle.size())
-            .h_auto()
-            .whitespace_nowrap()
-            .into_any_element()
-    }
 
-    /// Keep the Projects selection inside the filtered rows after a
-    /// keystroke: the rows are rebuilt at render, so a selection past the
-    /// new end wraps to the head.
-    pub(crate) fn clamp_projects_selection(&mut self, cx: &mut Context<Self>) {
-        let count = self.projects_rows(cx).len();
-        self.overlays.update(cx, |overlays, _| {
-            if let Some(palette) = overlays.palette_mut() {
-                if palette.kind == PaletteKind::Projects && palette.selected >= count {
-                    palette.selected = 0;
-                }
-            }
-        });
-    }
 
-    /// Keep the Commands selection inside the filtered rows after a
-    /// keystroke: the rows are rebuilt at render, so a selection past the
-    /// new end wraps to the head.
     /// The open session's provider, for the menus that offer per provider.
     pub(crate) fn active_provider(&self, cx: &gpui::App) -> Option<crate::providers::ProviderId> {
         self.active.as_ref().map(|view| view.read(cx).provider_kind())
     }
 
-    pub(crate) fn clamp_commands_selection(&mut self, cx: &mut Context<Self>) {
-        let query = self.commands_query.read(cx).value().trim().to_owned();
-        let count = filter_commands(&query, self.active_provider(cx)).len();
-        self.overlays.update(cx, |overlays, _| {
-            if let Some(palette) = overlays.palette_mut() {
-                if palette.kind == PaletteKind::Commands && palette.selected >= count {
-                    palette.selected = 0;
-                }
-            }
-        });
-    }
 
     /// The native folder panel, directories only: a chosen folder is adopted
     /// exactly like a recent workspace. Cancel does nothing.
@@ -429,173 +467,16 @@ impl Harness {
     }
 
 
-    /// One ordered vec feeds the Projects palette's keyboard, click and
-    /// drawn sections, so the three agree about what row 3 is. Section
-    /// "Projects" holds every adoption in sidebar order (mark, root with `~`
-    /// for home, visible session count); section "Add" holds recent Muse
-    /// workspaces from the index — minus adopted roots, only paths that
-    /// still exist as directories, newest first, at most twelve, badged
-    /// with their session count. The "Choose folder…" row is gone: the Add
-    /// section's lead is the library's `folder_drop_card`, drawn inside the
-    /// card under the section title (it is not a `PaletteItem` and takes no
-    /// keyboard selection). The query filters both sections by name and path.
-    fn projects_rows(&self, cx: &gpui::App) -> Vec<ProjectsRow> {
-        let query = self.projects_query.read(cx).value().trim().to_owned();
-        let needle = query.to_lowercase();
-        let matches = |name: &str, path: &str| {
-            needle.is_empty() || name.to_lowercase().contains(&needle) || path.to_lowercase().contains(&needle)
-        };
-        let emphasise = |item: PaletteItem| if query.is_empty() { item } else { item.matching(&query) };
-        let mut rows = Vec::new();
-        let visible = self.visible_sessions(cx);
-        for project in self.ordered_projects() {
-            let root = project.root.to_string_lossy().into_owned();
-            if !matches(&project.name, &root) {
-                continue;
-            }
-            let count = visible.iter().filter(|e| e.project.as_deref() == Some(project.id.as_str())).count();
-            // No coloured tiles anywhere: adopted
-            // projects wear the folder glyph, like the recent workspaces
-            // below.
-            let item = emphasise(
-                PaletteItem::new(
-                    SharedString::from(format!("p:{}", project.id)),
-                    PaletteIcon::Glyph(IconName::Folder),
-                    project.name.clone(),
-                )
-                .context(tilde_root(&root))
-                .badge(count.to_string()),
-            );
-            rows.push(ProjectsRow { id: SharedString::from(format!("p:{}", project.id)), add: false, item });
-        }
-        // Recent Muse workspaces, newest first: what the index saw sessions
-        // in, minus the roots this window already holds. ("Choose folder…"
-        // lives in the Add section as the `folder_drop_card` lead, not as
-        // a row.)
-        let adopted: std::collections::HashSet<String> = self
-            .projects
-            .projects
-            .iter()
-            .map(|p| crate::projects::canonical_path(&p.root).to_string_lossy().into_owned())
-            .collect();
-        // Baaz's own state directory holds the tier probe's throwaway
-        // workspace; it is never a project anyone means to adopt.
-        let own_state = [crate::store::support_dir(), crate::store::default_support_dir()];
-        let mut recents = 0;
-        for (root, count, _) in crate::index::workspaces(&self.index) {
-            if recents >= 12 {
-                break;
-            }
-            if adopted.contains(&crate::projects::canonical_str(&root)) {
-                continue;
-            }
-            if own_state.iter().any(|dir| std::path::Path::new(&root).starts_with(dir)) {
-                continue;
-            }
-            if !std::path::Path::new(&root).is_dir() {
-                continue;
-            }
-            let name = std::path::Path::new(&root)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| root.clone());
-            if !matches(&name, &root) {
-                continue;
-            }
-            let item = emphasise(
-                PaletteItem::new(
-                    SharedString::from(format!("a:{root}")),
-                    PaletteIcon::Glyph(IconName::Folder),
-                    name,
-                )
-                .context(root.clone())
-                .badge(count.to_string()),
-            );
-            rows.push(ProjectsRow { id: SharedString::from(format!("a:{root}")), add: true, item });
-            recents += 1;
-        }
-        rows
-    }
 
-    /// The palette's rows, in the order it draws them, so the keyboard and the
-    /// click agree about what row 3 is.
-    #[cfg(test)]
-    pub(crate) fn palette_rows_len_for(&self, kind: PaletteKind, cx: &gpui::App) -> usize {
-        self.palette_rows(kind, cx).len()
-    }
 
-    pub(crate) fn palette_rows(&self, kind: PaletteKind, cx: &gpui::App) -> Vec<(SharedString, SharedString, SharedString)> {
-        match kind {
-            PaletteKind::Commands => {
-                let query = self.commands_query.read(cx).value().trim().to_owned();
-                filter_commands(&query, self.active_provider(cx))
-                    .into_iter()
-                    .map(|c| (c.slash().into(), c.slash().into(), c.description().into()))
-                    .collect()
-            }
-            PaletteKind::Resume => self
-                .visible_sessions(cx)
-                .iter()
-                // Newest first, and only as many as the palette can show: a
-                // list taller than the window is a list with a hidden bottom.
-                .take(PALETTE_ROWS)
-                .map(|entry| {
-                    let meta: SharedString =
-                        if entry.turns > 0 { format!("{} turns", entry.turns).into() } else { "no turns".into() };
-                    (entry.id.clone().into(), entry.label.clone().into(), meta)
-                })
-                .collect(),
-            PaletteKind::Search => self.search_rows(cx),
-            // The keyboard walks the same ordered rows the sections draw,
-            // so an index is a row in both.
-            PaletteKind::Projects => self
-                .projects_rows(cx)
-                .into_iter()
-                .map(|row| {
-                    let detail = row.item.context.clone().unwrap_or_default();
-                    (row.id, row.item.label, detail)
-                })
-                .collect(),
-            // The active session's completed turns, newest first; the rows
-            // come from the view because the window does not keep a transcript.
-            PaletteKind::Fork => self
-                .active
-                .as_ref()
-                .map(|view| view.read(cx).fork_turns())
-                .unwrap_or_default()
-                .into_iter()
-                .take(PALETTE_ROWS)
-                .map(|(id, label, detail)| (id.into(), label.into(), detail.into()))
-                .collect(),
-        }
-    }
 
-    /// Run the palette's selected row: the keyboard's path, which is the one
-    /// that still has to resolve an index into a row.
-    fn confirm_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((kind, selected)) = self.overlays.read(cx).palette().map(|p| (p.kind, p.selected)) else {
-            return;
-        };
-        let rows = self.palette_rows(kind, cx);
-        let Some((id, _, _)) = rows.get(selected).cloned() else {
-            crate::baaz_log!("palette confirm: nothing at {selected} of {} rows", rows.len());
-            // The Add section's lead is a card, not a row, so an empty
-            // Projects palette still offers the panel on ↩.
-            if kind == PaletteKind::Projects {
-                self.choose_project_folder(cx);
-            }
-            return;
-        };
-        crate::baaz_log!("palette select (keyboard): {kind:?} {id}");
-        self.run_palette_row(kind, id, window, cx);
-    }
 
     /// Run one palette row by its id.
     ///
     /// A click already knows which row it hit, so it comes straight here
     /// rather than rebuilding every row to turn the id back into an index and
     /// the index back into the same id (finding `performance-7`).
-    fn run_palette_row(&mut self, kind: PaletteKind, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run_palette_row(&mut self, kind: PaletteKind, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         self.overlays.update(cx, |overlays, _| overlays.close_palette());
         // A palette action executed leaves Settings (no restore: the
         // destination owns the next route) — except pane/terminal commands,
@@ -944,461 +825,130 @@ impl Harness {
 
     pub(crate) fn move_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(view) = self.active.clone() else { return };
-        let rows = view.read(cx).menu_rows(cx);
-        self.overlays.update(cx, |overlays, _| overlays.move_selection(delta, rows));
-        cx.notify();
+        // The composer draws its menus: the session view (or the menu's
+        // picker) redraws, never the root.
+        view.update(cx, |view, cx| view.move_menu(delta, cx));
     }
 
-    /// The search palette's query editor, drawn inside the card's own query
-    /// row through the library's slot: one surface, the field where the
-    /// placeholder would be, no chrome of its own. Clearing it returns to
-    /// the empty state (recents).
-    fn search_query_editor(&self) -> AnyElement {
-        Textarea::new(&self.search_query)
-            .appearance(false)
-            .bordered(false)
-            .text_size(TextRole::Subtitle.size())
-            .h_auto()
-            .whitespace_nowrap()
-            .into_any_element()
+
+
+
+    /// The modal for this frame — its facts pushed first (the dialog draws
+    /// right after, in this same frame) — or `None` when none is up.
+    pub(crate) fn compose_dialog(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let view = self.overlays.read(cx).stack.view_as::<DialogView>(crate::overlay_stack::LayerKind::Dialog)?;
+        let facts = DialogFacts { handoff: self.handoff_state.confirm.clone(), still: self.still() || crate::clock::deterministic() };
+        view.update(cx, |dialog, _| dialog.facts = facts);
+        Some(view.into_any_element())
     }
 
-    /// The Commands palette's query editor, drawn inside the card's own
-    /// query row through the library's slot, like the search palette's:
-    /// one surface, the field where the placeholder would be, no chrome
-    /// of its own. The query filters [`Command::ALL`] on slash and
-    /// description, synchronously.
-    fn commands_query_editor(&self) -> AnyElement {
-        Textarea::new(&self.commands_query)
-            .appearance(false)
-            .bordered(false)
-            .text_size(TextRole::Subtitle.size())
-            .h_auto()
-            .whitespace_nowrap()
-            .into_any_element()
+    /// The modal's focus handle, while one is up.
+    pub(crate) fn dialog_focus(&self, cx: &gpui::App) -> Option<gpui::FocusHandle> {
+        use gpui::Focusable as _;
+        self.overlays.read(cx).stack.view_as::<DialogView>(crate::overlay_stack::LayerKind::Dialog).map(|view| view.focus_handle(cx))
     }
 
-    /// ⌘K and `/resume`: the command palette, over everything.
-    ///
-    /// The same primitive for both lists, because they are the same gesture —
-    /// a list, an arrow key and a return — and a second picker would be a
-    /// second set of keys to learn.
-    pub(crate) fn render_palette(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (kind, selected) = self.overlays.read(cx).palette().map(|p| (p.kind, p.selected))?;
-        let rows = self.palette_rows(kind, cx);
-        // The card's own query row mirrors the query for the picking lists;
-        // the search palette edits through its own field above the card, so
-        // the card's row carries the result count instead.
-        let (query, placeholder, sections) = match kind {
-            PaletteKind::Commands => {
-                // The rows already carry the filter; the match emphasis
-                // covers the label, like the search palette's.
-                let needle = self.commands_query.read(cx).value().trim().to_owned();
-                let items = palette_items(&rows, PaletteIcon::Glyph(IconName::Slash));
-                let items = if needle.is_empty() {
-                    items
+    /// What the modal's buttons asked for.
+    fn on_dialog_event(&mut self, event: DialogEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            DialogEvent::Primary { action, target } => self.run_dialog_primary(action, target, window, cx),
+            // The migration prompt's secondary is Never-ask-again ("Not
+            // now"); every other secondary only closes.
+            DialogEvent::Secondary { action } => {
+                if action == DialogAction::MigrateSessions {
+                    self.dismiss_session_migration(cx);
                 } else {
-                    items.into_iter().map(|item| item.matching(&needle)).collect()
-                };
-                (
-                    SharedString::from(""),
-                    SharedString::from("Every command in this build"),
-                    vec![PaletteSection::new("Commands", items)],
-                )
+                    self.close_dialog(cx);
+                }
             }
-            PaletteKind::Resume => (
-                SharedString::from(""),
-                SharedString::from("Resume a session in this workspace"),
-                vec![PaletteSection::new(
-                    "Sessions",
-                    palette_items(&rows, PaletteIcon::Glyph(IconName::Clock)),
-                )],
-            ),
-            PaletteKind::Fork => (
-                SharedString::from(""),
-                SharedString::from("Pick a completed turn to branch from"),
-                vec![PaletteSection::new(
-                    "Fork from",
-                    palette_items(&rows, PaletteIcon::Glyph(IconName::Git)),
-                )],
-            ),
-            PaletteKind::Projects => {
-                // The rows already carry their icons, contexts and badges;
-                // the sections only partition them. The Add section always
-                // shows: its lead is the library's folder card, the first
-                // thing under "ADD" above the recent workspaces, so a click
-                // chooses through P1's panel and a drop adopts every dropped
-                // directory, the first becoming current. It is not a row —
-                // the keyboard walks past it.
-                let entity = cx.entity().downgrade();
-                let choose = move |_: &mut Window, cx: &mut App| {
-                    entity.update(cx, |this, cx| this.choose_project_folder(cx)).ok();
-                };
-                let entity = cx.entity().downgrade();
-                let drop = move |paths: Vec<std::path::PathBuf>, _: &mut Window, cx: &mut App| {
-                    entity.update(cx, |this, cx| this.adopt_dropped(paths, cx)).ok();
-                };
-                let lead = folder_drop_card("projects-drop").key("⌘⇧O").on_click(choose).on_drop(drop);
-                let mut adopted = Vec::new();
-                let mut adding = Vec::new();
-                for row in self.projects_rows(cx) {
-                    if row.add {
-                        adding.push(row.item);
-                    } else {
-                        adopted.push(row.item);
-                    }
-                }
-                let mut sections = Vec::new();
-                if !adopted.is_empty() {
-                    sections.push(PaletteSection::new("Projects", adopted));
-                }
-                sections.push(PaletteSection::new("Add", adding).lead(lead));
-                (SharedString::from(""), SharedString::from("Add or switch project"), sections)
-            }
-            PaletteKind::Search => {
-                let (sessions, files): (Vec<_>, Vec<_>) =
-                    rows.iter().partition(|(id, _, _)| id.starts_with("s:"));
-                // The row's own match emphasis covers the label only — the
-                // library paints `matched` ranges on the label and the
-                // context (the snippet) stays muted mono. Primary text is
-                // the sidebar label either way; the snippet is display-only.
-                let query = self.search_query.read(cx).value().to_string();
-                // Every row wears its project's display name (the folder
-                // name for sessions no project holds), so hits from several
-                // projects tell themselves apart.
-                let badged = |part: Vec<&(SharedString, SharedString, SharedString)>, icon: PaletteIcon| {
-                    part.into_iter()
-                        .map(|(id, label, detail)| {
-                            let session_id = id
-                                .strip_prefix("s:")
-                                .or_else(|| id.strip_prefix("f:").and_then(|r| r.split_once(':').map(|(s, _)| s)));
-                            let mut item =
-                                PaletteItem::new(id.clone(), icon.clone(), label.clone()).context(detail.clone());
-                            if let Some(badge) =
-                                session_id.and_then(|sid| self.search_badge(sid).map(SharedString::from))
-                            {
-                                item = item.badge(badge);
-                            }
-                            if query.trim().is_empty() { item } else { item.matching(&query) }
-                        })
-                        .collect::<Vec<_>>()
-                };
-                let mut sections = Vec::new();
-                if !sessions.is_empty() {
-                    sections.push(PaletteSection::new(
-                        "Sessions",
-                        badged(sessions, PaletteIcon::Glyph(IconName::Clock)),
-                    ));
-                }
-                if !files.is_empty() {
-                    sections.push(PaletteSection::new("Files", badged(files, PaletteIcon::Glyph(IconName::File))));
-                }
-                (SharedString::from(""), self.search_status(cx), sections)
-            }
-        };
-        // The click carries the row id, so it runs that row directly instead
-        // of rebuilding every row to map the id back to a position and the
-        // position back to the same id (finding `performance-7`).
-        let select = self.main_listener(cx, move |this: &mut Self, id: &SharedString, window, cx| {
-            crate::baaz_log!("palette select (click): {kind:?} {id}");
-            this.run_palette_row(kind, id.clone(), window, cx);
-        });
-        let dismiss = self.main_listener(cx, |this: &mut Self, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.close_palette());
-            cx.notify();
-        });
-        let count = rows.len();
-        // A scripted screenshot is a static composition, not an opening: the
-        // card's enter presence (fade + rise) never settles inside a capture,
-        // so screenshots draw the palette at rest — opaque, one surface.
-        // Live opens keep the rise.
-        let mut card = command_palette("palette", query, sections, selected)
-            .placeholder(placeholder)
-            .on_select(move |id, w, cx| select(id, w, cx))
-            .on_dismiss(move |w, cx| dismiss(&(), w, cx));
-        if kind == PaletteKind::Search {
-            card = card.query_slot(self.search_query_editor());
         }
-        if kind == PaletteKind::Projects {
-            card = card.query_slot(self.projects_query_editor());
-        }
-        if kind == PaletteKind::Commands {
-            card = card.query_slot(self.commands_query_editor());
-        }
-        if self.still() {
-            card = card.at_rest();
-        }
-        // The Projects palette's drop card rides inside the card as the Add
-        // section's lead now, not as a floating box above it.
-        let centred: AnyElement = card.into_any_element();
-        // A click on the dimmed ground closes it, which is the gesture every
-        // overlay in this window already answers to. The layer dismisses on
-        // the *release*, not the press: gpui fires a row's `on_click` on
-        // mouse-up against the frame the release sees, so dismissing on
-        // mouse-down closed the palette under the press and the release
-        // found no row — every palette row's click silently did nothing but
-        // dismiss. The row's own click runs first on the way up and this
-        // runs after it, idempotently.
-        let close = self.main_listener(cx, |this, _: &(), _, cx| {
-            this.overlays.update(cx, |overlays, _| overlays.close_palette());
-            cx.notify();
-        });
-        Some(
-            popover_layer(
-                // The open palette owns the wheel: the layer occludes, so the
-                // transcript's `wheel_capture` yields everywhere outside the
-                // card (the library card already occludes its own rect and
-                // stops the wheel after its list scrolls), and a wheel over
-                // the dimmed ground never reaches the transcript behind it.
-                dismiss_layer("palette-scrim", "Close the palette", move |w, cx| close(&(), w, cx))
-                    .key_context(aui::keys::MENU_CONTEXT)
-                    .track_focus(&self.focus_palette)
-                    .on_action(self.main_listener(cx, move |this, _: &SelectNext, _, cx| {
-                        this.overlays.update(cx, |o, _| o.move_palette(1, count));
-                        cx.notify();
-                    }))
-                    .on_action(self.main_listener(cx, move |this, _: &SelectPrev, _, cx| {
-                        this.overlays.update(cx, |o, _| o.move_palette(-1, count));
-                        cx.notify();
-                    }))
-                    .on_action(self.main_listener(cx, |this, _: &Confirm, window, cx| this.confirm_palette(window, cx)))
-                    .on_action(self.main_listener(cx, |this, _: &Cancel, _, cx| {
-                        this.overlays.update(cx, |overlays, _| overlays.close_palette());
-                        cx.notify();
-                    }))
-                    .bg(aui::overlay::scrim())
-                    // Centred, its top at 18 % of the window (docs/83 §7):
-                    // a spacer of that share of the layer's height, then
-                    // the card.
-                    .child(
-                        v_flex()
-                            .size_full()
-                            .items_center()
-                            .child(div().flex_none().w_full().h(gpui::relative(scale::PALETTE_TOP)))
-                            .child(centred),
-                    ),
-            )
-            .into_any_element(),
-        )
     }
 
-    /// The handoff confirm: the library's own dialog — the destination
-    /// row, the Carried / Not carried lists the card draws, the pack size
-    /// and the honest fresh-start note — over the same modal layer every
-    /// other dialog uses. Cancel closes it (the frozen facts leave with
-    /// it); Hand off starts the run.
-    fn render_handoff_confirm(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let state = self.handoff_state.confirm.clone()?;
-        let confirm = self.main_listener(cx, |this: &mut Self, _: &(), window, cx| this.confirm_handoff(window, cx));
-        let close = self.main_listener(cx, |this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
-        let dismiss = self.main_listener(cx, |this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
-        let model = if state.to_model.trim().is_empty() { "provider default".to_owned() } else { state.to_model };
-        let card = handoff_confirm(
-            "handoff-confirm",
-            crate::handoff::wire_provider(state.to),
-            model,
-            &state.carried,
-            &state.lost,
-            Some(state.pack_tokens),
-        )
-        .on_primary(move |window, cx| confirm(&(), window, cx))
-        .on_secondary(move |window, cx| close(&(), window, cx))
-        .on_dismiss(move |window, cx| dismiss(&(), window, cx));
-        let card = if crate::clock::deterministic() { card.at_rest() } else { card };
-        Some(
-            popover_layer(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .key_context(aui::keys::MENU_CONTEXT)
-                    .track_focus(&self.focus_dialog)
-                    .on_action(self.main_listener(cx, |this, _: &Cancel, window, cx| {
-                        // Escape with the dialog focused pops the stack like
-                        // anywhere else: a menu opened over it closes first.
-                        this.pop_overlay(window, cx);
-                    }))
-                    .child(card.into_any_element()),
-            )
-            .into_any_element(),
-        )
-    }
-
-    pub(crate) fn render_dialog(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        // Read the modal out whole before anything asks `cx` for a listener:
-        // the entity's borrow and `cx.listener` cannot be alive at once.
-        if self.overlays.read(cx).dialog().is_some_and(|m| m.action == DialogAction::HandoffConfirm) {
-            return self.render_handoff_confirm(window, cx);
+    /// The modal's primary button: `action` on the `target` that rode the
+    /// dialog. The archive target stays on the dialog until its own button
+    /// runs: closing it any other way drops the target with it.
+    fn run_dialog_primary(&mut self, action: DialogAction, target: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if action == DialogAction::Archive {
+            self.confirm_archive_dialog(window, cx);
+            return;
         }
-        let (title, detail, kind, primary_label, action, target, danger) = {
-            let modal = self.overlays.read(cx).dialog()?;
-            let danger = modal.action == DialogAction::Archive
-                || modal.action == DialogAction::RemoveProject
-                || modal.action == DialogAction::QuitWithWorkRunning
-                || modal.action == DialogAction::CloseTerminalTab
-                || modal.action == DialogAction::ProviderSignOut
-                || modal.action == DialogAction::DeleteSpace
-                || modal.action == DialogAction::ClearHistory;
-            (
-                modal.title.clone(),
-                modal.detail.clone(),
-                modal.kind,
-                modal.primary,
-                modal.action,
-                modal.archive_target.clone(),
-                danger,
-            )
-        };
-        // The archive target stays on the dialog until its own button runs:
-        // closing it any other way drops the target with it.
-        // A dialog whose primary already dismisses it carries no second
-        // button: "Dismiss  Dismiss" was what a screenshot showed. The danger
-        // dialog keeps Cancel beside Archive; the others keep Dismiss beside
-        // Reconnect / Sign in / Done.
-        let secondary = match (danger, action) {
-            (true, _) => Some("Cancel"),
-            (false, DialogAction::Dismiss) => None,
-            // The migration prompt's opt-out: one click, never asked again
-            // (the Providers row stays while moves remain).
-            (false, DialogAction::MigrateSessions) => Some("Not now"),
-            (false, _) => Some("Dismiss"),
-        };
-        let primary = self.main_listener(cx, move |this: &mut Self, _: &(), window, cx| {
-            if action == DialogAction::Archive {
-                this.confirm_archive_dialog(window, cx);
-                return;
-            }
-            // The provider wire id rode the dialog: confirming signs that
-            // provider out for real, then re-probes so its card follows.
-            if action == DialogAction::ProviderSignOut {
-                let id = target.as_deref().map(crate::providers::ProviderId::parse);
-                if let Some(id) = id {
-                    this.confirm_provider_signout(id, window, cx);
-                } else {
-                    this.close_dialog(cx);
-                }
-                return;
-            }
-            if action == DialogAction::RemoveProject {
-                this.confirm_remove_project(cx);
-                return;
-            }
-            // The space id rode the dialog: confirming deletes it and closes
-            // its tabs; closing any other way keeps everything.
-            if action == DialogAction::DeleteSpace {
-                this.close_dialog(cx);
-                if let Some(space) = target.as_deref() {
-                    this.delete_space_now(space, window, cx);
-                }
-                return;
-            }
-            if action == DialogAction::SpaceSignIns {
-                this.close_dialog(cx);
-                if let Some(space) = target.as_deref() {
-                    this.toggle_space_signins(space, cx);
-                }
-                return;
-            }
-            if action == DialogAction::ClearHistory {
-                this.close_dialog(cx);
-                this.clear_history_now(cx);
-                return;
-            }
-            // Confirmed through its own path, like Archive: the tab id rode
-            // the dialog, so closing any other way already dropped it.
-            if action == DialogAction::CloseTerminalTab {
-                this.confirm_close_terminal_tab(cx);
-                return;
-            }
-            // The migration prompt's Move: the full dry-run plan through
-            // the journaling executor. Nothing moved without this click.
-            if action == DialogAction::MigrateSessions {
-                this.confirm_session_migration(cx);
-                return;
-            }
-            this.close_dialog(cx);
-            match action {
-                DialogAction::Dismiss => {}
-                // Rendered through `render_handoff_confirm`, never through
-                // this card — but the action still routes here if the
-                // dialog ever falls through, so it confirms rather than
-                // dropping the request.
-                DialogAction::HandoffConfirm => {
-                    this.confirm_handoff(window, cx);
-                }
-                DialogAction::Reconnect => {
-                    this.wire = Wire::Reconnecting;
-                    this.reconnect(cx);
-                }
-                DialogAction::Archive => {}
-                // Confirmed through the early return above, like Archive.
-                DialogAction::RemoveProject => {}
-                DialogAction::QuitWithWorkRunning => {
-                    crate::tier::cleanup_probes();
-                    cx.quit();
-                }
-                // Confirmed through the early return above, like Archive.
-                DialogAction::CloseTerminalTab => {}
-                // Confirmed through the early return above, like Archive.
-                DialogAction::ProviderSignOut => {}
-                // Confirmed through the early return above, like Archive.
-                DialogAction::MigrateSessions => {}
-                // Confirmed through the early return above, like Archive.
-                DialogAction::DeleteSpace => {}
-                // Confirmed through the early return above, like Archive.
-                DialogAction::ClearHistory => {}
-                // Confirmed through the early return above, like Archive.
-                DialogAction::SpaceSignIns => {}
-            }
-            cx.notify();
-        });
-        // The migration prompt's secondary is Never-ask-again ("Not now"):
-        // the scrim and Escape beside it only close, so an accidental
-        // dismissal re-asks next launch instead of stranding sessions.
-        let close = self.main_listener(cx, move |this: &mut Self, _: &(), _, cx| {
-            if action == DialogAction::MigrateSessions {
-                this.dismiss_session_migration(cx);
+        // The provider wire id rode the dialog: confirming signs that
+        // provider out for real, then re-probes so its card follows.
+        if action == DialogAction::ProviderSignOut {
+            let id = target.as_deref().map(crate::providers::ProviderId::parse);
+            if let Some(id) = id {
+                self.confirm_provider_signout(id, window, cx);
             } else {
-                this.close_dialog(cx);
+                self.close_dialog(cx);
             }
-        });
-        // `cx.listener` hands back an opaque `Fn`, not a `Clone`, so the scrim
-        // gets its own rather than sharing the secondary button's.
-        let dismiss = self.main_listener(cx, |this: &mut Self, _: &(), _, cx| this.close_dialog(cx));
-        // Critical errors (`DialogKind::Error`) lead the library dialog with
-        // the error mascot (56 pt, at the head of the body) in place of the
-        // kind tile; confirmations keep the tile, and the toast stack stays
-        // text-only.
-        let mascot = (kind == DialogKind::Error).then(|| crate::mascot::error_mascot(crate::mascot::ErrorMascot::classify(&title, &detail)));
-        let mut card = dialog("dialog", title).kind(kind).body(detail).danger(danger).primary(primary_label);
-        if let Some(mascot) = mascot {
-            card = card.leading(mascot);
+            return;
         }
-        if let Some(secondary) = secondary {
-            card = card.secondary(secondary);
+        if action == DialogAction::RemoveProject {
+            self.confirm_remove_project(cx);
+            return;
         }
-        let card = card
-            .on_primary(move |w, cx| primary(&(), w, cx))
-            .on_secondary(move |w, cx| close(&(), w, cx))
-            .on_dismiss(move |w, cx| dismiss(&(), w, cx));
-        // A scripted capture draws the dialog settled rather than rising in:
-        // the enter presence never lands on the same frame twice.
-        let card = if self.still() || crate::clock::deterministic() { card.at_rest() } else { card };
-        Some(
-            popover_layer(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .key_context(aui::keys::MENU_CONTEXT)
-                    .track_focus(&self.focus_dialog)
-                    .on_action(self.main_listener(cx, |this, _: &Cancel, window, cx| {
-                        // Escape with the dialog focused pops the stack like
-                        // anywhere else: a menu opened over it closes first.
-                        this.pop_overlay(window, cx);
-                    }))
-                    .child(card),
-            )
-            .into_any_element(),
-        )
+        // The space id rode the dialog: confirming deletes it and closes
+        // its tabs; closing any other way keeps everything.
+        if action == DialogAction::DeleteSpace {
+            self.close_dialog(cx);
+            if let Some(space) = target.as_deref() {
+                self.delete_space_now(space, window, cx);
+            }
+            return;
+        }
+        if action == DialogAction::SpaceSignIns {
+            self.close_dialog(cx);
+            if let Some(space) = target.as_deref() {
+                self.toggle_space_signins(space, cx);
+            }
+            return;
+        }
+        if action == DialogAction::ClearHistory {
+            self.close_dialog(cx);
+            self.clear_history_now(cx);
+            return;
+        }
+        // Confirmed through its own path, like Archive: the tab id rode
+        // the dialog, so closing any other way already dropped it.
+        if action == DialogAction::CloseTerminalTab {
+            self.confirm_close_terminal_tab(cx);
+            return;
+        }
+        // The migration prompt's Move: the full dry-run plan through the
+        // journaling executor. Nothing moved without this click.
+        if action == DialogAction::MigrateSessions {
+            self.confirm_session_migration(cx);
+            return;
+        }
+        // The handoff confirm runs before the dialog closes: its frozen
+        // facts leave with the dialog.
+        if action == DialogAction::HandoffConfirm {
+            self.confirm_handoff(window, cx);
+            return;
+        }
+        self.close_dialog(cx);
+        match action {
+            DialogAction::Dismiss => {}
+            DialogAction::Reconnect => {
+                self.wire = Wire::Reconnecting;
+                self.reconnect(cx);
+            }
+            DialogAction::QuitWithWorkRunning => {
+                crate::tier::cleanup_probes();
+                cx.quit();
+            }
+            // Confirmed through the early returns above.
+            DialogAction::Archive
+            | DialogAction::RemoveProject
+            | DialogAction::CloseTerminalTab
+            | DialogAction::ProviderSignOut
+            | DialogAction::MigrateSessions
+            | DialogAction::DeleteSpace
+            | DialogAction::ClearHistory
+            | DialogAction::SpaceSignIns
+            | DialogAction::HandoffConfirm => {}
+        }
+        cx.notify();
     }
 
     /// `error-dialog:<offline|blocked|sorry>`: capture aid that raises a
@@ -1591,7 +1141,7 @@ mod tests {
         assert_eq!(label(rows.last().unwrap()), ("Feedback mode".to_owned(), true), "checked while the mode is on");
     }
 
-    use super::{filter_commands, tilde_root};
+    use crate::palette::{filter_commands, tilde_root};
     use crate::app::Harness;
         use crate::layout::{Mode, RightKind};
     use crate::overlays::{Command, DialogAction, MenuKind, PaletteKind};
@@ -2019,9 +1569,8 @@ mod tests {
         });
         vc.update(|window, cx| view.update(cx, |view, cx| view.focus_composer(window, cx)));
         vc.run_until_parked();
-        let selected = |vc: &mut gpui::VisualTestContext| {
-            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).menu().map(|m| m.selected))
-        };
+        // The `@` list is a picker (plan 4.6): its selection is the picker's.
+        let selected = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| view.read(cx).menu_selected(cx));
         let size = vc.update(|window, _| window.viewport_size());
         for caret in ["/", "@"] {
             vc.simulate_input(caret);
@@ -2078,7 +1627,7 @@ mod tests {
             Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
         });
         let selected = |vc: &mut gpui::VisualTestContext| {
-            vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette().map(|p| p.selected))
+            vc.update(|_, cx| baaz.read(cx).palette_selected(cx))
         };
         // Rows for the session-backed palettes: three visible sessions feed
         // both Search (empty query lists recents) and Resume.
@@ -2161,7 +1710,7 @@ mod tests {
         // Typing still reaches the field, including `j` and `k`.
         vc.simulate_keystrokes("cmd-k");
         vc.simulate_input("jk");
-        let query = vc.update(|_, cx| baaz.read(cx).commands_query.read(cx).value().to_string());
+        let query = vc.update(|_, cx| baaz.read(cx).palette_query(cx).expect("the palette's field").read(cx).value().to_string());
         assert_eq!(query, "jk", "typing no longer reaches the query field");
         assert_eq!(selected(vc), Some(0), "the selection escaped the filtered rows");
         vc.simulate_keystrokes("escape");
@@ -2172,7 +1721,7 @@ mod tests {
         vc.simulate_keystrokes("cmd-k");
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.commands_query.update(cx, |field, cx| field.set_value(String::new(), window, cx));
+                harness.palette_query(cx).expect("the palette's field").update(cx, |field, cx| field.set_value(String::new(), window, cx));
             })
         });
         vc.simulate_input("brow");
@@ -2231,10 +1780,11 @@ mod tests {
         });
         vc.simulate_keystrokes("cmd-k");
         vc.simulate_keystrokes("down down");
-        let selected = vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette().map(|p| p.selected));
+        let selected = vc.update(|_, cx| baaz.read(cx).palette_selected(cx));
         assert_eq!(selected, Some(2), "two downs must select the third row");
-        // The row the palette would run, resolved the way `confirm_palette`
-        // resolves it: index into the same ordered rows.
+        // The row the palette would run, resolved the way the picker's ↩
+        // resolves it (`PickerDelegate::confirm`): index into the same
+        // ordered rows.
         let rows = vc.update(|_, cx| baaz.read(cx).palette_rows_len_for(PaletteKind::Commands, cx));
         assert!(rows > 2, "the Commands palette lists more than three rows");
         vc.simulate_keystrokes("enter");
@@ -2265,7 +1815,7 @@ mod tests {
         if rows > 1 {
             vc.simulate_keystrokes("down");
             assert_eq!(
-                vc.update(|_, cx| baaz.read(cx).overlays.read(cx).palette().map(|p| p.selected)),
+                vc.update(|_, cx| baaz.read(cx).palette_selected(cx)),
                 Some(1),
                 "down did not move in the Projects palette"
             );
@@ -2333,11 +1883,13 @@ mod tests {
     fn the_command_palette_has_a_query_field_and_filters(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("commands-query");
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx))
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            Harness::new(test_args(&state.2), crate::shot::CaptureToken::default(), window, cx)
         });
-        assert!(vc.update(|_, cx| baaz.read(cx).commands_query.read(cx).value().is_empty()));
+        // The field is the palette's own, made on its first frame.
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_palette(PaletteKind::Commands, cx)));
+        vc.run_until_parked();
+        assert!(vc.update(|_, cx| baaz.read(cx).palette_query(cx).expect("the palette's field").read(cx).value().is_empty()));
         let empty = vc.update(|_, cx| {
             let app: &gpui::App = cx;
             baaz.read(app).palette_rows(PaletteKind::Commands, app).len()
@@ -2345,7 +1897,7 @@ mod tests {
         assert_eq!(empty, 25, "an empty query lists every command");
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.commands_query.update(cx, |field, cx| field.set_value("brow", window, cx));
+                harness.palette_query(cx).expect("the palette's field").update(cx, |field, cx| field.set_value("brow", window, cx));
             });
         });
         let rows = vc.update(|_, cx| {
@@ -2538,16 +2090,18 @@ mod tests {
             crate::layout::Layout::stage(cx, |layout| layout.mode = Mode::Browse);
             h.open_palette(PaletteKind::Search, cx);
         }));
-        let (focus, query, dialog_focus) = vc.update(|_, cx| {
+        let (focus, query) = vc.update(|_, cx| {
             let h = baaz.read(cx);
-            (h.modal_focus(cx), h.search_query.focus_handle(cx), h.focus_dialog.clone())
+            (h.modal_focus(cx), h.search_query.focus_handle(cx))
         });
         assert_eq!(focus, Some(query), "a Search palette is typed into its query field");
         vc.update(|_, cx| baaz.update(cx, |h, cx| {
             h.overlays.update(cx, |o, _| o.close_palette());
             h.set_dialog(cx, Harness::quit_terminal_dialog("cargo", 0));
         }));
-        assert_eq!(vc.update(|_, cx| baaz.read(cx).modal_focus(cx)), Some(dialog_focus), "a dialog takes focus_dialog");
+        let dialog_focus = vc.update(|_, cx| baaz.read(cx).dialog_focus(cx));
+        assert!(dialog_focus.is_some(), "the dialog view has its own focus");
+        assert_eq!(vc.update(|_, cx| baaz.read(cx).modal_focus(cx)), dialog_focus, "a dialog takes its own focus");
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.close_dialog(cx)));
         assert_eq!(vc.update(|_, cx| baaz.read(cx).modal_focus(cx)), None, "no modal, no handle");
         restore_state(state);
@@ -2602,7 +2156,7 @@ mod tests {
         });
         vc.run_until_parked();
         // The dialog takes the keyboard (a click on it does the same).
-        let dialog_focus = vc.update(|_, cx| baaz.read(cx).focus_dialog.clone());
+        let dialog_focus = vc.update(|_, cx| baaz.read(cx).dialog_focus(cx)).expect("the dialog is up");
         vc.update(|window, cx| window.focus(&dialog_focus, cx));
         vc.run_until_parked();
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_menu(MenuKind::Overflow, cx)));
@@ -2621,6 +2175,85 @@ mod tests {
         vc.run_until_parked();
         assert!(vc.update(|_, cx| baaz.read(cx).overlays.read(cx).dialog().is_none()), "the second Escape closed the dialog");
         assert!(composer_focused(vc, &view), "the dialog gave the keyboard back to the composer");
+        restore_state(state);
+    }
+
+    /// Plan 4.6b: a sheet's own Escape goes through the overlay stack, so a
+    /// menu opened over the sheet closes first (newest first) and the sheet
+    /// only on the next Escape. The keyboard is in the Muse sheet's own key
+    /// field, so the Escape is the sheet's (its capture handler), not the
+    /// root's.
+    #[gpui::test]
+    fn a_sheets_own_escape_closes_the_menu_over_it_first(cx: &mut gpui::TestAppContext) {
+        use crate::overlay_stack::LayerKind;
+        let state = hermetic_state("sheet-escape-newest");
+        let (baaz, _view, vc) = replay_with_composer_focused(cx, &state.2);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_muse_sheet(cx)));
+        vc.run_until_parked();
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.login_intent(aui::screens::LoginIntent::UseApiKey, window, cx)));
+        vc.run_until_parked();
+        let key_field = vc.update(|_, cx| gpui::Focusable::focus_handle(baaz.read(cx).muse_sheet_facts(cx).api_key.read(cx), cx));
+        assert!(vc.update(|window, _| key_field.is_focused(window)), "the sheet's key field holds the keyboard");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_menu(MenuKind::Overflow, cx)));
+        vc.run_until_parked();
+        let top = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| baaz.read(cx).overlays.read(cx).stack.top());
+        assert_eq!(top(vc), Some(LayerKind::Menu), "the menu stands over the sheet");
+        vc.simulate_keystrokes("escape");
+        vc.run_until_parked();
+        assert_eq!(top(vc), Some(LayerKind::MuseSheet), "the sheet's Escape closed the menu over it, not the sheet");
+        assert!(vc.update(|window, _| key_field.is_focused(window)), "the menu gave the keyboard back to the sheet's field");
+        vc.simulate_keystrokes("escape");
+        vc.run_until_parked();
+        assert!(
+            !vc.update(|_, cx| baaz.read(cx).overlays.read(cx).stack.is_open(LayerKind::MuseSheet)),
+            "the second Escape closed the sheet"
+        );
+        restore_state(state);
+    }
+
+    /// Plan 4.6b: the overlay views redraw themselves — the arrows in the
+    /// palette and in the composer's model picker move the picker's own
+    /// selection, and the root is never notified for it.
+    #[gpui::test]
+    fn the_pickers_redraw_without_notifying_the_root(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("picker-redraw-alone");
+        let (baaz, view, vc) = replay_with_composer_focused(cx, &state.2);
+        let notified = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let count = notified.clone();
+        let _watch = vc.update(|_, cx| cx.observe(&baaz, move |_, _| count.set(count.get() + 1)));
+        // The palette: ⌘K, then ↓ twice.
+        vc.simulate_keystrokes("cmd-k");
+        vc.run_until_parked();
+        let palette = vc.update(|_, cx| baaz.read(cx).palette_view(cx)).expect("⌘K opened the palette");
+        let redrawn = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let picker_count = redrawn.clone();
+        let _palette_watch = vc.update(|_, cx| cx.observe(&palette, move |_, _| picker_count.set(picker_count.get() + 1)));
+        notified.set(0);
+        vc.simulate_keystrokes("down down");
+        vc.run_until_parked();
+        assert_eq!(vc.update(|_, cx| palette.read(cx).selected()), 2, "the palette's own selection moved");
+        assert!(redrawn.get() > 0, "the palette redrew itself");
+        assert_eq!(notified.get(), 0, "the palette's arrows never notified the root");
+        vc.simulate_keystrokes("escape");
+        vc.run_until_parked();
+        // The composer's model picker: the composer's arrows move it.
+        vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_picker(MenuKind::Model, cx)));
+        vc.run_until_parked();
+        let model = vc.update(|_, cx| view.read(cx).model_picker(cx)).expect("the model picker opened");
+        vc.update(|_, cx| {
+            model.update(cx, |picker, cx| {
+                picker.push_facts(cx, |delegate| {
+                    delegate.rows = vec![aui::composer::PickerRow::new("a", "A", ""), aui::composer::PickerRow::new("b", "B", "")];
+                });
+                picker.select(0, cx);
+            })
+        });
+        vc.run_until_parked();
+        notified.set(0);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.move_menu(1, cx)));
+        vc.run_until_parked();
+        assert_eq!(vc.update(|_, cx| model.read(cx).selected()), 1, "the model picker's own selection moved");
+        assert_eq!(notified.get(), 0, "the model picker's arrows never notified the root");
         restore_state(state);
     }
 

@@ -150,7 +150,7 @@ impl Harness {
     /// The card's content: the chat as the library's card or column, and the
     /// handoff picker over it while it is open. Float windows have no themed
     /// root, so the wrapper sets the ink.
-    pub(crate) fn render_agent_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_agent_card(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let input = self.browser.read(cx).agent_window.agent_card_input.clone()?;
         let title = self.browser_chat_title(cx);
         let (transcript, model) = match self.registry.browser_chat() {
@@ -220,7 +220,7 @@ impl Harness {
         let ink = cx.aui().colors.ink;
         let pad = if self.browser.read(cx).agent_window.card_ui == CardUi::Column { 0.0 } else { SHADOW_PAD };
         let mut root = div().size_full().relative().p(gpui::px(pad)).text_color(ink).child(card);
-        if let Some(picker) = self.render_handoff_picker(window, cx) {
+        if let Some(picker) = self.render_handoff_picker(cx) {
             root = root.child(picker);
         }
         Some(root.into_any_element())

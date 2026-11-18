@@ -1,13 +1,16 @@
-//! Plan 4.6a (audit A R5 / F18): one overlay stack.
+//! Plan 4.6 (audit A R5 / F18): one overlay stack, its views, one picker.
 //!
 //! baaz is a binary, so the shape is pinned in source text: Escape's
 //! `cancel` names no overlay (it pops the stack, then walks what stands),
 //! the overlay windows keep no `*_pending` twin beside their slot, the
-//! loose open flags stay gone from the views that used to own them, and the
-//! root's focus edge detector stays deleted. The behaviour (Escape pops the
+//! loose open flags stay gone from the views that used to own them, the
+//! root's focus edge detector stays deleted (4.6a); each dialog, sheet and
+//! palette is its own view dismissed through the stack, and every list is
+//! picked through the one `Picker` (4.6b). The behaviour (Escape pops the
 //! newest entry and gives the keyboard back, a covering entry covers the
-//! page, a menu's button toggles it) is pinned by gpui tests in
-//! `src/overlay_stack.rs`, `src/overlays.rs` and `src/dialogs.rs`.
+//! page, a menu's button toggles it, a sheet's own Escape closes the menu
+//! over it first, a picker redraws without the root) is pinned by gpui tests
+//! in `src/overlay_stack.rs`, `src/overlays.rs` and `src/dialogs.rs`.
 
 use std::path::{Path, PathBuf};
 
@@ -146,10 +149,16 @@ fn no_overlay_window_has_a_pending_twin() {
 /// the content of its own widgets.
 #[test]
 fn the_loose_open_flags_are_gone() {
-    let gone: [(&str, &[&str]); 11] = [
+    let gone: [(&str, &[&str]); 13] = [
         (
             "app.rs",
             &[
+                // 4.6b: the dialog and the palette are views with their own
+                // focus and query fields.
+                "focus_dialog: FocusHandle",
+                "focus_palette: FocusHandle",
+                "projects_query: Entity<",
+                "commands_query: Entity<",
                 "muse_sheet: bool",
                 "renaming: Option<String>",
                 "renaming_project: Option<String>",
@@ -158,7 +167,10 @@ fn the_loose_open_flags_are_gone() {
                 "menu_dismissed",
             ],
         ),
-        ("session.rs", &["plus_open: bool"]),
+        ("session.rs", &["plus_open: bool", "meter_open: bool"]),
+        // 4.6b: the leftovers.
+        ("skills_page.rs", &["overflow_open: bool", "add_menu_open: bool"]),
+        ("right_changes.rs", &["pub base_menu: bool"]),
         (
             "browser/view.rs",
             &[
@@ -170,6 +182,7 @@ fn the_loose_open_flags_are_gone() {
                 "tab_menu: Option<",
                 "browse_menu: Option<",
                 "page_menu_closed",
+                "bookmark_edit_sub",
             ],
         ),
         ("right_pane.rs", &["files_menu: Option<"]),
@@ -178,7 +191,7 @@ fn the_loose_open_flags_are_gone() {
         ("connect.rs", &["menu_open: bool"]),
         ("setup.rs", &["sheet: Option<SetupSheet>"]),
         ("import_ui.rs", &["sheet: Option<ImportSheet>"]),
-        ("app/agent_window.rs", &["handoff_picker_open"]),
+        ("app/agent_window.rs", &["handoff_picker_open", "handoff_query:", "handoff_selected:"]),
         ("overlays.rs", &["dialog: Option<Dialog>", "menu: Option<Menu>", "palette: Option<Palette>"]),
     ];
     for (file, fields) in gone {
@@ -212,4 +225,84 @@ fn the_page_cover_is_the_stacks_answer() {
     assert!(occlusion.contains("pub overlay_open: bool"), "one overlay input");
     let covers = body(&occlusion, "    pub(crate) fn page_covers(&self, window: &gpui::Window, cx: &gpui::App) -> Covers {");
     assert!(covers.contains("let overlay_open = self.overlays.read(cx).stack.covers_page(cx);"), "the stack answers for every overlay");
+}
+
+/// Plan 4.6b: one picker. ⌘K and its lists, the Projects palette, the model
+/// picker, the hand-off picker and the `@` file mention each construct a
+/// `Picker<…>` over their own delegate, and no second picker type stands
+/// beside it (the selection, the arrows, ↩ and the dismissal are the one
+/// view's).
+#[test]
+fn one_picker_type_serves_every_list() {
+    let picker = source("picker.rs");
+    assert!(picker.contains("pub(crate) struct Picker<D: PickerDelegate> {"), "the one picker");
+    assert!(picker.contains("pub(crate) trait PickerDelegate"), "the one delegate contract");
+    let palette = source("palette.rs");
+    assert!(palette.contains("pub(crate) type PaletteView = Picker<PaletteDelegate>;"), "the palette is a picker");
+    let show = body(&palette, "    pub(crate) fn show_palette(");
+    for (list, constructor) in [("⌘K (Commands) and Projects", "Picker::with_own_field("), ("search", "Picker::with_field("), ("resume and fork", "Picker::new(")] {
+        assert!(show.contains(constructor), "{list} constructs a Picker through `{constructor}`");
+    }
+    let projects = body(&palette, "    pub(crate) fn open_projects(");
+    assert!(projects.contains("self.show_palette(PaletteKind::Projects, cx)"), "the Projects palette is the palette picker");
+    let pickers = source("session/pickers.rs");
+    assert!(pickers.contains("pub(crate) type ModelPicker = Picker<ModelDelegate>;"), "the model picker is a picker");
+    assert!(pickers.contains("pub(crate) type MentionPicker = Picker<MentionDelegate>;"), "the @ mention is a picker");
+    assert!(body(&pickers, "    pub(super) fn open_model_picker(").contains("Picker::new(delegate, cx)"), "the model chip constructs a Picker");
+    assert!(body(&pickers, "    pub(super) fn open_mention_picker(").contains("Picker::new(delegate, cx)"), "an @ constructs a Picker");
+    let handoff = source("app/browser_handoff.rs");
+    assert!(handoff.contains("pub(crate) type HandoffPicker = crate::picker::Picker<HandoffDelegate>;"), "the hand-off picker is a picker");
+    assert!(body(&handoff, "    pub(crate) fn toggle_handoff_picker(").contains("crate::picker::Picker::with_own_field("), "the card constructs a Picker");
+    // Every delegate implements the one contract.
+    for (file, delegate) in [
+        ("palette.rs", "impl PickerDelegate for PaletteDelegate"),
+        ("session/pickers.rs", "impl PickerDelegate for ModelDelegate"),
+        ("session/pickers.rs", "impl PickerDelegate for MentionDelegate"),
+        ("app/browser_handoff.rs", "impl crate::picker::PickerDelegate for HandoffDelegate"),
+    ] {
+        assert!(source(file).contains(delegate), "{file}: `{delegate}`");
+    }
+}
+
+/// Plan 4.6b: each dialog, sheet and palette is its own view that emits
+/// `DismissEvent`, and the stack entry holds that view: the one close path
+/// (Escape, ✕, a click away) is the view's dismissal, which the stack pops
+/// newest-first.
+#[test]
+fn each_overlay_view_dismisses_through_the_stack() {
+    for (file, view) in [
+        ("dialogs.rs", "DialogView"),
+        ("login.rs", "MuseSheetView"),
+        ("setup.rs", "SetupHost"),
+        ("import_ui.rs", "ImportSheetView"),
+        ("chrome_import_ui.rs", "ChromeImportView"),
+        ("overlay/bookmark.rs", "BookmarkView"),
+    ] {
+        let text = source(file);
+        assert!(text.contains(&format!("impl gpui::EventEmitter<gpui::DismissEvent> for {view} {{}}")), "{file}: {view} emits DismissEvent");
+        assert!(text.contains(&format!("impl Render for {view} {{")), "{file}: {view} renders itself");
+    }
+    let picker = source("picker.rs");
+    assert!(picker.contains("impl<D: PickerDelegate> EventEmitter<DismissEvent> for Picker<D> {}"), "the picker emits DismissEvent");
+    let app = source("app.rs");
+    let push = body(&app, "    pub(crate) fn push_overlay_view<V: gpui::ManagedView>(");
+    assert!(push.contains("this.dismiss_overlay_view(view.entity_id(), cx);"), "a view's DismissEvent pops its entry");
+    let dismiss = body(&app, "    pub(crate) fn dismiss_overlay_view(");
+    assert!(dismiss.contains("self.pop_overlay_entry(cx)"), "newest-first: the dismissal pops the top");
+    // The sheets' own Escape and the panels' close go through it.
+    for (file, sheet) in [("login.rs", "MuseSheetView"), ("setup.rs", "SetupHost"), ("import_ui.rs", "ImportSheetView"), ("chrome_import_ui.rs", "ChromeImportView")] {
+        let text = source(file);
+        let at = text.find("event.keystroke.key == \"escape\"").unwrap_or_else(|| panic!("{file}: {sheet} handles its own Escape"));
+        let handler: String = text[at..].lines().take(3).collect();
+        assert!(handler.contains("cx.emit(gpui::DismissEvent);"), "{file}: {sheet}'s Escape dismisses through the stack");
+        assert!(!handler.contains("this."), "{file}: {sheet}'s Escape closes nothing itself");
+    }
+    let overlay = source("overlay.rs");
+    let close = body(&overlay, "    pub(crate) fn close_overlay_content(");
+    assert!(close.contains("view.update(cx, |_, cx| cx.emit(gpui::DismissEvent))"), "the bookmark panel's close is its view's dismissal");
+    assert!(close.contains("self.dismiss_overlay_view(view.entity_id(), cx)"), "the hosted modal's close is its view's dismissal");
+    // The dialog body left the root.
+    let dialogs = source("dialogs.rs");
+    assert!(!dialogs.contains("pub(crate) fn render_dialog("), "the dialog renders itself");
+    assert!(!dialogs.contains("pub(crate) fn render_palette("), "the palette renders itself");
 }
