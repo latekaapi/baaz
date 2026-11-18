@@ -407,7 +407,7 @@ impl Harness {
         // is no child to hang up and nothing was ever sent.
         if self.open_state.pending_disabled_notice == Some(provider_id) {
             self.open_state.pending_disabled_notice = None;
-            view.update(cx, |view, cx| view.show_disabled_notice(provider_id, cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.show_disabled_notice(provider_id, cx)));
         }
         // Like the muse path: the session groups under the project it
         // started in, and the drafts map names it while it is unsent so a
@@ -429,12 +429,12 @@ impl Harness {
         // A provider that pages its history (Muse) attached without it: an
         // existing session's turns page in now.
         if !fresh && crate::providers::pages_history(provider_id) {
-            view.update(cx, |view, cx| view.backfill_lane(cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.backfill_lane(cx)));
         }
         // Another window holds the session: it still opens, read-only under
         // the lease notice, with no dialog — the row stays selectable.
         if lease_held {
-            view.update(cx, |view, cx| view.set_lease_lost(crate::app::LEASE_NOTICE, cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_lease_lost(crate::app::LEASE_NOTICE, cx)));
         }
         // The swap that makes it the visible session: parks the outgoing
         // view, points the event subscription at the new one, focuses the
@@ -446,7 +446,7 @@ impl Harness {
         // A reopened handoff destination renders its snapshot prefix (or
         // the fallback divider) above the replayed history. Fresh opens
         // have no links yet and pass through untouched.
-        if let Some(view) = self.active.clone().filter(|view| view.read(cx).session_id == session_id) {
+        if let Some(view) = self.active.clone().filter(|view| view.read(cx).rt(cx).session_id == session_id) {
             self.attach_handoff_prefix(&view, cx);
         }
         // The scriptable check: a `--steps` run greps the log for this line
@@ -596,18 +596,18 @@ impl Harness {
         let picks = self.session_list.read(cx).projects.picks(project.as_deref().and_then(|id| self.session_list.read(cx).projects.find(id)));
         let carry = self.open_state.take_carry();
         if let Some((mode, effort)) = switch.and(carry) {
-            view.update(cx, |view, cx| view.carry_draft_settings(mode, effort, cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.carry_draft_settings(mode, effort, cx)));
         } else if let Some(effort) = picks.effort_for(provider_id.as_str()).as_deref().and_then(projects::parse_effort) {
-            view.update(cx, |view, cx| view.set_initial_effort(Some(effort), cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_initial_effort(Some(effort), cx)));
         }
         let remembered = self.start_model(provider_id, project.as_deref(), cx);
         if let Some(model) = remembered {
-            view.update(cx, |view, cx| view.set_model(&model, cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model(&model, cx)));
         }
         // The open asks for the mode the draft now stands on: a carried or
         // project Auto on a remembered model without it already fell back
         // to Ask above, and the child starts there rather than in Auto.
-        let mode = view.read(cx).draft_settings().0;
+        let mode = view.read(cx).rt(cx).draft_settings().0;
         // Named before the swap, so `activate` reads the project's name
         // for the empty state off the drafts map (no row exists yet), and
         // a repeated ⌘N while the child is still answering reopens this
@@ -683,7 +683,7 @@ impl Harness {
         workspace: String,
         cx: &mut Context<Self>,
     ) {
-        let opening = self.find_view(provisional, cx).is_some_and(|view| view.read(cx).is_starting());
+        let opening = self.find_view(provisional, cx).is_some_and(|view| view.read(cx).rt(cx).is_starting());
         if !opening || !self.open_state.starts_in_flight.contains(provisional) {
             return;
         }
@@ -737,7 +737,7 @@ impl Harness {
             provider.shutdown();
             return;
         }
-        let Some(view) = self.find_view(provisional, cx).filter(|view| view.read(cx).is_starting()) else {
+        let Some(view) = self.find_view(provisional, cx).filter(|view| view.read(cx).rt(cx).is_starting()) else {
             crate::baaz_log!(
                 "provider draft gone before its open landed provider={} session={session_id}",
                 provider_id.as_str()
@@ -755,7 +755,7 @@ impl Harness {
             provider_id.as_str(),
             cx,
         );
-        view.update(cx, |view, cx| view.attach_provider(session_id.clone(), provider, events, cx));
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.attach_provider(session_id.clone(), provider, events, cx)));
         // Recorded before the queue replays, so a send's acceptance finds
         // the record it titles.
         // Where the session runs: what a scripted check reads to prove a
@@ -799,8 +799,8 @@ impl Harness {
         };
         // The queued sends go back in the composer first, so the words read
         // from one place below.
-        view.update(cx, |view, cx| view.start_failed(reason.clone(), cx));
-        let centred = self.active.as_ref().is_some_and(|active| active.read(cx).session_id == provisional);
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.start_failed(reason.clone(), cx)));
+        let centred = self.active.as_ref().is_some_and(|active| active.read(cx).rt(cx).session_id == provisional);
         if !centred {
             cx.notify();
             return;
@@ -935,7 +935,7 @@ impl Harness {
             ProviderOpenRetry::OpenNew { project, workspace, draft } if !draft.is_empty() => {
                 self.open_state.provider_open_error = None;
                 self.open_new_on_provider(failure.provider, project, workspace, None, window, cx);
-                if let Some(view) = self.active.clone().filter(|view| view.read(cx).is_starting()) {
+                if let Some(view) = self.active.clone().filter(|view| view.read(cx).rt(cx).is_starting()) {
                     view.update(cx, |view, cx| view.set_draft(draft, window, cx));
                 }
             }
@@ -1267,12 +1267,12 @@ impl Harness {
 
     /// Forget a provider session for good: the record, its row and its
     /// views leave together. Dropping a view hangs its child up (see
-    /// `SessionView::drop`), so deleting the open or parked session also
+    /// `SessionRuntime::drop`), so deleting the open or parked session also
     /// shuts the child down — no orphaned `claude` / `codex` process.
     /// muse sessions never reach here: their list is the server's, and
     /// Baaz only ever hides or archives them.
     pub(crate) fn delete_provider_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
+        if self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).session_id == session_id) {
             self.active = None;
         }
         // A deleted session takes its inline open failure with it (Z4), so

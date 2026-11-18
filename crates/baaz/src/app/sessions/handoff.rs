@@ -22,15 +22,15 @@ impl Harness {
         // when the session holds no turns to carry.
         let preview = {
             let view = view.read(cx);
-            let session = view.session();
+            let session = view.rt(cx).session();
             let session = match session {
                 Some(session) if !session.turns.is_empty() => Some(session),
                 _ => None,
             };
             session.map(|session| {
-                let pack = crate::handoff::build_pack(session, view.workspace_path());
+                let pack = crate::handoff::build_pack(session, view.rt(cx).workspace_path());
                 let carried = crate::handoff::carried_items(&pack);
-                (view.provider_kind(), view.model_id(), view.handoff_blockers(), pack.tokens, carried)
+                (view.rt(cx).provider_kind(), view.rt(cx).model_id(), view.rt(cx).handoff_blockers(), pack.tokens, carried)
             })
         };
         let Some((from, from_model, blockers, pack_tokens, carried)) = preview else {
@@ -50,7 +50,7 @@ impl Harness {
             let card = run.card();
             let card_id = run.card_id.clone();
             self.handoff_state.runs.insert(source, run);
-            view.update(cx, |view, cx| view.append_handoff_card(&card_id, card, cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.append_handoff_card(&card_id, card, cx)));
             return;
         }
         self.handoff_state.confirm = Some(crate::handoff::HandoffConfirmState {
@@ -118,7 +118,7 @@ impl Harness {
                 }
                 let card = old.card();
                 let card_id = old.card_id.clone();
-                view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+                view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.replace_handoff_card(&card_id, card, cx)));
             }
         }
         let epoch = self.handoff_state.next_epoch();
@@ -134,15 +134,15 @@ impl Harness {
         }
         let facts = {
             let view = view.read(cx);
-            let session = view.session();
+            let session = view.rt(cx).session();
             Facts {
-                from: view.provider_kind(),
-                from_model: view.model_id(),
-                workspace: view.workspace_path().to_owned(),
-                running: view.handoff_turn_running(),
-                has_turns: view.has_turns(),
-                blockers: view.handoff_blockers(),
-                pack: session.map(|s| crate::handoff::build_pack(s, view.workspace_path())),
+                from: view.rt(cx).provider_kind(),
+                from_model: view.rt(cx).model_id(),
+                workspace: view.rt(cx).workspace_path().to_owned(),
+                running: view.rt(cx).handoff_turn_running(),
+                has_turns: view.rt(cx).has_turns(),
+                blockers: view.rt(cx).handoff_blockers(),
+                pack: session.map(|s| crate::handoff::build_pack(s, view.rt(cx).workspace_path())),
             }
         };
         let (question, approval, uninterruptible) = match facts.blockers {
@@ -175,7 +175,7 @@ impl Harness {
                 let card = refused.card();
                 let card_id = refused.card_id.clone();
                 self.handoff_state.runs.insert(source, refused);
-                view.update(cx, |view, cx| view.append_handoff_card(&card_id, card, cx));
+                view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.append_handoff_card(&card_id, card, cx)));
                 return;
             }
         };
@@ -184,25 +184,25 @@ impl Harness {
             let card = run.card();
             let card_id = run.card_id.clone();
             self.handoff_state.runs.insert(source, run);
-            view.update(cx, |view, cx| view.append_handoff_card(&card_id, card, cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.append_handoff_card(&card_id, card, cx)));
             return;
         };
         let card_id = run.card_id.clone();
         self.handoff_state.runs.insert(source.clone(), run.clone());
-        view.update(cx, |view, cx| view.append_handoff_card(&card_id, run.card(), cx));
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.append_handoff_card(&card_id, run.card(), cx)));
         // Quiescing: a running turn is interrupted, no new sends accepted
         // (the composer refuses while the card reads Quiescing).
         if facts.running {
-            view.update(cx, |view, cx| view.interrupt(cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.interrupt(cx)));
         }
         run.note_quiescing();
         self.handoff_state.runs.insert(source.clone(), run.clone());
-        view.update(cx, |view, cx| view.replace_handoff_card(&card_id, run.card(), cx));
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.replace_handoff_card(&card_id, run.card(), cx)));
         // Checkpointed: the pack is a point-in-time capture of the folded
         // transcript — an interrupt's late deltas may land just after it.
         run.note_checkpointed(pack);
         self.handoff_state.runs.insert(source.clone(), run.clone());
-        view.update(cx, |view, cx| view.replace_handoff_card(&card_id, run.card(), cx));
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.replace_handoff_card(&card_id, run.card(), cx)));
         // The model summary earns a side session only when it could add
         // something over the extractive pack (see
         // [`crate::handoff::should_model_summary`]) — and it never delays
@@ -230,7 +230,7 @@ impl Harness {
             if let Some(run) = self.handoff_state.runs.get(&source) {
                 let card = run.card();
                 let card_id = run.card_id.clone();
-                view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+                view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.replace_handoff_card(&card_id, card, cx)));
             }
             crate::baaz_log!("handoff requested epoch={epoch} {source} -> {} (summarising)", to.as_str());
             self.start_handoff_summary(source.clone(), epoch, prompt, cx);
@@ -294,7 +294,7 @@ impl Harness {
         // ordinary open racing the handoff keeps its session.
         let (lane, model) = {
             let view = view.read(cx);
-            (view.provider_kind(), view.model_id())
+            (view.rt(cx).provider_kind(), view.rt(cx).model_id())
         };
         if lane != run.to {
             return;
@@ -314,7 +314,7 @@ impl Harness {
         if let Some(source) = self.find_view(&pending.source_session, cx) {
             let card = run.card();
             let card_id = run.card_id.clone();
-            source.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+            source.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.replace_handoff_card(&card_id, card, cx)));
         }
         // Z2: the handoff swaps session ids, so the pane state moves with
         // it — the destination inherits what the source left, unless it
@@ -355,14 +355,14 @@ impl Harness {
             Some(pack.recent.len()),
         );
         view.update(cx, |view, cx| {
-            view.show_handoff_prefix(
+            view.runtime().clone().update(cx, |rt, cx| rt.show_handoff_prefix(
                 origin,
                 prefix,
                 divider,
                 Some(text.clone()),
                 Some(display.clone()),
                 cx,
-            );
+            ));
         });
         // The links land before the rows rebuild, so the sidebar row joins
         // the chain in this same frame — and the title guard already sees
@@ -389,7 +389,7 @@ impl Harness {
             self.session_list.update(cx, |list, _| mark(list));
         }
         view.update(cx, |view, cx| {
-            view.submit_pack(text, display, cx);
+            view.runtime().clone().update(cx, |rt, cx| rt.submit_pack(text, display, cx));
         });
         self.invalidate_list(cx);
     }
@@ -456,8 +456,8 @@ impl Harness {
         self.handoff_state.runs.insert(source.clone(), run);
         if let Some(view) = self.find_view(&source, cx) {
             view.update(cx, |view, cx| {
-                view.replace_handoff_card(&card_id, card, cx);
-                view.retire_for_handoff(to, dest.clone(), cx);
+                view.runtime().clone().update(cx, |rt, cx| rt.replace_handoff_card(&card_id, card, cx));
+                view.runtime().clone().update(cx, |rt, cx| rt.retire_for_handoff(to, dest.clone(), cx));
             });
         }
         // Landing already shows the prefix from the destination's first
@@ -465,16 +465,16 @@ impl Harness {
         // the scroll position, so the acknowledgement only fills in a
         // prefix landing never placed (a pending from before the stash).
         if let Some(view) = self.find_view(&dest, cx) {
-            if !view.read(cx).has_handoff_prefix() {
+            if !view.read(cx).rt(cx).has_handoff_prefix() {
                 view.update(cx, |view, cx| {
-                    view.show_handoff_prefix(
+                    view.runtime().clone().update(cx, |rt, cx| rt.show_handoff_prefix(
                         origin,
                         snap_turns,
                         divider,
                         (!pack_full.is_empty()).then(|| pack_full.clone()),
                         (!pack_display.is_empty()).then(|| pack_display.clone()),
                         cx,
-                    );
+                    ));
                 });
             }
         }
@@ -519,7 +519,7 @@ impl Harness {
         let card_id = run.card_id.clone();
         self.handoff_state.runs.insert(source.clone(), run);
         if let Some(view) = self.find_view(&source, cx) {
-            view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.replace_handoff_card(&card_id, card, cx)));
         }
         self.clear_handoff_links(&source, &dest, cx);
         let row_reason = format!("Hand-off failed: {reason}");
@@ -579,7 +579,7 @@ impl Harness {
             .filter_map(|(source, run)| Some((source.clone(), run.destination_session.clone()?)))
             .collect();
         for (source, dest) in pending {
-            let Some(outcome) = self.find_view(&dest, cx).and_then(|view| view.read(cx).pack_turn_outcome())
+            let Some(outcome) = self.find_view(&dest, cx).and_then(|view| view.read(cx).rt(cx).pack_turn_outcome())
             else {
                 continue;
             };
@@ -634,7 +634,7 @@ impl Harness {
         let card_id = run.card_id.clone();
         self.handoff_state.runs.insert(source.to_owned(), run);
         if let Some(view) = self.find_view(source, cx) {
-            view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.replace_handoff_card(&card_id, card, cx)));
         }
         crate::baaz_log!("handoff cancelled {source}");
         cx.notify();
@@ -656,7 +656,7 @@ impl Harness {
         let card_id = run.card_id.clone();
         self.handoff_state.runs.insert(pending.source_session.clone(), run);
         if let Some(view) = self.find_view(&pending.source_session, cx) {
-            view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.replace_handoff_card(&card_id, card, cx)));
         }
         crate::baaz_log!("handoff failed {}: {reason}", pending.source_session);
         cx.notify();
@@ -671,12 +671,12 @@ impl Harness {
         // Landing already shows the prefix from the destination's first
         // frame: reopening or re-attaching the same view must not wipe it
         // back to the fallback divider with no turns.
-        if view.read(cx).has_handoff_prefix() {
+        if view.read(cx).rt(cx).has_handoff_prefix() {
             return;
         }
         let (session_id, to) = {
             let view = view.read(cx);
-            (view.session_id.clone(), view.provider_kind())
+            (view.rt(cx).session_id.clone(), view.rt(cx).provider_kind())
         };
         if let Some(snapshot) = crate::handoff_snapshot::read_snapshot(&session_id) {
             let from = ProviderId::parse(&snapshot.from);
@@ -692,14 +692,14 @@ impl Harness {
                 snapshot.turns_carried,
             );
             view.update(cx, |view, cx| {
-                view.show_handoff_prefix(
+                view.runtime().clone().update(cx, |rt, cx| rt.show_handoff_prefix(
                     origin,
                     snapshot.turns.clone(),
                     divider,
                     (!snapshot.pack_text.is_empty()).then(|| snapshot.pack_text.clone()),
                     (!snapshot.pack_display.is_empty()).then(|| snapshot.pack_display.clone()),
                     cx,
-                );
+                ));
             });
             return;
         }
@@ -723,8 +723,8 @@ impl Harness {
         };
         let divider = crate::handoff_snapshot::fallback_text(from);
         view.update(cx, |view, cx| {
-            let display = view.pack_display_fallback();
-            view.show_handoff_prefix(origin, Vec::new(), divider, None, display, cx);
+            let display = view.runtime().clone().update(cx, |rt, _| rt.pack_display_fallback());
+            view.runtime().clone().update(cx, |rt, cx| rt.show_handoff_prefix(origin, Vec::new(), divider, None, display, cx));
         });
     }
 

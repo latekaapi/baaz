@@ -141,9 +141,9 @@ fn z4_retry_after_a_failed_reopen_opens_the_real_session(cx: &mut gpui::TestAppC
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("the retried lane is open");
-            assert!(view.read(cx).provider_kind() != ProviderId::Muse, "the retry reopens a lane, not a muse view");
-            assert_eq!(view.read(cx).session_id, "s-codex-old", "the clicked session itself");
-            assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex);
+            assert!(view.read(cx).rt(cx).provider_kind() != ProviderId::Muse, "the retry reopens a lane, not a muse view");
+            assert_eq!(view.read(cx).rt(cx).session_id, "s-codex-old", "the clicked session itself");
+            assert_eq!(view.read(cx).rt(cx).provider_kind(), ProviderId::Codex);
             assert!(
                 harness.open_state.provider_open_error.is_none(),
                 "the real view replaces the failure state"
@@ -160,7 +160,7 @@ fn z4_retry_after_a_failed_reopen_opens_the_real_session(cx: &mut gpui::TestAppC
             );
             let texts: Vec<String> = view
                 .read(cx)
-                .session()
+                .rt(cx).session()
                 .map(|session| {
                     session
                         .turns
@@ -242,7 +242,7 @@ fn a_replayed_reopen_asks_no_model_for_anything(cx: &mut gpui::TestAppContext) {
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the reopened lane is open");
-        assert_eq!(view.read(cx).session_id, "s-codex-old");
+        assert_eq!(view.read(cx).rt(cx).session_id, "s-codex-old");
         assert!(
             commands.lock().expect("commands").iter().any(|c| matches!(c, provider::Command::ResumeSession { .. })),
             "the reopen resumed and replayed"
@@ -357,7 +357,7 @@ fn a_reopen_that_replays_more_than_the_record_counted_keeps_the_rows_time(cx: &m
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         assert_eq!(
-            harness.active.clone().expect("the reopened lane is open").read(cx).session_id,
+            harness.active.clone().expect("the reopened lane is open").read(cx).rt(cx).session_id,
             "s-codex-old"
         );
         let record = harness.session_list.read(cx).provider_sessions.get("s-codex-old").expect("the record");
@@ -394,7 +394,7 @@ fn a_provider_session_reopens_with_its_history_after_a_restart(cx: &mut gpui::Te
     });
     vc.run_until_parked();
     let open_id = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the lane opened").read(cx).rt(cx).session_id.clone()
     });
     assert_eq!(open_id, "s-open");
     // One turn settles, so the record counts history: a reopened
@@ -453,8 +453,8 @@ fn a_provider_session_reopens_with_its_history_after_a_restart(cx: &mut gpui::Te
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the resumed lane is open");
-        assert!(view.read(cx).provider_kind() != ProviderId::Muse, "the click reopens a lane, not a muse view");
-        assert_eq!(view.read(cx).session_id, open_id);
+        assert!(view.read(cx).rt(cx).provider_kind() != ProviderId::Muse, "the click reopens a lane, not a muse view");
+        assert_eq!(view.read(cx).rt(cx).session_id, open_id);
         assert!(!harness.open_state.switch_pending, "the switch landed");
         assert!(
             harness.overlays.read(cx).dialog().is_none(),
@@ -462,7 +462,7 @@ fn a_provider_session_reopens_with_its_history_after_a_restart(cx: &mut gpui::Te
         );
         let texts: Vec<String> = view
             .read(cx)
-            .session()
+            .rt(cx).session()
             .map(|session| {
                 session
                     .turns
@@ -682,9 +682,9 @@ fn a_muse_reopen_without_a_record_writes_one_from_its_row_then_reads_it(cx: &mut
         assert_eq!(record.first_prompt.as_deref(), Some("chart the ferry routes"));
         assert_eq!(record.workspace.as_deref(), Some(state.2.to_string_lossy().as_ref()));
         let view = harness.active.clone().expect("the session opened");
-        assert_eq!(view.read(cx).session_id, "s-muse-old");
-        assert_eq!(view.read(cx).provider_kind(), ProviderId::Muse);
-        assert!(!view.read(cx).is_starting(), "the lane landed");
+        assert_eq!(view.read(cx).rt(cx).session_id, "s-muse-old");
+        assert_eq!(view.read(cx).rt(cx).provider_kind(), ProviderId::Muse);
+        assert!(!view.read(cx).rt(cx).is_starting(), "the lane landed");
         assert!(harness.open_state.provider_open_error.is_none(), "no failure");
         assert!(harness.open_state.drafts.values().all(|id| id != "s-muse-old"), "a reopen is never a draft");
         assert_eq!(harness.session_list.read(cx).sessions.iter().filter(|e| e.id == "s-muse-old").count(), 1, "one row");
@@ -722,7 +722,7 @@ fn a_muse_reopen_without_a_record_writes_one_from_its_row_then_reads_it(cx: &mut
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("reopened");
-        assert_eq!(view.read(cx).session_id, "s-muse-old");
+        assert_eq!(view.read(cx).rt(cx).session_id, "s-muse-old");
         assert_eq!(harness.session_list.read(cx).provider_sessions.get("s-muse-old").map(|r| r.turns), Some(3));
     });
     lane_restore(state);
@@ -743,8 +743,8 @@ fn a_held_elsewhere_muse_reopen_lands_read_only_under_the_lease_notice(cx: &mut 
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the session opened");
-        assert_eq!(view.read(cx).session_id, "s-muse-old");
-        assert_eq!(view.read(cx).banner_text(), Some(crate::app::LEASE_NOTICE));
+        assert_eq!(view.read(cx).rt(cx).session_id, "s-muse-old");
+        assert_eq!(view.read(cx).rt(cx).banner_text(), Some(crate::app::LEASE_NOTICE));
         assert!(harness.open_state.provider_open_error.is_none(), "not a failed open");
         assert!(harness.overlays.read(cx).dialog().is_none(), "no dialog");
     });
@@ -766,8 +766,8 @@ fn a_stale_history_muse_reopen_pages_in_anyway(cx: &mut gpui::TestAppContext) {
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the session opened");
-        assert_eq!(view.read(cx).session_id, "s-muse-old");
-        assert_ne!(view.read(cx).banner_text(), Some(crate::app::LEASE_NOTICE));
+        assert_eq!(view.read(cx).rt(cx).session_id, "s-muse-old");
+        assert_ne!(view.read(cx).rt(cx).banner_text(), Some(crate::app::LEASE_NOTICE));
         assert!(harness.open_state.provider_open_error.is_none(), "not a failed open");
     });
     assert!(pages_of(&commands) >= 1, "the history pages in");
@@ -818,7 +818,7 @@ fn a_muse_turn_moves_one_row_and_never_relists(cx: &mut gpui::TestAppContext) {
                 prompt: "and the night ferries".into(),
                 turn_id: "t-4".into(),
             };
-            harness.on_session_event(view.clone(), &event, cx);
+            harness.on_session_event(view.read(cx).runtime().clone(), &event, cx);
             assert!(!harness.session_list.read(cx).fetch.in_flight, "an admission never relists");
             assert_eq!(
                 harness.session_list.read(cx).provider_sessions.get("s-muse-old").and_then(|r| r.first_prompt.clone()).as_deref(),
@@ -851,7 +851,7 @@ fn a_muse_turn_moves_one_row_and_never_relists(cx: &mut gpui::TestAppContext) {
                 turn_id: "t-4".into(),
                 meta: aui_protocol::TurnMeta::default(),
             };
-            harness.on_session_event(view.clone(), &event, cx);
+            harness.on_session_event(view.read(cx).runtime().clone(), &event, cx);
             assert!(!harness.session_list.read(cx).fetch.in_flight, "a finished turn never relists");
             let row = harness.session_list.read(cx).sessions.iter().find(|e| e.id == "s-muse-old").expect("the row");
             assert_eq!(row.turns, 4, "the one row moved");

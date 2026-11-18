@@ -1136,7 +1136,7 @@ impl Harness {
     /// transcript ends above. `None` anywhere else.
     pub(crate) fn render_provider_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use gpui::prelude::*;
-        let id = self.active.as_ref().map(|view| view.read(cx).provider_kind())?;
+        let id = self.active.as_ref().map(|view| view.read(cx).rt(cx).provider_kind())?;
         let text = self.provider_model.read(cx).banners.get(&id)?.clone();
         let weak = cx.entity().downgrade();
         Some(

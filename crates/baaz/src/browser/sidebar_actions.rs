@@ -307,7 +307,7 @@ impl Harness {
             }
             TaskFolderAction::Stop => {
                 if let Some(view) = self.find_view(session, cx) {
-                    view.update(cx, |view, cx| view.interrupt(cx));
+                    view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.interrupt(cx)));
                 }
             }
             TaskFolderAction::CloseTabs => {

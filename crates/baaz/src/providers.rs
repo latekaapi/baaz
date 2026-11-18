@@ -797,13 +797,15 @@ pub fn read_claude_code_last_reported_model() -> Option<String> {
 
 /// Remember the last model a Claude Code session reported. Best-effort: a
 /// store that cannot be written loses the seed, never the session. A
-/// deterministic capture never writes.
+/// deterministic capture never writes, and neither does a report of the
+/// model already stored: the read is cheaper than the atomic write it
+/// saves on every settle (docs/81 A F14).
 pub fn write_claude_code_last_reported_model(model: &str) {
     if claude_code_seed_deterministic() {
         return;
     }
     let model = model.trim();
-    if model.is_empty() {
+    if model.is_empty() || read_claude_code_last_reported_model().as_deref() == Some(model) {
         return;
     }
     if let Ok(text) = serde_json::to_string(&LastClaudeCodeModel { model: model.to_owned() }) {

@@ -9,7 +9,7 @@ impl Harness {
     /// What a session cannot decide for itself.
     pub(in crate::app) fn on_session_event(
         &mut self,
-        view: Entity<SessionView>,
+        runtime: Entity<SessionRuntime>,
         event: &SessionEvent,
         cx: &mut Context<Self>,
     ) {
@@ -33,7 +33,7 @@ impl Harness {
             // refusal): the one quiet banner above the composer, and a
             // re-probe so every surface agrees (D5 B5). No dialog.
             SessionEvent::SignedOut => {
-                let id = view.read(cx).provider_kind();
+                let id = runtime.read(cx).provider_kind();
                 self.provider_model.update(cx, |model, _| model.raise_typed_signed_out(id));
                 crate::provider_status::reprobe_provider(id);
                 cx.notify();
@@ -47,7 +47,7 @@ impl Harness {
             // grows its own lost banner into the typed failure, under its
             // transcript; the window only notes it.
             SessionEvent::ChildFailed { message, stderr_excerpt } => {
-                let session_id = view.read(cx).session_id.clone();
+                let session_id = runtime.read(cx).session_id.clone();
                 crate::baaz_log!(
                     "session {session_id}: the agent died twice in a row ({message}; {} stderr lines)",
                     stderr_excerpt.len()
@@ -61,7 +61,7 @@ impl Harness {
             // The grown lost banner's typed action: the D5 flow of that
             // name for this session's provider.
             SessionEvent::FailureAction(action) => {
-                let provider = view.read(cx).provider_kind();
+                let provider = runtime.read(cx).provider_kind();
                 let action = *action;
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| {
@@ -76,7 +76,7 @@ impl Harness {
                 self.record_turn_outcome(&session_id, failed, error.as_deref(), cx);
             }
             SessionEvent::Closed => {
-                let closed_id = view.read(cx).session_id.clone();
+                let closed_id = runtime.read(cx).session_id.clone();
                 self.fail_handoff_for_lost_destination(
                     &closed_id,
                     "the destination session closed before it acknowledged the pack".to_owned(),
@@ -87,16 +87,16 @@ impl Harness {
             // pages land. Anything but the open view is a parked chain
             // warming the cache, and its own completion already pinned it.
             SessionEvent::HistoryReady => {
-                if self.active.as_ref().is_some_and(|active| *active == view) {
+                if let Some(view) = self.active.clone().filter(|active| *active.read(cx).runtime() == runtime) {
                     view.update(cx, |view, cx| view.follow_tail(cx));
-                    let session_id = view.read(cx).session_id.clone();
+                    let session_id = runtime.read(cx).session_id.clone();
                     self.mark_read(&session_id, cx);
                 }
             }
             // The open session was read to its end (task 3.1).
             SessionEvent::SeenToEnd => {
-                if self.active.as_ref().is_some_and(|active| *active == view) {
-                    let session_id = view.read(cx).session_id.clone();
+                if self.active.as_ref().is_some_and(|active| *active.read(cx).runtime() == runtime) {
+                    let session_id = runtime.read(cx).session_id.clone();
                     self.mark_read(&session_id, cx);
                 }
             }
@@ -126,7 +126,7 @@ impl Harness {
             // the session may earn a generated title, and the record moves
             // to now — the lane's `turn/started`.
             SessionEvent::ProviderTurnAccepted { session_id, prompt, turn_id, .. } => {
-                self.on_turn_accepted(view, session_id, prompt, turn_id, cx)
+                self.on_turn_accepted(runtime, session_id, prompt, turn_id, cx)
             }
             // A provider lane landed or settled an approval card: the
             // row re-reads the open view's pending words, so it stands
@@ -146,8 +146,11 @@ impl Harness {
             // ledger gains its tagged row, and the record counts the turn —
             // the lane's `turn/completed`.
             SessionEvent::ProviderTurnFinished { session_id, turn_id, meta } => {
-                self.on_turn_finished(view, session_id, turn_id, meta, cx)
+                self.settle_turns(runtime, session_id, &[(turn_id.clone(), meta.clone())], cx)
             }
+            // A reopen's replayed history: the same settle, once for the
+            // whole batch (docs/81 A F14).
+            SessionEvent::HistoryReplayed { session_id, turns } => self.settle_turns(runtime, session_id, turns, cx),
             SessionEvent::Logout => self.logout(cx),
             // "Enable" on a disabled-provider banner: Settings on the
             // Providers page, where the switch lives.
@@ -175,7 +178,7 @@ impl Harness {
             }
             SessionEvent::TierRecheck => self.probe_tier(true, cx),
             SessionEvent::Rename { name } => {
-                let session_id = view.read(cx).session_id.clone();
+                let session_id = runtime.read(cx).session_id.clone();
                 self.rename_session(session_id, name.clone(), cx);
             }
             // The person picked a model, effort or approval mode in a
@@ -184,13 +187,13 @@ impl Harness {
             // `setmode:` steps and plan-mode toggles never emit these, so
             // scripted and transient choices stay out of the defaults.
             SessionEvent::ModelSelected { model_id } => {
-                let provider = view.read(cx).provider_kind();
+                let provider = runtime.read(cx).provider_kind();
                 self.note_pick(|defaults| {
                     defaults.note_model(provider.as_str(), model_id);
                 }, cx);
             }
             SessionEvent::EffortSelected { effort } => {
-                let provider = view.read(cx).provider_kind();
+                let provider = runtime.read(cx).provider_kind();
                 self.note_pick(|defaults| {
                     defaults.note_effort(provider.as_str(), effort.clone());
                 }, cx);
@@ -206,7 +209,7 @@ impl Harness {
             // is not muse. Y2b: the old view stays active and drawn (composer
             // locked, chip already on the pick) until the replacement
             // activates in the same update — no empty-state frame between.
-            SessionEvent::SwitchProvider { provider } => self.on_switch_provider(view, provider, cx),
+            SessionEvent::SwitchProvider { provider } => self.on_switch_provider(runtime, provider, cx),
             // "Hand off to X…" on a session with turns: the lossy
             // re-prompt (see `crate::handoff`). The dialog (or the step
             // verb's headless flag) decides whether a confirm comes
@@ -214,7 +217,7 @@ impl Harness {
             // rejoin through one like the paths above.
             SessionEvent::HandoffRequested { provider, headless } => {
                 let (source, provider, headless) =
-                    (view.read(cx).session_id.clone(), *provider, *headless);
+                    (runtime.read(cx).session_id.clone(), *provider, *headless);
                 if headless {
                     self.tasks.push(cx.spawn(async move |this, cx| {
                         let _ = this.update_in(cx, |this, window, cx| {
@@ -247,7 +250,7 @@ impl Harness {
             // "Cancel" on a handoff card: abort while cancellable,
             // shutting the opened destination down.
             SessionEvent::HandoffCancel { card_id } => {
-                let (source, card_id) = (view.read(cx).session_id.clone(), card_id.clone());
+                let (source, card_id) = (runtime.read(cx).session_id.clone(), card_id.clone());
                 self.cancel_handoff(&source, &card_id, cx);
             }
             // The pack's submit ack on the destination: the run holding
@@ -260,13 +263,13 @@ impl Harness {
                 self.fail_handoff(session_id.clone(), reason.clone(), cx);
             }
             SessionEvent::RenameStart => {
-                let session_id = view.read(cx).session_id.clone();
+                let session_id = runtime.read(cx).session_id.clone();
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| this.start_rename(session_id, window, cx));
                 }));
             }
             SessionEvent::Hide => {
-                let session_id = view.read(cx).session_id.clone();
+                let session_id = runtime.read(cx).session_id.clone();
                 self.hide_session(session_id, cx);
             }
             SessionEvent::ToggleEmpty => {
@@ -346,7 +349,7 @@ impl Harness {
             // D6 (docs/43 §4): the chip opens Changes on that turn's files,
             // open, scrolled to, flashing once.
             SessionEvent::OpenTurnChanges { turn_id } => {
-                let files = self.active.as_ref().map(|view| view.read(cx).turn_edits(turn_id)).unwrap_or_default();
+                let files = self.active.as_ref().map(|view| view.read(cx).rt(cx).turn_edits(turn_id)).unwrap_or_default();
                 self.open_turn_changes(files, cx);
             }
         }
@@ -357,10 +360,10 @@ impl Harness {
     /// (titled from the prompt when it carries no name of its own),
     /// the session may earn a generated title, and the record moves
     /// to now — the lane's `turn/started`.
-    fn on_turn_accepted(&mut self, view: Entity<SessionView>, session_id: &str, prompt: &str, turn_id: &str, cx: &mut Context<Self>) {
+    fn on_turn_accepted(&mut self, runtime: Entity<SessionRuntime>, session_id: &str, prompt: &str, turn_id: &str, cx: &mut Context<Self>) {
         // Every provider's turn, Muse's included (docs/70): rows,
         // titles and drafts follow the view's own lane.
-        let provider_kind = view.read(cx).provider_kind();
+        let provider_kind = runtime.read(cx).provider_kind();
         let (session_id, prompt, turn_id) =
             (session_id.to_owned(), prompt.to_owned(), turn_id.to_owned());
         // A turn that started is a session made real: it is no
@@ -420,7 +423,7 @@ impl Harness {
             // already have given up on it (it was filtered as
             // empty), so re-arm it as an outside activation
             // does — only for the session this window has open.
-            if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
+            if self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).session_id == session_id) {
                 let id = session_id.clone();
                 self.sidebar_pane.update(cx, |pane, cx| pane.set_reveal(Some(id), false, cx));
             }
@@ -429,33 +432,37 @@ impl Harness {
         // muse side session the muse lane uses — never a second
         // provider child.
         self.maybe_start_title(&session_id, Some(prompt), cx);
-        self.title_from_transcript(&view, cx);
+        self.title_from_transcript(&runtime, cx);
         // A late admission — the ack arriving after its turn
         // already finished — is bookkeeping only (row, record,
         // title above): the row declines it as a start and
         // re-reads the settled view instead of manufacturing a
         // fresh `Working · now` (W8c).
-        let stale = view.read(cx).provider_turn_finished(&turn_id);
+        let stale = runtime.read(cx).provider_turn_finished(&turn_id);
         self.sync_row_live(&session_id, !stale, cx);
         cx.notify();
     }
 
-    /// A provider lane settled a turn: the free byline lands, the
-    /// ledger gains its tagged row, and the record counts the turn —
-    /// the lane's `turn/completed`.
-    fn on_turn_finished(
+    /// A provider lane settled turns — the one it was running, or a
+    /// reopen's replayed batch: the free byline lands, the ledger gains a
+    /// tagged row per turn, and the record counts the exchanges — the
+    /// lane's `turn/completed`. Everything past the ledger rows reads the
+    /// fold after the whole batch, so it runs once per call, never once per
+    /// replayed turn (docs/81 A F14).
+    fn settle_turns(
         &mut self,
-        view: Entity<SessionView>,
+        runtime: Entity<SessionRuntime>,
         session_id: &str,
-        turn_id: &str,
-        meta: &aui_protocol::TurnMeta,
+        turns: &[(String, aui_protocol::TurnMeta)],
         cx: &mut Context<Self>,
     ) {
-        let (session_id, turn_id, meta) = (session_id.to_owned(), turn_id.to_owned(), meta.clone());
+        #[cfg(test)]
+        SETTLES.with(|settles| settles.set(settles.get() + 1));
+        let session_id = session_id.to_owned();
         // Every provider's turn, Muse's included (docs/70): the
         // ledger row is tagged with its provider, and the row,
         // record and byline move here — one row, never a relist.
-        let provider_kind = view.read(cx).provider_kind();
+        let provider_kind = runtime.read(cx).provider_kind();
         let provider = provider_kind.as_str().to_owned();
         // A Claude Code report seeds the next fresh session's
         // chip: display-only (the argv never sees it — see
@@ -464,30 +471,34 @@ impl Harness {
         // ...except an internal sub-call's (see
         // `should_seed_claude_code_model`): only a Haiku report
         // against a non-Haiku pick is ever dropped — any other
-        // report updates the seed as before.
-        let known = view.read(cx).model_id();
-        if should_seed_claude_code_model(provider_kind, &meta.model, &known) {
+        // report updates the seed as before. Of a batch, the last
+        // report that seeds is the one a turn-by-turn settle left
+        // standing, and the write compares before it writes.
+        let known = runtime.read(cx).model_id();
+        if let Some((_, meta)) =
+            turns.iter().rev().find(|(_, meta)| should_seed_claude_code_model(provider_kind, &meta.model, &known))
+        {
             crate::providers::write_claude_code_last_reported_model(&meta.model);
         }
-        let cursor =
-            view.read(cx).last_cursor().unwrap_or_else(|| turn_id.clone());
-        let row = crate::provider_sessions::ledger_row(
-            &session_id,
-            &provider,
-            &cursor,
-            &turn_id,
-            &meta,
-        );
+        let cursor = runtime.read(cx).last_cursor();
+        let rows: Vec<_> = turns
+            .iter()
+            .map(|(turn_id, meta)| {
+                let cursor = cursor.clone().unwrap_or_else(|| turn_id.clone());
+                crate::provider_sessions::ledger_row(&session_id, &provider, &cursor, turn_id, meta)
+            })
+            .collect();
         // Fire-and-forget on the background executor, like the muse
         // lane's recorder: usage history is a ledger, not a feature
         // anything blocks on. The `(session_id, turn_id)` key makes
-        // a replayed turn a no-op insert rather than a duplicate.
-        self.wire_call(cx, move || crate::usage::record_backfilled(&[row]), |_this, (), _cx| {});
+        // a replayed turn a no-op insert rather than a duplicate, and a
+        // batch is one write.
+        self.wire_call(cx, move || crate::usage::record_backfilled(&rows), |_this, (), _cx| {});
         // Count exchanges, as muse rows do: the folded assistant
         // turns, never a blind increment — a reopen replays the
         // same `TurnFinished`s, and incrementing again read "2
         // turns" for one user+assistant exchange.
-        let exchanges = view
+        let exchanges = runtime
             .read(cx)
             .session()
             .map(|session| {
@@ -529,18 +540,18 @@ impl Harness {
         // (owner, 2026-11-12): a session made in the CLI swapped its
         // first prompt for its last reply on open.
         if live {
-            self.record_last_summary(&view, cx);
+            self.record_last_summary(&runtime, cx);
         }
         // A settled pack turn fails its handoff here, with its
         // reason on the card and the row — never a silent Active.
         self.reconcile_pack_turns(cx);
         if counted {
-            self.title_from_transcript(&view, cx);
+            self.title_from_transcript(&runtime, cx);
             // The free excerpt just landed; a poor one may earn one
             // debounced rewrite — idle sessions only, never a
             // running turn — through the same side session as a
             // title.
-            self.maybe_rewrite_byline(&view, cx);
+            self.maybe_rewrite_byline(&runtime, cx);
         }
         // The lane settled: repaint on this path even if the
         // view's own notify raced the event delivery (W8c).
@@ -553,8 +564,8 @@ impl Harness {
     /// is not muse. Y2b: the old view stays active and drawn (composer
     /// locked, chip already on the pick) until the replacement
     /// activates in the same update — no empty-state frame between.
-    fn on_switch_provider(&mut self, view: Entity<SessionView>, provider: &ProviderId, cx: &mut Context<Self>) {
-        let old = view.read(cx).session_id.clone();
+    fn on_switch_provider(&mut self, runtime: Entity<SessionRuntime>, provider: &ProviderId, cx: &mut Context<Self>) {
+        let old = runtime.read(cx).session_id.clone();
         // Y2b2: every switch stamps a fresh generation. A second
         // switch while one is pending supersedes the first: its
         // in-flight open is orphaned (it lands stale — child shut
@@ -575,17 +586,17 @@ impl Harness {
         // lane instead of failing on the closed draft — and the
         // claim is what lets the start through the one-session
         // guard (see [`OpenState::begin_switch`]).
-        let carry = view.read(cx).draft_settings();
+        let carry = runtime.read(cx).draft_settings();
         let epoch = self.open_state.begin_switch(old.clone(), carry);
         self.select_new_provider(*provider, cx);
-        view.update(cx, |v, cx| {
-            v.set_input_locked(true, cx);
-            v.set_switching_to(Some(*provider), cx);
+        runtime.update(cx, |rt, cx| {
+            rt.set_input_locked(true, cx);
+            rt.set_switching_to(Some(*provider), cx);
         });
-        if let Some(active) = self.active.clone().filter(|v| v.read(cx).session_id == old) {
-            active.update(cx, |v, cx| {
-                v.set_input_locked(true, cx);
-                v.set_switching_to(Some(*provider), cx);
+        if let Some(active) = self.active.clone().filter(|v| v.read(cx).rt(cx).session_id == old) {
+            active.read(cx).runtime().clone().update(cx, |rt, cx| {
+                rt.set_input_locked(true, cx);
+                rt.set_switching_to(Some(*provider), cx);
             });
         }
         self.tasks.push(cx.spawn(async move |this, cx| {
@@ -594,4 +605,11 @@ impl Harness {
             });
         }));
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times [`Harness::settle_turns`] ran on this thread: what
+    /// the F14 test counts (a reopen of N turns settles once).
+    pub(crate) static SETTLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }

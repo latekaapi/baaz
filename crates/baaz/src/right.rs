@@ -1000,7 +1000,7 @@ impl Harness {
         let active = self
             .active
             .as_ref()
-            .map(|view| view.read(cx).session_id.clone());
+            .map(|view| view.read(cx).rt(cx).session_id.clone());
         let foreground = agent_open_flips_visible_pane(active.as_deref(), session_id);
         if foreground {
             self.select_right(RightKind::Browser, cx);

@@ -27,12 +27,12 @@ fn a_lane_lost_twice_keeps_its_transcript_and_grows_the_banner(cx: &mut gpui::Te
     });
     vc.run_until_parked();
     let view = vc.update(|_, cx| baaz.read(cx).active.clone().expect("the lane is open"));
-    vc.update(|_, cx| view.update(cx, |view, cx| view.step_child_lost(cx))).expect("the child loss lands");
+    vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.step_child_lost(cx)))).expect("the child loss lands");
     vc.run_until_parked();
     vc.update(|_, cx| {
-        assert!(view.read(cx).child_failure().is_none(), "one loss is the quiet banner only");
+        assert!(view.read(cx).rt(cx).child_failure().is_none(), "one loss is the quiet banner only");
     });
-    vc.update(|_, cx| view.update(cx, |view, cx| view.step_child_lost(cx))).expect("the child loss lands");
+    vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.step_child_lost(cx)))).expect("the child loss lands");
     vc.run_until_parked();
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
@@ -42,14 +42,14 @@ fn a_lane_lost_twice_keeps_its_transcript_and_grows_the_banner(cx: &mut gpui::Te
             !harness.registry.is_view_parked(&view),
             "the view is not parked"
         );
-        let failure = view.read(cx).child_failure().cloned().expect("the banner grew into the failure");
+        let failure = view.read(cx).rt(cx).child_failure().cloned().expect("the banner grew into the failure");
         assert_eq!(failure.kind, crate::provider_status::FailureKind::Crashed);
         assert_eq!(failure.stderr_excerpt.len(), 3, "the step's sample well");
     });
-    vc.update(|_, cx| view.update(cx, |view, cx| view.run_banner_action(cx)));
+    vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.run_banner_action(cx))));
     vc.run_until_parked();
     vc.update(|_, cx| {
-        assert!(view.read(cx).child_failure().is_none(), "Retry revives and stands the failure down");
+        assert!(view.read(cx).rt(cx).child_failure().is_none(), "Retry revives and stands the failure down");
         assert!(baaz.read(cx).active.as_ref() == Some(&view), "the same view throughout");
     });
     lane_restore(state);
@@ -78,20 +78,20 @@ fn a_lane_turn_outcome_moves_the_rows_failed_state(cx: &mut gpui::TestAppContext
     });
     vc.run_until_parked();
     let view = vc.update(|_, cx| baaz.read(cx).active.clone().expect("the lane is open"));
-    let session_id = vc.update(|_, cx| view.read(cx).session_id.clone());
+    let session_id = vc.update(|_, cx| view.read(cx).rt(cx).session_id.clone());
     let outcome = |failed: bool, error: Option<&str>| crate::session::SessionEvent::ProviderTurnOutcome {
         session_id: session_id.clone(),
         failed,
         error: error.map(str::to_owned),
     };
     let failed = outcome(true, Some("stream disconnected"));
-    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.clone(), &failed, cx)));
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.read(cx).runtime().clone(), &failed, cx)));
     vc.update(|_, cx| {
         let error = baaz.read(cx).session_list.read(cx).overrides.get(&session_id).and_then(|meta| meta.last_error.clone());
         assert_eq!(error.as_deref(), Some("stream disconnected"), "the failure is recorded");
     });
     let ok = outcome(false, None);
-    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.clone(), &ok, cx)));
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.read(cx).runtime().clone(), &ok, cx)));
     vc.update(|_, cx| {
         let error = baaz.read(cx).session_list.read(cx).overrides.get(&session_id).and_then(|meta| meta.last_error.clone());
         assert!(error.is_none(), "a later success stands it down");
@@ -122,13 +122,13 @@ fn unread_is_set_by_an_unseen_finish_and_cleared_by_reading(cx: &mut gpui::TestA
     });
     vc.run_until_parked();
     let view = vc.update(|_, cx| baaz.read(cx).active.clone().expect("the lane is open"));
-    let session_id = vc.update(|_, cx| view.read(cx).session_id.clone());
+    let session_id = vc.update(|_, cx| view.read(cx).rt(cx).session_id.clone());
     let unread = |id: &str, cx: &mut gpui::VisualTestContext| {
         cx.update(|_, cx| baaz.read(cx).session_list.read(cx).overrides.get(id).is_some_and(|meta| meta.unread))
     };
     // The open session, at its end: the finish is read as it lands.
     let done = crate::session::SessionEvent::ProviderTurnOutcome { session_id: session_id.clone(), failed: false, error: None };
-    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.clone(), &done, cx)));
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.read(cx).runtime().clone(), &done, cx)));
     assert!(!unread(&session_id, vc), "a finish read as it lands is not unread");
     // Another session's finish: nobody read it.
     vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.record_turn_outcome("s-elsewhere", false, None, cx)));
@@ -138,11 +138,11 @@ fn unread_is_set_by_an_unseen_finish_and_cleared_by_reading(cx: &mut gpui::TestA
     // The open session, flagged unread, arriving at its end clears.
     vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.set_override(&session_id, |meta| meta.unread = true, cx)));
     let seen = crate::session::SessionEvent::SeenToEnd;
-    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.clone(), &seen, cx)));
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.read(cx).runtime().clone(), &seen, cx)));
     assert!(!unread(&session_id, vc), "arriving at the end reads it");
     // Baaz stopped restarting the child: the row reads Failed.
     let lost = crate::session::SessionEvent::ChildFailed { message: "the agent exited".into(), stderr_excerpt: Vec::new() };
-    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.clone(), &lost, cx)));
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.on_session_event(view.read(cx).runtime().clone(), &lost, cx)));
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let error = harness.session_list.read(cx).overrides.get(&session_id).and_then(|meta| meta.last_error.clone());
@@ -298,7 +298,7 @@ fn a_provider_draft_with_no_turns_opens_fresh_instead_of_resuming(
     });
     vc.run_until_parked();
     let open_id = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the lane opened").read(cx).rt(cx).session_id.clone()
     });
     assert_eq!(open_id, "s-open");
     // The restart, with no turn ever settling: the record counts zero.
@@ -345,7 +345,7 @@ fn a_provider_draft_with_no_turns_opens_fresh_instead_of_resuming(
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the fresh lane is open");
-        assert!(view.read(cx).provider_kind() != ProviderId::Muse, "a lane opens, not a muse view");
+        assert!(view.read(cx).rt(cx).provider_kind() != ProviderId::Muse, "a lane opens, not a muse view");
         assert!(
             harness.overlays.read(cx).dialog().is_none(),
             "no failure dialog on a fresh open"
@@ -381,7 +381,7 @@ fn a_generated_title_lands_on_a_provider_row(cx: &mut gpui::TestAppContext) {
     });
     vc.run_until_parked();
     let open_id = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the lane opened").read(cx).rt(cx).session_id.clone()
     });
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
@@ -424,7 +424,7 @@ fn a_finished_provider_turn_counts_and_moves_the_record(cx: &mut gpui::TestAppCo
     vc.run_until_parked();
     let open_id = vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            let id = harness.active.clone().expect("the lane opened").read(cx).session_id.clone();
+            let id = harness.active.clone().expect("the lane opened").read(cx).rt(cx).session_id.clone();
             // An old stamp, so the move below is the turn's, not the open's.
             harness.session_list.update(cx, |list, _| list.provider_sessions.get_mut(&id).expect("the open's record").updated_ms = 1);
             id
@@ -432,13 +432,13 @@ fn a_finished_provider_turn_counts_and_moves_the_record(cx: &mut gpui::TestAppCo
     });
     vc.update(|_, cx| {
         let view = baaz.read(cx).active.clone().expect("the lane view");
-        view.update(cx, |view, cx| view.send_text("hello there".to_owned(), cx));
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("hello there".to_owned(), cx)));
     });
     vc.run_until_parked();
     // The double's echo: the user turn, the assistant turn, its finish.
     vc.update(|_, cx| {
         let view = baaz.read(cx).active.clone().expect("the lane view");
-        view.update(cx, |view, cx| view.test_drain_provider(cx));
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.test_drain_provider(cx)));
     });
     vc.run_until_parked();
     vc.update(|_, cx| {
@@ -479,7 +479,7 @@ fn a_retried_first_send_keeps_the_generated_title(cx: &mut gpui::TestAppContext)
     vc.run_until_parked();
     let (view, open_id) = vc.update(|_, cx| {
         let view = baaz.read(cx).active.clone().expect("the lane opened");
-        let id = view.read(cx).session_id.clone();
+        let id = view.read(cx).rt(cx).session_id.clone();
         (view, id)
     });
     let accept = |vc: &mut gpui::VisualTestContext, turn: &str| {
@@ -544,7 +544,7 @@ fn a_parked_session_finishing_its_turn_settles_its_row(cx: &mut gpui::TestAppCon
     });
     vc.run_until_parked();
     let first = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).rt(cx).session_id.clone()
     });
     assert!(first.starts_with("s-park-"), "the quiet double mints the id");
     // One settled turn behind it, one in flight: the row reads Working.
@@ -581,7 +581,7 @@ fn a_parked_session_finishing_its_turn_settles_its_row(cx: &mut gpui::TestAppCon
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let second =
-            harness.active.clone().expect("the second lane opened").read(cx).session_id.clone();
+            harness.active.clone().expect("the second lane opened").read(cx).rt(cx).session_id.clone();
         assert_ne!(second, first, "the second open is another session");
         assert!(
             harness.registry.is_parked(&first),
@@ -589,8 +589,8 @@ fn a_parked_session_finishing_its_turn_settles_its_row(cx: &mut gpui::TestAppCon
         );
         assert_eq!(
             harness.registry.subscription_count(),
-            subs_before + 1,
-            "both live views stay subscribed"
+            subs_before + 2,
+            "both live sessions stay subscribed: each runtime and each view"
         );
     });
     // The parked turn finishes: no activation, just the lane event.
@@ -738,13 +738,13 @@ fn a_replaced_busy_browser_chat_stays_alive(cx: &mut gpui::TestAppContext) {
         baaz.update(cx, |harness, cx| {
             let busy = chat_view(harness, "s-chat-busy", window, cx);
             busy.update(cx, |view, cx| {
-                view.fold_provider_events(
+                view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(
                     vec![provider::ProviderEvent::TurnRunning {
                         session_id: "s-chat-busy".into(),
                         turn_id: "t-1".into(),
                     }],
                     cx,
-                );
+                ));
             });
             harness.set_browser_chat(busy.clone(), cx);
             let next = chat_view(harness, "s-chat-next", window, cx);
@@ -825,7 +825,7 @@ fn a_parked_finish_records_its_own_byline(cx: &mut gpui::TestAppContext) {
         vc.update(|_, cx| baaz.read(cx).active.clone().expect("a lane opened"))
     };
     let fill = |view: &Entity<SessionView>, ask: &str, reply: &str, cx: &mut gpui::App| {
-        let id = view.read(cx).session_id.clone();
+        let id = view.read(cx).rt(cx).session_id.clone();
         let mut session = Session::new(id, aui_protocol::Provider::Claude, "m", "/tmp");
         session.turns = vec![
             Turn::User { id: "u1".into(), text: ask.into(), attachments: Vec::new(), mentions: Vec::new(), timestamp: None },
@@ -836,12 +836,12 @@ fn a_parked_finish_records_its_own_byline(cx: &mut gpui::TestAppContext) {
                 timestamp: None,
             },
         ];
-        view.update(cx, |view, cx| view.load_fixture(session, cx));
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.load_fixture(session, cx)));
     };
     let first = open(vc);
     let second = open(vc);
     let (first_id, second_id) =
-        vc.update(|_, cx| (first.read(cx).session_id.clone(), second.read(cx).session_id.clone()));
+        vc.update(|_, cx| (first.read(cx).rt(cx).session_id.clone(), second.read(cx).rt(cx).session_id.clone()));
     assert_ne!(first_id, second_id);
     vc.update(|_, cx| {
         fill(&first, "Parked ask about tests", "Parked reply: all tests pass now.", cx);
@@ -955,7 +955,7 @@ fn a_parked_cancelled_approval_stops_reading_needs_approval(cx: &mut gpui::TestA
     });
     vc.run_until_parked();
     let first = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the lane opened").read(cx).rt(cx).session_id.clone()
     });
     // A pending MCP elicitation tap: the row reads Needs approval while
     // the session is open — the active behaviour, unchanged by this fix.
@@ -965,10 +965,10 @@ fn a_parked_cancelled_approval_stops_reading_needs_approval(cx: &mut gpui::TestA
             harness.merge_provider_rows(cx);
             let view = harness.active.clone().expect("the lane opened");
             view.update(cx, |view, cx| {
-                view.inject_external_approval(
+                view.runtime().clone().update(cx, |rt, cx| rt.inject_external_approval(
                     crate::providers::ExternalApproval {
                         id: "mcp-elicitation-0".into(),
-                        session_id: view.session_id.clone(),
+                        session_id: rt.session_id.clone(),
                         provider: crate::providers::ProviderId::Codex,
                         kind: crate::providers::ExternalApprovalKind::CodexMcpElicitation,
                         headline: "Allow the baaz MCP server to run tool \"terminal_run\"?".into(),
@@ -978,8 +978,8 @@ fn a_parked_cancelled_approval_stops_reading_needs_approval(cx: &mut gpui::TestA
                         decision_sent: None,
                     },
                     cx,
-                );
-                cx.emit(SessionEvent::ProviderApprovalsChanged { session_id: view.session_id.clone() });
+                ));
+                cx.emit(SessionEvent::ProviderApprovalsChanged { session_id: view.rt(cx).session_id.clone() });
             });
         });
     });
@@ -1015,12 +1015,12 @@ fn a_parked_cancelled_approval_stops_reading_needs_approval(cx: &mut gpui::TestA
                 .registry.parked(&first)
                 .expect("the parked view");
             view.update(cx, |view, cx| {
-                view.decide_external_approval(
+                view.runtime().clone().update(cx, |rt, cx| rt.decide_external_approval(
                     "mcp-elicitation-0".to_owned(),
                     crate::providers::ApprovalChoice::Cancel,
                     None,
                     cx,
-                );
+                ));
             });
         });
     });
@@ -1031,7 +1031,7 @@ fn a_parked_cancelled_approval_stops_reading_needs_approval(cx: &mut gpui::TestA
             .registry.parked(&first)
             .expect("the parked view");
         assert_eq!(
-            view.read(cx).row_pending(),
+            view.read(cx).rt(cx).row_pending(),
             (None, None),
             "the answered tap leaves nothing pending on the parked view"
         );
@@ -1112,7 +1112,7 @@ fn an_earlier_turns_finish_leaves_the_running_turn_busy(cx: &mut gpui::TestAppCo
         .expect("the lane channel is open");
     });
     vc.run_until_parked();
-    vc.update(|_, cx| assert!(view.read(cx).busy(), "the open turn reads busy"));
+    vc.update(|_, cx| assert!(view.read(cx).rt(cx).busy(), "the open turn reads busy"));
     vc.update(|_, _| {
         tx.unbounded_send(provider::ProviderEvent::Deltas {
             session_id: Some("s-b3b-1".into()),
@@ -1124,7 +1124,7 @@ fn an_earlier_turns_finish_leaves_the_running_turn_busy(cx: &mut gpui::TestAppCo
         .expect("the lane channel is open");
     });
     vc.run_until_parked();
-    vc.update(|_, cx| assert!(view.read(cx).busy(), "a-2 is still in flight after a-1's finish"));
+    vc.update(|_, cx| assert!(view.read(cx).rt(cx).busy(), "a-2 is still in flight after a-1's finish"));
     vc.update(|_, _| {
         tx.unbounded_send(provider::ProviderEvent::Deltas {
             session_id: Some("s-b3b-1".into()),
@@ -1136,7 +1136,7 @@ fn an_earlier_turns_finish_leaves_the_running_turn_busy(cx: &mut gpui::TestAppCo
         .expect("the lane channel is open");
     });
     vc.run_until_parked();
-    vc.update(|_, cx| assert!(!view.read(cx).busy(), "the running turn's own finish stands the lane down"));
+    vc.update(|_, cx| assert!(!view.read(cx).rt(cx).busy(), "the running turn's own finish stands the lane down"));
 }
 
 /// B3b: a finished turn's still-Pending card settles for row purposes.
@@ -1179,7 +1179,7 @@ fn a_finished_turns_pending_card_settles_for_row_purposes(cx: &mut gpui::TestApp
     vc.run_until_parked();
     vc.update(|_, cx| {
         assert_eq!(
-            view.read(cx).row_pending(),
+            view.read(cx).rt(cx).row_pending(),
             (Some("rm -rf /tmp/probe".to_owned()), None),
             "the waiting card stands on the row while its turn runs"
         );
@@ -1197,7 +1197,7 @@ fn a_finished_turns_pending_card_settles_for_row_purposes(cx: &mut gpui::TestApp
     vc.run_until_parked();
     vc.update(|_, cx| {
         assert_eq!(
-            view.read(cx).row_pending(),
+            view.read(cx).rt(cx).row_pending(),
             (None, None),
             "a turn that is over settles its cards for the row"
         );
@@ -1214,7 +1214,7 @@ fn a_removed_turn_refreshes_the_row(cx: &mut gpui::TestAppContext) {
     let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
     let seen_in = seen.clone();
     let _sub = vc.update(|_, cx| {
-        cx.subscribe(&view, move |_, event: &SessionEvent, _| {
+        cx.subscribe(&view.read(cx).runtime().clone(), move |_, event: &SessionEvent, _| {
             if matches!(event, SessionEvent::ProviderApprovalsChanged { .. }) {
                 seen_in.borrow_mut().push("approvals".to_owned());
             }
@@ -1275,7 +1275,7 @@ fn deleting_a_provider_session_forgets_it_entirely(cx: &mut gpui::TestAppContext
     });
     vc.run_until_parked();
     let open_id = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the lane opened").read(cx).rt(cx).session_id.clone()
     });
     // The deleted view stays alive in this local until teardown
     // (lanes bridge synchronously in tests, see `conn::gate_sync`);
@@ -1305,6 +1305,298 @@ fn deleting_a_provider_session_forgets_it_entirely(cx: &mut gpui::TestAppContext
             !crate::provider_sessions::read().contains_key(&open_id),
             "the file forgets it too"
         );
+    });
+    lane_restore(state);
+}
+
+
+/// Open a Codex lane over the quiet double and return its id, runtime and
+/// view: the session the no-view tests below drive by folding the lane's
+/// events into the runtime, as the drain task would.
+fn open_quiet_lane(
+    vc: &mut gpui::VisualTestContext,
+    baaz: &gpui::Entity<Harness>,
+) -> (String, gpui::Entity<crate::session::SessionRuntime>, gpui::Entity<SessionView>) {
+    vc.update(|window, cx| {
+        baaz.update(cx, |harness, cx| {
+            let workspace = harness.workspace(cx);
+            harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+        });
+    });
+    vc.run_until_parked();
+    vc.update(|_, cx| {
+        let view = baaz.read(cx).active.clone().expect("the lane opened");
+        let runtime = view.read(cx).runtime().clone();
+        (runtime.read(cx).session_id.clone(), runtime, view)
+    })
+}
+
+/// One user turn and its assistant turn, as a lane's deltas.
+fn exchange(user: &str, assistant: &str, text: &str) -> Vec<aui_protocol::Delta> {
+    vec![
+        aui_protocol::Delta::TurnStarted {
+            turn: aui_protocol::Turn::User {
+                id: user.into(),
+                text: format!("ask {user}"),
+                attachments: Vec::new(),
+                mentions: Vec::new(),
+                timestamp: None,
+            },
+        },
+        aui_protocol::Delta::TurnStarted {
+            turn: aui_protocol::Turn::Assistant {
+                id: assistant.into(),
+                blocks: Vec::new(),
+                meta: aui_protocol::TurnMeta::default(),
+                timestamp: None,
+            },
+        },
+        aui_protocol::Delta::BlockAdded {
+            turn_id: assistant.into(),
+            block: aui_protocol::Block::Text { text: text.into(), streaming: false },
+        },
+    ]
+}
+
+/// A turn's finish with a cost the ledger keeps.
+fn finished(turn_id: &str) -> aui_protocol::Delta {
+    aui_protocol::Delta::TurnFinished {
+        turn_id: turn_id.into(),
+        meta: aui_protocol::TurnMeta { model: "codex-mini".into(), cost_usd: 0.02, ..Default::default() },
+    }
+}
+
+/// docs/82 4.8 (audit B S-9, A F1): a session runs to completion with no
+/// view. A turn starts; the session parks; the cap drops its view (the
+/// runtime has work, so it stays); the turn finishes on the runtime alone.
+/// The row settles, the ledger gains its row and the store holds the turn,
+/// with nothing drawing it. Reopening builds a view over the same runtime,
+/// which shows the finished turn.
+#[gpui::test]
+fn a_session_runs_to_completion_with_no_view(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("no-view-turn");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, _| {
+            harness.provider_factory = parking_factory();
+            mark_muse_up(harness);
+        });
+    });
+    let (first, runtime, view) = open_quiet_lane(vc, &baaz);
+    let weak_view = view.downgrade();
+    drop(view);
+    // The turn starts: the record counts history, the row reads Working.
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, cx| {
+            harness.session_list.update(cx, |list, _| list.provider_sessions.get_mut(&first).expect("the record").turns = 1);
+            harness.merge_provider_rows(cx);
+            harness.session_list.update(cx, |list, _| {
+                let row = list.sessions.iter_mut().find(|entry| entry.id == first).expect("the row");
+                row.running = true;
+                row.turn_started = Some(crate::clock::now_local());
+            });
+        });
+        let mut deltas = exchange("u-1", "a-1", "Working on it");
+        deltas.truncate(2);
+        runtime.update(cx, |rt, cx| {
+            rt.fold_provider_events(
+                vec![
+                    provider::ProviderEvent::Deltas { session_id: Some(first.clone()), deltas },
+                    provider::ProviderEvent::TurnRunning { session_id: first.clone(), turn_id: "a-1".into() },
+                ],
+                cx,
+            )
+        });
+        assert!(runtime.read(cx).is_sending(), "setup: the turn runs");
+    });
+    // Another session opens: the first parks. Then the cap drops its view.
+    let _second = open_quiet_lane(vc, &baaz);
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, cx| {
+            assert!(harness.registry.is_parked(&first), "setup: the first session parked");
+            let gone = harness.registry.evict_idle(&std::collections::HashSet::new(), 0, cx);
+            assert!(gone.iter().all(|(id, _)| *id != first), "a running runtime is never evicted");
+            assert!(harness.registry.parked(&first).is_none(), "its view went");
+            assert!(harness.registry.is_parked(&first), "its runtime stays");
+            harness.resubscribe_live_views(cx);
+        });
+    });
+    vc.run_until_parked();
+    assert!(weak_view.upgrade().is_none(), "nothing draws the session any more");
+    // The turn finishes on the runtime alone.
+    vc.update(|_, cx| {
+        let mut deltas = exchange("u-1", "a-1", "Done with no view").split_off(2);
+        deltas.push(finished("a-1"));
+        runtime.update(cx, |rt, cx| {
+            rt.fold_provider_events(vec![provider::ProviderEvent::Deltas { session_id: Some(first.clone()), deltas }], cx)
+        });
+    });
+    vc.run_until_parked();
+    vc.update(|_, cx| {
+        let harness = baaz.read(cx);
+        let row = harness.session_list.read(cx).sessions.iter().find(|entry| entry.id == first).expect("the row");
+        assert!(!row.running, "the view-less finish stands the row down");
+        assert_eq!(row.row_status(crate::clock::now_local()).kind, aui::nav::RowStatusKind::Settled);
+        let rt = runtime.read(cx);
+        assert!(!rt.is_sending(), "the runtime settled");
+        assert!(rt.provider_turn_finished("a-1"), "the runtime saw the turn finish");
+        assert!(
+            rt.session().is_some_and(|session| session.turns.iter().any(|turn| turn.id() == "a-1")),
+            "the store holds the turn"
+        );
+        let connection = crate::usage::open_at(&crate::usage::db_path()).expect("ledger opens");
+        assert!(crate::usage::find_turn(&connection, &first, "a-1").is_some(), "the ledger got its row");
+    });
+    // Reopen: a new view over the same runtime shows the finished turn.
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet(first.clone(), window, cx)));
+    vc.run_until_parked();
+    vc.update(|_, cx| {
+        let view = baaz.read(cx).active.clone().expect("the session reopened");
+        assert_eq!(*view.read(cx).runtime(), runtime, "the reopen draws the runtime that ran the turn");
+        view.update(cx, |view, cx| view.refresh_render_cache(cx));
+        assert_eq!(view.read(cx).last_answer_text(), "Done with no view", "the new view shows the finished turn");
+    });
+    lane_restore(state);
+}
+
+/// docs/81 A F14: a reopen's replay of N finished turns is one
+/// `HistoryReplayed`, and the root's settle runs once for it — one seed
+/// read, one batch of ledger rows, one row rejoin — where it used to run
+/// N times. A live turn after it still settles on its own.
+#[gpui::test]
+fn reopening_n_turns_emits_one_history_replayed_and_settles_once(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("f14-replay");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, _| {
+            harness.provider_factory = parking_factory();
+            mark_muse_up(harness);
+        });
+    });
+    let (id, runtime, _view) = open_quiet_lane(vc, &baaz);
+    let replays: std::rc::Rc<std::cell::RefCell<Vec<usize>>> = Default::default();
+    let finishes = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let _sub = vc.update(|_, cx| {
+        let (replays, finishes) = (replays.clone(), finishes.clone());
+        cx.subscribe(&runtime, move |_, event: &SessionEvent, _| match event {
+            SessionEvent::HistoryReplayed { turns, .. } => replays.borrow_mut().push(turns.len()),
+            SessionEvent::ProviderTurnFinished { .. } => finishes.set(finishes.get() + 1),
+            _ => {}
+        })
+    });
+    let settles = || crate::app::sessions::events::SETTLES.with(std::cell::Cell::get);
+    let before = settles();
+    // The resume's replay: three finished exchanges in one batch, as
+    // Claude Code and Codex replay a stored transcript.
+    vc.update(|_, cx| {
+        let mut deltas = Vec::new();
+        for n in 1..=3 {
+            deltas.extend(exchange(&format!("u-{n}"), &format!("a-{n}"), &format!("Reply {n}")));
+            deltas.push(finished(&format!("a-{n}")));
+        }
+        runtime.update(cx, |rt, cx| {
+            rt.fold_provider_events(vec![provider::ProviderEvent::Deltas { session_id: Some(id.clone()), deltas }], cx)
+        });
+    });
+    vc.run_until_parked();
+    assert_eq!(*replays.borrow(), vec![3], "one HistoryReplayed carries the three turns");
+    assert_eq!(finishes.get(), 0, "no per-turn settle for replayed history");
+    assert_eq!(settles() - before, 1, "the root's settle ran once");
+    vc.update(|_, cx| {
+        let connection = crate::usage::open_at(&crate::usage::db_path()).expect("ledger opens");
+        assert_eq!(crate::usage::count_for_session(&connection, &id), 3, "every replayed turn has its ledger row");
+        let record = baaz.read(cx).session_list.read(cx).provider_sessions.get(&id).map(|record| record.turns);
+        assert_eq!(record, Some(3), "the record counts the three exchanges");
+    });
+    // A live turn afterwards settles on its own, as before.
+    vc.update(|_, cx| {
+        let mut deltas = exchange("u-4", "a-4", "Live reply");
+        deltas.truncate(2);
+        runtime.update(cx, |rt, cx| {
+            rt.fold_provider_events(
+                vec![
+                    provider::ProviderEvent::Deltas { session_id: Some(id.clone()), deltas },
+                    provider::ProviderEvent::TurnRunning { session_id: id.clone(), turn_id: "a-4".into() },
+                    provider::ProviderEvent::Deltas { session_id: Some(id.clone()), deltas: vec![finished("a-4")] },
+                ],
+                cx,
+            )
+        });
+    });
+    vc.run_until_parked();
+    assert_eq!(finishes.get(), 1, "the live turn is a ProviderTurnFinished");
+    assert_eq!(replays.borrow().len(), 1, "and no second replay");
+    assert_eq!(settles() - before, 2, "one more settle, for the live turn");
+    lane_restore(state);
+}
+
+/// docs/82 4.8 (D Q5 #2): a streamed entry update redraws its view and
+/// never the root. The runtime folds the chunk, says which entry changed
+/// (`EntryUpdated`), and the view takes it as one list operation; the root
+/// hears nothing — no `SessionEvent`, no notify.
+#[gpui::test]
+fn a_streamed_entry_redraws_its_view_and_never_the_root(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("stream-redraw");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, _| {
+            harness.provider_factory = parking_factory();
+            mark_muse_up(harness);
+        });
+    });
+    let (id, runtime, view) = open_quiet_lane(vc, &baaz);
+    // A reply has started: the entry the chunk will grow.
+    vc.update(|_, cx| {
+        let deltas = exchange("u-1", "a-1", "The first words");
+        runtime.update(cx, |rt, cx| {
+            rt.fold_provider_events(vec![provider::ProviderEvent::Deltas { session_id: Some(id.clone()), deltas }], cx)
+        });
+    });
+    vc.run_until_parked();
+    let root_notifies = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let view_notifies = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let entry_events: std::rc::Rc<std::cell::RefCell<Vec<crate::session::RuntimeEvent>>> = Default::default();
+    let _watch = vc.update(|_, cx| {
+        let (root, drawn, events) = (root_notifies.clone(), view_notifies.clone(), entry_events.clone());
+        (
+            cx.observe(&baaz, move |_, _| root.set(root.get() + 1)),
+            cx.observe(&view, move |_, _| drawn.set(drawn.get() + 1)),
+            cx.subscribe(&runtime, move |_, event: &crate::session::RuntimeEvent, _| events.borrow_mut().push(event.clone())),
+        )
+    });
+    // The streamed chunk.
+    vc.update(|_, cx| {
+        runtime.update(cx, |rt, cx| {
+            rt.fold_provider_events(
+                vec![provider::ProviderEvent::Deltas {
+                    session_id: Some(id.clone()),
+                    deltas: vec![aui_protocol::Delta::TextDelta {
+                        turn_id: "a-1".into(),
+                        block_index: 0,
+                        text: " and then some".into(),
+                    }],
+                }],
+                cx,
+            )
+        });
+    });
+    vc.run_until_parked();
+    assert_eq!(
+        *entry_events.borrow(),
+        vec![crate::session::RuntimeEvent::EntryUpdated(1)],
+        "the runtime names the one entry that changed"
+    );
+    assert!(view_notifies.get() > 0, "the view redraws");
+    assert_eq!(root_notifies.get(), 0, "the root is never notified");
+    vc.update(|_, cx| {
+        view.update(cx, |view, cx| view.refresh_render_cache(cx));
+        assert_eq!(view.read(cx).last_answer_text(), "The first words and then some", "the view draws the chunk");
     });
     lane_restore(state);
 }

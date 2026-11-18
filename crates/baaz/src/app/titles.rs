@@ -207,7 +207,7 @@ impl Harness {
     /// see [`crate::utility`]), or none when no live view names one.
     pub(crate) fn utility_model(&self, session_id: &str, cx: &Context<Self>) -> Option<String> {
         self.find_view(session_id, cx)
-            .map(|view| view.read(cx).model_id())
+            .map(|view| view.read(cx).rt(cx).model_id())
             .filter(|model| !model.is_empty())
     }
 
@@ -291,7 +291,7 @@ impl Harness {
     /// `Naming this session…` row without spending a turn. No open
     /// session fails the step.
     pub(crate) fn step_title_pending(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let id = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).ok_or("no open session")?;
+        let id = self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone()).ok_or("no open session")?;
         self.session_list.update(cx, |list, _| list.titles_pending.insert(id.clone()));
         self.session_list.update(cx, |list, _| {
             if let Some(entry) = list.sessions.iter_mut().find(|e| e.id == id) {
@@ -309,7 +309,7 @@ impl Harness {
     /// spending a turn. A following `title-land:<text>` then lands like a
     /// late answer would. No open session fails the step.
     pub(crate) fn step_title_timeout(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let id = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).ok_or("no open session")?;
+        let id = self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone()).ok_or("no open session")?;
         self.title_timeout(&id, cx);
         Ok(())
     }
@@ -322,7 +322,7 @@ impl Harness {
     /// place — exactly what a stood-down job's harvest does on the wire.
     /// No open session, or a text that cleans to no title, fails the step.
     pub(crate) fn step_title_land(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let id = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).ok_or("no open session")?;
+        let id = self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone()).ok_or("no open session")?;
         let title = titles::clean_title(rest).ok_or_else(|| format!("`{rest}` is not a usable title"))?;
         self.set_override(&id, |meta| meta.generated_title = Some(title), cx);
         self.session_list.update(cx, |list, _| list.titles_pending.remove(&id));
@@ -470,7 +470,7 @@ impl Harness {
         let card = run.card();
         let card_id = run.card_id.clone();
         if let Some(view) = self.find_view(source, cx) {
-            view.update(cx, |view, cx| view.replace_handoff_card(&card_id, card, cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.replace_handoff_card(&card_id, card, cx)));
         }
     }
 
@@ -513,7 +513,7 @@ impl Harness {
     /// `view` is the session whose turn completed — the emitter, which may
     /// be parked; the open session's byline is never re-judged on another
     /// session's trigger (docs/81 A F3).
-    pub(super) fn maybe_rewrite_byline(&mut self, view: &Entity<SessionView>, cx: &mut Context<Self>) {
+    pub(super) fn maybe_rewrite_byline(&mut self, runtime: &Entity<SessionRuntime>, cx: &mut Context<Self>) {
         // The muse lane's settled-turn hook doubles as the pack check: a
         // pack turn that ended failed fails its handoff here, before any
         // byline work and independent of the byline switch below. Runs
@@ -522,7 +522,7 @@ impl Harness {
         if !crate::layout::Layout::get(cx).auto_summary {
             return;
         }
-        let session_id = view.read(cx).session_id.clone();
+        let session_id = runtime.read(cx).session_id.clone();
         // The session's own provider rewrites its byline (docs/50 P2).
         if !self.utility_available(self.session_lane_provider(&session_id, cx)) {
             return;
@@ -530,9 +530,9 @@ impl Harness {
         if self.is_side_session(&session_id, cx) {
             return;
         }
-        let running = view.read(cx).is_sending();
-        let ask = view.read(cx).last_user_text();
-        let result = view.read(cx).last_summary_text();
+        let running = runtime.read(cx).is_sending();
+        let ask = runtime.read(cx).last_user_text();
+        let result = runtime.read(cx).last_summary_text();
         // The pack turn and its acknowledgement are the handoff speaking,
         // never words to rewrite a byline from — but only a handoff
         // destination ever has a pack turn (Y2a, Y2a3).

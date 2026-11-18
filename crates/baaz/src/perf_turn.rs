@@ -229,10 +229,10 @@ fn time_render_turns(
     let view = stress_view(window, cx);
     let events: Vec<_> = capture.iter().flat_map(|body| folder.fold_line(body)).collect();
     view.update(cx, |view, cx| {
-        view.fold_provider_events(events, cx);
+        view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(events, cx));
         for n in 0..extra {
             for body in renamed(last_turn, "t-stress-300", n, 0) {
-                view.fold_provider_events(folder.fold_line(&body), cx);
+                view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(folder.fold_line(&body), cx));
             }
         }
         view.refresh_render_cache(cx);
@@ -250,7 +250,7 @@ fn time_render_turns(
         let at = Instant::now();
         view.update(cx, |view, cx| {
             for events in turn {
-                view.fold_provider_events(events, cx);
+                view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(events, cx));
                 view.refresh_render_cache(cx);
             }
         });
@@ -305,7 +305,7 @@ fn time_long_answer(window: &mut gpui::Window, cx: &mut gpui::App) -> (f64, f64)
     ];
     view.update(cx, |view, cx| {
         for body in &opening {
-            view.fold_provider_events(folder.fold_line(body), cx);
+            view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(folder.fold_line(body), cx));
         }
         view.refresh_render_cache(cx);
     });
@@ -326,7 +326,7 @@ fn time_long_answer(window: &mut gpui::Window, cx: &mut gpui::App) -> (f64, f64)
         let events = folder.fold_line(&body);
         let at = Instant::now();
         let drawn = view.update(cx, |view, cx| {
-            view.fold_provider_events(events, cx);
+            view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(events, cx));
             view.refresh_render_cache(cx);
             view.last_answer_text()
         });

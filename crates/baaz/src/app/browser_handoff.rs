@@ -253,8 +253,8 @@ impl Harness {
         let Some(chat) = self.registry.browser_chat().cloned() else { return };
         let (chat_id, answer) = {
             let view = chat.read(cx);
-            let busy = view.busy() || view.is_starting();
-            (view.session_id.clone(), view.transcript_session().and_then(|s| crate::app::agent_window::settled_answer(s, busy)))
+            let busy = view.rt(cx).busy() || view.rt(cx).is_starting();
+            (view.rt(cx).session_id.clone(), view.rt(cx).transcript_session().and_then(|s| crate::app::agent_window::settled_answer(s, busy)))
         };
         let title = self.browser_chat_title_for(&chat_id, cx);
         let owner = Owner::Session(chat_id.clone());
@@ -331,7 +331,7 @@ impl Harness {
         }
         self.find_view(session, cx)
             .and_then(|view| {
-                view.read(cx).transcript_session().and_then(|s| {
+                view.read(cx).rt(cx).transcript_session().and_then(|s| {
                     s.turns.iter().find_map(|turn| match turn {
                         aui_protocol::Turn::User { text, .. } => {
                             Some(crate::app::agent_window::strip_page_prompt(text).lines().next().unwrap_or("").to_owned())

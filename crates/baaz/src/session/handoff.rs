@@ -1,14 +1,17 @@
 //! The handoff card's view half: refusal checks, card writes, the pack
 //! submit and the read-only retirement.
 //!
-//! Part of [`SessionView`](super::SessionView); the state machine itself
-//! lives in [`crate::handoff`], owned by the application. This file only
-//! touches this view's own state, which is why it lives here.
+//! Part of [`SessionRuntime`](super::SessionRuntime) (the handoff state is
+//! the session's: a view over it can be dropped and built again) and
+//! [`SessionView`](super::SessionView) (the snapshot it draws); the state
+//! machine itself lives in [`crate::handoff`], owned by the application.
+//! This file only touches the session's own state, which is why it lives
+//! here.
 
 use super::*;
 use crate::handoff::{self, HandoffRefusal};
 
-impl SessionView {
+impl SessionRuntime {
     /// The workspace root this session runs in: what the pack carries and
     /// what the destination opens in.
     pub(crate) fn workspace_path(&self) -> &str {
@@ -67,7 +70,7 @@ impl SessionView {
     pub(crate) fn append_handoff_card(&mut self, card_id: &str, card: Block, cx: &mut Context<Self>) {
         self.handoff_card = Some(card.clone());
         self.append_client_block(card_id, card);
-        self.follow = true;
+        cx.emit(RuntimeEvent::EntriesAppended);
         cx.notify();
     }
 
@@ -78,8 +81,8 @@ impl SessionView {
             return;
         }
         self.handoff_card = Some(card.clone());
-        self.replace_client_block(card_id, card);
-        self.follow = true;
+        let landed = self.replace_client_block(card_id, card);
+        self.announce_landed(&landed, cx);
         cx.notify();
     }
 
@@ -99,7 +102,7 @@ impl SessionView {
     pub(crate) fn note_handoff_pack(&mut self, pack: String, display: String, cx: &mut Context<Self>) {
         self.handoff_pack_full = Some(pack);
         self.handoff_pack_display = Some(display);
-        self.refresh_render_cache(cx);
+        cx.emit(RuntimeEvent::CardsChanged);
         cx.notify();
     }
 
@@ -210,11 +213,13 @@ impl SessionView {
         if pack_display.is_some() {
             self.handoff_pack_display = pack_display;
         }
-        self.follow = true;
-        self.refresh_render_cache(cx);
+        cx.emit(RuntimeEvent::EntriesAppended);
+        cx.emit(RuntimeEvent::CardsChanged);
         cx.notify();
     }
+}
 
+impl SessionView {
     /// The source transcript as this view shows it: prefix, divider, own
     /// turns with the pack bubble and its acknowledgement hidden — and never
     /// the handoff card, which is still Prepared here and would freeze that
@@ -222,12 +227,14 @@ impl SessionView {
     /// handoff). What activation snapshots, so a chain's next hop already
     /// carries this hop's divider. The live source view keeps its card; only
     /// these returned turns leave it out.
-    pub(crate) fn handoff_snapshot_turns(&mut self, cx: &gpui::App) -> Vec<Turn> {
+    pub(crate) fn handoff_snapshot_turns(&mut self, cx: &mut gpui::App) -> Vec<Turn> {
         self.refresh_render_cache(cx);
         let turns: Vec<Turn> = self.cached_turns.iter().map(|turn| (**turn).clone()).collect();
         crate::handoff_snapshot::without_handoff_cards(turns)
     }
+}
 
+impl SessionRuntime {
     /// A pack-derived bubble text from before snapshots existed: the display
     /// map's value whose full text starts with the pack header. What hides
     /// the pack bubble for a pair made before this change, where no snapshot

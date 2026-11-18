@@ -152,7 +152,7 @@ impl Harness {
             // flight already left, and a replayed capture is not ours.
             let registered = self.open_state.names_draft(&active);
             let sending =
-                self.active.as_ref().is_some_and(|view| view.read(cx).session_id == active && view.read(cx).is_sending());
+                self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).session_id == active && view.read(cx).rt(cx).is_sending());
             let project_of = self
                 .session_list.read(cx).sessions
                 .iter()
@@ -163,7 +163,7 @@ impl Harness {
                 let moving = self
                     .active
                     .clone()
-                    .filter(|view| view.read(cx).session_id == active)
+                    .filter(|view| view.read(cx).rt(cx).session_id == active)
                     .map(|view| view.update(cx, |view, vc| view.take_draft(window, vc)));
                 self.open_state.forget_draft(&active);
                 // A rowless draft has no row to hide; a rowed one keeps the

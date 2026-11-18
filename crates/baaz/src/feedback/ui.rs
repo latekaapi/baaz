@@ -1487,7 +1487,7 @@ impl crate::app::Harness {
 
     /// The open session's raw id, when a session is open.
     pub(crate) fn feedback_session_id(&self, cx: &gpui::App) -> Option<String> {
-        self.active.as_ref().map(|view| view.read(cx).session_id.clone())
+        self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone())
     }
 
     /// The human right-pane name (`Browser`, `Files`, …), only while open.

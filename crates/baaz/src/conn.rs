@@ -49,8 +49,6 @@ pub struct Connected {
     /// mismatch is additive evolution, never a failure: log it and carry
     /// on. `None` when the fingerprints agreed.
     pub warning: Option<String>,
-    /// Whether `initialize` granted `userShell`.
-    pub user_shell: bool,
     /// Whether `initialize` granted `sessionMcp` (muse ≥ 1.3): the
     /// terminal relay's route. `false` means no route — sessions open
     /// exactly as they always did.
@@ -93,7 +91,6 @@ pub fn connect(program: &str) -> Result<Connected, ProviderError> {
         agent_name: established.handshake.agent_name,
         agent_version: established.handshake.agent_version,
         warning: established.warning,
-        user_shell: established.user_shell,
         session_mcp: established.session_mcp,
     })
 }

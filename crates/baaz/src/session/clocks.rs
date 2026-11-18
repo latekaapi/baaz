@@ -1,12 +1,12 @@
 //! The clocks a session keeps: the question countdown and the retry
 //! backoff, both ticked here because MSP sends durations and never deadlines.
 //!
-//! Part of [`SessionView`]; see [`crate::session`] for what
-//! the entity owns and why these are its own files.
+//! Part of [`SessionRuntime`]; see [`crate::session`] for what the
+//! entity owns and why these are its own files.
 
 use super::*;
 
-impl SessionView {
+impl SessionRuntime {
     // ---------------------------------------------------------------- clocks
 
     /// Notice a countdown that has started, and start (or stop) the 1 s clock.

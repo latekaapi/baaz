@@ -34,7 +34,7 @@ impl Harness {
             // click's destination never opened, so nothing may keep naming
             // it.
             if let Some(view) = self.active.clone() {
-                let id = view.read(cx).session_id.clone();
+                let id = view.read(cx).rt(cx).session_id.clone();
                 self.open_state.pending_id = Some(id.clone());
                 self.restore_right_for_session(&id, cx);
                 // Q4c: the click consumed the composer's focus arm — re-arm
@@ -66,13 +66,13 @@ impl Harness {
     /// composer unlocked and its provider back as the new-session pick.
     fn restore_replaced(&mut self, old_id: Option<String>, cx: &mut Context<Self>) {
         let Some(old_id) = old_id else { return };
-        if let Some(old) = self.active.clone().filter(|v| v.read(cx).session_id == old_id) {
-            let provider = old.read(cx).provider_kind();
+        if let Some(old) = self.active.clone().filter(|v| v.read(cx).rt(cx).session_id == old_id) {
+            let provider = old.read(cx).rt(cx).provider_kind();
             self.new_provider = provider.as_str().to_owned();
             crate::providers::write_last_provider(provider);
             old.update(cx, |v, cx| {
-                v.set_input_locked(false, cx);
-                v.set_switching_to(None, cx);
+                v.runtime().clone().update(cx, |rt, cx| rt.set_input_locked(false, cx));
+                v.runtime().clone().update(cx, |rt, cx| rt.set_switching_to(None, cx));
             });
         }
         cx.notify();
@@ -95,12 +95,12 @@ impl Harness {
             self.open_state.finish_replace();
             return false;
         }
-        let old_view = self.active.take().filter(|v| v.read(cx).session_id == old_id);
+        let old_view = self.active.take().filter(|v| v.read(cx).rt(cx).session_id == old_id);
         let Some(old_view) = old_view else {
             self.open_state.finish_replace();
             return false;
         };
-        let new_id = new_view.read(cx).session_id.clone();
+        let new_id = new_view.read(cx).rt(cx).session_id.clone();
         // Z2: a replacement swaps session ids, so the pane state moves with
         // it — the new id inherits what the old one left, unless it already
         // holds its own. The restore at the end of `activate` applies it.
@@ -127,16 +127,17 @@ impl Harness {
                 }
             });
         }
-        old_view.update(cx, |v, _| v.shutdown_lane());
-        if new_id != old_id && old_view.read(cx).is_opening_lane() {
+        old_view.read(cx).runtime().clone().update(cx, |rt, _| rt.shutdown_lane());
+        if new_id != old_id && old_view.read(cx).rt(cx).is_opening_lane() {
             self.forget_provisional(old_id, cx);
         }
-        if let Some(cached) = self.cache_take(old_id) {
-            // A stale parked copy under the same id never survives the swap
-            // — unless it IS the replacement (shared scripted id in tests),
-            // which is never parked, so this only drops the old duplicate.
-            if cached != *new_view && cached != old_view {
-                cached.update(cx, |v, _| v.shutdown_lane());
+        // A stale parked copy under the same id never survives the swap —
+        // unless it IS the replacement (shared scripted id in tests), which
+        // is never parked, so this only drops the old duplicate.
+        let keep = [new_view.read(cx).runtime().clone(), old_view.read(cx).runtime().clone()];
+        if let Some((cached, _)) = self.registry.take(old_id) {
+            if !keep.contains(&cached) {
+                cached.update(cx, |rt, _| rt.shutdown_lane());
             }
         }
         // An unsent provider draft leaves no transcript anywhere, so its

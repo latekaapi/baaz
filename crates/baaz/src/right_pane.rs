@@ -282,9 +282,9 @@ impl RightPane {
         self.facts
             .session
             .as_ref()
-            .map(|view| match view.read(cx).fresh_session_edits() {
+            .map(|view| match view.read(cx).fresh_session_edits(cx) {
                 Some(fresh) => fresh,
-                None => view.update(cx, |view, _| view.refresh_session_edits()),
+                None => view.update(cx, |view, cx| view.refresh_session_edits(cx)),
             })
             .unwrap_or_default()
     }
@@ -671,7 +671,7 @@ impl Harness {
     /// is the existing one — the render builds it where the window is.
     pub(crate) fn right_facts(&self, cx: &App) -> RightFacts {
         let session = self.active.clone();
-        let provider = session.as_ref().map(|view| self.session_lane_provider(&view.read(cx).session_id, cx));
+        let provider = session.as_ref().map(|view| self.session_lane_provider(&view.read(cx).rt(cx).session_id, cx));
         RightFacts {
             project: self.right_project(cx),
             session,

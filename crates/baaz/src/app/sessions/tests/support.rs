@@ -442,7 +442,7 @@ pub(super) fn y2b2_open(
     });
     vc.run_until_parked();
     vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the lane opened").read(cx).rt(cx).session_id.clone()
     })
 }
 
@@ -792,7 +792,7 @@ impl provider::ProviderAdapter for Y2b2Adapter {
     }
     fn shutdown(&mut self) {
         // Recorded once per child: hanging up is idempotent by
-        // contract ([`SessionView::shutdown_lane`], and a dropped view
+        // contract ([`SessionRuntime::shutdown_lane`], and a dropped view
         // hangs up again), so a re-hangup on drop must not read as a
         // second child shut down.
         if let Some(id) = self.id.lock().expect("y2b2").clone() {

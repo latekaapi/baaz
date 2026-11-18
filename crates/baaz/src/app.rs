@@ -87,7 +87,7 @@ use crate::region::Region as _;
 use crate::resize::ResizeDrag;
 use crate::right;
 use crate::shot::CaptureToken;
-use crate::session::{self, Draft, SessionEvent, SessionHost, SessionView};
+use crate::session::{self, Draft, SessionEvent, SessionHost, SessionRuntime, SessionView};
 use crate::tier::Tier;
 use crate::sessions::SessionMeta;
 use crate::projects::{self, Project, Projects};
@@ -775,10 +775,6 @@ pub struct Harness {
     /// window opens and to `capture_and_quit`, so a second window would wait
     /// on its own.
     pub(crate) capture: CaptureToken,
-    /// Whether `initialize` granted `userShell`. Requested in `conn::connect`;
-    /// a server that did not grant it disables the `!` path with a banner
-    /// rather than letting the command fail on the wire.
-    user_shell: bool,
     /// Whether `initialize` granted `sessionMcp` (muse ≥ 1.3). Requested
     /// in `conn::connect`; a server that did not grant it opens sessions
     /// with no terminal route — the bridge rides `session/start` and
@@ -1018,7 +1014,6 @@ impl Harness {
             lights_hidden: false,
             transcript_scroll_sweep: None,
             capture,
-            user_shell: true,
             session_mcp: false,
             focus_root: cx.focus_handle(),
             hosting_overlay: false,
@@ -1449,7 +1444,7 @@ impl Harness {
     /// What the window's own title bar says: the open session against its
     /// project, the project alone, or the app name with no project at all.
     fn window_title(&self, cx: &gpui::App) -> String {
-        let session = self.active.as_ref().map(|a| a.read(cx).session_id.clone());
+        let session = self.active.as_ref().map(|a| a.read(cx).rt(cx).session_id.clone());
         // One identity per chain: the raw view id resolves to its head,
         // and the collapsed view row — the same label the sidebar's one
         // row wears — names the window (Y2a, Y2a3).
@@ -1556,7 +1551,6 @@ impl Harness {
                     // failure: say so on stderr and carry on.
                     crate::baaz_log!("{warning}");
                 }
-                this.user_shell = connected.user_shell;
                 this.session_mcp = connected.session_mcp;
                 // Muse sessions are lanes on this hub; the terminal relay
                 // rides its `sessionMcp` grant.
@@ -1618,7 +1612,7 @@ impl Harness {
         self.wire = Wire::Down(reason);
         // A Muse draft waiting on the start stops saying "Starting Muse…".
         if let Some(view) = self.active.clone() {
-            view.update(cx, |view, cx| view.set_muse_starting(false, cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_muse_starting(false, cx)));
         }
         if !self.session_list.read(cx).sessions_loaded {
             self.session_list.update(cx, |list, _| list.sessions_loaded = true);
@@ -1723,7 +1717,8 @@ impl Harness {
             _ => return,
         }
         if let Some(view) = self.active.clone() {
-            self.title_from_transcript(&view, cx);
+            let runtime = view.read(cx).runtime().clone();
+            self.title_from_transcript(&runtime, cx);
         }
         cx.notify();
     }
@@ -1755,7 +1750,6 @@ impl Harness {
                     crate::baaz_log!("{warning}");
                 }
                 this.session_mcp = hub.session_mcp_granted();
-                this.user_shell = hub.user_shell_granted();
                 this.muse_slot.set_ready(hub.clone());
                 this.wire = Wire::Ready;
                 // Every followed session the respawned child re-attached has
@@ -1768,7 +1762,7 @@ impl Harness {
                         continue;
                     }
                     if let Some(view) = this.find_view(&session_id, cx) {
-                        view.update(cx, |view, cx| view.note_resumed(cx));
+                        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.note_resumed(cx)));
                     }
                 }
                 for (session_id, error) in refused {
@@ -1777,7 +1771,7 @@ impl Harness {
                         provider::RefusalHint::HeldElsewhere => {
                             crate::baaz_log!("reconnect resume of {session_id} rejected ({error}); lease notice on the view");
                             if let Some(view) = view {
-                                view.update(cx, |view, cx| view.set_lease_lost(LEASE_NOTICE, cx));
+                                view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_lease_lost(LEASE_NOTICE, cx)));
                             }
                         }
                         provider::RefusalHint::StaleHistory => {
@@ -1787,7 +1781,7 @@ impl Harness {
                             crate::baaz_log!("reconnect resume of {session_id} failed: {error}");
                             if let Some(view) = view {
                                 let text = error.to_string();
-                                view.update(cx, |view, cx| view.show_banner(&text, cx));
+                                view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.show_banner(&text, cx)));
                             }
                         }
                     }
@@ -2188,7 +2182,7 @@ impl Harness {
             return;
         }
         let Some(session_id) =
-            self.active.clone().map(|view| view.read(cx).session_id.clone())
+            self.active.clone().map(|view| view.read(cx).rt(cx).session_id.clone())
         else {
             return;
         };
@@ -2313,7 +2307,7 @@ impl Harness {
     /// records for the origins of the project's tabs.
     pub(crate) fn dock_facts(&self, cx: &App) -> terminal::DockFacts {
         let project = self.current_project(cx).map(|project| project.root.clone());
-        let origin = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
+        let origin = self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone());
         let mut records = HashMap::new();
         if let Some(root) = &project {
             for tab in self.terminal_dock.read(cx).host().read(cx).tabs_for(root) {
@@ -3164,7 +3158,7 @@ impl Harness {
             let renaming_here = self
                 .active
                 .as_ref()
-                .map(|view| view.read(cx).session_id.clone())
+                .map(|view| view.read(cx).rt(cx).session_id.clone())
                 .is_some_and(|id| self.renaming(cx).as_deref() == Some(id.as_str()));
             if renaming_here {
                 // The field's own root is `w_full`, so the flex item clips:
@@ -3186,7 +3180,7 @@ impl Harness {
         // The click's target, from the list entry — never the view, so the
         // header answers on the click's own frame, before any page arrives.
         let target =
-            self.open_state.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).session_id.clone()));
+            self.open_state.pending_id.clone().or_else(|| self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone()));
         // One identity per chain: header, window and selection all resolve
         // the raw id to its head, and the collapsed view row names it —
         // the same label the sidebar's one row wears (Y2a, Y2a3).
@@ -3264,7 +3258,7 @@ impl Harness {
     fn render_wire_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Muse's connection is Muse's business: a Claude Code or Codex
         // session (or no session) never wears its banner (docs/50 P1).
-        let muse_session = self.active.as_ref().is_some_and(|view| view.read(cx).provider_kind().shares_one_child());
+        let muse_session = self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).provider_kind().shares_one_child());
         if !muse_session {
             return None;
         }
@@ -3314,12 +3308,12 @@ impl Harness {
             match provider_muse::replay::Capture::load(&path) {
                 Ok(capture) if bench => {
                     let id = capture.session_id().unwrap_or_else(|| "bench".to_owned());
-                    view.begin_bench_replay(id, capture.sent, cx);
+                    view.runtime().clone().update(cx, |rt, cx| rt.begin_bench_replay(id, capture.sent, cx));
                 }
-                Ok(capture) => view.load_capture(capture, cx),
-                Err(error) => view.show_banner(&format!("{}: {error}", path.display()), cx),
+                Ok(capture) => view.runtime().clone().update(cx, |rt, cx| rt.load_capture(capture, cx)),
+                Err(error) => view.runtime().clone().update(cx, |rt, cx| rt.show_banner(&format!("{}: {error}", path.display()), cx)),
             }
-            view.load_history(cx);
+            view.runtime().clone().update(cx, |rt, cx| rt.load_history(cx));
             view
         });
         crate::log::trace_mark("replay-folded");
@@ -3330,7 +3324,7 @@ impl Harness {
         // moment it is not the open one — so switching sessions in a replay
         // window would shrink the list under the scroll (the click moved
         // `-1262 → -1198` on the clamp, not on the reveal).
-        let mut replayed = SessionEntry::replayed(&view.read(cx).session_id, &path, &self.session_list.read(cx).projects);
+        let mut replayed = SessionEntry::replayed(&view.read(cx).rt(cx).session_id, &path, &self.session_list.read(cx).projects);
         // A title Baaz already stored for this capture (a rename, or the
         // transcript-derived title an earlier open wrote) names the row the
         // way it names a live one. Without this only the first open in a
@@ -3341,14 +3335,14 @@ impl Harness {
             replayed.label = label.to_owned();
         }
         replayed.named = self.session_list.read(cx).overrides.get(&replayed.id).is_some_and(|meta| meta.name.is_some());
-        replayed.turns = view.read(cx).session().map(|s| s.turns.len() as u64).unwrap_or(0);
+        replayed.turns = view.read(cx).rt(cx).session().map(|s| s.turns.len() as u64).unwrap_or(0);
         // The replayed row stands for the folded capture, and no wire event
         // will ever sync it the way `session/list` does live: read the open
         // session's own words off the view here — the same overlay
         // `render_row_detail` applies every frame.
         {
             let view = view.read(cx);
-            let (approval, question) = view.row_pending();
+            let (approval, question) = view.rt(cx).row_pending();
             if approval.is_some() {
                 replayed.approval_command = approval;
             }
@@ -3356,10 +3350,10 @@ impl Harness {
                 replayed.pending_question = question;
             }
             if replayed.last_ask.as_deref().map(str::trim).is_none_or(|s| s.is_empty()) {
-                replayed.last_ask = view.last_user_text();
+                replayed.last_ask = view.rt(cx).last_user_text();
             }
             if replayed.description.trim().is_empty() {
-                if let Some(summary) = view.last_summary_text() {
+                if let Some(summary) = view.rt(cx).last_summary_text() {
                     replayed.description = summary;
                 }
             }
@@ -3378,7 +3372,7 @@ impl Harness {
         // so `--steps search:<query>` screenshots show session hits.
         self.load_index(cx);
         let tier_banner = self.tier_banner();
-        view.update(cx, |view, cx| view.set_tier_banner(tier_banner, cx));
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_tier_banner(tier_banner, cx)));
         self.overlays.update(cx, |o, _| { o.stack.close(crate::overlay_stack::LayerKind::PageMenu); });
         self.active = Some(view);
         // The replayed session is current, so its agent routes may drive
@@ -3388,7 +3382,7 @@ impl Harness {
             .active
             .as_ref()
             .map(|view| view.read(cx))
-            .map(|view| (view.session_id.clone(), view.provider_kind()));
+            .map(|view| (view.rt(cx).session_id.clone(), view.rt(cx).provider_kind()));
         if let Some((session_id, provider)) = replayed {
             let root = self
                 .current_project(cx)
@@ -3400,7 +3394,8 @@ impl Harness {
         // `title_from_transcript` for it: without this the replayed row
         // keeps the file's name even when the transcript knows better.
         if let Some(view) = self.active.clone() {
-            self.title_from_transcript(&view, cx);
+            let runtime = view.read(cx).runtime().clone();
+            self.title_from_transcript(&runtime, cx);
         }
         // `--session <id>`: the live boot opens it once the list arrives
         // (`load_sessions`), and a replay window has no list reply — so the
@@ -3431,7 +3426,7 @@ impl Harness {
             return None;
         }
         let dest = self.open_state.pending_id.clone()?;
-        if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == dest) {
+        if self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).session_id == dest) {
             return None;
         }
         Some(dest)
@@ -4183,8 +4178,8 @@ impl Harness {
             }))
             .on_action(cx.listener(|this, _: &TogglePlan, _, cx| {
                 this.with_session(cx, |view, cx| {
-                    let on = !view.plan_mode();
-                    view.set_plan(on, cx);
+                    let on = !view.rt(cx).plan_mode();
+                    view.runtime().clone().update(cx, |rt, cx| rt.set_plan(on, cx));
                 });
             }))
             .on_action(cx.listener(|this, _: &PasteMaybeImage, window, cx| this.paste(window, cx)))
@@ -4415,10 +4410,12 @@ impl Harness {
         cx.notify();
     }
 
-    /// Hang up every provider lane's child this window holds — the open view,
-    /// every parked one and the browser chat (docs/81 A F6). What app quit calls so no `claude` or `codex`
-    /// child outlives the app; dropping the views would do the same through
-    /// [`Drop`](crate::session::SessionView), but quit should not rely on
+    /// Hang up every provider lane's child this window holds — the open
+    /// session's, every parked one's (with a view or without) and the
+    /// browser chat's (docs/81 A F6): quit shuts runtimes down, not views
+    /// (docs/82 4.8). What app quit calls so no `claude` or `codex` child
+    /// outlives the app; dropping the runtimes would do the same through
+    /// [`Drop`](crate::session::SessionRuntime), but quit should not rely on
     /// teardown order. Quitting with a switch pending cancels it too, so an
     /// open that lands after teardown is discarded instead of activating.
     ///
@@ -4748,7 +4745,7 @@ impl Harness {
         // `format!` behind it have no business in a steady-state frame
         // (finding `performance-9`).
         let stale = {
-            let active = self.active.as_ref().map(|a| a.read(cx).session_id.as_str());
+            let active = self.active.as_ref().map(|a| a.read(cx).rt(cx).session_id.as_str());
             self.window_title_key.as_ref().map(|(epoch, id)| (*epoch, id.as_deref()))
                 != Some((self.session_list.read(cx).epoch, active))
         };
@@ -5659,7 +5656,7 @@ impl Harness {
             return;
         }
         if let Some(view) = self.active.clone() {
-            view.update(cx, |view, cx| view.interrupt(cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.interrupt(cx)));
         }
     }
 
@@ -6714,7 +6711,7 @@ mod tests {
         let landed = vc.update(|_, cx| {
             let h = baaz.read(cx);
             let active = h.active.clone().expect("the Ask opened a session");
-            let active_id = active.read(cx).session_id.clone();
+            let active_id = active.read(cx).rt(cx).session_id.clone();
             assert_ne!(active_id, "s-1", "the Ask starts a new session, never reuses the open one");
             assert_eq!(active.read(cx).draft_text(cx), "what is this page?");
             assert!(h.browser.read(cx).pending_ask_draft.is_none(), "the landed draft is taken");
@@ -6731,7 +6728,7 @@ mod tests {
             let h = baaz.read(cx);
             assert!(h.browser.read(cx).pending_ask_draft.is_none(), "the refused Ask leaves nothing armed");
             let active = h.active.clone().expect("the session is still open");
-            assert_eq!(active.read(cx).session_id, landed, "no session opened");
+            assert_eq!(active.read(cx).rt(cx).session_id, landed, "no session opened");
             assert_eq!(
                 active.read(cx).draft_text(cx),
                 "what is this page?",
@@ -8247,7 +8244,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 harness.on_session_event(
-                    view.clone(),
+                    view.read(cx).runtime().clone(),
                     &crate::session::SessionEvent::OpenUrl {
                         url: "https://example.com/page".to_owned(),
                         external: false,
@@ -8310,7 +8307,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 harness.on_session_event(
-                    view.clone(),
+                    view.read(cx).runtime().clone(),
                     &crate::session::SessionEvent::RevealPath { abs: abs.clone(), highlight: None },
                     cx,
                 );
@@ -8378,7 +8375,7 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 harness.on_session_event(
-                    view.clone(),
+                    view.read(cx).runtime().clone(),
                     &crate::session::SessionEvent::RevealPath {
                         abs: abs.clone(),
                         highlight: Some(2..3),
@@ -8448,7 +8445,7 @@ mod tests {
         assert!(url.ends_with("/site/kitchen%20sink.html"), "{url}");
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.on_session_event(view.clone(), &crate::session::SessionEvent::RevealPath { abs: abs.clone(), highlight: None }, cx);
+                harness.on_session_event(view.read(cx).runtime().clone(), &crate::session::SessionEvent::RevealPath { abs: abs.clone(), highlight: None }, cx);
             })
         });
         vc.run_until_parked();
@@ -8886,7 +8883,7 @@ mod tests {
                 h.session_list.update(cx, |list, _| list.sessions.push(idle_row("s-1")));
                 let view = h.active.clone().expect("a session is open");
                 view.update(cx, |view, cx| {
-                    view.apply(crate::session::wire_note("turn/started", "s-1", serde_json::json!({"turnId": "t-1"})), cx);
+                    view.runtime().clone().update(cx, |rt, cx| rt.apply(crate::session::wire_note("turn/started", "s-1", serde_json::json!({"turnId": "t-1"})), cx));
                 });
                 h.sync_row_live("s-1", true, cx);
             })

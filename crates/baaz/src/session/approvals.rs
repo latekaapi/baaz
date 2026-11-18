@@ -2,13 +2,15 @@
 //! output a settled shell card can then fetch, and the retry a failed turn
 //! offers.
 //!
-//! Part of [`SessionView`]; see [`crate::session`] for what
-//! the entity owns and why these are its own files.
+//! Part of [`SessionRuntime`] (the model half: what it does to the
+//! session) and [`SessionView`] (the drawing half: fields, menus, focus);
+//! see [`crate::session`] for what each entity owns and why these are
+//! their own files.
 
 use super::*;
 use crate::providers::{ApprovalChoice, ExternalApproval};
 
-impl SessionView {
+impl SessionRuntime {
     /// A server-minted choice was pressed: `approval/decide`.
     ///
     /// The `requirementId` is the guard MSP requires: it must equal the
@@ -24,7 +26,9 @@ impl SessionView {
         // resolution moves it, never this send.
         self.decide_provider_approval(approval_id, choice_id, feedback, cx);
     }
+}
 
+impl SessionView {
     /// Open (or close) the feedback field a choice asks for.
     pub fn toggle_feedback(&mut self, approval_id: String, choice_id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.feedback_open = choice_id.map(|choice| (approval_id, choice));
@@ -51,7 +55,7 @@ impl SessionView {
         if let Some((approval_id, choice_id)) = self.feedback_open.clone() {
             let text = self.feedback.read(cx).value().to_string();
             let feedback = (!text.trim().is_empty()).then_some(text);
-            self.decide_approval(approval_id, choice_id, feedback, cx);
+            self.runtime.update(cx, |rt, cx| rt.decide_approval(approval_id, choice_id, feedback, cx));
             // The field is gone with the decision; the keyboard goes back
             // to the composer rather than to a field no longer drawn.
             self.focus_composer(window, cx);
@@ -72,7 +76,9 @@ impl SessionView {
         }
         closed
     }
+}
 
+impl SessionRuntime {
     // ---------------------------------------------------------- full output
 
     /// "Show full output" on a truncated tool card: page `item/readOutput` on
@@ -88,7 +94,7 @@ impl SessionView {
             return;
         }
         self.full_outputs.insert(block_id.clone(), full_output::Fetch::Fetching);
-        self.refresh_render_cache(cx);
+        cx.emit(RuntimeEvent::CardsChanged);
         cx.notify();
         let command = ProviderCommand::ReadStoredOutput {
             session_id: self.session_id.clone(),
@@ -111,7 +117,7 @@ impl SessionView {
                     this.report_provider_error(&error, cx);
                 }
             }
-            this.refresh_render_cache(cx);
+            cx.emit(RuntimeEvent::CardsChanged);
             cx.notify();
         });
     }
@@ -224,7 +230,7 @@ impl SessionView {
     }
 }
 
-impl SessionView {
+impl SessionRuntime {
     // --------------------------------------- external approvals (S46)
 
     /// Park a new provider's approval request on this surface: Claude
@@ -240,7 +246,7 @@ impl SessionView {
     /// lands.
     pub fn inject_external_approval(&mut self, approval: ExternalApproval, cx: &mut Context<Self>) {
         self.external_approvals.inject(approval);
-        self.follow = true;
+        cx.emit(RuntimeEvent::ApprovalRequested);
         cx.notify();
     }
 
@@ -266,7 +272,7 @@ impl SessionView {
             return;
         };
         crate::baaz_log!("external approval {approval_id} ({headline}): deciding {choice_id}");
-        self.close_feedback_for(&approval_id);
+        cx.emit(RuntimeEvent::ApprovalDecided(approval_id.clone()));
         self.external_outbox.push(ProviderCommand::DecideApproval {
             request_id: uuid::Uuid::new_v4().to_string(),
             session_id: self.session_id.clone(),
@@ -325,7 +331,7 @@ impl SessionView {
         // muse lane's does. Left open, it kept the composer's ⏎ bound to
         // `ConfirmField`, which re-sent this settled decision on every
         // later Enter ("unknown approval", live 2026-10-17).
-        self.close_feedback_for(&approval_id);
+        cx.emit(RuntimeEvent::ApprovalDecided(approval_id.clone()));
         self.external_outbox.push(ProviderCommand::DecideApproval {
             request_id: uuid::Uuid::new_v4().to_string(),
             session_id: self.session_id.clone(),
@@ -371,15 +377,19 @@ impl SessionView {
         }
         cx.notify();
     }
+}
 
+impl SessionView {
     /// Close the feedback field when it belongs to `approval_id`: the
     /// decision it was opened for is on its way.
-    fn close_feedback_for(&mut self, approval_id: &str) {
+    pub(super) fn close_feedback_for(&mut self, approval_id: &str) {
         if self.feedback_open.as_ref().is_some_and(|(open, _)| open == approval_id) {
             self.feedback_open = None;
         }
     }
+}
 
+impl SessionRuntime {
     /// The provider answered a decision with "unknown approval": no pending
     /// request carries that id there any more (answered already, expired,
     /// or its child is gone), so no notification will ever settle it. It
@@ -392,7 +402,7 @@ impl SessionView {
         use aui_protocol::{ApprovalState, Block, Delta};
         crate::baaz_log!("provider approval {approval_id}: the provider holds nothing under that id; dropping the card");
         self.external_approvals.resolve(approval_id);
-        self.close_feedback_for(approval_id);
+        cx.emit(RuntimeEvent::ApprovalDecided(approval_id.to_owned()));
         let pending = self.store.session().and_then(|session| {
             session.turns.iter().find_map(|turn| {
                 let index = turn.blocks().iter().position(|block| {
@@ -405,9 +415,9 @@ impl SessionView {
             if let Block::Approval { state, .. } = &mut block {
                 *state = ApprovalState::Cancelled { reason: Some(format!("{} withdrew it", self.provider_kind().label())) };
             }
-            self.store.apply_deltas(vec![Delta::BlockUpdated { turn_id, block_index, block }]);
+            let landed = self.store.apply_deltas(vec![Delta::BlockUpdated { turn_id, block_index, block }]);
+            self.announce_landed(&landed, cx);
         }
-        self.follow = true;
         cx.emit(super::SessionEvent::ProviderApprovalsChanged { session_id: self.session_id.clone() });
         cx.notify();
     }
@@ -421,7 +431,7 @@ impl SessionView {
     pub fn resolve_external_approval(&mut self, approval_id: &str, cx: &mut Context<Self>) -> bool {
         let settled = self.external_approvals.resolve(approval_id);
         if settled {
-            self.follow = true;
+            cx.emit(RuntimeEvent::EntriesAppended);
             cx.notify();
         }
         settled

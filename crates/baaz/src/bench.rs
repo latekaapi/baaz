@@ -600,7 +600,7 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
         let view = match seed {
             BenchSeed::Bare(root) => {
                 let view = cx.update(|cx| root.read(cx).view.clone());
-                cx.update(|cx| view.update(cx, |view, cx| view.begin_bench_replay(session_id, sent, cx)));
+                cx.update(|cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.begin_bench_replay(session_id, sent, cx))));
                 view
             }
             BenchSeed::Shell(baaz) => {
@@ -645,7 +645,7 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
                     let start = Instant::now();
                     // The translation a hub lane runs, then the view's fold:
                     // the whole per-event cost a live stream pays.
-                    view.fold_provider_events(event, cx);
+                    view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(event, cx));
                     let micros = start.elapsed().as_micros();
                     match opts.scroll {
                         BenchScroll::Top => {}

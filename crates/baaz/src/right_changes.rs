@@ -628,7 +628,7 @@ impl Harness {
     /// Create PR (the pane's [`RightPaneEvent::OpenPrForm`]): the form opens
     /// with the session's title, and drafts on its provider.
     pub(crate) fn open_pr_form(&mut self, root: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        let session = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
+        let session = self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone());
         let draft = PrDraftFacts {
             label: session.as_ref().and_then(|id| self.collapsed_head_label(&self.chain_head(id, cx), cx)),
             provider: session.as_ref().map(|id| self.session_lane_provider(id, cx)),
@@ -643,7 +643,7 @@ impl Harness {
     /// a hidden side session for a provider that completes there — landing
     /// in the pane ([`RightPane::land_draft`]).
     pub(crate) fn draft_commit_for_pane(&mut self, root: &Path, files: &[FileChange], cx: &mut Context<Self>) {
-        let Some(session) = self.active.as_ref().map(|view| view.read(cx).session_id.clone()) else {
+        let Some(session) = self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone()) else {
             self.right_pane.update(cx, |pane, cx| pane.land_draft(root, DraftKind::Commit, None, cx));
             return;
         };

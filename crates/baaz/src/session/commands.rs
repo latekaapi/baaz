@@ -1,8 +1,10 @@
 //! What the composer's verbs do: send, steer, interrupt, the slash
 //! commands, and plan mode.
 //!
-//! Part of [`SessionView`]; see [`crate::session`] for what
-//! the entity owns and why these are its own files.
+//! Part of [`SessionRuntime`] (the model half: what it does to the
+//! session) and [`SessionView`] (the drawing half: fields, menus, focus);
+//! see [`crate::session`] for what each entity owns and why these are
+//! their own files.
 
 use super::*;
 use aui_protocol::{Delta, Turn};
@@ -20,18 +22,18 @@ impl SessionView {
     /// transcript shows, and it stays the person's words even when plan mode
     /// prefixes the model-visible input.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_input_locked() {
-            self.banner = Some("Switching provider — sends resume when the new session opens.".to_owned());
-            self.banner_action = None;
-            cx.notify();
+        if self.runtime.read(cx).is_input_locked() {
+            // The runtime's notify redraws this view (it observes it).
+            self.runtime.as_mut(cx).banner = Some("Switching provider — sends resume when the new session opens.".to_owned());
+            self.runtime.as_mut(cx).banner_action = None;
             return;
         }
         // No session stands behind the view (its start failed): the words
         // stay in the composer and the banner says why — the failure's own
         // reason while it still stands — rather than leaving for nowhere.
-        if matches!(self.start, StartState::Failed) {
-            if self.banner.is_none() {
-                self.set_banner("This session did not start — open a new one.", None, cx);
+        if matches!(self.runtime.read(cx).start, StartState::Failed) {
+            if self.runtime.read(cx).banner.is_none() {
+                self.runtime.update(cx, |rt, cx| rt.set_banner("This session did not start — open a new one.", None, cx));
             }
             return;
         }
@@ -41,21 +43,20 @@ impl SessionView {
         // so the field clears like any send and the view reads busy until
         // then. An empty Enter has nothing to wait with — no approval can
         // be pending before the session exists.
-        if matches!(self.start, StartState::Starting(_)) {
-            let empty = text.trim().is_empty() && self.images.is_empty() && self.files.is_empty();
-            if empty || self.attachments_pending() {
+        if matches!(self.runtime.read(cx).start, StartState::Starting(_)) {
+            let empty = text.trim().is_empty() && self.runtime.read(cx).images.is_empty() && self.runtime.read(cx).files.is_empty();
+            if empty || self.runtime.read(cx).attachments_pending() {
                 return;
             }
             self.composer.update(cx, |state, cx| state.set_value("", window, cx));
             self.note_draft(cx);
-            if let Some(queue) = self.start_queue() {
+            if let Some(queue) = self.runtime.as_mut(cx).start_queue() {
                 queue.sends.push(text);
             }
-            self.submitting = true;
-            cx.notify();
+            self.runtime.as_mut(cx).submitting = true;
             return;
         }
-        if text.trim().is_empty() && self.images.is_empty() && self.files.is_empty() {
+        if text.trim().is_empty() && self.runtime.read(cx).images.is_empty() && self.runtime.read(cx).files.is_empty() {
             // ⏎ on an empty composer answers a pending approval (its hint).
             self.allow_pending(window, cx);
             return;
@@ -63,7 +64,7 @@ impl SessionView {
         // An image still being read has no bytes to send (finding
         // `performance-14`). The send button is already down; this is the
         // keyboard's path to the same refusal, and the draft stays put.
-        if self.attachments_pending() {
+        if self.runtime.read(cx).attachments_pending() {
             return;
         }
         self.composer.update(cx, |state, cx| state.set_value("", window, cx));
@@ -80,7 +81,7 @@ impl SessionView {
         // outside any turn, and still subject to the approval policy.
         if let Some(command) = text.strip_prefix('!') {
             if !command.trim().is_empty() {
-                self.run_user_shell(command.trim().to_owned(), cx);
+                self.runtime.update(cx, |rt, cx| rt.run_user_shell(command.trim().to_owned(), cx));
                 return;
             }
         }
@@ -91,9 +92,11 @@ impl SessionView {
             self.run_command_with(command, argument.to_owned(), window, cx);
             return;
         }
-        self.submit(text, cx);
+        self.runtime.update(cx, |rt, cx| rt.submit(text, cx));
     }
+}
 
+impl SessionRuntime {
     /// Send `text` without touching the composer — the scripting hook.
     pub fn send_text(&mut self, text: String, cx: &mut Context<Self>) {
         self.submit(text, cx);
@@ -187,7 +190,7 @@ impl SessionView {
         self.submitting = true;
         crate::log::send_reset();
         if crate::log::trace_enabled() {
-            self.send_trace_turns = Some(self.cached_turns.len());
+            self.send_trace_turns = Some(self.session().map_or(0, |session| session.turns.len()));
         }
         self.append_history(text.clone(), cx);
         let request_id = provider::new_request_id();
@@ -230,9 +233,7 @@ impl SessionView {
                 },
             }],
         );
-        if !landed.is_empty() {
-            self.follow = true;
-        }
+        self.announce_landed(&landed, cx);
         self.pending_optimistic.push(PendingOptimistic { id: optimistic_id.clone(), text: text.clone() });
         let planning = self.plan;
         // A send while the reply is done but the turn still open (Muse
@@ -269,7 +270,7 @@ impl SessionView {
             // a bubble — its user turn arrives when it starts.
             Ok(provider::Ack::TurnAccepted { queued: true, .. }) => {
                 self.submitting = false;
-                self.remove_optimistic_turn(&optimistic_id);
+                self.remove_optimistic_turn(&optimistic_id, cx);
             }
             Ok(provider::Ack::TurnAccepted { turn_id, .. }) => {
                 // Events can beat acks: when the adapter already said
@@ -302,14 +303,14 @@ impl SessionView {
                 // No turn carries the input, so the optimistic bubble
                 // must go too — otherwise it sticks with no turn behind
                 // it. The prompt stays sent, as before.
-                self.remove_optimistic_turn(&optimistic_id);
+                self.remove_optimistic_turn(&optimistic_id, cx);
             }
             Err(error) => {
                 self.submitting = false;
                 // The turn never left, so the optimistic bubble goes and
                 // the person keeps their words. An `Unsupported` refusal
                 // shows its reason, never silence.
-                self.remove_optimistic_turn(&optimistic_id);
+                self.remove_optimistic_turn(&optimistic_id, cx);
                 // A lost lane whose revive failed: the child died again,
                 // which the lost-child rule owns (docs/71 §2).
                 if !self.revive_failed(&error, cx) {
@@ -355,23 +356,27 @@ impl SessionView {
             self.send_or_queue(text, cx);
         }
     }
+}
 
+impl SessionView {
     /// ⌘↩: interject into the running turn instead of queueing behind it.
     pub fn steer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().to_string();
         if text.trim().is_empty() {
             return;
         }
-        if self.running.is_none() {
+        if self.runtime.read(cx).running.is_none() {
             // Nothing to steer into; the honest thing is an ordinary send.
             self.send(window, cx);
             return;
         }
         self.composer.update(cx, |state, cx| state.set_value("", window, cx));
         self.note_draft(cx);
-        self.steer_text(text, cx);
+        self.runtime.update(cx, |rt, cx| rt.steer_text(text, cx));
     }
+}
 
+impl SessionRuntime {
     pub(crate) fn steer_text(&mut self, text: String, cx: &mut Context<Self>) {
         // The capability gate, before any wire: on a provider where
         // steering is `Unavailable` the seam would refuse the command, so
@@ -513,7 +518,7 @@ impl SessionView {
         }
         let pending = std::mem::take(&mut self.pending_optimistic);
         for optimistic in &pending {
-            self.remove_optimistic_turn(&optimistic.id);
+            self.remove_optimistic_turn(&optimistic.id, cx);
         }
         self.submitting = false;
         if let Some(restored) = pending.into_iter().last().map(|stopped| stopped.text) {
@@ -634,12 +639,12 @@ impl SessionView {
         self.show_mode_fallback(&text, cx);
         if let Some(queue) = self.start_queue() {
             queue.mode = Some(ask);
-            self.sync_mode_menu_check(cx);
+            cx.emit(RuntimeEvent::MenusStale);
             cx.notify();
             return;
         }
         let previous = self.stand_on_mode(ask);
-        self.sync_mode_menu_check(cx);
+        cx.emit(RuntimeEvent::MenusStale);
         let command = ProviderCommand::SelectApprovalMode {
             request_id: provider::new_request_id(),
             session_id: self.session_id.clone(),
@@ -717,7 +722,7 @@ impl SessionView {
                 effort_notes: row.effort_notes.clone(),
                 context_limit: None,
                 description: row.description,
-                display_label: if muse { SessionView::muse_row_label(&row.id, &row.label) } else { row.label },
+                display_label: if muse { SessionRuntime::muse_row_label(&row.id, &row.label) } else { row.label },
                 is_active: row.active,
                 is_default: row.is_default,
                 model_id: row.id,
@@ -751,11 +756,13 @@ impl SessionView {
             });
         }
         self.models_error = None;
-        self.sync_model_menu_check(cx);
+        cx.emit(RuntimeEvent::MenusStale);
         self.leave_auto_if_unsupported(cx);
         cx.notify();
     }
+}
 
+impl SessionView {
     /// Keep an open model menu's check on the row the chip names. The
     /// menu's check is its keyboard row, an index picked when it opened —
     /// and a catalog that folds while it stands open (the picker asks the
@@ -764,12 +771,14 @@ impl SessionView {
     /// sat past its end, at index 3, which the child's five-row catalog
     /// names Sonnet while the chip read Default (recommended).
     pub(super) fn sync_model_menu_check(&mut self, cx: &mut Context<Self>) {
-        let checked = self.model_menu_checked().unwrap_or(self.models.len());
+        let checked = self.runtime.read(cx).model_menu_checked().unwrap_or(self.runtime.read(cx).models.len());
         if let Some(picker) = self.model_picker(cx) {
             picker.update(cx, |picker, cx| picker.select(checked, cx));
         }
     }
+}
 
+impl SessionRuntime {
     /// Record a model pick on the provider lane: the matching row marks
     /// active and the chip reads the pick at once. A bare id still
     /// applies (aliases travel): when no row names it — a model the catalog
@@ -876,7 +885,7 @@ impl SessionView {
             through_turn: None,
         };
         self.provider_send(command, cx, move |this, result, cx| match result {
-            Ok(provider::Ack::Noop { reason }) => this.toast("Nothing to compact", reason, cx),
+            Ok(provider::Ack::Noop { reason }) => cx.emit(RuntimeEvent::Toast { title: "Nothing to compact".to_owned(), body: reason }),
             Ok(_) => {}
             Err(error) => this.report_provider_error(&error, cx),
         });
@@ -970,12 +979,16 @@ impl SessionView {
         }
         cx.notify();
     }
+}
 
+impl SessionView {
     pub(super) fn toast(&mut self, title: impl Into<String>, body: impl Into<String>, cx: &mut Context<Self>) {
         self.overlays.update(cx, |overlays, _| overlays.toast(title, body));
         cx.notify();
     }
+}
 
+impl SessionRuntime {
     /// Keep the elapsed time honest while a turn runs: 1 Hz, notifying only
     /// when the displayed second changes, so the clock costs one frame per
     /// second instead of four whole-transcript rebuilds (P2).
@@ -1059,7 +1072,7 @@ impl SessionView {
             &id,
             Block::Plan { id: id.clone(), items, sections, state: PlanState::Proposed },
         );
-        self.follow = true;
+        cx.emit(RuntimeEvent::EntriesAppended);
         cx.notify();
     }
 
@@ -1103,7 +1116,9 @@ impl SessionView {
         }
         None
     }
+}
 
+impl SessionView {
     /// Accept / Refine / Reject on a plan card (spec §3.1).
     pub(super) fn plan_action(&mut self, id: &str, action: PlanAction, window: &mut Window, cx: &mut Context<Self>) {
         let state = match action {
@@ -1112,25 +1127,27 @@ impl SessionView {
             PlanAction::Refine => PlanState::Proposed,
         };
         if action != PlanAction::Refine {
-            if let Some(block) = self.plan_block(id) {
+            if let Some(block) = self.runtime.read(cx).plan_block(id) {
                 let Block::Plan { items, sections, .. } = &block else { return };
                 let replaced =
                     Block::Plan { id: id.to_owned(), items: items.clone(), sections: sections.clone(), state };
-                self.replace_client_block(id, replaced);
+                self.runtime.as_mut(cx).replace_client_block(id, replaced);
                 self.follow = true;
             }
         }
         match action {
             PlanAction::Accept => {
-                self.set_plan(false, cx);
-                self.submit(plan::ACCEPT_PROMPT.to_owned(), cx);
+                self.runtime.update(cx, |rt, cx| rt.set_plan(false, cx));
+                self.runtime.update(cx, |rt, cx| rt.submit(plan::ACCEPT_PROMPT.to_owned(), cx));
             }
-            PlanAction::Reject => self.set_plan(false, cx),
+            PlanAction::Reject => self.runtime.update(cx, |rt, cx| rt.set_plan(false, cx)),
             PlanAction::Refine => self.focus_composer(window, cx),
         }
         cx.notify();
     }
+}
 
+impl SessionRuntime {
     pub(super) fn plan_block(&self, id: &str) -> Option<Block> {
         let session = self.session()?;
         session.turns.iter().find_map(|turn| match turn {
@@ -1386,27 +1403,27 @@ mod tests {
         assert_eq!(rows.len(), 4, "the fixture lists four models");
         let view = lane_view(vc, "codex", "s-codex");
         vc.update(|_, cx| {
-            view.update(cx, |view, cx| view.apply_model_catalog(rows, "openai", cx));
-            view.update(cx, |view, _| {
-                assert!(view.models_error.is_none());
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.apply_model_catalog(rows, "openai", cx)));
+            view.update(cx, |view, cx| {
+                assert!(view.rt(cx).models_error.is_none());
                 let ids: Vec<&str> =
-                    view.models.iter().map(|m| m.model_id.as_str()).collect();
+                    view.rt(cx).models.iter().map(|m| m.model_id.as_str()).collect();
                 assert_eq!(ids, ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"]);
                 let labels: Vec<&str> =
-                    view.models.iter().map(|m| m.display_label.as_str()).collect();
+                    view.rt(cx).models.iter().map(|m| m.display_label.as_str()).collect();
                 assert_eq!(labels, ["GPT-5.6-Sol", "GPT-5.6-Terra", "GPT-5.6-Luna", "GPT-5.5"]);
                 assert!(
-                    view.models.iter().all(|m| m.display_label != m.model_id),
+                    view.rt(cx).models.iter().all(|m| m.display_label != m.model_id),
                     "no raw slug where a display name exists"
                 );
                 let active: Vec<&str> = view
-                    .models
+                    .rt(cx).models
                     .iter()
                     .filter(|m| m.is_active)
                     .map(|m| m.model_id.as_str())
                     .collect();
                 assert_eq!(active, ["gpt-5.6-sol"], "the current one is marked");
-                let sol = view.models.iter().find(|m| m.model_id == "gpt-5.6-sol").expect("sol");
+                let sol = view.rt(cx).models.iter().find(|m| m.model_id == "gpt-5.6-sol").expect("sol");
                 assert!(sol.is_default, "the default flag folds");
                 assert!(
                     sol.description.as_deref().is_some_and(|detail| !detail.is_empty()),
@@ -1437,27 +1454,27 @@ mod tests {
         vc.update(|_, cx| {
             // Opening the chip folds the supplied list; nothing marks yet
             // because the session names no supplied alias.
-            view.update(cx, |view, cx| view.load_models(cx));
-            view.update(cx, |view, _| {
-                assert_eq!(view.models.len(), 3);
-                assert!(view.models_error.is_none());
-                assert!(view.models.iter().all(|m| !m.is_active));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.load_models(cx)));
+            view.update(cx, |view, cx| {
+                assert_eq!(view.rt(cx).models.len(), 3);
+                assert!(view.rt(cx).models_error.is_none());
+                assert!(view.rt(cx).models.iter().all(|m| !m.is_active));
             });
             // The pick routes through the seam (outbox `SelectModel`) and
             // the chip updates at once, with the human name.
-            view.update(cx, |view, cx| view.set_model("opus", cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("opus", cx)));
             view.update(cx, |view, cx| {
-                assert_eq!(view.model().as_ref(), "Opus");
-                assert!(view.take_external_outbox().iter().any(|command| matches!(
+                assert_eq!(view.rt(cx).model().as_ref(), "Opus");
+                assert!(view.runtime().clone().update(cx, |rt, _| rt.take_external_outbox()).iter().any(|command| matches!(
                     command,
                     ProviderCommand::SelectModel { model, .. } if model == "opus"
                 )));
                 // Reopening the chip marks the pick.
-                view.load_models(cx);
+                view.runtime().clone().update(cx, |rt, cx| rt.load_models(cx));
             });
-            view.update(cx, |view, _| {
+            view.update(cx, |view, cx| {
                 let active: Vec<&str> = view
-                    .models
+                    .rt(cx).models
                     .iter()
                     .filter(|m| m.is_active)
                     .map(|m| m.model_id.as_str())
@@ -1475,26 +1492,26 @@ mod tests {
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
                 // A transcript already in the session, not a fresh one.
-                view.append_client_block("t-seed",
+                view.runtime().clone().update(cx, |rt, _| rt.append_client_block("t-seed",
                     Block::Text { text: "earlier work".into(), streaming: false },
-                );
-                assert!(view.has_turns(), "the session has turns in it");
-                view.apply_model_catalog(codex_fixture_catalog(), "openai", cx);
+                ));
+                assert!(view.rt(cx).has_turns(), "the session has turns in it");
+                view.runtime().clone().update(cx, |rt, cx| rt.apply_model_catalog(codex_fixture_catalog(), "openai", cx));
             });
             // The pick routes through the seam and the chip updates, with
             // turns in the session exactly as without.
-            view.update(cx, |view, cx| view.set_model("gpt-5.6-terra", cx));
-            view.update(cx, |view, _| {
-                assert_eq!(view.model().as_ref(), "GPT-5.6-Terra");
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("gpt-5.6-terra", cx)));
+            view.update(cx, |view, cx| {
+                assert_eq!(view.rt(cx).model().as_ref(), "GPT-5.6-Terra");
                 let active: Vec<&str> = view
-                    .models
+                    .rt(cx).models
                     .iter()
                     .filter(|m| m.is_active)
                     .map(|m| m.model_id.as_str())
                     .collect();
                 assert_eq!(active, ["gpt-5.6-terra"]);
-                assert_eq!(view.provider_kind(), ProviderId::Codex, "the lane never moves");
-                let outbox = view.take_external_outbox();
+                assert_eq!(view.rt(cx).provider_kind(), ProviderId::Codex, "the lane never moves");
+                let outbox = view.runtime().clone().update(cx, |rt, _| rt.take_external_outbox());
                 assert_eq!(outbox.len(), 1, "one seam command, never past it");
                 assert!(
                     matches!(
@@ -1521,10 +1538,10 @@ mod tests {
         let view = lane_view(vc, "codex", "s-effort");
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.apply_model_catalog(codex_fixture_catalog(), "openai", cx);
+                view.runtime().clone().update(cx, |rt, cx| rt.apply_model_catalog(codex_fixture_catalog(), "openai", cx));
             });
-            view.update(cx, |view, _| {
-                let EffortOptions::Available(options) = view.effort_options() else {
+            view.update(cx, |view, cx| {
+                let EffortOptions::Available(options) = view.rt(cx).effort_options() else {
                     panic!("sol names a catalog row with levels");
                 };
                 let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
@@ -1534,9 +1551,9 @@ mod tests {
             });
             // Selecting a different model changes the list: gpt-5.5 stops
             // at xhigh, where sol reaches ultra.
-            view.update(cx, |view, cx| view.set_model("gpt-5.5", cx));
-            view.update(cx, |view, _| {
-                let EffortOptions::Available(options) = view.effort_options() else {
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("gpt-5.5", cx)));
+            view.update(cx, |view, cx| {
+                let EffortOptions::Available(options) = view.rt(cx).effort_options() else {
                     panic!("gpt-5.5 names a catalog row with levels");
                 };
                 let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
@@ -1564,21 +1581,21 @@ mod tests {
         let vc = cx.add_empty_window();
         let view = lane_view(vc, "codex", "s-off-catalog");
         vc.update(|_, cx| {
-            view.update(cx, |view, cx| view.apply_model_catalog(codex_fixture_catalog(), "openai", cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.apply_model_catalog(codex_fixture_catalog(), "openai", cx)));
             // The session runs a model the catalog omits.
-            view.update(cx, |view, cx| view.set_model("gpt-6-astra", cx));
-            view.update(cx, |view, _| {
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("gpt-6-astra", cx)));
+            view.update(cx, |view, cx| {
                 let current: Vec<&str> = view
-                    .models
+                    .rt(cx).models
                     .iter()
                     .filter(|m| m.is_active)
                     .map(|m| m.model_id.as_str())
                     .collect();
                 assert_eq!(current, ["gpt-6-astra"], "the current model lists, checked");
-                assert_eq!(view.model().as_ref(), "gpt-6-astra");
+                assert_eq!(view.rt(cx).model().as_ref(), "gpt-6-astra");
             });
-            view.update(cx, |view, _| {
-                let EffortOptions::AvailableWithNote { options, note } = view.effort_options()
+            view.update(cx, |view, cx| {
+                let EffortOptions::AvailableWithNote { options, note } = view.rt(cx).effort_options()
                 else {
                     panic!("an off-catalog model still gets an effort list");
                 };
@@ -1613,27 +1630,27 @@ mod tests {
         let view = lane_view(vc, "claude-code", "s-auto");
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.apply_model_catalog(claude_fixture_catalog(), "anthropic", cx)
+                view.runtime().clone().update(cx, |rt, cx| rt.apply_model_catalog(claude_fixture_catalog(), "anthropic", cx))
             });
-            view.update(cx, |view, cx| view.set_model("haiku", cx));
-            view.update(cx, |view, _| {
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("haiku", cx)));
+            view.update(cx, |view, cx| {
                 assert_eq!(
-                    view.mode_unavailable(PermissionMode::OnRequest).as_deref(),
+                    view.rt(cx).mode_unavailable(PermissionMode::OnRequest).as_deref(),
                     Some("Not available for Haiku")
                 );
                 for mode in [PermissionMode::AllowAll, PermissionMode::PromptUnmatched, PermissionMode::DenyUnmatched] {
-                    assert_eq!(view.mode_unavailable(mode), None, "{mode:?} stays available");
+                    assert_eq!(view.rt(cx).mode_unavailable(mode), None, "{mode:?} stays available");
                 }
                 assert_eq!(
-                    SessionView::resolve_mode_limits("claude-haiku-4-5-20251001", &view.mode_limits),
+                    SessionRuntime::resolve_mode_limits("claude-haiku-4-5-20251001", &view.rt(cx).mode_limits),
                     vec![PermissionMode::OnRequest],
                     "the resolved id finds Haiku's row"
                 );
-                assert!(SessionView::resolve_mode_limits("claude-sonnet-5", &view.mode_limits).is_empty());
+                assert!(SessionRuntime::resolve_mode_limits("claude-sonnet-5", &view.rt(cx).mode_limits).is_empty());
             });
-            view.update(cx, |view, cx| view.set_model("sonnet", cx));
-            view.update(cx, |view, _| {
-                assert_eq!(view.mode_unavailable(PermissionMode::OnRequest), None);
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("sonnet", cx)));
+            view.update(cx, |view, cx| {
+                assert_eq!(view.rt(cx).mode_unavailable(PermissionMode::OnRequest), None);
             });
         });
     }
@@ -1649,23 +1666,23 @@ mod tests {
         let view = lane_view(vc, "claude-code", "s-catalog");
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.apply_model_catalog(claude_fixture_catalog(), "anthropic", cx)
+                view.runtime().clone().update(cx, |rt, cx| rt.apply_model_catalog(claude_fixture_catalog(), "anthropic", cx))
             });
-            view.update(cx, |view, _| {
+            view.update(cx, |view, cx| {
                 let ids: Vec<&str> =
-                    view.models.iter().map(|m| m.model_id.as_str()).collect();
+                    view.rt(cx).models.iter().map(|m| m.model_id.as_str()).collect();
                 assert_eq!(
                     ids,
                     ["default", "opus[1m]", "claude-fable-5-1[1m]", "sonnet", "haiku"]
                 );
                 let labels: Vec<&str> =
-                    view.models.iter().map(|m| m.display_label.as_str()).collect();
+                    view.rt(cx).models.iter().map(|m| m.display_label.as_str()).collect();
                 assert_eq!(
                     labels,
                     ["Default (recommended)", "Opus (1M context)", "Fable", "Sonnet", "Haiku"]
                 );
                 let fable = view
-                    .models
+                    .rt(cx).models
                     .iter()
                     .find(|m| m.model_id == "claude-fable-5-1[1m]")
                     .expect("fable folds");
@@ -1677,18 +1694,18 @@ mod tests {
                 );
             });
             // Sonnet's row names five levels: the menu lists them.
-            view.update(cx, |view, cx| view.set_model("sonnet", cx));
-            view.update(cx, |view, _| {
-                let EffortOptions::Available(options) = view.effort_options() else {
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("sonnet", cx)));
+            view.update(cx, |view, cx| {
+                let EffortOptions::Available(options) = view.rt(cx).effort_options() else {
                     panic!("sonnet names effort levels");
                 };
                 let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
                 assert_eq!(ids, ["default", "Low", "Medium", "High", "Xhigh", "Max"]);
             });
             // Fable's row names a subset: the menu lists only those.
-            view.update(cx, |view, cx| view.set_model("claude-fable-5-1[1m]", cx));
-            view.update(cx, |view, _| {
-                let EffortOptions::Available(options) = view.effort_options() else {
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("claude-fable-5-1[1m]", cx)));
+            view.update(cx, |view, cx| {
+                let EffortOptions::Available(options) = view.rt(cx).effort_options() else {
                     panic!("fable names effort levels");
                 };
                 let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
@@ -1696,9 +1713,9 @@ mod tests {
             });
             // Haiku's row names none: the menu says why instead of listing
             // the launch flag's levels.
-            view.update(cx, |view, cx| view.set_model("haiku", cx));
-            view.update(cx, |view, _| {
-                let EffortOptions::Unavailable(reason) = view.effort_options() else {
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("haiku", cx)));
+            view.update(cx, |view, cx| {
+                let EffortOptions::Unavailable(reason) = view.rt(cx).effort_options() else {
                     panic!("haiku names no effort levels");
                 };
                 assert!(
@@ -1725,15 +1742,15 @@ mod tests {
         .collect();
         for _ in 0..16 {
             assert_eq!(
-                SessionView::resolve_claude_row("claude-opus-5[1m]", &efforts),
+                SessionRuntime::resolve_claude_row("claude-opus-5[1m]", &efforts),
                 Some(levels(&["low", "medium", "high"])),
                 "the shared levels of both opus rows, whatever the map order"
             );
         }
         let one: std::collections::HashMap<String, Vec<String>> =
             [("opus[1m]".to_string(), levels(&["low", "high"]))].into_iter().collect();
-        assert_eq!(SessionView::resolve_claude_row("claude-opus-5[1m]", &one), Some(levels(&["low", "high"])));
-        assert_eq!(SessionView::resolve_claude_row("claude-haiku-4-5", &efforts), None, "no haiku row: no match");
+        assert_eq!(SessionRuntime::resolve_claude_row("claude-opus-5[1m]", &one), Some(levels(&["low", "high"])));
+        assert_eq!(SessionRuntime::resolve_claude_row("claude-haiku-4-5", &efforts), None, "no haiku row: no match");
     }
 
     /// H3, claude-code: the session runs `claude-opus-5[1m]` — the
@@ -1748,12 +1765,12 @@ mod tests {
         let view = lane_view(vc, "claude-code", "s-claude-resolved");
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.apply_model_catalog(claude_fixture_catalog(), "anthropic", cx)
+                view.runtime().clone().update(cx, |rt, cx| rt.apply_model_catalog(claude_fixture_catalog(), "anthropic", cx))
             });
             // The stream's resolved id, never a catalog value.
-            view.update(cx, |view, cx| view.set_model("claude-opus-5[1m]", cx));
-            view.update(cx, |view, _| {
-                let EffortOptions::Available(options) = view.effort_options() else {
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("claude-opus-5[1m]", cx)));
+            view.update(cx, |view, cx| {
+                let EffortOptions::Available(options) = view.rt(cx).effort_options() else {
                     panic!("the resolved id finds its catalog row");
                 };
                 let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
@@ -1765,9 +1782,9 @@ mod tests {
             });
             // A dated full id resolves through its family too — here to
             // Haiku, whose row names no levels, so the menu says why.
-            view.update(cx, |view, cx| view.set_model("claude-haiku-4-5-20251001", cx));
-            view.update(cx, |view, _| {
-                let EffortOptions::Unavailable(reason) = view.effort_options() else {
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("claude-haiku-4-5-20251001", cx)));
+            view.update(cx, |view, cx| {
+                let EffortOptions::Unavailable(reason) = view.rt(cx).effort_options() else {
                     panic!("the dated id finds Haiku's level-less row");
                 };
                 assert!(
@@ -1793,12 +1810,12 @@ mod tests {
         let view = lane_view(vc, "claude-code", "s-claude-off-catalog");
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.apply_model_catalog(claude_fixture_catalog(), "anthropic", cx)
+                view.runtime().clone().update(cx, |rt, cx| rt.apply_model_catalog(claude_fixture_catalog(), "anthropic", cx))
             });
             // The session runs a model no catalog row matches.
-            view.update(cx, |view, cx| view.set_model("claude-quantum-9", cx));
-            view.update(cx, |view, _| {
-                let EffortOptions::AvailableWithNote { options, note } = view.effort_options()
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("claude-quantum-9", cx)));
+            view.update(cx, |view, cx| {
+                let EffortOptions::AvailableWithNote { options, note } = view.rt(cx).effort_options()
                 else {
                     panic!("an unmatched model still gets an effort list");
                 };
@@ -1828,8 +1845,8 @@ mod tests {
         let vc = cx.add_empty_window();
         let view = lane_view(vc, "claude-code", "s-effort");
         vc.update(|window, cx| {
-            view.update(cx, |view, _| {
-                let EffortOptions::AvailableWithNote { options, note } = view.effort_options()
+            view.update(cx, |view, cx| {
+                let EffortOptions::AvailableWithNote { options, note } = view.rt(cx).effort_options()
                 else {
                     panic!("pre-catalog offers only Default");
                 };
@@ -1849,8 +1866,8 @@ mod tests {
             let rows = view.read(cx).menu_rows(cx);
             assert_eq!(rows, 1, "Default alone");
             view.update(cx, |view, cx| view.confirm_menu(window, cx));
-            view.update(cx, |view, _| {
-                assert_eq!(effort_label(view.effort), "Default", "the chip stays on Default");
+            view.update(cx, |view, cx| {
+                assert_eq!(effort_label(view.rt(cx).effort), "Default", "the chip stays on Default");
             });
         });
     }
@@ -1867,28 +1884,28 @@ mod tests {
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
                 // A transcript already in the session, not a fresh one.
-                view.append_client_block("t-seed",
+                view.runtime().clone().update(cx, |rt, _| rt.append_client_block("t-seed",
                     Block::Text { text: "earlier work".into(), streaming: false },
-                );
-                assert!(view.has_turns(), "the session has turns in it");
-                view.apply_model_catalog(codex_fixture_catalog(), "openai", cx);
+                ));
+                assert!(view.rt(cx).has_turns(), "the session has turns in it");
+                view.runtime().clone().update(cx, |rt, cx| rt.apply_model_catalog(codex_fixture_catalog(), "openai", cx));
             });
             view.update(cx, |view, cx| {
                 view.pick_effort(Some(aui_protocol::ReasoningEffort::High), cx)
             });
-            view.update(cx, |view, _| {
-                assert_eq!(view.effort, Some(aui_protocol::ReasoningEffort::High));
-                assert_eq!(effort_label(view.effort), "High", "the chip follows the pick");
+            view.update(cx, |view, cx| {
+                assert_eq!(view.rt(cx).effort, Some(aui_protocol::ReasoningEffort::High));
+                assert_eq!(effort_label(view.rt(cx).effort), "High", "the chip follows the pick");
             });
             // The open menu highlights the picked row.
             view.update(cx, |view, cx| view.toggle_picker(MenuKind::Effort, cx));
             view.update(cx, |view, cx| {
                 use crate::overlays::EffortOptions;
                 let selected = view.overlays.read(cx).menu().map(|m| m.selected);
-                let EffortOptions::Available(options) = view.effort_options() else {
+                let EffortOptions::Available(options) = view.rt(cx).effort_options() else {
                     panic!("the picked row lists while turns are in");
                 };
-                let position = options.iter().position(|o| o.effort == view.effort);
+                let position = options.iter().position(|o| o.effort == view.rt(cx).effort);
                 assert_eq!(selected, position, "the highlight sits on the pick");
             });
         });
@@ -1903,8 +1920,8 @@ mod tests {
         let vc = cx.add_empty_window();
         let view = lane_view(vc, "muse", "s-muse-effort");
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                let EffortOptions::Available(options) = view.effort_options() else {
+            view.update(cx, |view, cx| {
+                let EffortOptions::Available(options) = view.rt(cx).effort_options() else {
                     panic!("the muse lane always offers effort");
                 };
                 let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
@@ -1932,8 +1949,8 @@ mod tests {
         let vc = cx.add_empty_window();
         let view = lane_view(vc, "muse", "s-muse-tiers");
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.models = vec![
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).models = vec![
                     ModelCatalogEntry {
                         display_label: "Tiered".into(),
                         is_active: true,
@@ -1952,17 +1969,17 @@ mod tests {
                     },
                 ];
             });
-            view.update(cx, |view, _| {
-                let EffortOptions::Available(options) = view.effort_options() else {
+            view.update(cx, |view, cx| {
+                let EffortOptions::Available(options) = view.rt(cx).effort_options() else {
                     panic!("the tiered row offers levels");
                 };
                 let ids: Vec<String> = options.iter().map(|o| effort_row_id(o.effort)).collect();
                 assert_eq!(ids, ["default", "Low", "Medium", "High"], "only the row's own tiers");
                 assert_eq!(options[0].detail, "The model's default: Medium.");
                 assert_eq!(options[1].detail, "Quick answers");
-                assert_eq!(view.effort_levels().len(), 3, "the slider walks the same stops");
+                assert_eq!(view.rt(cx).effort_levels().len(), 3, "the slider walks the same stops");
                 // Another row's submenu reads that row: an older host's.
-                let EffortOptions::Available(options) = view.effort_options_for(Some("untiered")) else {
+                let EffortOptions::Available(options) = view.rt(cx).effort_options_for(Some("untiered")) else {
                     panic!("an older host still offers effort");
                 };
                 assert_eq!(options.len(), 9, "the full closed enum plus Default");
@@ -1980,10 +1997,10 @@ mod tests {
         vc.update(|window, cx| {
             // Opening the chip cannot list: no live lane, so a reason.
             view.update(cx, |view, cx| view.toggle_picker(MenuKind::Model, cx));
-            view.update(cx, |view, _| {
-                assert!(view.models.is_empty());
+            view.update(cx, |view, cx| {
+                assert!(view.rt(cx).models.is_empty());
                 assert!(
-                    view.models_error.as_ref().is_some_and(|reason| !reason.is_empty()),
+                    view.rt(cx).models_error.as_ref().is_some_and(|reason| !reason.is_empty()),
                     "the chip says why"
                 );
             });
@@ -2005,7 +2022,7 @@ mod tests {
     /// window.
     #[test]
     fn disabled_providers_leave_the_composer_menu() {
-        let rows = SessionView::provider_rows_for(
+        let rows = SessionRuntime::provider_rows_for(
             ProviderId::Muse,
             false,
             &[ProviderId::Muse, ProviderId::Codex],
@@ -2018,7 +2035,7 @@ mod tests {
         assert!(rows.iter().any(|row| row.id == "codex"));
         // The session's own lane stays even switched off mid-run.
         let rows =
-            SessionView::provider_rows_for(ProviderId::ClaudeCode, false, &[ProviderId::Muse]);
+            SessionRuntime::provider_rows_for(ProviderId::ClaudeCode, false, &[ProviderId::Muse]);
         assert!(rows.iter().any(|row| row.id == "claude-code"));
     }
 
@@ -2059,7 +2076,7 @@ mod tests {
         vc.update(|_, cx| {
             assert_eq!(*swaps.borrow(), [ProviderId::ClaudeCode]);
             assert!(new_on.borrow().is_empty(), "no new-session detour on a fresh session");
-            assert_eq!(view.read(cx).provider_kind(), ProviderId::Muse, "the view never swaps lanes live");
+            assert_eq!(view.read(cx).rt(cx).provider_kind(), ProviderId::Muse, "the view never swaps lanes live");
         });
         // Picking the session's own lane is a no-op success, like its
         // menu row — a setter, not a toggle — and an unknown id fails
@@ -2078,18 +2095,18 @@ mod tests {
         vc.update(|_, cx| {
             assert_eq!(swaps.borrow().len(), 1, "the unknown id emitted nothing");
             assert!(new_on.borrow().is_empty());
-            assert_eq!(view.read(cx).provider_kind(), ProviderId::Muse);
+            assert_eq!(view.read(cx).rt(cx).provider_kind(), ProviderId::Muse);
         });
         // A session with turns keeps its lane: the verb behaves exactly
         // as the menu does (a new session starts on the pick) and says
         // so as a failure rather than reading as an in-place swap.
         vc.update(|_, cx| {
-            view.update(cx, |view, _cx| {
-                view.append_client_block("t-seed",
+            view.update(cx, |view, cx| {
+                view.runtime().clone().update(cx, |rt, _| rt.append_client_block("t-seed",
                     Block::Text { text: "earlier work".into(), streaming: false },
-                );
+                ));
             });
-            assert!(view.read(cx).has_turns(), "the session has turns in it");
+            assert!(view.read(cx).rt(cx).has_turns(), "the session has turns in it");
         });
         let detour = vc.update(|window, cx| {
             view.update(cx, |view, cx| {
@@ -2100,7 +2117,7 @@ mod tests {
         let reason = detour.expect_err("the detour is a failure, never a silent non-swap");
         assert!(reason.contains("new session"), "the failure says a new session started: {reason}");
         vc.update(|_, cx| {
-            assert_eq!(view.read(cx).provider_kind(), ProviderId::Muse, "the live session never changes lanes");
+            assert_eq!(view.read(cx).rt(cx).provider_kind(), ProviderId::Muse, "the live session never changes lanes");
         });
         // `seteffort:` rides the same shape: a known level applies
         // through the menu's own pick, an unknown spelling fails loudly.
@@ -2116,7 +2133,7 @@ mod tests {
         let reason = unknown.expect_err("an unknown effort level is a failure");
         assert!(reason.contains("sideways"), "the failure names the spelling: {reason}");
         vc.update(|_, cx| {
-            assert_eq!(view.read(cx).effort, Some(aui_protocol::ReasoningEffort::High), "the unknown spelling changed nothing");
+            assert_eq!(view.read(cx).rt(cx).effort, Some(aui_protocol::ReasoningEffort::High), "the unknown spelling changed nothing");
         });
         drop(sub);
     }

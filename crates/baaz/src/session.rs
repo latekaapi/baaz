@@ -1,14 +1,23 @@
-//! One open session: its transcript, the composer, and the centre pane.
+//! One open session: its model, and the centre pane that draws it.
 //!
-//! This is the entity the spec calls `SessionView` (§2.3). It owns one
-//! provider lane ([`lane`]) that folds the provider's neutral
-//! `ProviderEvent`s into the session's `Session` model, plus the composer
-//! draft, the scroll position, and which cards the person folded shut.
-//! Closing the session drops its transcript with it.
+//! Two entities (docs/82 4.8, audit B S-9). A [`SessionRuntime`]
+//! ([`runtime`]) is the session: one provider lane ([`lane`]) that folds
+//! the provider's neutral `ProviderEvent`s into the session's `Session`
+//! model, the turn state, the approvals and questions, the picks, the
+//! outgoing attachments and the banners. It draws nothing and lives in the
+//! application's session registry whether or not anything shows it, so a
+//! turn runs to its end with no view. A [`SessionView`] — the entity the
+//! spec calls `SessionView` (§2.3) — draws one runtime: the transcript list
+//! and its caches, the composer draft, the scroll position, which cards the
+//! person folded shut, the card fields. It sends the person's intents to
+//! the runtime and maps each [`RuntimeEvent`] to one list operation.
+//! Dropping a view loses only its drawing; closing the session drops the
+//! runtime, and its transcript with it.
 //!
-//! Everything it renders is a pure function of that model, recomputed every
-//! frame. Nothing is optimistic except the word "Working…", which the
-//! provider's first turn event immediately replaces with the real turn.
+//! Everything the view renders is a pure function of that model,
+//! recomputed every frame. Nothing is optimistic except the word
+//! "Working…", which the provider's first turn event immediately replaces
+//! with the real turn.
 //!
 //! # The composer controls
 //!
@@ -104,7 +113,7 @@ fn centred(content: impl IntoElement) -> AnyElement {
 /// Whether one assistant turn's reply has fully arrived: at least one text
 /// block, none of them still streaming, and no tool call still running.
 ///
-/// What [`SessionView::reply_complete_for_running_turn`] reads for the
+/// What [`SessionRuntime::reply_complete_for_running_turn`] reads for the
 /// running turn: a complete reply with the turn still open — once a token
 /// reading says the model call that wrote it ended — means Muse is on the
 /// `reminderChild` tail, and the turn reads finished.
@@ -206,12 +215,15 @@ mod composer;
 mod events;
 mod handoff;
 mod lane;
+mod runtime;
 pub(crate) mod pickers;
 mod questions;
 pub(crate) mod render;
 mod scripting;
 mod shell;
 pub(crate) mod spans;
+
+pub use runtime::{RuntimeEvent, SessionRuntime};
 
 /// What every session view is handed by the window that opens it.
 ///
@@ -235,7 +247,7 @@ pub struct SessionHost {
 }
 
 /// Tests: one Muse notification frame for `session_id`, as the wire spells
-/// it, for [`SessionView::apply`].
+/// it, for [`SessionRuntime::apply`].
 #[cfg(test)]
 pub(crate) fn wire_note(method: &str, session_id: &str, mut params: serde_json::Value) -> serde_json::Value {
     if let Some(map) = params.as_object_mut() {
@@ -294,6 +306,26 @@ pub(crate) struct QuoteAnchor {
     pub start: gpui::Point<Pixels>,
     pub end: gpui::Point<Pixels>,
     pub scroll_y: Pixels,
+}
+
+/// The `@` picker's last completed rank and what it was ranked for. The
+/// rank runs on the background executor (a 5 000-path subsequence scan per
+/// keystroke does not belong on the UI thread); the render path reads this
+/// cache and never ranks.
+#[derive(Default)]
+pub(crate) struct MentionRank {
+    /// The ranked paths.
+    cache: Vec<String>,
+    /// The filter `cache` was ranked for.
+    cache_for: String,
+    /// The root `cache` was ranked over: ranks never cross roots.
+    root: String,
+    /// How many files the rank above ran over: a re-walk invalidates it.
+    files_len: usize,
+    /// The filter a background rank is computing, if any.
+    pending: Option<String>,
+    /// Monotonic id for mention ranks; only the latest result is kept.
+    epoch: u64,
 }
 
 /// A shell block's output now: lines, running, exit, and a fetched full
@@ -436,13 +468,12 @@ pub enum SessionEvent {
         /// The session whose reply completed.
         session_id: String,
     },
-    /// A provider lane settled a turn: a `TurnFinished` delta landed. The
-    /// application records the byline, the ledger row and the record bump,
-    /// and moves the one row — for every provider, Muse included
-    /// (docs/70).
-    /// Replayed history settles here too (a reopen replays finished
-    /// turns), and every write below is idempotent, so replays land the
-    /// byline without double-counting the ledger.
+    /// A provider lane settled the turn it was running: a `TurnFinished`
+    /// delta landed for it. The application records the byline, the
+    /// ledger row and the record bump, and moves the one row — for every
+    /// provider, Muse included (docs/70). Replayed history settles through
+    /// [`SessionEvent::HistoryReplayed`] instead, once per batch; every
+    /// write is idempotent, so a replay never double-counts the ledger.
     ProviderTurnFinished {
         /// The lane session that settled.
         session_id: String,
@@ -450,6 +481,18 @@ pub enum SessionEvent {
         turn_id: String,
         /// The turn's final counters, carrying the adapter-reported cost.
         meta: aui_protocol::TurnMeta,
+    },
+    /// A fold batch that landed with nothing in flight finished turns: a
+    /// reopen's replayed history (Claude Code and Codex replay a resumed
+    /// session's stored turns as one batch). The application does its
+    /// settle work once for all of them — one seed write, one batch of
+    /// ledger rows, one row rejoin — where one `ProviderTurnFinished` per
+    /// turn ran it N times (docs/81 A F14).
+    HistoryReplayed {
+        /// The lane session that replayed.
+        session_id: String,
+        /// Each replayed finish, in fold order: `(turn id, final counters)`.
+        turns: Vec<(String, aui_protocol::TurnMeta)>,
     },
     /// The grown lost banner's typed action (Install / Sign in / Update,
     /// docs/71 §3): the application runs the D5 flow of that name for
@@ -673,7 +716,7 @@ struct PendingUnqueue {
 /// collide with a catalog row.
 const MODEL_UNAVAILABLE_ROW: &str = "__models_unavailable";
 
-/// Where a view's own `session/start` stands (see [`SessionView::begin_start`]).
+/// Where a view's own `session/start` stands (see [`SessionRuntime::begin_start`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum StartState {
     /// The server knows the session: every view but a fresh one.
@@ -697,43 +740,13 @@ struct StartQueue {
     sends: Vec<String>,
 }
 
-/// One open Muse session.
+/// The centre pane over one session: the transcript list, the composer and
+/// the card fields, drawn from its [`SessionRuntime`] (see the module doc).
 pub struct SessionView {
-    /// The Muse session id this view follows.
-    pub session_id: String,
-    /// What the view renders, for every lane: the transcript, the facts
-    /// beside it, the changed turns and the prompts this view sent.
-    store: session_store::SessionStore,
-    /// The lane is the read-only one ([`SessionView::new`]): nothing live is
-    /// behind this view, so a provider's offline fallbacks (Claude Code's
-    /// supplied catalog) stand in for asking.
-    read_only: bool,
-    /// Tests: the wire translation [`Self::apply`] folds raw events through.
-    #[cfg(test)]
-    test_wire: provider_muse::replay::Folder,
-    /// A `--replay` session: the transcript is a file, and every command is
-    /// refused rather than quietly dropped.
-    replay: bool,
-    /// `meta`, or `echo` under `BAAZ_PROVIDER=echo`.
-    provider_id: String,
-    /// Which lane owns this view for its whole life: the muse pump or a
-    /// provider task. Set at construction and never reassigned — there is no
-    /// setter, so no code path can attach a second writer.
-    lane: lane::Lane,
-    /// Approvals from a new provider (Claude Code / Codex) waiting on the
-    /// person. The legacy lane has no room for them, so they live here and
-    /// render on the same approvals surface.
-    external_approvals: ExternalApprovalStore,
-    /// Decisions the press sent that the server has not answered yet: the
-    /// `DecideApproval` commands the provider lane drains, oldest first.
-    /// The card waits on them; it never settles on the press.
-    external_outbox: Vec<ProviderCommand>,
-    /// Questions a new provider raised, waiting on the person. The full
-    /// prompt arrived as a delta; this is the tap on the shoulder, kept so
-    /// the question surface can answer it.
-    external_questions: lane::ExternalQuestions,
-    /// The workspace the session runs in, for the header and the empty state.
-    workspace: String,
+    /// The session this view draws: its model, lane and turn state
+    /// ([`SessionRuntime`]). The registry holds it too, so it outlives a
+    /// dropped view.
+    runtime: Entity<SessionRuntime>,
     /// The session's project display name for the empty state ("<provider>
     /// runs in …"): a rename changes it without touching the folder, so the
     /// folder name alone is not it. The window syncs it on every activation.
@@ -886,10 +899,6 @@ pub struct SessionView {
     /// A sent quote's way back to its source in flight (docs/43 §0): the
     /// start, the from / to scroll offsets, and the turn it lands on.
     quote_scroll: Option<(std::time::Instant, gpui::Point<Pixels>, gpui::Point<Pixels>, gpui::ListOffset)>,
-    /// The spans sent quotes were taken from, by (source turn, words): what
-    /// a click on the sent quote flashes. This session's quotes only — a
-    /// reopened session scrolls back without the flash.
-    sent_quote_spans: HashMap<(String, String), (String, aui::transcript::MessageSelection)>,
     /// The span to flash once the quote's scroll lands: (owner, span).
     quote_flash_pending: Option<(String, aui::transcript::MessageSelection)>,
     /// The source span flashing now (docs/43 §0 "flashes the source span's
@@ -901,90 +910,11 @@ pub struct SessionView {
     /// the copy intent and cleared after the library's `COPY_HOLD`, so the
     /// tick reads as a confirmation and then the copy glyph returns.
     copied_turn: Option<String>,
-    /// Last elapsed second the turn ticker painted, so the 1 Hz clock
-    /// notifies only when the displayed number changes (P2).
-    last_tick_secs: Option<u64>,
-    running: Option<Running>,
-    /// Turn ids this view already saw complete. A `turn/started` for one of
-    /// them is the re-attach replay, not new work, and never marks running.
-    completed_turns: HashSet<String>,
-    /// Provider lane: submit-ack turn id → the id that turn streams under,
-    /// from the adapter's `TurnIdentified` (Claude Code acks before the
-    /// CLI names the turn). Everything keyed by an ack's id resolves
-    /// through [`SessionView::streamed_turn_id`]. Bounded like
-    /// `completed_turns`.
-    turn_aliases: HashMap<String, String>,
     /// Q1b: tool-call id → the wall time (epoch ms) its block first
     /// appeared. Stamped in `refresh_render_cache` where applied deltas
     /// materialise, read back through the transcript `Folds` so live run
     /// rows tick from the run's first member start.
     tool_first_seen: HashMap<String, u64>,
-    /// A `turn/start` is in flight and no `turn/started` has arrived yet.
-    submitting: bool,
-    /// Optimistic user turns folded at send, oldest first, waiting on the
-    /// provider's own user turn to replace them (X1). A refused submit or
-    /// a dead connection removes them; each echo consumes the earliest
-    /// still pending (X1b). An early stop drains them and hands the newest
-    /// text back to the composer.
-    pending_optimistic: Vec<PendingOptimistic>,
-    /// The running turn whose last model call ended on a whole reply: a
-    /// token-usage reading landed while its reply stood complete. What
-    /// [`Self::on_reminder_tail`] stands on, so a reply that completes
-    /// while the model is still composing its next tool call never reads
-    /// as finished. Cleared when the turn moves on or ends.
-    reply_done: Option<String>,
-    /// `fixture-models` filled the model menu: no catalog request may
-    /// replace it (captures only).
-    models_fixture: bool,
-    /// Sends made during the reminder tail that the provider queued, by
-    /// request id → their optimistic bubble: the bubble stands for the
-    /// queued words (no queue-strip row) until the turn starts and its
-    /// echo replaces it.
-    tail_queued: HashMap<String, String>,
-    /// History is still being paged in behind the live stream.
-    loading_history: bool,
-    /// A `view/page` chain is in flight. Separate from `loading_history`,
-    /// which the open path raises before the resume ack so the first frame
-    /// shows the loading row: guarding the chain on the display flag made
-    /// `backfill` skip every cache-miss open.
-    backfill_running: bool,
-    /// A stale-sidecar page failure was already retried once in this backfill
-    /// chain: the second failure reports instead.
-    backfill_stale_retried: bool,
-    /// The lane backfill's page in flight is its first: the tail-pin cue
-    /// follows it.
-    backfill_first: bool,
-    /// The lease is gone — the session is open in another window (or the
-    /// child that held it exited) — so nothing is sent until a later resume
-    /// succeeds. `Some` is the banner text, re-shown on
-    /// every refused send so a dismissal cannot strand a silent refusal.
-    lease_notice: Option<String>,
-    /// The inline banner over the composer: one recoverable command error.
-    banner: Option<String>,
-    /// The banner's action, when the error is one the person can do something
-    /// about: the label and what pressing it does.
-    banner_action: Option<BannerAction>,
-    /// The banner shows the Auto-fallback notice (a model pick left Auto
-    /// for Ask), which a later mode pick takes down.
-    banner_is_mode_fallback: bool,
-    /// When the lane's child last died with no turn finished since: a
-    /// second death inside [`LOST_TWICE_WINDOW`] turns the banner into the
-    /// failure view. A finished turn clears it.
-    lost_at: Option<std::time::Instant>,
-    /// The lane's child died twice within [`LOST_TWICE_WINDOW`] (docs/71
-    /// §2): the lost banner grows in place into the typed failure — the
-    /// kind's sentence, the child's last stderr lines, Retry and the kind's
-    /// action — under the transcript, which stays (owner 2026-10-30: the
-    /// old full-centre view hid the conversation and the composer). A
-    /// restored connection or a finished turn takes it down.
-    child_failure: Option<ChildFailure>,
-    /// The billing guard's banner, and whether it is refusing turns.
-    tier_banner: Option<TierBanner>,
-    /// A live Muse draft opened while Muse itself is still starting (it
-    /// starts on demand, docs/50 P1): the chip and the model menu say so
-    /// instead of reading "Muse" over an empty menu. Set by the
-    /// application, which owns the connection.
-    muse_starting: bool,
     /// Which approval's feedback field is open, as `(approvalId, choiceId)`.
     feedback_open: Option<(String, String)>,
     /// The feedback field itself. The card never owns text; this does.
@@ -998,20 +928,6 @@ pub struct SessionView {
     selections: HashMap<String, Vec<usize>>,
     /// Which option previews are expanded, keyed by the question block's id.
     previews: HashMap<String, Vec<usize>>,
-    /// Answers gathered so far for a multi-question request, keyed by
-    /// `userInputId` then `questionId`. MSP settles the whole prompt at once, so
-    /// the app holds the earlier answers until the last question is answered.
-    answers: HashMap<String, HashMap<String, provider::QuestionAnswer>>,
-    /// When each pending question's auto-resolution clock started, keyed by
-    /// `userInputId`. MSP sends a duration, never a deadline.
-    question_started: HashMap<String, Instant>,
-    /// When the live `turn/retryScheduled` was observed, for the same reason.
-    retry_started: Option<(String, Instant)>,
-    /// A 1 s clock, held only while a countdown is on screen.
-    countdown: Option<Task<()>>,
-    /// Whether `initialize` granted the `userShell` capability. Without it the
-    /// `!` path is disabled and says so rather than failing on the wire.
-    user_shell: bool,
     /// Session id → the label the sidebar shows for it, so a `ForkedFrom`
     /// marker can name its source rather than print a uuid.
     titles: Rc<HashMap<String, String>>,
@@ -1028,86 +944,6 @@ pub struct SessionView {
     /// The window's terminal tabs, for the D51 live mirror: `None` in
     /// replays and tests, where cards render their folded text.
     terminal_host: Option<Entity<crate::terminal::TerminalHost>>,
-    /// A prompt handed back by a retraction, waiting for a frame with a
-    /// `Window` in it to reach the composer.
-    pending_prompt: Option<String>,
-    /// The model catalog, fetched when the picker opens. A snapshot: MSP has no
-    /// catalog subscription.
-    models: Vec<ModelCatalogEntry>,
-    /// Why the catalog is missing, when it is: the typed reason the picker
-    /// shows instead of a silently empty menu. `None` means the last fetch
-    /// succeeded (or none ran yet).
-    models_error: Option<String>,
-    /// The model the person picked on the provider lane (Claude Code /
-    /// Codex): what the chip reads until the server echoes. The muse lane
-    /// never sets this — its chip moves only on `session/modelChanged` —
-    /// and no lane ever changes provider, which has no setter by design.
-    pending_model: Option<String>,
-    /// A muse mode pick's two wire steps (approval mode and permission
-    /// profile) are on the wire. Picks never interleave: one runs at a
-    /// time, and the latest pick made meanwhile waits in
-    /// [`SessionView::mode_pick_queued`].
-    mode_pick_in_flight: bool,
-    /// The newest muse mode pick made while another was on the wire —
-    /// latest wins, an earlier waiting pick is dropped.
-    mode_pick_queued: Option<PermissionMode>,
-    /// The Claude Code chip's pre-first-turn seed, resolved once: it reads
-    /// up to four files, and the composer asks for it on every frame.
-    claude_seed_label: std::cell::OnceCell<SharedString>,
-    /// The last model a finished turn reported on the provider lane, in
-    /// arrival order: replayed history's footers land here first, so a
-    /// reopened session's chip names the session's model instead of the
-    /// provider. A later pick (see [`SessionView::pending_model`]) or a
-    /// live catalog row still wins; the muse lane never sets this.
-    history_model: Option<String>,
-    /// The Codex catalog's per-model reasoning levels, folded from the
-    /// neutral catalog: model id → its `supportedReasoningEfforts`, in
-    /// provider order. A snapshot like [`SessionView::models`], keyed because
-    /// the effort menu follows the *selected* model, not the provider.
-    codex_efforts: HashMap<String, Vec<provider_codex::child::SupportedEffort>>,
-    /// The Claude Code catalog's per-model effort levels, folded from the
-    /// `initialize` answer's `models[]`: catalog `value` → its
-    /// `supportedEffortLevels`. A snapshot like [`SessionView::codex_efforts`];
-    /// a row that names no levels (Haiku) maps to an empty list, which the
-    /// effort menu explains instead of listing the launch flag's levels.
-    claude_efforts: HashMap<String, Vec<String>>,
-    /// The approval modes each catalog model cannot run in, folded from
-    /// the neutral catalog's `unavailable_modes` (Claude Code: Auto on a
-    /// row without `supportsAutoMode`). Model id → its limits; a model
-    /// with none has no entry. The mode picker reads it for the chip's
-    /// model, so a refused switch is explained before it is tried.
-    mode_limits: HashMap<String, Vec<PermissionMode>>,
-    /// The session's reasoning effort. `None` is "Default", which omits the
-    /// field; client-side, because nothing on the wire reflects it back.
-    effort: Option<ReasoningEffort>,
-    /// Plan mode, a client-side overlay (spec §3.1).
-    plan: bool,
-    /// The approval mode plan mode displaced, restored on Accept or Reject.
-    plan_previous_mode: Option<PermissionMode>,
-    /// The turn started in plan mode, whose reply becomes a `Block::Plan`.
-    plan_turn: Option<String>,
-    /// Monotonic id source for the client-authored plan turns.
-    plan_seq: u64,
-    /// Images waiting to go out with the next turn.
-    images: Vec<images::Image>,
-    /// Monotonic id source for image chips.
-    image_seq: u64,
-    /// Files waiting to go out with the next turn, as extracted text.
-    files: Vec<attachments::AttachedFile>,
-    /// Monotonic id source for file chips.
-    file_seq: u64,
-    /// Attachments that could not be read (D4): a failed chip each, the
-    /// reason as its meta, until ✕ removes it. `(chip id, name, reason)`.
-    failed_chips: Vec<(String, String, String)>,
-    /// Quotations waiting to go out with the next turn (D4): the words and
-    /// the turn they were quoted from.
-    quotes: Vec<QuoteDraft>,
-    /// The next quote block's number (ids stay unique per view).
-    quote_seq: u64,
-    /// A Browse annotation batch waiting to go out with the next turn.
-    annotation_draft: Option<crate::sent::SentAnnotations>,
-    /// What each sent turn carried (D4, `crate::sent`), in send order.
-    sent_items: Vec<crate::sent::SentItem>,
     /// [`Self::sent_items`] paired with the transcript's user turns, by turn
     /// id: refreshed with the render cache.
     sent_pairs: Rc<HashMap<String, crate::sent::SentItem>>,
@@ -1125,9 +961,6 @@ pub struct SessionView {
     /// (0 = none), so the deterministic clock a refresh reads is resumed
     /// at the rebuilt turn instead of re-walking the transcript.
     ts_prefix: Vec<u64>,
-    /// The turn count when created files were last recorded: the next
-    /// settle scans from there (`None`: never, so it sweeps everything).
-    created_files_through: Option<usize>,
     /// A drag is over the window, so the drop overlay is up.
     dragging: bool,
     /// Whether the composer's draft trims to nothing.
@@ -1139,81 +972,14 @@ pub struct SessionView {
     /// programmatically, which emit no change event at all — the library's
     /// `set_value` suppresses them on purpose.
     draft_empty: bool,
-    /// Where the composer is in this workspace's prompt history.
-    history: history::Cursor,
-    /// The `@` picker's last completed rank and what it was ranked for. The
-    /// rank runs on the background executor (a 5 000-path subsequence scan per
-    /// keystroke does not belong on the UI thread); the render path reads this
-    /// cache and never ranks.
-    mention_cache: Vec<String>,
-    /// The filter `mention_cache` was ranked for.
-    mention_cache_for: String,
-    /// The root `mention_cache` was ranked over: ranks never cross roots.
-    mention_cache_root: String,
-    /// How many files the rank above ran over: a re-walk invalidates it.
-    mention_files_len: usize,
-    /// The filter a background rank is computing, if any.
-    mention_pending: Option<String>,
-    /// Monotonic id for mention ranks; only the latest result is kept.
-    mention_epoch: u64,
-    /// The canonical workspace key the history file is written under.
-    workspace_key: String,
-    /// Queued turns whose unqueue is in flight, with the intent and the text
-    /// captured when the row's button was clicked.
-    unqueueing: HashMap<String, PendingUnqueue>,
-    /// "Show full output" fetches by tool block id: what the server's stored
-    /// bytes came back as. The fold keeps the fetch handle (`outputRef`); this
-    /// keeps the result, so the card renders fetched lines without the fold
-    /// ever changing.
-    full_outputs: HashMap<String, full_output::Fetch>,
-    /// A synthetic `session/contextUsage`, for a scripted capture of a pressure
-    /// state the echo provider cannot reach.
-    fake_context: Option<provider::facts::ContextReading>,
+    /// The `@` picker's background rank: what the render path reads, never
+    /// ranks (see [`MentionRank`]).
+    mention: MentionRank,
     focus: FocusHandle,
     tasks: Vec<Task<()>>,
-    /// Held only while a turn runs, so the elapsed time advances.
-    ticker: Option<Task<()>>,
-    /// `BAAZ_TRACE` send trace: the turn count when the traced send left, so
-    /// `first-reply-painted` waits for its user turn and a reply after it.
-    pub(crate) send_trace_turns: Option<usize>,
     /// Held while a terminal card's command runs: the mirror's next refresh
     /// (see `TERMINAL_MIRROR_TICK`). One at a time; it clears itself.
     terminal_tick: Option<Task<()>>,
-    /// The handoff card's render state on this (source) session: the run's
-    /// card, refreshed on every transition. `None` when no handoff ever
-    /// started here (see [`crate::handoff`]).
-    handoff_card: Option<Block>,
-    /// This session was retired by a handoff: the destination provider and
-    /// session id. The composer refuses sends and names the new session.
-    handed_off_to: Option<(ProviderId, String)>,
-    /// A provider switch is replacing this view (Y2b): sends are refused
-    /// while the replacement opens, keeping the old view drawable.
-    input_locked: bool,
-    /// Where this view's own `session/start` stands. A new muse session
-    /// opens its view on the click, before the server answers, so sends
-    /// made meanwhile wait for the start instead of reaching a session the
-    /// server does not know yet.
-    start: StartState,
-    /// The switch's pick, for the composer chip while this view is still
-    /// drawn: the lane itself never changes, only the displayed mark.
-    switching_to: Option<ProviderId>,
-    /// This session started as a handoff's destination: where it came from.
-    /// Drawn as the quiet marker at the top of the transcript.
-    handoff_origin: Option<crate::handoff::HandoffOrigin>,
-    /// The handoff prefix: the source transcript's turns at activation,
-    /// view-side so provider deltas never touch them. Read-only history the
-    /// destination renders above its own turns (`docs/22-handoff.md` §8).
-    handoff_prefix: Rc<Vec<Rc<Turn>>>,
-    /// The one divider between the prefix and this session's own turns.
-    /// View-side like the prefix: it replaces the old fold-written origin
-    /// marker, so exactly one divider stands per handoff, never two.
-    handoff_divider: Option<Rc<Turn>>,
-    /// The pack's full model-visible text and its short summary bubble text:
-    /// what identifies the destination's first user turn so the view can
-    /// hide it (the divider stands for it). The pack stays in the provider
-    /// history untouched.
-    handoff_pack_full: Option<String>,
-    handoff_pack_display: Option<String>,
     /// The hidden pack bubble's turn id, found on the last cache refresh:
     /// what keeps the per-frame sync check O(1).
     handoff_pack_hidden: Option<String>,
@@ -1222,13 +988,8 @@ pub struct SessionView {
     /// for both). Found on the same refresh; the turn stays in the provider
     /// history, only undrawn.
     handoff_pack_reply_hidden: Option<String>,
-    /// Full provider-submitted text → bubble text for submits that carried
-    /// `display_text`, mirrored from the provider session record on first
-    /// use. `None` until a provider submit records one or a replayed delta
-    /// needs a lookup: the lazy load keeps sessions that never submit with
-    /// a display text off the store entirely.
-    display_overrides: Option<HashMap<String, String>>,
     _subscriptions: Vec<gpui::Subscription>,
+
 }
 
 impl EventEmitter<SessionEvent> for SessionView {}
@@ -1239,36 +1000,44 @@ impl WireCall for SessionView {
     }
 }
 
-impl SessionView {
-    /// A view over `session_id` with nothing live behind it: a replayed
+impl SessionRuntime {
+    /// A runtime over `session_id` with nothing live behind it: a replayed
     /// capture, an offline row, a test. It rides a read-only lane that
     /// answers the catalog and pending pulls with nothing and refuses every
     /// command that would act, saying why.
-    pub fn new(session_id: String, host: SessionHost, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn read_only(session_id: String, provider_id: String, workspace: String, cx: &mut Context<Self>) -> Self {
         use provider::ProviderAdapter as _;
         let mut lane = provider_muse::replay::ReadOnly::new("Nothing is running behind this session here: it is read-only.");
         let _ = lane.connect(&crate::conn::connect_info());
         let (provider, events) = crate::conn::gate_quiet(provider::Provider::new(lane));
-        let mut this = Self::new_unowned(session_id, host, window, cx);
+        let mut this = Self::new(session_id, provider_id, workspace);
         this.read_only = true;
         this.install_lane(provider, events, cx);
         this
     }
+}
 
-    /// The shared half of both lane constructors: every field except the
-    /// lane itself and the lane's subscription. The muse constructor runs
-    /// this and hands over its child; the provider constructor runs this,
-    /// records its session in the fold, and spawns its drain task.
-    fn new_unowned(
-        session_id: String,
-        host: SessionHost,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let SessionHost { provider_id, workspace, overlays, capture, terminal_host } = host;
+impl SessionView {
+    /// A view over `session_id` with nothing live behind it: a replayed
+    /// capture, an offline row, a test — over a fresh read-only runtime
+    /// ([`SessionRuntime::read_only`]).
+    pub fn new(session_id: String, host: SessionHost, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (provider_id, workspace) = (host.provider_id.clone(), host.workspace.clone());
+        let runtime = cx.new(|cx| SessionRuntime::read_only(session_id, provider_id, workspace, cx));
+        Self::over(runtime, host, window, cx)
+    }
+
+    /// A view over `runtime`: every view field, the composer and the card
+    /// fields, and the two links to the runtime — its notify redraws this
+    /// view, and each [`RuntimeEvent`] is one list operation here. Views
+    /// are made on demand over a runtime the registry already holds, so a
+    /// dropped (evicted) view is built again over the same session.
+    pub fn over(runtime: Entity<SessionRuntime>, host: SessionHost, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let SessionHost { provider_id: _, workspace: _, overlays, capture, terminal_host } = host;
+        let provider = runtime.read(cx).provider_kind();
         // The empty composer names the session's own provider: the person
         // is asking whoever this session runs on, never a hardcoded Muse.
-        let composer_placeholder = ProviderId::parse(&provider_id).composer_placeholder();
+        let composer_placeholder = provider.composer_placeholder();
         let composer =
             cx.new(|cx| composer_state_rows(composer_placeholder.clone(), 1, 8, window, cx));
         // Typing is what opens, filters and closes the caret popovers, and what
@@ -1280,7 +1049,7 @@ impl SessionView {
         });
         // The feedback fields name the same provider: whoever reads the
         // answer is whoever the session runs on.
-        let provider_label = ProviderId::parse(&provider_id).label();
+        let provider_label = provider.label();
         let feedback = cx.new(|cx| {
             composer_state_rows(format!("Why not? {provider_label} reads this."), 2, 4, window, cx)
         });
@@ -1303,21 +1072,14 @@ impl SessionView {
                 cx.notify();
             }
         });
-        let workspace_key = workspace.clone();
-        let sent_items = crate::sent::load(&session_id);
+        // Whatever the runtime notifies (a banner, a chip, a clock) this view
+        // draws; the root is not told.
+        let redraw = cx.observe(&runtime, |_, _, cx| cx.notify());
+        let events = cx.subscribe(&runtime, |this: &mut Self, _, event: &RuntimeEvent, cx| {
+            this.on_runtime_event(event, cx);
+        });
         Self {
-            store: session_store::SessionStore::new(&session_id, aui_protocol::Provider::Muse, workspace_key.clone()),
-            read_only: false,
-            #[cfg(test)]
-            test_wire: provider_muse::replay::Folder::new(),
-            session_id,
-            replay: false,
-            provider_id,
-            lane: lane::Lane::unattached(),
-            external_approvals: ExternalApprovalStore::empty(),
-            external_outbox: Vec::new(),
-            external_questions: lane::ExternalQuestions::default(),
-            workspace,
+            runtime,
             project_name: None,
             composer,
             overlays,
@@ -1369,114 +1131,73 @@ impl SessionView {
             quote_anchor: None,
             quote_dismiss: false,
             quote_scroll: None,
-            sent_quote_spans: HashMap::new(),
             quote_flash_pending: None,
             quote_flash: None,
             transcript_bounds: None,
             copied_turn: None,
-            last_tick_secs: None,
-            running: None,
-            completed_turns: HashSet::new(),
-            turn_aliases: HashMap::new(),
             tool_first_seen: HashMap::new(),
-            submitting: false,
-            pending_optimistic: Vec::new(),
-            reply_done: None,
-            models_fixture: false,
-            tail_queued: HashMap::new(),
-            loading_history: false,
-            backfill_running: false,
-            backfill_stale_retried: false,
-            backfill_first: false,
-            lease_notice: None,
-            banner: None,
-            banner_is_mode_fallback: false,
-            lost_at: None,
-            child_failure: None,
-            banner_action: None,
-            tier_banner: None,
-            muse_starting: false,
             feedback_open: None,
             feedback,
             clarify_open: None,
             clarify,
             selections: HashMap::new(),
             previews: HashMap::new(),
-            answers: HashMap::new(),
-            question_started: HashMap::new(),
-            retry_started: None,
-            countdown: None,
-            user_shell: true,
             titles: Rc::new(HashMap::new()),
             at_rest: false,
             capture,
             terminal_host,
-            pending_prompt: None,
-            models: Vec::new(),
-            models_error: None,
-            pending_model: None,
-            mode_pick_in_flight: false,
-            mode_pick_queued: None,
-            claude_seed_label: std::cell::OnceCell::new(),
-            history_model: None,
-            codex_efforts: HashMap::new(),
-            claude_efforts: HashMap::new(),
-            mode_limits: HashMap::new(),
-            effort: None,
-            plan: false,
-            plan_previous_mode: None,
-            plan_turn: None,
-            plan_seq: 0,
-            images: Vec::new(),
-            image_seq: 0,
-            files: Vec::new(),
-            file_seq: 0,
-            failed_chips: Vec::new(),
-            quotes: Vec::new(),
-            quote_seq: 0,
-            annotation_draft: None,
-            sent_items,
             sent_pairs: Rc::new(HashMap::new()),
             sent_cursors: Vec::new(),
             sent_cursor_items: 0,
             card_sites: Vec::new(),
             ts_prefix: Vec::new(),
-            created_files_through: None,
             dragging: false,
             draft_empty: true,
-            history: history::Cursor::new(Vec::new()),
-            workspace_key,
-            mention_cache: Vec::new(),
-            mention_cache_for: String::new(),
-            mention_cache_root: String::new(),
-            mention_files_len: 0,
-            mention_pending: None,
-            mention_epoch: 0,
-            unqueueing: HashMap::new(),
-            full_outputs: HashMap::new(),
-            fake_context: None,
+            mention: MentionRank::default(),
             focus: cx.focus_handle(),
             tasks: Vec::new(),
-            ticker: None,
             terminal_tick: None,
-            send_trace_turns: None,
-            handoff_card: None,
-            handed_off_to: None,
-            input_locked: false,
-            start: StartState::Started,
-            switching_to: None,
-            handoff_origin: None,
-            handoff_prefix: Rc::new(Vec::new()),
-            handoff_divider: None,
-            handoff_pack_full: None,
-            handoff_pack_display: None,
             handoff_pack_hidden: None,
             handoff_pack_reply_hidden: None,
-            display_overrides: None,
-            _subscriptions: vec![subscription, layout_watch],
+            _subscriptions: vec![subscription, layout_watch, redraw, events],
         }
     }
 
+    /// The runtime this view draws.
+    pub fn runtime(&self) -> &Entity<SessionRuntime> {
+        &self.runtime
+    }
+
+    /// The runtime's state, read for a frame or a question.
+    pub fn rt<'a>(&self, cx: &'a gpui::App) -> &'a SessionRuntime {
+        self.runtime.read(cx)
+    }
+
+    /// One runtime event, one list operation: transcript changes refresh the
+    /// rows from the change and keep the tail; a decision closes the field
+    /// open on it; stale menus re-read their checks; a toast goes up.
+    fn on_runtime_event(&mut self, event: &RuntimeEvent, cx: &mut Context<Self>) {
+        match event {
+            RuntimeEvent::EntriesAppended
+            | RuntimeEvent::EntryUpdated(_)
+            | RuntimeEvent::EntriesRemoved
+            | RuntimeEvent::ApprovalRequested => self.follow = true,
+            RuntimeEvent::ApprovalDecided(approval_id) => self.close_feedback_for(approval_id),
+            RuntimeEvent::CardsChanged => self.refresh_render_cache(cx),
+            RuntimeEvent::MenusStale => {
+                self.sync_model_menu_check(cx);
+                self.sync_mode_menu_check(cx);
+            }
+            RuntimeEvent::Toast { title, body } => {
+                let (title, body) = (title.clone(), body.clone());
+                self.overlays.update(cx, |overlays, _| overlays.toast(title, body));
+            }
+        }
+        cx.notify();
+    }
+}
+
+impl SessionRuntime {
     /// The folded transcript, once anything has arrived.
     pub fn session(&self) -> Option<&Session> {
         self.store.session()
@@ -1514,19 +1235,23 @@ impl SessionView {
             self.on_provider_event(event, cx);
         }
     }
+}
 
+impl SessionView {
     /// B8c: the cached Changes-pane edit list when it is still fresh — `Some`
     /// when the turns have not moved under it — so the shell render pays no
     /// block scan on a steady frame. `None` means the caller must
     /// [`Self::refresh_session_edits`] under update.
-    pub fn fresh_session_edits(&self) -> Option<Vec<String>> {
-        let key = match self.session() {
+    pub fn fresh_session_edits(&self, cx: &gpui::App) -> Option<Vec<String>> {
+        let key = match self.runtime.read(cx).session() {
             Some(session) => crate::transcript::edited_paths_cache_key(&session.turns),
             None => crate::transcript::edited_paths_cache_key(&[]),
         };
         (self.cached_session_edits_key == Some(key)).then(|| self.cached_session_edits.clone())
     }
+}
 
+impl SessionRuntime {
     /// D6: a shell block's current output — lines, still running, exit —
     /// and the fetched full output when one landed, for the output view.
     pub fn tool_output(&self, block_id: &str) -> Option<ToolOutputNow> {
@@ -1558,12 +1283,14 @@ impl SessionView {
     pub fn turn_edits(&self, turn_id: &str) -> Vec<String> {
         self.session().map(|s| crate::transcript::turn_edited_paths(&s.turns, turn_id)).unwrap_or_default()
     }
+}
 
+impl SessionView {
     /// B8c: recompute the Changes-pane edit list, store it with its key, and
     /// return it. Call only when [`Self::fresh_session_edits`] reports stale;
     /// with no session open this stores (and returns) the empty list.
-    pub fn refresh_session_edits(&mut self) -> Vec<String> {
-        let (key, edits) = match self.session() {
+    pub fn refresh_session_edits(&mut self, cx: &gpui::App) -> Vec<String> {
+        let (key, edits) = match self.runtime.read(cx).session() {
             Some(session) => (
                 crate::transcript::edited_paths_cache_key(&session.turns),
                 crate::transcript::session_edited_paths(&session.turns),
@@ -1574,7 +1301,9 @@ impl SessionView {
         self.cached_session_edits_key = Some(key);
         edits
     }
+}
 
+impl SessionRuntime {
     /// The last view cursor the fold observed, which is what a reconnect's
     /// `session/resume` needs.
     pub fn last_cursor(&self) -> Option<String> {
@@ -1680,7 +1409,7 @@ impl SessionView {
     /// the provider lane to drain. The card waits on these; it never
     /// settles on the press.
     ///
-    /// [`SessionView::decide_external_approval`] drains this the moment a
+    /// [`SessionRuntime::decide_external_approval`] drains this the moment a
     /// press lands, oldest first, through the lane's dispatch point.
     pub fn take_external_outbox(&mut self) -> Vec<ProviderCommand> {
         std::mem::take(&mut self.external_outbox)
@@ -2000,7 +1729,7 @@ impl SessionView {
         self.store.session()
     }
 
-        pub fn busy(&self) -> bool {
+    pub fn busy(&self) -> bool {
         self.running.is_some() || self.submitting
     }
 
@@ -2077,11 +1806,7 @@ impl SessionView {
     /// before `turn/completed`.
     #[cfg(test)]
     pub fn reply_complete_for_running_turn(&self) -> bool {
-        let Some(running) = self.running.as_ref() else { return false };
-        self.cached_turns
-            .iter()
-            .find(|turn| turn.id() == running.turn_id)
-            .is_some_and(|turn| reply_complete(turn))
+        self.reply_complete_in_fold()
     }
 
     /// [`Self::reply_complete_for_running_turn`] off the fold itself, which
@@ -2145,7 +1870,9 @@ impl SessionView {
     pub fn working(&self) -> bool {
         self.busy() && !self.saving_memories()
     }
+}
 
+impl SessionView {
     /// Whether the composer is empty, which is what Escape branches on — and
     /// what the send button is enabled by, once a frame (finding
     /// `performance-8`).
@@ -2178,9 +1905,11 @@ impl SessionView {
         self.draft_is_empty(cx)
             && !self.card_field_open()
             && (self.newest_pending_approval().is_some()
-                || !self.external_approvals.pending().is_empty())
+                || !self.runtime.read(cx).external_approvals.pending().is_empty())
     }
+}
 
+impl SessionRuntime {
     /// The approval waiting on the person, as one line for the agent card
     /// (R3): a provider's own headline, or a plain ask for the server's.
     pub(crate) fn pending_approval_line(&self) -> Option<String> {
@@ -2207,7 +1936,7 @@ impl SessionView {
                 None => approval.headline.clone(),
             });
         }
-        self.newest_pending_approval().map(|_| "This action needs your OK".to_owned())
+        self.has_pending_approval_card().then(|| "This action needs your OK".to_owned())
     }
 
     /// The provider's pending approvals, `(id, headline)`, oldest first.
@@ -2244,7 +1973,9 @@ impl SessionView {
             }
         }
     }
+}
 
+impl SessionView {
     /// ⏎ on an empty composer with an approval pending (D4, the card's
     /// `⏎ allow` hint): the approving choice — the server's first Once /
     /// for-the-session choice, or a provider's Accept. Returns whether it
@@ -2271,7 +2002,7 @@ impl SessionView {
             let _ = self.step_choose(&(index + 1).to_string(), window, cx);
             return true;
         }
-        if self.external_approvals.pending().is_empty() {
+        if self.runtime.read(cx).external_approvals.pending().is_empty() {
             return false;
         }
         let wanted = if allow { crate::providers::ApprovalChoice::Accept } else { crate::providers::ApprovalChoice::Decline };
@@ -2287,20 +2018,24 @@ impl SessionView {
         // card's choices, or with nothing pending, presses nothing.
         let _ = self.step_choose(&(index + 1).to_string(), window, cx);
     }
+}
 
+impl SessionRuntime {
     /// Whether plan mode is on, for the app's Shift+Tab.
     pub fn plan_mode(&self) -> bool {
         self.plan
     }
+}
 
+impl SessionView {
     /// What the application knows and the session does not: what the other
-    /// sessions in this workspace are called (for a `ForkedFrom` marker), and
-    /// whether `initialize` granted `userShell`.
-    pub fn set_context(&mut self, titles: HashMap<String, String>, user_shell: bool) {
+    /// sessions in this workspace are called (for a `ForkedFrom` marker).
+    pub fn set_context(&mut self, titles: HashMap<String, String>) {
         self.titles = Rc::new(titles);
-        self.user_shell = user_shell;
     }
+}
 
+impl SessionRuntime {
     /// The billing guard's banner, or `None` when the login's tier is fine.
     ///
     /// Pushed by the application, which owns the probe: the session view knows
@@ -2318,7 +2053,9 @@ impl SessionView {
             cx.notify();
         }
     }
+}
 
+impl SessionView {
     /// "Send anyway" on the pay-as-you-go banner: the person accepts the
     /// bill for this run (the application keeps that, on
     /// [`SessionEvent::TierOverride`]) and the message the guard held back
@@ -2327,16 +2064,17 @@ impl SessionView {
     /// here first because the application's banner push lands only after
     /// this update; it would otherwise refuse the very send it allows.
     pub(crate) fn send_anyway(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(banner) = self.tier_banner.as_mut() {
+        if let Some(banner) = self.runtime.as_mut(cx).tier_banner.as_mut() {
             banner.blocking = false;
         }
         cx.emit(SessionEvent::TierOverride);
         // A refused send restores its words on the next frame; a press
         // before that frame sends them from here rather than from an
         // empty composer.
-        if let Some(text) = self.pending_prompt.take() {
+        let held = self.runtime.update(cx, |rt, _| rt.pending_prompt.take());
+        if let Some(text) = held {
             self.dispatch_text(text, window, cx);
-        } else if !self.draft_is_empty(cx) || !self.images.is_empty() || !self.files.is_empty() {
+        } else if !self.draft_is_empty(cx) || !self.runtime.read(cx).images.is_empty() || !self.runtime.read(cx).files.is_empty() {
             self.send(window, cx);
         }
         cx.notify();
@@ -2391,13 +2129,17 @@ impl SessionView {
     pub(crate) fn at_transcript_end(&self) -> bool {
         self.list_state.is_scrolled_to_end().unwrap_or(true)
     }
+}
 
+impl SessionRuntime {
     /// Whether the transcript is still being read back from the provider
     /// (its end is not the session's end yet).
     pub(crate) fn history_loading(&self) -> bool {
         self.loading_history
     }
+}
 
+impl SessionView {
     /// Text size or density changed: every transcript row is now a
     /// different height, but the list keeps the heights it measured at the
     /// old sizes until something asks again, so a transcript read at its end
@@ -2412,14 +2154,18 @@ impl SessionView {
     pub fn set_at_rest(&mut self, at_rest: bool) {
         self.at_rest = at_rest;
     }
+}
 
+impl SessionRuntime {
     /// Whether this view folds a capture file rather than a live session.
     /// Replayed views are never parked in the session cache: their transcript
     /// is the file, and reopening re-reads it.
     pub fn is_replay(&self) -> bool {
         self.replay
     }
+}
 
+impl SessionView {
     /// Pin the tail after history landed. The application calls this on
     /// [`SessionEvent::HistoryReady`], which the backfill emits after its
     /// first page — not at the end — so later pages keep arriving under a
@@ -2428,7 +2174,9 @@ impl SessionView {
         self.follow = true;
         cx.notify();
     }
+}
 
+impl SessionRuntime {
     /// Fold a capture into this view: `--replay` (decision A0). The capture
     /// folds through the same translation a live Muse lane does, at once and
     /// with no child and no wire, so screenshots cost nothing. The view
@@ -2445,7 +2193,7 @@ impl SessionView {
         }
         self.fold_provider_events(capture.events(), cx);
         self.observe_clocks(cx);
-        self.follow = true;
+        cx.emit(RuntimeEvent::EntriesAppended);
         cx.notify();
     }
 
@@ -2459,10 +2207,12 @@ impl SessionView {
         for (command_id, text) in sent {
             self.remember_command(&command_id, &text);
         }
-        self.follow = true;
+        cx.emit(RuntimeEvent::EntriesAppended);
         cx.notify();
     }
+}
 
+impl SessionView {
     /// Drive the transcript list to `frac` of the folded turns (0 = top,
     /// 1 = tail) without touching the pointer, for `--bench --bench-scroll`.
     pub fn bench_scroll_to(&mut self, frac: f32, cx: &mut Context<Self>) {
@@ -2517,8 +2267,8 @@ impl SessionView {
     pub(crate) fn take_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Draft {
         let draft = Draft {
             text: self.composer.read(cx).value().to_string(),
-            images: std::mem::take(&mut self.images),
-            files: std::mem::take(&mut self.files),
+            images: self.runtime.update(cx, |rt, _| std::mem::take(&mut rt.images)),
+            files: self.runtime.update(cx, |rt, _| std::mem::take(&mut rt.files)),
         };
         self.composer.update(cx, |state, cx| state.set_value(String::new(), window, cx));
         self.on_draft_changed(cx);
@@ -2528,12 +2278,14 @@ impl SessionView {
     /// Receive a moved-in draft. The images and files land first so the
     /// composer's own write sees the state the next send will read.
     pub(crate) fn put_draft(&mut self, draft: Draft, window: &mut Window, cx: &mut Context<Self>) {
-        self.images = draft.images;
-        self.files = draft.files;
+        self.runtime.as_mut(cx).images = draft.images;
+        self.runtime.as_mut(cx).files = draft.files;
         self.set_draft(draft.text, window, cx);
         self.on_draft_changed(cx);
     }
+}
 
+impl SessionRuntime {
     /// The approval mode and effort this unsent draft stands on — what a
     /// provider switch carries into the draft that replaces it.
     pub(crate) fn draft_settings(&self) -> (PermissionMode, Option<ReasoningEffort>) {
@@ -2561,12 +2313,14 @@ impl SessionView {
     pub(crate) fn is_sending(&self) -> bool {
         self.submitting || self.running.is_some()
     }
+}
 
+impl SessionView {
     /// Whether this view holds no movable content: nothing typed, nothing
     /// attached. What decides a retargeted draft may land here without
     /// clobbering anything.
     pub(crate) fn draft_content_empty(&self, cx: &gpui::App) -> bool {
-        self.images.is_empty() && self.files.is_empty() && self.composer.read(cx).value().trim().is_empty()
+        self.runtime.read(cx).images.is_empty() && self.runtime.read(cx).files.is_empty() && self.composer.read(cx).value().trim().is_empty()
     }
 
     /// The composer's current text, for hosts that append to the draft
@@ -2579,7 +2333,7 @@ impl SessionView {
     /// send handed back (`restore_prompt`) waits for a frame to land in the
     /// field, and a view closed before that frame must not lose it.
     pub(crate) fn words_in_hand(&self, cx: &gpui::App) -> String {
-        self.pending_prompt.clone().unwrap_or_else(|| self.draft_text(cx))
+        self.runtime.read(cx).pending_prompt.clone().unwrap_or_else(|| self.draft_text(cx))
     }
 
     /// Put text in the composer. Only the scripted `--send` uses this; a person
@@ -2613,12 +2367,14 @@ impl SessionView {
         cx: &mut Context<Self>,
     ) {
         let text = text.trim_end().to_string();
-        if text.is_empty() || self.quotes.iter().any(|q| q.text == text) {
+        if text.is_empty() || self.runtime.read(cx).quotes.iter().any(|q| q.text == text) {
             self.focus_composer(window, cx);
             return;
         }
-        self.quote_seq += 1;
-        self.quotes.push(QuoteDraft { id: format!("quote-{}", self.quote_seq), text, source, code, span });
+        self.runtime.update(cx, |rt, _| {
+            rt.quote_seq += 1;
+            rt.quotes.push(QuoteDraft { id: format!("quote-{}", rt.quote_seq), text, source, code, span });
+        });
         let draft = self.draft_text(cx);
         let end = position_of(&draft, draft.len());
         self.composer.update(cx, |state, cx| state.set_cursor_position(end, window, cx));
@@ -2642,7 +2398,9 @@ impl SessionView {
     pub(crate) fn composer_focus_handle(&self, cx: &mut Context<Self>) -> FocusHandle {
         self.composer.focus_handle(cx).clone()
     }
+}
 
+impl SessionRuntime {
     /// The view opened ahead of its `session/start`: sends and picks wait
     /// for it (see [`StartQueue`]).
     pub(crate) fn begin_start(&mut self) {
@@ -2655,13 +2413,28 @@ impl SessionView {
         matches!(self.start, StartState::Starting(_))
     }
 
-    /// Whether dropping this view would lose work: a turn in flight, an
-    /// approval or question waiting on the person, or a start still on the
-    /// wire. The parked-view cap never evicts such a view (docs/81 A F1).
+    /// Whether an approval card in a turn that is still open waits on the
+    /// person, read from the fold (the view's render cache holds the same
+    /// answer for its keys; the runtime cannot borrow a view's cache).
+    pub(crate) fn has_pending_approval_card(&self) -> bool {
+        self.session().is_some_and(|session| {
+            session.turns.iter().rev().any(|turn| {
+                !self.turn_over(turn.id())
+                    && turn.blocks().iter().any(|block| {
+                        matches!(block, Block::Approval { state: aui_protocol::ApprovalState::Pending, .. })
+                    })
+            })
+        })
+    }
+
+    /// Whether shutting this session down would lose work: a turn in
+    /// flight, an approval or question waiting on the person, or a start
+    /// still on the wire. Eviction never shuts such a runtime down — it
+    /// may drop the view, never the runtime (docs/81 A F1).
     pub(crate) fn must_stay_alive(&self) -> bool {
         self.is_sending()
             || self.is_starting()
-            || self.newest_pending_approval().is_some()
+            || self.has_pending_approval_card()
             || !self.external_approvals.pending().is_empty()
             || !self.external_questions.is_empty()
             || self.newest_pending_question().is_some()
@@ -2680,14 +2453,17 @@ impl SessionView {
             _ => None,
         }
     }
+}
 
+impl SessionRuntime {
     /// The start landed: the session is real, and whatever the person did
     /// while it was on the wire goes now, in order — the picks first, so
-    /// the sends run under them, then each send exactly as typed.
-    pub(crate) fn start_landed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// the sends run under them. Returns the sends, each exactly as typed,
+    /// for the view to dispatch (a typed `/command` needs its window);
+    /// `None` when no start was pending.
+    pub(crate) fn take_start(&mut self, cx: &mut Context<Self>) -> Option<Vec<String>> {
         let StartState::Starting(queue) = std::mem::replace(&mut self.start, StartState::Started) else {
-            cx.notify();
-            return;
+            return None;
         };
         // A mode picked while opening (the fallback out of Auto among
         // them) stands before the model replays, so the replayed model
@@ -2709,12 +2485,24 @@ impl SessionView {
         if !queue.sends.is_empty() {
             self.submitting = false;
         }
-        for text in queue.sends {
+        Some(queue.sends)
+    }
+}
+
+impl SessionView {
+    /// The start landed ([`SessionRuntime::take_start`]): each send made
+    /// while it was on the wire goes now, exactly as typed, and the view
+    /// redraws on the landed state.
+    pub(crate) fn start_landed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let sends = self.runtime.update(cx, |rt, cx| rt.take_start(cx)).unwrap_or_default();
+        for text in sends {
             self.dispatch_text(text, window, cx);
         }
         cx.notify();
     }
+}
 
+impl SessionRuntime {
     /// The start failed: there is no session behind this view, so it
     /// refuses every command from here on and says why. The draft stays,
     /// and the sends that waited go back into it.
@@ -3532,38 +3320,38 @@ mod tests {
         // A reopened session: the fold names no model, the session's own
         // past names a catalog row — the chip reads the row's label.
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.models = vec![row("muse-everyday", "Muse Everyday")];
-                view.history_model = Some("muse-everyday".to_owned());
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).models = vec![row("muse-everyday", "Muse Everyday")];
+                view.runtime().as_mut(cx).history_model = Some("muse-everyday".to_owned());
             });
         });
         vc.update(|_, cx| {
             assert_eq!(
-                view.read(cx).model().to_string(),
+                view.read(cx).rt(cx).model().to_string(),
                 "Muse Everyday",
                 "a known muse model chips its catalog label"
             );
         });
         // A model the catalog omits chips humanised — never the provider.
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.history_model = Some("muse-quantum-2".to_owned());
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).history_model = Some("muse-quantum-2".to_owned());
             });
         });
         vc.update(|_, cx| {
-            let chip = view.read(cx).model().to_string();
+            let chip = view.read(cx).rt(cx).model().to_string();
             assert_eq!(chip, "Muse Quantum 2", "an unknown muse model chips humanised");
             assert_ne!(chip, "muse", "the chip never wears the bare provider id");
         });
         // Nothing known yet: the chip still never wears the wire id.
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.models = Vec::new();
-                view.history_model = None;
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).models = Vec::new();
+                view.runtime().as_mut(cx).history_model = None;
             });
         });
         vc.update(|_, cx| {
-            let chip = view.read(cx).model().to_string();
+            let chip = view.read(cx).rt(cx).model().to_string();
             assert_eq!(chip, "Muse", "with no model known the chip names the human label");
             assert_ne!(chip, "muse", "the chip never wears the bare provider id");
         });
@@ -3601,16 +3389,16 @@ mod tests {
         };
         // The catalog's active row is stale: the chip names row 1.
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.models =
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).models =
                     vec![row("muse-first", "Muse First", true), row("muse-second", "Muse Second", false)];
-                view.pending_model = Some("muse-second".to_owned());
+                view.runtime().as_mut(cx).pending_model = Some("muse-second".to_owned());
             });
         });
         vc.update(|_, cx| {
-            assert_eq!(view.read(cx).model_id(), "muse-second");
-            assert_eq!(view.read(cx).model().to_string(), "Muse Second");
-            assert_eq!(view.read(cx).model_menu_checked(), Some(1));
+            assert_eq!(view.read(cx).rt(cx).model_id(), "muse-second");
+            assert_eq!(view.read(cx).rt(cx).model().to_string(), "Muse Second");
+            assert_eq!(view.read(cx).rt(cx).model_menu_checked(), Some(1));
         });
         // Opening the picker checks the chip's row, not the active one.
         // (Offline the catalog fetch is a no-op, so the rows above stand.)
@@ -3624,12 +3412,12 @@ mod tests {
         });
         // A chip no row matches: nothing is checked, never the first row.
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.pending_model = Some("muse-ghost".to_owned());
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).pending_model = Some("muse-ghost".to_owned());
             });
         });
         vc.update(|_, cx| {
-            assert_eq!(view.read(cx).model_menu_checked(), None);
+            assert_eq!(view.read(cx).rt(cx).model_menu_checked(), None);
         });
         vc.update(|_, cx| {
             view.update(cx, |view, cx| view.toggle_picker(MenuKind::Model, cx));

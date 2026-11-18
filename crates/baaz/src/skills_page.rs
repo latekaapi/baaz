@@ -2741,7 +2741,7 @@ impl Harness {
             lane: self
                 .active
                 .as_ref()
-                .map(|view| view.read(cx).provider_kind())
+                .map(|view| view.read(cx).rt(cx).provider_kind())
                 .unwrap_or_else(|| crate::providers::ProviderId::parse(&self.new_provider)),
         }
     }

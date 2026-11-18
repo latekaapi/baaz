@@ -157,7 +157,7 @@ impl SessionView {
     /// the last row is "no row": the chip names a model the catalog lacks).
     pub(super) fn open_model_picker(&mut self, selected: usize, cx: &mut Context<Self>) {
         let pick = cx.listener(|this: &mut Self, pick: &ModelPick, _, cx| this.on_model_pick(pick, cx));
-        let delegate = ModelDelegate { rows: self.model_menu_rows(), sub_open: false };
+        let delegate = ModelDelegate { rows: self.model_menu_rows(cx), sub_open: false };
         let picker = cx.new(|cx| {
             let mut picker = Picker::new(delegate, cx).on_pick(pick);
             picker.select(selected, cx);
@@ -189,7 +189,7 @@ impl SessionView {
     fn on_model_pick(&mut self, pick: &ModelPick, cx: &mut Context<Self>) {
         match pick {
             ModelPick::Model(id) if id.as_ref() == MODEL_UNAVAILABLE_ROW => {
-                if let Some(reason) = self.models_error.clone() {
+                if let Some(reason) = self.runtime.read(cx).models_error.clone() {
                     self.toast("Models unavailable", reason, cx);
                 }
                 self.close_menu(cx);
@@ -200,7 +200,7 @@ impl SessionView {
             }
             ModelPick::Nested(model, level) => {
                 let effort = self
-                    .effort_options_for(Some(model.as_ref()))
+                    .rt(cx).effort_options_for(Some(model.as_ref()))
                     .options()
                     .and_then(|options| options.iter().find(|o| crate::overlays::effort_row_id(o.effort) == level.as_ref()).map(|o| o.effort));
                 let model = model.to_string();

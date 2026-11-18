@@ -25,7 +25,7 @@ impl Harness {
 
     /// The browser chat's session id, if one is open.
     pub(crate) fn browser_chat_id(&self, cx: &gpui::App) -> Option<String> {
-        self.registry.browser_chat().map(|view| view.read(cx).session_id.clone())
+        self.registry.browser_chat().map(|view| view.read(cx).rt(cx).session_id.clone())
     }
 
     /// Start a browser chat and send `ask` as its first turn: the view is
@@ -58,9 +58,9 @@ impl Harness {
         };
         let view = cx.new(|cx| SessionView::new_provider_opening(request_id.clone(), mode, host, window, cx));
         if !choice.model.is_empty() {
-            view.update(cx, |view, cx| view.set_model(choice.model, cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model(choice.model, cx)));
         }
-        view.update(cx, |view, cx| view.send_or_queue(ask, cx));
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_or_queue(ask, cx)));
         self.set_browser_chat(view, cx);
         self.open_state.starts_in_flight.insert(request_id.clone());
         self.spawn_provider_open(choice.provider, None, workspace, request_id.clone(), mode, cx);
@@ -90,9 +90,9 @@ impl Harness {
         // Shown again from its folder: it leaves the MRU for the line.
         self.registry.forget_view(&view);
         if let Some(old) = self.registry.replace_browser_chat(view.clone()).filter(|old| *old != view) {
-            if old.read(cx).must_stay_alive() && self.active.as_ref() != Some(&old) {
-                let id = old.read(cx).session_id.clone();
-                self.registry.park(id, old);
+            if old.read(cx).rt(cx).must_stay_alive() && self.active.as_ref() != Some(&old) {
+                let id = old.read(cx).rt(cx).session_id.clone();
+                self.registry.park(id, old, cx);
             }
         }
         self.resubscribe_live_views(cx);

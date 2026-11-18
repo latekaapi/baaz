@@ -1,12 +1,12 @@
 //! The two session-level operations that are neither a turn nor an
 //! answer: `session/userShell` and `session/fork`.
 //!
-//! Part of [`SessionView`]; see [`crate::session`] for what
-//! the entity owns and why these are its own files.
+//! Part of [`SessionRuntime`]; see [`crate::session`] for what the
+//! entity owns and why these are its own files.
 
 use super::*;
 
-impl SessionView {
+impl SessionRuntime {
     // ------------------------------------------------------------ user shell
 
     /// A draft starting with `!` is a shell command, not a turn (research

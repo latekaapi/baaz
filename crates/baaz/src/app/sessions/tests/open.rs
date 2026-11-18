@@ -259,8 +259,8 @@ fn a_new_session_opens_on_the_click_and_its_row_needs_no_list(cx: &mut gpui::Tes
         baaz.update(cx, |harness, cx| {
             harness.new_session(window, cx);
             let view = harness.active.clone().expect("the draft is up before the start lands");
-            let id = view.read(cx).session_id.clone();
-            assert!(view.read(cx).is_starting(), "its start is still on the wire");
+            let id = view.read(cx).rt(cx).session_id.clone();
+            assert!(view.read(cx).rt(cx).is_starting(), "its start is still on the wire");
             assert!(harness.open_state.starts_in_flight.contains(&id), "scripted verbs wait for it");
             assert!(!harness.open_state.switch_pending, "a new session is no switch");
             assert_eq!(harness.open_state.drafts.get(&project), Some(&id), "a second click reuses it");
@@ -271,8 +271,8 @@ fn a_new_session_opens_on_the_click_and_its_row_needs_no_list(cx: &mut gpui::Tes
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the draft stays open");
-        assert_eq!(view.read(cx).session_id, minted, "the start kept the minted id");
-        assert!(!view.read(cx).is_starting(), "the start landed");
+        assert_eq!(view.read(cx).rt(cx).session_id, minted, "the start kept the minted id");
+        assert!(!view.read(cx).rt(cx).is_starting(), "the start landed");
         assert!(harness.open_state.starts_in_flight.is_empty(), "nothing is still opening");
         let row = harness.session_list.read(cx).sessions.iter().find(|entry| entry.id == minted).expect("the row is in");
         assert_eq!(row.project.as_deref(), Some(project.as_str()), "it files under its project");
@@ -305,7 +305,7 @@ fn a_failed_early_start_keeps_the_view_and_frees_the_draft(cx: &mut gpui::TestAp
     let minted = vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
             harness.new_session(window, cx);
-            harness.active.clone().expect("the draft is up").read(cx).session_id.clone()
+            harness.active.clone().expect("the draft is up").read(cx).rt(cx).session_id.clone()
         })
     });
     vc.run_until_parked();
@@ -349,7 +349,7 @@ fn an_unfiled_session_never_starts_in_the_launch_directory(cx: &mut gpui::TestAp
         vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
         vc.run_until_parked();
         let workspace = vc.update(|_, cx| {
-            baaz.read(cx).active.clone().map(|view| view.read(cx).workspace_for_tests().to_owned())
+            baaz.read(cx).active.clone().map(|view| view.read(cx).rt(cx).workspace_for_tests().to_owned())
         });
         let home = projects::default_workspace().to_string_lossy().into_owned();
         assert_eq!(workspace.as_deref(), Some(home.as_str()), "{provider:?} starts in the default workspace");
@@ -377,10 +377,10 @@ fn quit_asks_when_a_turn_is_running(cx: &mut gpui::TestAppContext) {
             };
             let view = cx.new(|cx| SessionView::new("s-quit".to_owned(), host, window, cx));
             view.update(cx, |view, cx| {
-                view.fold_provider_events(
+                view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(
                     vec![provider::ProviderEvent::TurnRunning { session_id: "s-quit".into(), turn_id: "t".into() }],
                     cx,
-                );
+                ));
             });
             harness.park_active(cx);
             harness.active = Some(view);
@@ -397,9 +397,10 @@ fn quit_asks_when_a_turn_is_running(cx: &mut gpui::TestAppContext) {
     lane_restore(state);
 }
 
-/// docs/81 A F1: a parked view with a turn running is never evicted —
-/// dropping it shuts its lane down and kills the child mid-turn. Nine
-/// later sessions park behind it; it is still alive and settles.
+/// docs/81 A F1: a parked session with a turn running is never evicted —
+/// shutting its lane down would kill the child mid-turn. Nine later
+/// sessions park behind it: past the cap it loses its view, never its
+/// runtime, which is still alive and settles (docs/82 4.8).
 #[gpui::test]
 fn a_busy_parked_session_is_never_evicted(cx: &mut gpui::TestAppContext) {
     let state = lane_state("busy-never-evicted");
@@ -417,15 +418,15 @@ fn a_busy_parked_session_is_never_evicted(cx: &mut gpui::TestAppContext) {
             };
             let view = cx.new(|cx| SessionView::new(busy_id.clone(), host, window, cx));
             view.update(cx, |view, cx| {
-                view.fold_provider_events(
+                view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(
                     vec![provider::ProviderEvent::TurnRunning {
                         session_id: busy_id.clone(),
                         turn_id: "t-busy".into(),
                     }],
                     cx,
-                );
+                ));
             });
-            assert!(view.read(cx).is_sending(), "setup: a turn is running");
+            assert!(view.read(cx).rt(cx).is_sending(), "setup: a turn is running");
             harness.open_state.drafts.clear();
             harness.park_active(cx);
             harness.active = Some(view.clone());
@@ -444,28 +445,57 @@ fn a_busy_parked_session_is_never_evicted(cx: &mut gpui::TestAppContext) {
             harness.park_active(cx);
             assert!(
                 harness.registry.is_parked(&busy_id),
-                "the busy view survives {} later parks",
+                "the busy session survives {} later parks",
                 SESSION_CACHE_LIMIT + 1
             );
             let idle = harness.registry.parked_ids().iter().filter(|id| id.starts_with("s-idle-")).count();
             assert_eq!(idle, SESSION_CACHE_LIMIT, "idle views are still capped");
+            // Past the cap the busy session keeps no view — views are
+            // drawing state (docs/82 4.8) — but its runtime runs on.
+            assert!(harness.registry.parked(&busy_id).is_none(), "its view went with the cap");
+            let runtime = harness.registry.find_runtime(None, &busy_id, cx).expect("its runtime is kept");
+            assert_eq!(runtime, *view.read(cx).runtime(), "the same session, not a new one");
+            assert!(runtime.read(cx).is_sending(), "dropping the view never stopped the turn");
             view
         })
     });
     vc.update(|_, cx| {
         busy.update(cx, |view, cx| {
-            view.fold_provider_events(
+            view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(
                 vec![provider::ProviderEvent::TurnSettled {
                     session_id: "s-busy".into(),
                     turn_id: "t-busy".into(),
                     outcome: provider::facts::TurnOutcome::Completed,
                 }],
                 cx,
-            );
+            ));
         });
     });
     vc.run_until_parked();
-    assert!(vc.update(|_, cx| !busy.read(cx).is_sending()), "the parked turn settles");
+    assert!(vc.update(|_, cx| !busy.read(cx).rt(cx).is_sending()), "the parked turn settles");
+    // Settled and view-less, it has nothing left in hand: the next park
+    // shuts it down rather than keeping an idle child until quit.
+    let runtime = vc.update(|_, cx| busy.read(cx).runtime().clone());
+    drop(busy);
+    vc.update(|window, cx| {
+        baaz.update(cx, |harness, cx| {
+            let host = SessionHost {
+                provider_id: ProviderId::Codex.as_str().to_owned(),
+                workspace: harness.workspace(cx),
+                overlays: harness.overlays.clone(),
+                capture: crate::shot::CaptureToken::default(),
+                terminal_host: None,
+            };
+            let next = cx.new(|cx| SessionView::new("s-after".to_owned(), host, window, cx));
+            harness.active = Some(next);
+            harness.park_active(cx);
+            assert!(!harness.registry.is_parked(&busy_id), "the idle view-less runtime goes at the next park");
+            assert!(harness.registry.find_runtime(None, &busy_id, cx).is_none(), "nothing holds it any more");
+            let idle = harness.registry.parked_ids().iter().filter(|id| id.starts_with("s-idle-")).count();
+            assert_eq!(idle, SESSION_CACHE_LIMIT - 1, "the views keep their cap");
+        })
+    });
+    drop(runtime);
     lane_restore(state);
 }
 
@@ -509,10 +539,10 @@ fn new_after_open_lands_a_draft(cx: &mut gpui::TestAppContext, name: &str, provi
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             let view = harness.active.clone().unwrap_or_else(|| panic!("{round}: a view is open"));
-            let id = view.read(cx).session_id.clone();
+            let id = view.read(cx).rt(cx).session_id.clone();
             assert_ne!(id, "s-codex-old", "{round}: New session left the clicked session up");
             assert!(harness.is_live_draft(&id, cx), "{round}: the centre is an unsent draft");
-            assert_eq!(view.read(cx).provider_kind(), provider, "{round}: on the default's lane");
+            assert_eq!(view.read(cx).rt(cx).provider_kind(), provider, "{round}: on the default's lane");
             assert!(!harness.session_opening(), "{round}: nothing is still opening");
             id
         })
@@ -525,7 +555,7 @@ fn new_after_open_lands_a_draft(cx: &mut gpui::TestAppContext, name: &str, provi
         vc.update(|_, cx| {
             let harness = baaz.read(cx);
             let view = harness.active.clone().unwrap_or_else(|| panic!("{round}: a view is open"));
-            assert_eq!(view.read(cx).session_id, "s-codex-old", "{round}: the click opened it");
+            assert_eq!(view.read(cx).rt(cx).session_id, "s-codex-old", "{round}: the click opened it");
             assert!(!harness.session_opening(), "{round}: the reopen landed");
         });
     };
@@ -573,16 +603,16 @@ fn what_is_done_while_the_start_is_on_the_wire_goes_when_it_lands(cx: &mut gpui:
             harness.new_session(window, cx);
             let view = harness.active.clone().expect("the draft is up");
             view.update(cx, |view, cx| {
-                assert!(view.is_starting());
+                assert!(view.rt(cx).is_starting());
                 view.set_draft("captured at enter".into(), window, cx);
                 view.send(window, cx);
                 assert_eq!(view.draft_text(cx), "", "the field clears like any send");
-                assert!(view.busy(), "the queued send reads as pending");
+                assert!(view.rt(cx).busy(), "the queued send reads as pending");
                 view.set_draft("edited afterwards".into(), window, cx);
-                view.set_model("muse-early", cx);
-                view.set_mode(aui_protocol::PermissionMode::DenyUnmatched, cx);
+                view.runtime().clone().update(cx, |rt, cx| rt.set_model("muse-early", cx));
+                view.runtime().clone().update(cx, |rt, cx| rt.set_mode(aui_protocol::PermissionMode::DenyUnmatched, cx));
                 assert_eq!(
-                    view.mode_label(),
+                    view.rt(cx).mode_label(),
                     aui_protocol::PermissionMode::DenyUnmatched.label(),
                     "the chip reads the waiting pick"
                 );
@@ -629,7 +659,7 @@ fn a_start_answered_under_another_id_fails_the_view(cx: &mut gpui::TestAppContex
                 view.set_draft("kept".into(), window, cx);
                 view.send(window, cx);
             });
-            view.read(cx).session_id.clone()
+            view.read(cx).rt(cx).session_id.clone()
         })
     });
     vc.run_until_parked();
@@ -819,7 +849,7 @@ fn a_reopened_muse_session_is_muse_whatever_the_new_session_default(cx: &mut gpu
         vc.update(|_, cx| {
             let view = baaz.read(cx).active.clone().expect("the row opened");
             assert_eq!(
-                view.read(cx).provider_kind(),
+                view.read(cx).rt(cx).provider_kind(),
                 ProviderId::Muse,
                 "a Muse row reopened with a {default:?} default still reads Muse"
             );
@@ -866,7 +896,7 @@ fn b2fix_project(
                 cx,
             )
         });
-        view.update(cx, |view, _| view.seed_test_catalog(catalog));
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, _| rt.seed_test_catalog(catalog)));
         baaz.update(cx, |harness, _| {
             harness.active = Some(view);
         });
@@ -897,14 +927,14 @@ fn a_provider_draft_requests_the_projects_remembered_model(cx: &mut gpui::TestAp
     y2b2_drain_until_opens(vc, &shared, 1);
     vc.update(|_, cx| {
         let view = baaz.read(cx).active.clone().expect("the draft is drawn");
-        assert!(view.read(cx).is_opening_lane());
-        assert_eq!(view.read(cx).model_id(), "opus[1m]", "the chip names the requested model");
+        assert!(view.read(cx).rt(cx).is_opening_lane());
+        assert_eq!(view.read(cx).rt(cx).model_id(), "opus[1m]", "the chip names the requested model");
     });
     vc.run_until_parked();
     vc.update(|_, cx| {
         let view = baaz.read(cx).active.clone().expect("the draft landed");
-        assert!(!view.read(cx).is_opening_lane());
-        assert_eq!(view.read(cx).model_id(), "opus[1m]");
+        assert!(!view.read(cx).rt(cx).is_opening_lane());
+        assert_eq!(view.read(cx).rt(cx).model_id(), "opus[1m]");
     });
     lane_restore(state);
 }
@@ -940,8 +970,8 @@ fn a_pick_in_one_project_starts_the_next_session_in_another(cx: &mut gpui::TestA
     vc.update(|_, cx| {
         let view = baaz.read(cx).active.clone().expect("the first draft is drawn");
         baaz.update(cx, |harness, cx| {
-            harness.on_session_event(view.clone(), &SessionEvent::ModeSelected { mode: aui_protocol::PermissionMode::AllowAll }, cx);
-            harness.on_session_event(view, &SessionEvent::EffortSelected { effort: Some("medium".into()) }, cx);
+            harness.on_session_event(view.read(cx).runtime().clone(), &SessionEvent::ModeSelected { mode: aui_protocol::PermissionMode::AllowAll }, cx);
+            harness.on_session_event(view.read(cx).runtime().clone(), &SessionEvent::EffortSelected { effort: Some("medium".into()) }, cx);
         });
     });
     vc.run_until_parked();
@@ -959,7 +989,7 @@ fn a_pick_in_one_project_starts_the_next_session_in_another(cx: &mut gpui::TestA
     vc.run_until_parked();
     vc.update(|_, cx| {
         let view = baaz.read(cx).active.clone().expect("the second draft is drawn");
-        let (mode, effort) = view.read(cx).draft_settings();
+        let (mode, effort) = view.read(cx).rt(cx).draft_settings();
         assert_eq!(mode, aui_protocol::PermissionMode::AllowAll, "Full access carries into {second}");
         assert_eq!(crate::overlays::effort_label(effort), "Medium", "Medium carries into {second}");
     });
@@ -995,10 +1025,10 @@ fn a_draft_on_a_remembered_haiku_opens_in_ask(cx: &mut gpui::TestAppContext) {
     vc.update(|_, cx| {
         let view = baaz.read(cx).active.clone().expect("the draft is drawn");
         let view = view.read(cx);
-        assert_eq!(view.model_id(), "haiku");
-        assert_eq!(view.mode_label(), "Ask", "never Auto on Haiku");
+        assert_eq!(view.rt(cx).model_id(), "haiku");
+        assert_eq!(view.rt(cx).mode_label(), "Ask", "never Auto on Haiku");
         assert_eq!(
-            view.banner_text(),
+            view.rt(cx).banner_text(),
             Some("Auto is not available for Haiku; Claude Code will ask before acting.")
         );
     });
@@ -1139,7 +1169,7 @@ fn a_second_new_while_a_switch_is_in_flight_starts_nothing(cx: &mut gpui::TestAp
         let harness = baaz.read(cx);
         assert_eq!(opens_of(&opens), 1, "one `new` pair spawns one child");
         let view = harness.active.clone().expect("the session opened");
-        assert!(view.read(cx).provider_kind() != ProviderId::Muse, "it rides the provider lane");
+        assert!(view.read(cx).rt(cx).provider_kind() != ProviderId::Muse, "it rides the provider lane");
         assert!(!harness.open_state.switch_pending, "the switch landed");
     });
     lane_restore(state);

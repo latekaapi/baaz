@@ -457,7 +457,7 @@ impl Harness {
     /// only when it is a Muse one. Claude Code and Codex rows are not
     /// Muse's to clear (docs/50 P1).
     pub(crate) fn forget_muse_rows(&mut self, cx: &mut Context<Self>) {
-        if self.active.as_ref().is_some_and(|view| view.read(cx).provider_kind() == crate::providers::ProviderId::Muse) {
+        if self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).provider_kind() == crate::providers::ProviderId::Muse) {
             self.active = None;
         }
         self.session_list.update(cx, |list, _| list.sessions.retain(|entry| entry.provider != crate::providers::ProviderId::Muse));

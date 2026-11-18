@@ -295,7 +295,7 @@ impl Harness {
     /// `rename:<name>`: open the active row's inline field, optionally
     /// filled. No open session fails the step.
     pub(crate) fn step_rename(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let session_id = self.active.as_ref().map(|a| a.read(cx).session_id.clone()).ok_or("no open session")?;
+        let session_id = self.active.as_ref().map(|a| a.read(cx).rt(cx).session_id.clone()).ok_or("no open session")?;
         self.start_rename(session_id, window, cx);
         if !rest.is_empty() {
             self.rename.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));

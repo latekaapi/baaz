@@ -112,7 +112,7 @@ impl Harness {
     /// A shell card's full output (docs/43 §2.9): the card's lines at once,
     /// or "Fetching…" while the provider pages the rest in.
     pub(crate) fn open_tool_output(&mut self, out: crate::transcript::OutputOpen, cx: &mut Context<Self>) {
-        let session = self.active.as_ref().map(|view| view.read(cx).session_id.clone()).unwrap_or_default();
+        let session = self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone()).unwrap_or_default();
         let lines = if out.fetchable { OutputLines::Fetching } else { OutputLines::Ready { lines: Arc::new(out.lines.clone()), capped: None } };
         self.push_right_view(
             Pushed::Output(OutputPush {
@@ -163,14 +163,14 @@ impl RightPane {
     /// pane's render.
     pub(crate) fn sync_pushed_outputs(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self.facts.session.clone() else { return };
-        let session = view.read(cx).session_id.clone();
+        let session = view.read(cx).rt(cx).session_id.clone();
         for pushed in self.cache.pushed.values_mut() {
             let Pushed::Output(out) = pushed else { continue };
             let Some((sid, block)) = out.source.clone() else { continue };
             if sid != session {
                 continue;
             }
-            let Some((lines, live, exit, fetched)) = view.read(cx).tool_output(&block) else { continue };
+            let Some((lines, live, exit, fetched)) = view.read(cx).rt(cx).tool_output(&block) else { continue };
             match (&out.lines, fetched) {
                 (OutputLines::Fetching, Some((full, capped))) => {
                     let total = full.len();

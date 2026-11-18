@@ -1,13 +1,16 @@
-//! The provider lane: the one subscription that owns a session view.
+//! The provider lane: the one subscription that feeds a session.
 //!
-//! Part of [`SessionView`](super::SessionView); see [`crate::session`] for
-//! what the entity owns. Every session view is owned by exactly one lane for
-//! its whole life, folding `ProviderEvent`s into its `Session` model. The
-//! lane is fixed at construction — [`Lane`] has no setter — so no code path
-//! can attach a second writer. The one transition is a new view opened on
-//! the click: it starts [`Lane::Opening`] and takes its provider exactly
-//! once, when the child's `OpenSession` answers
-//! ([`SessionView::attach_provider`]).
+//! Part of [`SessionRuntime`](super::SessionRuntime); see [`crate::session`]
+//! for what the entity owns. Every session runtime is fed by exactly one
+//! lane for its whole life, folding `ProviderEvent`s into its `Session`
+//! model whether or not a view draws it (docs/82 4.8). The lane is fixed at
+//! construction — [`Lane`] has no setter — so no code path can attach a
+//! second writer. The one transition is a new session opened on the click:
+//! it starts [`Lane::Opening`] and takes its provider exactly once, when
+//! the child's `OpenSession` answers
+//! ([`SessionRuntime::attach_provider`](super::SessionRuntime::attach_provider)).
+//! The runtime owns the `Provider` handle and the drain task; dropping the
+//! runtime (never a view) hangs the child up.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -16,7 +19,8 @@ use futures::StreamExt as _;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{Context, Window};
 
-use super::{SessionHost, SessionView};
+use super::{RuntimeEvent, SessionHost, SessionRuntime, SessionView};
+use gpui::AppContext as _;
 use crate::providers::{ExternalApproval, ExternalApprovalKind, ProviderId};
 use crate::wire::{ProviderCall as _, SharedProvider};
 use aui_protocol::{ApprovalState, Block, Delta, Turn};
@@ -46,7 +50,7 @@ pub(super) enum Lane {
     Provider(ProviderLane),
     /// A new provider session drawn on the click while its child is still
     /// answering `OpenSession`: a provider lane with no provider yet. It
-    /// becomes [`Lane::Provider`] once, in [`SessionView::attach_provider`],
+    /// becomes [`Lane::Provider`] once, in [`SessionRuntime::attach_provider`],
     /// and never goes back — so there is still only ever one writer.
     Opening(OpeningLane),
 }
@@ -133,7 +137,7 @@ impl ExternalQuestions {
     }
 }
 
-impl SessionView {
+impl SessionRuntime {
     /// The mode an opening provider view's open asked for, while no child
     /// has reported one (see [`OpeningLane`] and
     /// [`ProviderLane::unreported_mode`]).
@@ -173,31 +177,98 @@ impl SessionView {
     }
 
     /// Whether this view was drawn on the click and never got its child:
-    /// still opening, or its open failed. Such a view stands on a
+    /// still opening, or its open failed. Such a session stands on a
     /// provisional id nothing else outlives it with.
     pub(crate) fn is_opening_lane(&self) -> bool {
         matches!(self.lane, Lane::Opening(_))
     }
 
-    /// Hang up the lane's provider child, if this view owns one. Idempotent:
-    /// [`provider::Provider::shutdown`] is, and so is calling this twice.
-    /// Closing or replacing a provider-lane view calls this so no `claude`
-    /// or `codex` child outlives its view; dropping the view does the same
-    /// through [`Drop`].
+    /// Hang up the lane's provider child, if this runtime owns one.
+    /// Idempotent: [`provider::Provider::shutdown`] is, and so is calling
+    /// this twice. Closing, evicting or replacing a provider session calls
+    /// this so no `claude` or `codex` child outlives its session; dropping
+    /// the runtime does the same through [`Drop`]. Dropping a view never
+    /// does.
+    ///
+    /// Never waits on the UI thread for a command in flight on the lane
+    /// (docs/81 A F12): when one holds the lane's mutex — a revive, a
+    /// resume, a catalog pull on a hung child — the hang-up waits for it on
+    /// a thread of its own. Quit, which must not leave before the child is
+    /// gone, waits instead ([`Self::shutdown_lane_and_wait`]).
     pub(crate) fn shutdown_lane(&mut self) {
-        if let Lane::Provider(lane) = &self.lane {
+        let Lane::Provider(lane) = &self.lane else { return };
+        match lane.provider.try_lock() {
+            Ok(mut provider) => provider.shutdown(),
             // A poisoned lock still hangs the child up (docs/81 B PM-3).
-            lane.provider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).shutdown();
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner().shutdown(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let provider = lane.provider.clone();
+                let spawned = std::thread::Builder::new().name("lane-hangup".into()).spawn(move || {
+                    provider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).shutdown();
+                });
+                if let Err(error) = spawned {
+                    crate::baaz_log!("lane hang-up: no thread to wait on the busy lane ({error}); waiting here");
+                    lane.provider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).shutdown();
+                }
+            }
         }
     }
 
-    /// A view over a provider session. Mirrors [`SessionView::new`] minus
-    /// the child: the caller hands over an already-connected
-    /// [`provider::Provider`] and its bridged event stream, and this spawns
-    /// exactly one gpui task draining that stream for the view's whole life.
+    /// [`Self::shutdown_lane`] for quit: hang up now, waiting for a command
+    /// in flight if one holds the lane, so the app never exits ahead of
+    /// its child.
+    pub(crate) fn shutdown_lane_and_wait(&mut self) {
+        if let Lane::Provider(lane) = &self.lane {
+            lane.provider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).shutdown();
+        }
+    }
+}
+
+impl SessionRuntime {
+    /// A runtime over a provider session: the caller hands over an
+    /// already-connected [`provider::Provider`] and its bridged event
+    /// stream, and this spawns exactly one gpui task draining that stream
+    /// for the runtime's whole life — whether or not a view draws it.
     ///
     /// W2's open path constructs the real adapters through this; tests
     /// drive it with a scripted provider.
+    pub(crate) fn on_provider(
+        session_id: String,
+        provider: provider::Provider,
+        events: UnboundedReceiver<provider::ProviderEvent>,
+        provider_id: String,
+        workspace: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::new(session_id, provider_id, workspace);
+        this.install_lane(provider, events, cx);
+        this
+    }
+
+    /// A new provider session drawn on the click, before its child answers
+    /// `OpenSession`: the composer, the pickers and the empty state work at
+    /// once, and what the person does meanwhile waits in the
+    /// [`StartQueue`](super::StartQueue), replayed by `start_landed` once
+    /// [`Self::attach_provider`] hands over the child. `session_id` is the
+    /// open's request id — the session's own id for Claude Code
+    /// (`--session-id`), a provisional one for Codex until its thread id
+    /// lands.
+    pub(crate) fn opening(
+        session_id: String,
+        mode: aui_protocol::PermissionMode,
+        provider_id: String,
+        workspace: String,
+    ) -> Self {
+        let mut this = Self::new(session_id, provider_id, workspace);
+        this.lane = Lane::Opening(OpeningLane { mode });
+        this.begin_start();
+        this
+    }
+}
+
+impl SessionView {
+    /// A view over a provider session, over a fresh runtime that owns the
+    /// lane ([`SessionRuntime::on_provider`]).
     pub fn new_on_provider(
         session_id: String,
         provider: provider::Provider,
@@ -206,19 +277,14 @@ impl SessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut this = Self::new_unowned(session_id, host, window, cx);
-        this.install_lane(provider, events, cx);
-        this
+        let (provider_id, workspace) = (host.provider_id.clone(), host.workspace.clone());
+        let runtime =
+            cx.new(|cx| SessionRuntime::on_provider(session_id, provider, events, provider_id, workspace, cx));
+        Self::over(runtime, host, window, cx)
     }
 
-    /// A new provider session's view drawn on the click, before its child
-    /// answers `OpenSession`: the composer, the pickers and the empty state
-    /// work at once, and what the person does meanwhile waits in the
-    /// [`StartQueue`](super::StartQueue) the muse path uses, replayed by
-    /// `start_landed` once [`Self::attach_provider`] hands over the child.
-    /// `session_id` is the open's request id — the session's own id for
-    /// Claude Code (`--session-id`), a provisional one for Codex until its
-    /// thread id lands.
+    /// A new provider session's view drawn on the click, over an opening
+    /// runtime ([`SessionRuntime::opening`]).
     pub fn new_provider_opening(
         session_id: String,
         mode: aui_protocol::PermissionMode,
@@ -226,12 +292,13 @@ impl SessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut this = Self::new_unowned(session_id, host, window, cx);
-        this.lane = Lane::Opening(OpeningLane { mode });
-        this.begin_start();
-        this
+        let (provider_id, workspace) = (host.provider_id.clone(), host.workspace.clone());
+        let runtime = cx.new(|_| SessionRuntime::opening(session_id, mode, provider_id, workspace));
+        Self::over(runtime, host, window, cx)
     }
+}
 
+impl SessionRuntime {
     /// The opening view's child answered: take the session's real id (the
     /// provisional one renames here and nowhere else in the view), then
     /// the provider and its event stream, exactly once. A second attach —
@@ -306,20 +373,9 @@ impl SessionView {
             }
         }));
     }
-
 }
 
-impl Drop for SessionView {
-    /// A dropped view owns no child anymore: hang up the lane's provider so
-    /// no `claude` or `codex` process outlives the view that spawned it.
-    /// Idempotent — [`SessionView::shutdown_lane`] is — so an explicit close
-    /// beforehand changes nothing.
-    fn drop(&mut self) {
-        self.shutdown_lane();
-    }
-}
-
-impl SessionView {
+impl SessionRuntime {
     /// Fold one provider event: deltas into the transcript, approval and
     /// question taps onto their surfaces, a lost connection onto the banner.
     /// Only the lane task calls this, so `apply_deltas` has exactly one
@@ -384,13 +440,17 @@ impl SessionView {
                         other => other,
                     })
                     .collect();
+                // A batch that lands while nothing is in flight — no turn
+                // running, no send waiting on its echo — is history: a
+                // reopen's replay (Claude Code and Codex replay a resumed
+                // session's stored turns as one batch). Its finishes settle
+                // once, together (docs/81 A F14).
+                let replaying = self.running.is_none() && !self.submitting && self.pending_optimistic.is_empty();
                 let deltas = self.reconcile_optimistic(deltas);
-                let session_id = self.session_id.clone();
-                let _ = &session_id;
                 let landed = self.store.apply_deltas(deltas);
                 if !landed.is_empty() {
-                    self.follow = true;
-                    self.note_provider_deltas(&landed, cx);
+                    self.announce_landed(&landed, cx);
+                    self.note_provider_deltas(&landed, replaying, cx);
                     // A block that opens after the reply (a tool call the
                     // model went on to compose) takes the tail back.
                     self.note_reply_progress(false, cx);
@@ -436,7 +496,7 @@ impl SessionView {
                     _ => false,
                 };
                 if self.store.set_mode(mode) || was_unreported {
-                    self.sync_mode_menu_check(cx);
+                    cx.emit(RuntimeEvent::MenusStale);
                     cx.notify();
                 }
                 // Auto reported on a model that cannot run it (a launch on
@@ -491,7 +551,7 @@ impl SessionView {
                     session_id,
                     headline,
                 });
-                self.follow = true;
+                cx.emit(RuntimeEvent::EntriesAppended);
                 cx.notify();
             }
             // The facts beside the transcript, whole: the meter, the queue,
@@ -508,7 +568,7 @@ impl SessionView {
                 self.tail_queued.retain(|turn_id, _| side.queued.iter().any(|q| &q.turn_id == turn_id));
                 self.store.set_side(side);
                 self.note_reply_progress(usage_landed, cx);
-                self.sync_mode_menu_check(cx);
+                cx.emit(RuntimeEvent::MenusStale);
                 self.observe_clocks(cx);
                 cx.notify();
             }
@@ -580,7 +640,7 @@ impl SessionView {
                 if let Some(at) = self.pending_optimistic.iter().position(|pending| !text.is_empty() && pending.text == text) {
                     let id = self.pending_optimistic[at].id.clone();
                     self.tail_queued.retain(|_, bubble| *bubble != id);
-                    self.remove_optimistic_turn(&id);
+                    self.remove_optimistic_turn(&id, cx);
                 }
                 match turn_id.and_then(|turn_id| self.unqueueing.remove(&turn_id)) {
                     // Routed by the intent captured when the row's button
@@ -645,7 +705,7 @@ impl SessionView {
         // behind it ("Finishing up…" forever, 2026-10-15).
         self.submitting = false;
         for optimistic in std::mem::take(&mut self.pending_optimistic) {
-            self.remove_optimistic_turn(&optimistic.id);
+            self.remove_optimistic_turn(&optimistic.id, cx);
         }
         self.clear_running();
         self.external_approvals.clear();
@@ -793,7 +853,7 @@ impl SessionView {
     }
 }
 
-impl SessionView {
+impl SessionRuntime {
     /// The one dispatch point for provider-lane sends: every user action on
     /// a provider lane (submit, steer, stop, reclaim, decide, answer,
     /// shell) travels as a [`provider::Command`] through here, and every
@@ -840,7 +900,7 @@ impl SessionView {
     /// [`crate::provider_status::mark_usage_pending`]): the reading stays
     /// in the lane's fold and the next TurnFinished or menu open persists
     /// it instead of dropping it silently. The caller pairs it with
-    /// [`SessionView::provider_kind`].
+    /// [`SessionRuntime::provider_kind`].
     pub(crate) fn lane_usage(&self) -> Option<provider::UsageReport> {
         let provider = self.lane_provider()?;
         let Ok(guard) = provider.try_lock() else {
@@ -942,9 +1002,14 @@ impl SessionView {
     /// `interrupt.jsonl` at `turn/completed` with `status: "interrupted"`,
     /// Claude Code emits one `TurnFinished` per open turn). The stop
     /// button, the "working" indicator and
-    /// [`SessionView::reply_complete_for_running_turn`] all read
+    /// [`SessionRuntime::reply_complete_for_running_turn`] all read
     /// `self.running`, so they follow this with no second source.
-    fn note_provider_deltas(&mut self, landed: &[Delta], cx: &mut Context<Self>) {
+    ///
+    /// `replaying`: the batch landed with nothing in flight — a reopen's
+    /// replayed history — so its finishes settle together in one
+    /// [`SessionEvent::HistoryReplayed`](super::SessionEvent::HistoryReplayed)
+    /// after the batch, not one `ProviderTurnFinished` each (docs/81 A F14).
+    fn note_provider_deltas(&mut self, landed: &[Delta], replaying: bool, cx: &mut Context<Self>) {
         // X1b: the Codex reorder (`reconcile_optimistic` moving the empty
         // assistant turn after the echo) passes the running turn through
         // remove/start below, which would reset its start instant and make
@@ -956,6 +1021,7 @@ impl SessionView {
         // no restart behind them refresh the row, after the batch below.
         let mut removed: Vec<String> = Vec::new();
         let mut started: Vec<String> = Vec::new();
+        let mut replayed: Vec<(String, aui_protocol::TurnMeta)> = Vec::new();
         for delta in landed {
             match delta {
                 Delta::TurnStarted { turn } => match turn {
@@ -1021,7 +1087,8 @@ impl SessionView {
                     // still in flight. (The row that read Working forever
                     // was a parked view nobody listened to — B3b fixes that
                     // in the subscriptions, not here.)
-                    if self.running.as_ref().is_some_and(|r| r.turn_id == *turn_id) {
+                    let live = self.running.as_ref().is_some_and(|r| r.turn_id == *turn_id);
+                    if live {
                         self.clear_running();
                         // A live turn finished: the lane is healthy, and a
                         // provider that settles only failures (Claude Code,
@@ -1038,14 +1105,19 @@ impl SessionView {
                     }
                     self.submitting = false;
                     // The lane's terminal: the application records the
-                    // byline, the ledger row and the record bump. Replayed
-                    // history settles here too; every write
-                    // below is idempotent, so a reopen never double-counts.
-                    cx.emit(super::SessionEvent::ProviderTurnFinished {
-                        session_id: self.session_id.clone(),
-                        turn_id: turn_id.clone(),
-                        meta: meta.clone(),
-                    });
+                    // byline, the ledger row and the record bump. A
+                    // replayed batch's finishes wait for the batch's end,
+                    // where they settle in one `HistoryReplayed` (docs/81 A
+                    // F14), not one settle each.
+                    if !replaying {
+                        cx.emit(super::SessionEvent::ProviderTurnFinished {
+                            session_id: self.session_id.clone(),
+                            turn_id: turn_id.clone(),
+                            meta: meta.clone(),
+                        });
+                    } else {
+                        replayed.push((turn_id.clone(), meta.clone()));
+                    }
                     // The turn may have carried a fresh usage reading (a
                     // rate-limit frame, an account push): persist it now,
                     // so the menu shows it with its true age even if this
@@ -1099,6 +1171,11 @@ impl SessionView {
                 session_id: self.session_id.clone(),
             });
         }
+        // Every finished turn the batch replayed, settled once: a reopen of
+        // N turns is one event, not N (docs/81 A F14).
+        if !replayed.is_empty() {
+            cx.emit(super::SessionEvent::HistoryReplayed { session_id: self.session_id.clone(), turns: replayed });
+        }
         if let (Some((turn_id, started)), Some(running)) = (running_before, self.running.as_mut()) {
             if running.turn_id == turn_id {
                 running.started = started;
@@ -1110,16 +1187,14 @@ impl SessionView {
     /// queued and fold its removal, so a refused submit or a dead lane
     /// leaves no stuck bubble behind. Removing a turn the fold never saw
     /// (or already dropped) lands nothing — never an error.
-    pub(super) fn remove_optimistic_turn(&mut self, turn_id: &str) {
+    pub(super) fn remove_optimistic_turn(&mut self, turn_id: &str, cx: &mut Context<Self>) {
         if let Some(at) = self.pending_optimistic.iter().position(|pending| pending.id == turn_id) {
             self.pending_optimistic.remove(at);
         }
         let removed = self.store.apply_deltas(
             vec![Delta::TurnRemoved { turn_id: turn_id.to_owned() }],
         );
-        if !removed.is_empty() {
-            self.follow = true;
-        }
+        self.announce_landed(&removed, cx);
     }
 
     /// Reconcile the provider's own user turns with the optimistic bubbles
@@ -1327,7 +1402,7 @@ impl SessionView {
                 headline: pending.headline,
             });
         }
-        self.follow = true;
+        cx.emit(RuntimeEvent::EntriesAppended);
         cx.notify();
     }
 }
@@ -1346,7 +1421,7 @@ mod tests {
     }
 
     use super::*;
-    use gpui::{AppContext as _, Entity};
+    use gpui::Entity;
 
     /// A provider-lane view over a connected scripted provider, with the
     /// sender half of its lane channel held back for the test to drive.
@@ -1395,7 +1470,7 @@ mod tests {
         text: &str,
     ) {
         vc.update(|_, cx| {
-            let lane = view.read(cx).test_provider();
+            let lane = view.read(cx).rt(cx).test_provider();
             let guard = lane.lock().expect("lane provider");
             guard
                 .send(provider::Command::SubmitInput {
@@ -1416,7 +1491,7 @@ mod tests {
     fn assistant_texts(view: &Entity<SessionView>, vc: &mut gpui::VisualTestContext) -> Vec<String> {
         vc.update(|_, cx| {
             view.read(cx)
-                .session()
+                .rt(cx).session()
                 .map(|session| {
                     session
                         .turns
@@ -1438,12 +1513,12 @@ mod tests {
         let vc = cx.add_empty_window();
         let (view, tx) = open_lane_view(vc, "s-1");
         vc.update(|_, cx| {
-            // Three tasks: the lane's one drain loop, plus the one-shot
+            // Three runtime tasks: the lane's one drain loop, plus the one-shot
             // `ListPending` the open pulls so a missed approval still
             // shows, plus the one-shot `ListModels` the open pulls so the
             // menu lists what the child returns.
-            assert_eq!(view.read(cx).tasks.len(), 3, "the drain loop plus the open's two pulls");
-            assert!(view.read(cx).provider_kind() != crate::providers::ProviderId::Muse);
+            assert_eq!(view.read(cx).rt(cx).tasks.len(), 3, "the drain loop plus the open's two pulls");
+            assert!(view.read(cx).rt(cx).provider_kind() != crate::providers::ProviderId::Muse);
         });
         submit_and_deliver(&view, &tx, vc, "hello");
         let texts = assistant_texts(&view, vc);
@@ -1464,7 +1539,7 @@ mod tests {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (view, tx) = open_lane_view_as(vc, "s-1", "claude-code");
-        vc.update(|_, cx| view.update(cx, |view, _| view.plan_turn = Some("r-1".to_owned())));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().as_mut(cx).plan_turn = Some("r-1".to_owned())));
         vc.update(|_, _| {
             tx.unbounded_send(provider::ProviderEvent::TurnIdentified {
                 session_id: "s-1".to_owned(),
@@ -1476,10 +1551,10 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert_eq!(view.plan_turn.as_deref(), Some("msg-1"), "the plan turn re-keys");
-            assert_eq!(view.streamed_turn_id("r-1"), "msg-1");
-            assert_eq!(view.streamed_turn_id("r-other"), "r-other", "an unaliased ack is its own id");
-            assert!(!view.provider_turn_finished("r-1"), "not finished yet");
+            assert_eq!(view.rt(cx).plan_turn.as_deref(), Some("msg-1"), "the plan turn re-keys");
+            assert_eq!(view.rt(cx).streamed_turn_id("r-1"), "msg-1");
+            assert_eq!(view.rt(cx).streamed_turn_id("r-other"), "r-other", "an unaliased ack is its own id");
+            assert!(!view.rt(cx).provider_turn_finished("r-1"), "not finished yet");
         });
         vc.update(|_, _| {
             tx.unbounded_send(provider::ProviderEvent::Deltas {
@@ -1501,7 +1576,7 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             assert!(
-                view.read(cx).provider_turn_finished("r-1"),
+                view.read(cx).rt(cx).provider_turn_finished("r-1"),
                 "a late ack for a finished turn reads stale through its alias"
             );
         });
@@ -1524,7 +1599,7 @@ mod tests {
         vc.update(|_, cx| {
             let approval = view
                 .read(cx)
-                .external_approvals
+                .rt(cx).external_approvals
                 .get("ap-1")
                 .expect("the tap parks on the approvals surface");
             assert_eq!(approval.headline, "rm -rf /tmp/probe");
@@ -1554,7 +1629,7 @@ mod tests {
         vc.update(|_, cx| {
             let approval = view
                 .read(cx)
-                .external_approvals
+                .rt(cx).external_approvals
                 .get("mcp-elicitation-0")
                 .expect("the tap parks on the approvals surface");
             assert_eq!(
@@ -1563,12 +1638,12 @@ mod tests {
                 "the prefix routes the kind, not the provider default"
             );
             view.update(cx, |view, cx| {
-                view.decide_external_approval(
+                view.runtime().clone().update(cx, |rt, cx| rt.decide_external_approval(
                     "mcp-elicitation-0".to_owned(),
                     crate::providers::ApprovalChoice::Accept,
                     None,
                     cx,
-                );
+                ));
             });
         });
         vc.run_until_parked();
@@ -1605,10 +1680,10 @@ mod tests {
             // The tap lives beside the fold, so the row reads it from
             // there: without the `row_pending` fallback the row said
             // `Working` while the approval waited.
-            let (approval, _) = view.read(cx).row_pending();
+            let (approval, _) = view.read(cx).rt(cx).row_pending();
             assert_eq!(approval.as_deref(), Some("rm -rf /tmp/probe"));
             assert_eq!(
-                view.read(cx).waiting_on_you(),
+                view.read(cx).rt(cx).waiting_on_you(),
                 Some((1, 0)),
                 "the needs-you banner lights for a lane approval too"
             );
@@ -1632,15 +1707,15 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert_eq!(view.running.as_ref().map(|r| r.turn_id.as_str()), Some("t-1"), "running before any delta");
-            assert_eq!(view.store.side().queued.len(), 1, "the queue strip has its row");
-            assert_eq!(view.last_cursor().as_deref(), Some("c-9"), "a reconnect resumes after the cursor");
+            assert_eq!(view.rt(cx).running.as_ref().map(|r| r.turn_id.as_str()), Some("t-1"), "running before any delta");
+            assert_eq!(view.rt(cx).store.side().queued.len(), 1, "the queue strip has its row");
+            assert_eq!(view.rt(cx).last_cursor().as_deref(), Some("c-9"), "a reconnect resumes after the cursor");
         });
         // A reclaimed row whose button asked for Edit: its words go back to
         // the composer by that intent.
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.unqueueing.insert(
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).unqueueing.insert(
                     "t-q".into(),
                     super::super::PendingUnqueue { kind: super::super::Unqueue::Edit, text: "later".into() },
                 );
@@ -1659,10 +1734,10 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert!(view.running.is_none(), "the settle stands the turn down");
-            assert!(view.completed_turns.contains("t-1"));
-            assert_eq!(view.pending_prompt.as_deref(), Some("later"), "the words are back in the composer");
-            assert!(view.unqueueing.is_empty(), "the intent was used once");
+            assert!(view.rt(cx).running.is_none(), "the settle stands the turn down");
+            assert!(view.rt(cx).completed_turns.contains("t-1"));
+            assert_eq!(view.rt(cx).pending_prompt.as_deref(), Some("later"), "the words are back in the composer");
+            assert!(view.rt(cx).unqueueing.is_empty(), "the intent was used once");
         });
         // A re-delivered start for the settled turn marks nothing running.
         send(provider::ProviderEvent::TurnRunning { session_id: "s-1".into(), turn_id: "t-1".into() });
@@ -1674,8 +1749,8 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert!(view.running.is_none());
-            assert_eq!(view.store.side().queued.len(), 1);
+            assert!(view.rt(cx).running.is_none());
+            assert_eq!(view.rt(cx).store.side().queued.len(), 1);
         });
     }
 
@@ -1696,7 +1771,7 @@ mod tests {
         vc.update(|_, cx| {
             let question = view
                 .read(cx)
-                .external_questions
+                .rt(cx).external_questions
                 .get("q-1")
                 .expect("the tap is recorded for the question surface");
             assert_eq!(question.headline, "Which region?");
@@ -1709,12 +1784,12 @@ mod tests {
         vc.update(|_, cx| {
             let view = view.read(cx);
             assert_eq!(
-                view.banner.as_deref(),
+                view.rt(cx).banner.as_deref(),
                 Some(lost_banner(ProviderId::Codex).as_str()),
                 "the lost connection shows the quiet lost banner"
             );
-            assert_eq!(view.banner_action, Some(super::super::BannerAction::RetryNow));
-            assert!(view.external_questions.is_empty(), "the dead child's question is gone");
+            assert_eq!(view.rt(cx).banner_action, Some(super::super::BannerAction::RetryNow));
+            assert!(view.rt(cx).external_questions.is_empty(), "the dead child's question is gone");
         });
     }
 
@@ -1724,13 +1799,17 @@ mod tests {
 
     #[gpui::test]
     fn dropping_the_view_shuts_its_child_down(cx: &mut gpui::TestAppContext) {
+        // The view here is its runtime's last holder, so dropping it drops
+        // the runtime, whose `Drop` hangs up. A view dropped while the
+        // registry still holds the runtime hangs nothing up (see
+        // `a_session_runs_to_completion_with_no_view`).
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (view, tx) = open_lane_view(vc, "s-1");
         // The lane's provider, held past the view so the shutdown below is
         // observable: scripted providers share state across handles, and a
         // shut one refuses every later command as shut down.
-        let lane = vc.update(|_, cx| view.read(cx).test_provider());
+        let lane = vc.update(|_, cx| view.read(cx).rt(cx).test_provider());
         drop(view);
         drop(tx);
         vc.run_until_parked();
@@ -1753,6 +1832,37 @@ mod tests {
         }
     }
 
+    /// docs/81 A F12: hanging a lane up never waits on the UI thread for a
+    /// command in flight. The lane's mutex is held (a revive on a hung
+    /// child, say); the hang-up returns at once and lands when the command
+    /// lets go.
+    #[gpui::test]
+    fn a_hang_up_never_waits_on_a_command_in_flight(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (view, _tx) = open_lane_view(vc, "s-1");
+        let lane = vc.update(|_, cx| view.read(cx).rt(cx).test_provider());
+        let in_flight = lane.lock().expect("lane provider");
+        // Held on this very thread: a hang-up that waited would never return.
+        vc.update(|_, cx| view.read(cx).runtime().clone().update(cx, |rt, _| rt.shutdown_lane()));
+        drop(in_flight);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let refused = lane.lock().expect("lane provider").send(provider::Command::SubmitInput {
+                request_id: "r-late".into(),
+                session_id: "s-1".into(),
+                parts: vec![provider::SubmissionPart::Text("after the hang-up".into())],
+                display_text: None,
+                effort: None,
+            });
+            if matches!(&refused, Err(provider::ProviderError::Unavailable { reason }) if reason.contains("shut down")) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the hang-up landed once the command let go, answered {refused:?}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     /// Every lane survives a lost child (docs/71 §2): a Codex lane keeps
     /// its provider (no hang-up — its adapter revives on the next send),
     /// keeps draining, and wears the quiet banner with Retry now. A second
@@ -1767,7 +1877,7 @@ mod tests {
         let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<&'static str>::new()));
         vc.update(|_, cx| {
             let seen = seen.clone();
-            let sub = cx.subscribe(&view, move |_, event: &super::super::SessionEvent, _| match event {
+            let sub = cx.subscribe(&view.read(cx).runtime().clone(), move |_, event: &super::super::SessionEvent, _| match event {
                 super::super::SessionEvent::ChildFailed { message, .. } => {
                     assert_eq!(message, "child exited again");
                     seen.borrow_mut().push("failed");
@@ -1782,7 +1892,7 @@ mod tests {
             .expect("the lane channel is open");
         vc.run_until_parked();
         assert_eq!(*seen.borrow(), ["rows"], "one loss: the rows re-read, nothing closes");
-        let lane = vc.update(|_, cx| view.read(cx).test_provider());
+        let lane = vc.update(|_, cx| view.read(cx).rt(cx).test_provider());
         let still_open = lane.lock().expect("lane provider").send(provider::Command::FollowSession {
             session_id: "s-1".into(),
             after: None,
@@ -1797,13 +1907,13 @@ mod tests {
         .expect("the lane still drains after the loss");
         vc.run_until_parked();
         vc.update(|_, cx| {
-            assert!(view.read(cx).external_approvals.get("ap-revived").is_some(), "the revived ask surfaces");
-            assert_eq!(view.read(cx).banner_action, Some(super::super::BannerAction::RetryNow));
+            assert!(view.read(cx).rt(cx).external_approvals.get("ap-revived").is_some(), "the revived ask surfaces");
+            assert_eq!(view.read(cx).rt(cx).banner_action, Some(super::super::BannerAction::RetryNow));
         });
         // The revive restored the connection: the lost banner stands down.
         tx.unbounded_send(provider::ProviderEvent::ConnectionRestored).expect("the lane channel is open");
         vc.run_until_parked();
-        vc.update(|_, cx| assert!(view.read(cx).banner.is_none(), "restored takes the banner down"));
+        vc.update(|_, cx| assert!(view.read(cx).rt(cx).banner.is_none(), "restored takes the banner down"));
         tx.unbounded_send(provider::ProviderEvent::ConnectionLost { reason: "child exited again".into() })
             .expect("the lane channel is open");
         vc.run_until_parked();
@@ -1820,7 +1930,7 @@ mod tests {
         let failed = std::rc::Rc::new(std::cell::Cell::new(false));
         vc.update(|_, cx| {
             let failed = failed.clone();
-            let sub = cx.subscribe(&view, move |_, event: &super::super::SessionEvent, _| {
+            let sub = cx.subscribe(&view.read(cx).runtime().clone(), move |_, event: &super::super::SessionEvent, _| {
                 if matches!(event, super::super::SessionEvent::ChildFailed { .. }) {
                     failed.set(true);
                 }
@@ -1834,7 +1944,7 @@ mod tests {
         vc.run_until_parked();
         assert!(!failed.get(), "a finished turn in between restarts the count");
         vc.update(|_, cx| {
-            assert_eq!(view.read(cx).banner_action, Some(super::super::BannerAction::RetryNow), "the quiet banner again");
+            assert_eq!(view.read(cx).rt(cx).banner_action, Some(super::super::BannerAction::RetryNow), "the quiet banner again");
         });
     }
 
@@ -1852,12 +1962,12 @@ mod tests {
         let (view, tx) = open_lane_view_as(vc, "s-1", "claude-code");
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                assert_eq!(view.provider_kind(), ProviderId::ClaudeCode);
-                view.running = Some(super::super::Running {
+                assert_eq!(view.rt(cx).provider_kind(), ProviderId::ClaudeCode);
+                view.runtime().as_mut(cx).running = Some(super::super::Running {
                     turn_id: "t-1".to_owned(),
                     started: crate::clock::now_instant(),
                 });
-                view.inject_external_approval(
+                view.runtime().clone().update(cx, |rt, cx| rt.inject_external_approval(
                     ExternalApproval {
                         id: "ap-1".to_owned(),
                         session_id: "s-1".to_owned(),
@@ -1870,7 +1980,7 @@ mod tests {
                         decision_sent: None,
                     },
                     cx,
-                );
+                ));
             });
         });
         let lost = provider::ProviderEvent::ConnectionLost { reason: "exited mid-turn".into() };
@@ -1878,9 +1988,9 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert!(!view.busy(), "no turn reads as running after the loss");
-            assert!(view.external_approvals.get("ap-1").is_none(), "the dead child's ask is gone");
-            assert_eq!(view.banner.as_deref(), Some(lost_banner(ProviderId::ClaudeCode).as_str()));
+            assert!(!view.rt(cx).busy(), "no turn reads as running after the loss");
+            assert!(view.rt(cx).external_approvals.get("ap-1").is_none(), "the dead child's ask is gone");
+            assert_eq!(view.rt(cx).banner.as_deref(), Some(lost_banner(ProviderId::ClaudeCode).as_str()));
         });
         tx.unbounded_send(provider::ProviderEvent::ApprovalRequested {
             session_id: "s-1".to_owned(),
@@ -1891,7 +2001,7 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             assert!(
-                view.read(cx).external_approvals.get("ap-2").is_some(),
+                view.read(cx).rt(cx).external_approvals.get("ap-2").is_some(),
                 "the resumed child's ask reaches the surface"
             );
         });
@@ -2357,7 +2467,7 @@ mod tests {
         vc: &mut gpui::VisualTestContext,
     ) {
         vc.update(|_, cx| {
-            let lane = view.read(cx).test_provider();
+            let lane = view.read(cx).rt(cx).test_provider();
             let guard = lane.lock().expect("lane provider");
             for event in guard.events().try_iter() {
                 tx.unbounded_send(event).expect("the lane channel is open");
@@ -2428,8 +2538,8 @@ mod tests {
         let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.images.push(test_image());
-                view.send_text("hello there".to_owned(), cx);
+                view.runtime().as_mut(cx).images.push(test_image());
+                view.runtime().clone().update(cx, |rt, cx| rt.send_text("hello there".to_owned(), cx));
             });
         });
         vc.run_until_parked();
@@ -2457,7 +2567,7 @@ mod tests {
         // is the transcript now.
         drain_recording(&view, &tx, vc);
         vc.update(|_, cx| {
-            assert!(view.read(cx).busy(), "the open turn marks the view busy");
+            assert!(view.read(cx).rt(cx).busy(), "the open turn marks the view busy");
         });
     }
 
@@ -2467,14 +2577,14 @@ mod tests {
         let vc = cx.add_empty_window();
         let (adapter, handle) = RecordingProvider::new();
         let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("work".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("work".to_owned(), cx))));
         vc.run_until_parked();
         drain_recording(&view, &tx, vc);
         let running = vc.update(|_, cx| {
-            assert!(view.read(cx).busy(), "the turn runs before the steer");
-            view.read(cx).running.as_ref().map(|r| r.turn_id.clone()).expect("a running turn id")
+            assert!(view.read(cx).rt(cx).busy(), "the turn runs before the steer");
+            view.read(cx).rt(cx).running.as_ref().map(|r| r.turn_id.clone()).expect("a running turn id")
         });
-        vc.update(|_, cx| view.update(cx, |view, cx| view.steer_text("follow up".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.steer_text("follow up".to_owned(), cx))));
         vc.run_until_parked();
         let steers = handle.commands_of("steer-input");
         assert_eq!(steers.len(), 1, "one SteerInput leaves the lane, drew {steers:?}");
@@ -2493,12 +2603,12 @@ mod tests {
         let vc = cx.add_empty_window();
         let (adapter, handle) = RecordingProvider::new();
         let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("work".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("work".to_owned(), cx))));
         vc.run_until_parked();
         drain_recording(&view, &tx, vc);
         vc.update(|_, cx| {
-            assert!(view.read(cx).busy(), "the stop button's world: the provider works");
-            view.update(cx, |view, cx| view.interrupt(cx));
+            assert!(view.read(cx).rt(cx).busy(), "the stop button's world: the provider works");
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.interrupt(cx)));
         });
         vc.run_until_parked();
         let stops = handle.commands_of("interrupt-turn");
@@ -2512,7 +2622,7 @@ mod tests {
         }
         drain_recording(&view, &tx, vc);
         vc.update(|_, cx| {
-            assert!(!view.read(cx).busy(), "the finished turn drops the stop button");
+            assert!(!view.read(cx).rt(cx).busy(), "the finished turn drops the stop button");
         });
     }
 
@@ -2525,22 +2635,22 @@ mod tests {
         let vc = cx.add_empty_window();
         let (adapter, handle) = RecordingProvider::new();
         let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("work".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("work".to_owned(), cx))));
         vc.run_until_parked();
         drain_recording(&view, &tx, vc);
         vc.update(|_, cx| {
-            assert!(view.read(cx).busy(), "setup: the turn runs");
-            view.update(cx, |view, cx| view.interrupt(cx));
+            assert!(view.read(cx).rt(cx).busy(), "setup: the turn runs");
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.interrupt(cx)));
         });
         vc.run_until_parked();
         assert_eq!(handle.commands_of("interrupt-turn").len(), 1, "Stop leaves the lane as InterruptTurn");
         drain_recording(&view, &tx, vc);
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert!(!view.busy(), "the turn ended");
-            assert!(view.banner.is_none(), "no refusal banner: {:?}", view.banner);
+            assert!(!view.rt(cx).busy(), "the turn ended");
+            assert!(view.rt(cx).banner.is_none(), "no refusal banner: {:?}", view.rt(cx).banner);
         });
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("next".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("next".to_owned(), cx))));
         vc.run_until_parked();
         assert_eq!(handle.commands_of("submit-input").len(), 2, "the composer sends the next message");
     }
@@ -2589,7 +2699,7 @@ mod tests {
             observed_at: Some(1_700_000_000),
         });
         let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        let lane = vc.update(|_, cx| view.read(cx).test_provider());
+        let lane = vc.update(|_, cx| view.read(cx).rt(cx).test_provider());
         {
             let _held = lane.lock().expect("lane provider");
             tx.unbounded_send(finished_turn("a-1")).expect("the lane channel is open");
@@ -2642,7 +2752,7 @@ mod tests {
         let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.inject_external_approval(crate::providers::ExternalApproval {
+                view.runtime().clone().update(cx, |rt, cx| rt.inject_external_approval(crate::providers::ExternalApproval {
                     id: "ap-1".to_owned(),
                     session_id: "s-1".to_owned(),
                     provider: crate::providers::ProviderId::Codex,
@@ -2652,15 +2762,15 @@ mod tests {
                     dont_ask_again: None,
                     stage_token: Some("st-1".to_owned()),
                     decision_sent: None,
-                }, cx);
+                }, cx));
             });
             view.update(cx, |view, cx| {
-                view.decide_external_approval(
+                view.runtime().clone().update(cx, |rt, cx| rt.decide_external_approval(
                     "ap-1".to_owned(),
                     crate::providers::ApprovalChoice::Accept,
                     Some("looks fine".to_owned()),
                     cx,
-                );
+                ));
             });
         });
         vc.run_until_parked();
@@ -2682,13 +2792,13 @@ mod tests {
             other => panic!("a press must travel as DecideApproval, travelled as {other:?}"),
         }
         vc.update(|_, cx| {
-            let card = view.read(cx).external_approvals.get("ap-1").expect("the card waits");
+            let card = view.read(cx).rt(cx).external_approvals.get("ap-1").expect("the card waits");
             assert_eq!(card.decision_sent.as_deref(), Some("accept"), "sent, waiting — never settled on the press");
             assert!(
-                view.update(cx, |view, cx| view.resolve_external_approval("ap-1", cx)),
+                view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.resolve_external_approval("ap-1", cx))),
                 "the resolution settles what the press never may"
             );
-            assert!(view.read(cx).external_approvals.get("ap-1").is_none());
+            assert!(view.read(cx).rt(cx).external_approvals.get("ap-1").is_none());
         });
     }
 
@@ -2777,16 +2887,16 @@ mod tests {
             vc.run_until_parked();
             vc.update(|_, cx| {
                 assert!(
-                    view.read(cx).busy(),
+                    view.read(cx).rt(cx).busy(),
                     "ack-first={ack_first}: the approval turn runs while it waits"
                 );
                 view.update(cx, |view, cx| {
-                    view.decide_external_approval(
+                    view.runtime().clone().update(cx, |rt, cx| rt.decide_external_approval(
                         approval_id.clone(),
                         crate::providers::ApprovalChoice::Accept,
                         None,
                         cx,
-                    );
+                    ));
                 });
             });
             if ack_first {
@@ -2825,14 +2935,14 @@ mod tests {
             });
             vc.run_until_parked();
             vc.update(|_, cx| {
-                let settled = view.read(cx).provider_turn_finished(&turn_id);
+                let settled = view.read(cx).rt(cx).provider_turn_finished(&turn_id);
                 assert!(settled, "ack-first={ack_first}: the finished turn counts as finished");
                 assert!(
-                    !view.read(cx).busy(),
+                    !view.read(cx).rt(cx).busy(),
                     "ack-first={ack_first}: the finished approval turn drops the stop button"
                 );
                 assert_eq!(
-                    view.read(cx).row_pending(),
+                    view.read(cx).rt(cx).row_pending(),
                     (None, None),
                     "ack-first={ack_first}: no pending words left for the row to stand on"
                 );
@@ -2870,7 +2980,7 @@ mod tests {
         );
         vc.update(|_, cx| {
             let card =
-                view.read(cx).external_approvals.get("ap-9").expect("the pulled approval parks");
+                view.read(cx).rt(cx).external_approvals.get("ap-9").expect("the pulled approval parks");
             assert_eq!(card.stage_token.as_deref(), Some("st-9"));
             assert!(card.decision_sent.is_none());
         });
@@ -2905,7 +3015,7 @@ mod tests {
             }
             other => panic!("an answer must travel as AnswerQuestion, travelled as {other:?}"),
         }
-        vc.update(|_, cx| view.update(cx, |view, cx| view.skip_question("q-1".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.skip_question("q-1".to_owned(), cx))));
         vc.run_until_parked();
         assert!(
             handle
@@ -2957,7 +3067,7 @@ mod tests {
             let sent = handle.question_commands();
             assert_eq!(sent.len(), 1, "one answer leaves the lane, drew {sent:?}");
             assert!(matches!(sent[0], provider::Command::AnswerQuestion { .. }), "drew {sent:?}");
-            assert!(view.banner.is_none(), "an attempted lane does not banner, drew {:?}", view.banner);
+            assert!(view.rt(cx).banner.is_none(), "an attempted lane does not banner, drew {:?}", view.rt(cx).banner);
         });
     }
 
@@ -2971,10 +3081,10 @@ mod tests {
             let vc = cx.add_empty_window();
             let (adapter, handle) = RecordingProvider::new();
             let (view, _tx) = open_recording_view(vc, "s-1", provider, adapter);
-            vc.update(|_, cx| view.update(cx, |view, cx| view.run_user_shell("echo hi".to_owned(), cx)));
+            vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.run_user_shell("echo hi".to_owned(), cx))));
             vc.run_until_parked();
             assert!(handle.commands_of("run-shell").is_empty(), "{provider}: nothing leaves the lane");
-            let banner = vc.update(|_, cx| view.read(cx).banner.clone());
+            let banner = vc.update(|_, cx| view.read(cx).rt(cx).banner.clone());
             assert_eq!(banner, Some(format!("Not available in {label}.")), "{provider}");
         }
     }
@@ -2989,10 +3099,10 @@ mod tests {
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
                 let error = provider::ProviderError::Rejected { reason: "thread/x was never captured".into() };
-                view.report_provider_error(&error, cx);
+                view.runtime().clone().update(cx, |rt, cx| rt.report_provider_error(&error, cx));
             })
         });
-        let banner = vc.update(|_, cx| view.read(cx).banner.clone()).unwrap_or_default();
+        let banner = vc.update(|_, cx| view.read(cx).rt(cx).banner.clone()).unwrap_or_default();
         assert_eq!(banner, "Codex couldn't do that.");
         assert!(!banner.contains("provider refused the command"));
     }
@@ -3003,14 +3113,14 @@ mod tests {
         let vc = cx.add_empty_window();
         let (adapter, handle) = RecordingProvider::new();
         let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("try me".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("try me".to_owned(), cx))));
         vc.run_until_parked();
         drain_recording(&view, &tx, vc);
         let request_id = match handle.commands_of("submit-input").as_slice() {
             [provider::Command::SubmitInput { request_id, .. }] => request_id.clone(),
             other => panic!("one submit first, drew {other:?}"),
         };
-        vc.update(|_, cx| view.update(cx, |view, cx| view.retry_turn(request_id, cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.retry_turn(request_id, cx))));
         vc.run_until_parked();
         let resubmits = handle.commands_of("submit-input");
         assert_eq!(resubmits.len(), 2, "retry resubmits, drew {resubmits:?}");
@@ -3037,7 +3147,7 @@ mod tests {
                 view.pick_effort(Some(aui_protocol::ReasoningEffort::High), cx)
             });
         });
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("push hard".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("push hard".to_owned(), cx))));
         vc.run_until_parked();
         let submits = handle.commands_of("submit-input");
         assert_eq!(submits.len(), 1, "one SubmitInput leaves the lane, drew {submits:?}");
@@ -3058,7 +3168,7 @@ mod tests {
         let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.unqueue("t-9", super::super::Unqueue::Remove, "queued words".to_owned(), cx)
+                view.runtime().clone().update(cx, |rt, cx| rt.unqueue("t-9", super::super::Unqueue::Remove, "queued words".to_owned(), cx))
             });
         });
         vc.run_until_parked();
@@ -3077,14 +3187,14 @@ mod tests {
         // so the seam refuses before any adapter code runs.
         let (view, _tx) = open_lane_view(vc, "s-1");
         vc.run_until_parked();
-        vc.update(|_, cx| assert!(view.read(cx).banner.is_none(), "the ListPending pull stays quiet"));
-        vc.update(|_, cx| view.update(cx, |view, cx| view.run_user_shell("echo hi".to_owned(), cx)));
+        vc.update(|_, cx| assert!(view.read(cx).rt(cx).banner.is_none(), "the ListPending pull stays quiet"));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.run_user_shell("echo hi".to_owned(), cx))));
         vc.run_until_parked();
         vc.update(|_, cx| {
             assert!(
-                view.read(cx).banner.as_deref().is_some_and(|banner| banner == "Not available in Codex."),
+                view.read(cx).rt(cx).banner.as_deref().is_some_and(|banner| banner == "Not available in Codex."),
                 "the refusal names the provider in plain words, drew {:?}",
-                view.read(cx).banner
+                view.read(cx).rt(cx).banner
             );
         });
     }
@@ -3117,10 +3227,10 @@ mod tests {
         let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
         vc.update(|_, cx| {
             let view = view.read(cx);
-            let ids: Vec<&str> = view.models.iter().map(|m| m.model_id.as_str()).collect();
+            let ids: Vec<&str> = view.rt(cx).models.iter().map(|m| m.model_id.as_str()).collect();
             assert_eq!(ids, ["gx-1", "gx-2"], "the menu lists what the child returned");
-            assert_eq!(view.model().as_ref(), "GX One", "the chip reads the active row's human name");
-            assert!(!view.model().as_ref().contains("codex"), "never the provider id");
+            assert_eq!(view.rt(cx).model().as_ref(), "GX One", "the chip reads the active row's human name");
+            assert!(!view.rt(cx).model().as_ref().contains("codex"), "never the provider id");
         });
         vc.update(|_, cx| view.update(cx, |view, cx| view.pick_model("gx-2", cx)));
         vc.run_until_parked();
@@ -3138,9 +3248,9 @@ mod tests {
             other => panic!("a pick must travel as SelectModel, travelled as {other:?}"),
         }
         vc.update(|_, cx| {
-            assert_eq!(view.read(cx).model().as_ref(), "GX Two", "the chip follows the pick");
+            assert_eq!(view.read(cx).rt(cx).model().as_ref(), "GX Two", "the chip follows the pick");
             assert!(
-                view.read(cx).pending_model.as_deref() == Some("gx-2"),
+                view.read(cx).rt(cx).pending_model.as_deref() == Some("gx-2"),
                 "recorded in pending_model until confirmed"
             );
         });
@@ -3174,17 +3284,17 @@ mod tests {
         // The open's own ask came back before the child's catalog existed.
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                let provider = view.provider_id.clone();
-                view.apply_model_catalog(crate::providers::claude_code_catalog(Some("")), &provider, cx);
+                let provider = view.rt(cx).provider_id.clone();
+                view.runtime().clone().update(cx, |rt, cx| rt.apply_model_catalog(crate::providers::claude_code_catalog(Some("")), &provider, cx));
             })
         });
         vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_picker(MenuKind::Model, cx)));
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert_eq!(view.model().as_ref(), "Default (recommended)");
+            assert_eq!(view.rt(cx).model().as_ref(), "Default (recommended)");
             let selected = view.menu_selected(cx).expect("open");
-            assert_eq!(view.models.get(selected).map(|m| m.model_id.as_str()), Some("default"));
+            assert_eq!(view.rt(cx).models.get(selected).map(|m| m.model_id.as_str()), Some("default"));
         });
     }
 
@@ -3228,15 +3338,15 @@ mod tests {
         })
         .expect("lane open");
         vc.run_until_parked();
-        vc.update(|_, cx| assert_eq!(view.read(cx).mode_label(), "Auto"));
+        vc.update(|_, cx| assert_eq!(view.read(cx).rt(cx).mode_label(), "Auto"));
         choose_row(vc, &view, MenuKind::Model, 1);
         // On the pick, before anything answers.
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert_eq!(view.model().as_ref(), "Haiku");
-            assert_eq!(view.mode_label(), "Ask", "the chip leaves Auto on the pick");
+            assert_eq!(view.rt(cx).model().as_ref(), "Haiku");
+            assert_eq!(view.rt(cx).mode_label(), "Ask", "the chip leaves Auto on the pick");
             assert_eq!(
-                view.banner_text(),
+                view.rt(cx).banner_text(),
                 Some("Auto is not available for Haiku; Claude Code will ask before acting.")
             );
         });
@@ -3261,8 +3371,8 @@ mod tests {
         choose_row(vc, &view, MenuKind::Mode, read_only);
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert_eq!(view.banner_text(), None, "a mode pick supersedes the fallback banner");
-            assert_eq!(view.mode_label(), "Read-only", "the newest request, not the superseded Ask");
+            assert_eq!(view.rt(cx).banner_text(), None, "a mode pick supersedes the fallback banner");
+            assert_eq!(view.rt(cx).mode_label(), "Read-only", "the newest request, not the superseded Ask");
         });
         // The CLI's report has the last word when it comes.
         tx.unbounded_send(provider::ProviderEvent::ApprovalModeChanged {
@@ -3271,7 +3381,7 @@ mod tests {
         })
         .expect("lane open");
         vc.run_until_parked();
-        vc.update(|_, cx| assert_eq!(view.read(cx).mode_label(), "Read-only"));
+        vc.update(|_, cx| assert_eq!(view.read(cx).rt(cx).mode_label(), "Read-only"));
     }
 
     /// W4: a refused pick un-records itself and banners the reason — the
@@ -3286,16 +3396,16 @@ mod tests {
         vc.run_until_parked();
         // The background `ListModels` pull stays quiet: the reason row
         // explains the catalog, never a banner.
-        vc.update(|_, cx| assert!(view.read(cx).banner.is_none(), "the catalog pull stays quiet"));
+        vc.update(|_, cx| assert!(view.read(cx).rt(cx).banner.is_none(), "the catalog pull stays quiet"));
         vc.update(|_, cx| view.update(cx, |view, cx| view.pick_model("gx-9", cx)));
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert!(view.pending_model.is_none(), "the unlanded pick is dropped");
+            assert!(view.rt(cx).pending_model.is_none(), "the unlanded pick is dropped");
             assert!(
-                view.banner.as_deref().is_some_and(|banner| banner == "Not available in Codex."),
+                view.rt(cx).banner.as_deref().is_some_and(|banner| banner == "Not available in Codex."),
                 "the refusal names the provider in plain words, drew {:?}",
-                view.banner
+                view.rt(cx).banner
             );
         });
     }
@@ -3336,7 +3446,7 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             assert_eq!(
-                view.read(cx).pending_model.as_deref(),
+                view.read(cx).rt(cx).pending_model.as_deref(),
                 Some("opus-x"),
                 "the optimistic pick records"
             );
@@ -3361,20 +3471,20 @@ mod tests {
         vc.update(|_, cx| {
             let view = view.read(cx);
             assert!(
-                view.banner.as_deref().is_some_and(|banner| banner.contains("Model 'opus-x' not found")),
+                view.rt(cx).banner.as_deref().is_some_and(|banner| banner.contains("Model 'opus-x' not found")),
                 "the CLI reason reaches the banner, drew {:?}",
-                view.banner
+                view.rt(cx).banner
             );
             assert_eq!(
-                view.pending_model.as_deref(),
+                view.rt(cx).pending_model.as_deref(),
                 Some("sonnet"),
                 "the chip resyncs to the model in effect, drew {:?}",
-                view.pending_model
+                view.rt(cx).pending_model
             );
             assert!(
-                view.models.iter().filter(|row| row.is_active).all(|row| row.model_id == "sonnet"),
+                view.rt(cx).models.iter().filter(|row| row.is_active).all(|row| row.model_id == "sonnet"),
                 "one checked row, the effective model: {:?}",
-                view.models.iter().map(|row| (&row.model_id, row.is_active)).collect::<Vec<_>>()
+                view.rt(cx).models.iter().map(|row| (&row.model_id, row.is_active)).collect::<Vec<_>>()
             );
         });
     }
@@ -3410,12 +3520,12 @@ mod tests {
         vc.update(|_, cx| {
             let view = view.read(cx);
             assert!(
-                view.banner.as_deref().is_some_and(|banner| banner.contains("unsupported effort: high")),
+                view.rt(cx).banner.as_deref().is_some_and(|banner| banner.contains("unsupported effort: high")),
                 "the CLI reason reaches the banner, drew {:?}",
-                view.banner
+                view.rt(cx).banner
             );
             assert_eq!(
-                view.effort,
+                view.rt(cx).effort,
                 Some(aui_protocol::ReasoningEffort::High),
                 "the chip keeps the pick for the next submit to retry"
             );
@@ -3432,7 +3542,7 @@ mod tests {
         let (adapter, _handle) = RecordingProvider::new();
         let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
         vc.update(|_, cx| {
-            let meter = view.read(cx).context();
+            let meter = view.read(cx).rt(cx).context();
             assert_eq!(meter.used_tokens, 0, "no turns yet: the meter reads zero, honestly");
         });
         vc.update(|_, _| {
@@ -3462,7 +3572,7 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            let meter = view.context();
+            let meter = view.rt(cx).context();
             assert_eq!(meter.prompt_tokens, 1200, "input tokens out of TurnMeta");
             assert_eq!(meter.output_tokens, 300, "output tokens out of TurnMeta");
             assert_eq!(meter.total_tokens, 1500);
@@ -3493,7 +3603,7 @@ mod tests {
         let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
         vc.update(|_, cx| {
             assert_eq!(
-                view.read(cx).model().as_ref(),
+                view.read(cx).rt(cx).model().as_ref(),
                 "Sonnet",
                 "V1: no model known yet, so the chip names the CLI default, never the provider"
             );
@@ -3543,11 +3653,11 @@ mod tests {
         vc.update(|_, cx| {
             let view = view.read(cx);
             assert_eq!(
-                view.model().as_ref(),
+                view.rt(cx).model().as_ref(),
                 "hist-model",
                 "the chip names the history's model, never the provider"
             );
-            assert!(!view.busy(), "the replayed finish settles the view");
+            assert!(!view.rt(cx).busy(), "the replayed finish settles the view");
         });
         // The next turn arrives after history and appends after it.
         vc.update(|_, _| {
@@ -3593,7 +3703,7 @@ mod tests {
         vc.update(|_, cx| {
             let view = view.read(cx);
             let texts: Vec<String> = view
-                .session()
+                .rt(cx).session()
                 .map(|session| {
                     session
                         .turns
@@ -3612,7 +3722,7 @@ mod tests {
                 "history first, the new turn appended after it: {texts:?}"
             );
             assert_eq!(
-                view.model().as_ref(),
+                view.rt(cx).model().as_ref(),
                 "new-model",
                 "the chip follows the latest finished turn"
             );
@@ -3634,8 +3744,8 @@ mod tests {
         let (adapter, _handle) = RecordingProvider::new();
         let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.pending_model = Some("opus".to_owned());
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).pending_model = Some("opus".to_owned());
             });
         });
         vc.update(|_, _| {
@@ -3664,11 +3774,11 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert_eq!(view.model().as_ref(), "Opus", "the chip still reads the pick");
+            assert_eq!(view.rt(cx).model().as_ref(), "Opus", "the chip still reads the pick");
             assert!(
-                view.history_model.is_none(),
+                view.rt(cx).history_model.is_none(),
                 "history keeps nothing of the sub-call, drew {:?}",
-                view.history_model
+                view.rt(cx).history_model
             );
             assert_eq!(
                 crate::providers::read_claude_code_last_reported_model(),
@@ -3693,8 +3803,8 @@ mod tests {
         let (adapter, _handle) = RecordingProvider::new();
         let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.pending_model = Some("opus".to_owned());
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).pending_model = Some("opus".to_owned());
             });
         });
         vc.update(|_, _| {
@@ -3724,13 +3834,13 @@ mod tests {
         vc.update(|_, cx| {
             let view = view.read(cx);
             assert_eq!(
-                view.history_model.as_deref(),
+                view.rt(cx).history_model.as_deref(),
                 Some("claude-sonnet-4-5-20250822"),
                 "a fallback report updates history, drew {:?}",
-                view.history_model
+                view.rt(cx).history_model
             );
             assert_eq!(
-                view.model().as_ref(),
+                view.rt(cx).model().as_ref(),
                 "Opus",
                 "the chip still reads the live pick while it stands"
             );
@@ -3749,8 +3859,8 @@ mod tests {
         let (adapter, _handle) = RecordingProvider::new();
         let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.pending_model = Some("haiku".to_owned());
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).pending_model = Some("haiku".to_owned());
             });
         });
         vc.update(|_, _| {
@@ -3780,12 +3890,12 @@ mod tests {
         vc.update(|_, cx| {
             let view = view.read(cx);
             assert_eq!(
-                view.history_model.as_deref(),
+                view.rt(cx).history_model.as_deref(),
                 Some("claude-haiku-4-5-20251001"),
                 "a Haiku pick's Haiku report is its own, drew {:?}",
-                view.history_model
+                view.rt(cx).history_model
             );
-            assert_eq!(view.model().as_ref(), "Haiku", "the chip reads the Haiku pick");
+            assert_eq!(view.rt(cx).model().as_ref(), "Haiku", "the chip reads the Haiku pick");
         });
     }
 
@@ -3820,7 +3930,7 @@ mod tests {
             .expect("the lane channel is open");
         });
         vc.run_until_parked();
-        vc.update(|_, cx| view.update(cx, |view, cx| view.compact(cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.compact(cx))));
         vc.run_until_parked();
         let compacts = handle.commands_of("compact-session");
         assert_eq!(compacts.len(), 1, "one CompactSession leaves the lane, drew {compacts:?}");
@@ -3828,7 +3938,7 @@ mod tests {
         let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         vc.update(|_, cx| {
             let seen = seen.clone();
-            let sub = cx.subscribe(&view, move |_, event: &super::super::SessionEvent, _| {
+            let sub = cx.subscribe(&view.read(cx).runtime().clone(), move |_, event: &super::super::SessionEvent, _| {
                 if let super::super::SessionEvent::ForkedOnProvider { session_id, provider } = event {
                     assert_eq!(*provider, crate::providers::ProviderId::Muse, "the fork stays on its lane");
                     seen.borrow_mut().push(session_id.clone());
@@ -3836,7 +3946,7 @@ mod tests {
             });
             std::mem::forget(sub);
         });
-        vc.update(|_, cx| view.update(cx, |view, cx| view.fork(None, cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.fork(None, cx))));
         vc.run_until_parked();
         let forks = handle.commands_of("fork-session");
         assert_eq!(forks.len(), 1, "one ForkSession leaves the lane, drew {forks:?}");
@@ -3863,13 +3973,13 @@ mod tests {
         let vc = cx.add_empty_window();
         let (view, _tx) = open_lane_view(vc, "s-1");
         vc.run_until_parked();
-        vc.update(|_, cx| view.update(cx, |view, cx| view.compact(cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.compact(cx))));
         vc.run_until_parked();
         vc.update(|_, cx| {
             assert!(
-                view.read(cx).banner.as_deref().is_some_and(|banner| !banner.is_empty()),
+                view.read(cx).rt(cx).banner.as_deref().is_some_and(|banner| !banner.is_empty()),
                 "the refusal's reason reaches the banner, drew {:?}",
-                view.read(cx).banner
+                view.read(cx).rt(cx).banner
             );
         });
     }
@@ -3900,7 +4010,7 @@ mod tests {
             other => panic!("a mode pick must travel as SelectApprovalMode, travelled as {other:?}"),
         }
         // Plan mode attempts the same switch on a lane that accepts it.
-        vc.update(|_, cx| view.update(cx, |view, cx| view.set_plan(true, cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_plan(true, cx))));
         vc.run_until_parked();
         let modes: Vec<_> = handle
             .received()
@@ -3908,7 +4018,7 @@ mod tests {
             .filter(|c| matches!(c, provider::Command::SelectApprovalMode { .. }))
             .collect();
         assert_eq!(modes.len(), 2, "plan mode attempts the DenyUnmatched switch, drew {modes:?}");
-        vc.update(|_, cx| assert!(view.read(cx).plan_mode(), "the accepted switch holds the pill"));
+        vc.update(|_, cx| assert!(view.read(cx).rt(cx).plan_mode(), "the accepted switch holds the pill"));
     }
 
     /// The chip shows the mode the adapter reports, not the seam's
@@ -3932,7 +4042,7 @@ mod tests {
         .expect("lane open");
         vc.run_until_parked();
         vc.update(|_, cx| {
-            assert_eq!(view.read(cx).mode_label(), aui_protocol::PermissionMode::PromptUnmatched.label());
+            assert_eq!(view.read(cx).rt(cx).mode_label(), aui_protocol::PermissionMode::PromptUnmatched.label());
         });
     }
 
@@ -3956,7 +4066,7 @@ mod tests {
                 })
                 .collect()
         };
-        vc.update(|_, cx| view.update(cx, |view, cx| view.set_model("haiku", cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("haiku", cx))));
         vc.run_until_parked();
         let before = asked(&handle).len();
         tx.unbounded_send(provider::ProviderEvent::ApprovalModeChanged {
@@ -3967,13 +4077,13 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert_eq!(view.mode_label(), "Ask");
+            assert_eq!(view.rt(cx).mode_label(), "Ask");
             assert_eq!(
-                view.banner_text(),
+                view.rt(cx).banner_text(),
                 Some("Auto is not available for Haiku; Claude Code will ask before acting.")
             );
             assert_eq!(
-                view.mode_unavailable(PermissionMode::OnRequest).as_deref(),
+                view.rt(cx).mode_unavailable(PermissionMode::OnRequest).as_deref(),
                 Some("Not available for Haiku")
             );
         });
@@ -4001,7 +4111,7 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert_eq!(view.mode_label(), "Full access");
+            assert_eq!(view.rt(cx).mode_label(), "Full access");
             let selected = view.overlays.read(cx).menu().map(|menu| menu.selected);
             assert_eq!(selected, MODES.iter().position(|mode| *mode == aui_protocol::PermissionMode::AllowAll));
         });
@@ -4022,7 +4132,7 @@ mod tests {
             .expect("lane open");
         vc.run_until_parked();
         vc.update(|_, cx| {
-            assert_eq!(crate::overlays::effort_label(view.read(cx).effort), "High");
+            assert_eq!(crate::overlays::effort_label(view.read(cx).rt(cx).effort), "High");
         });
     }
 
@@ -4039,7 +4149,7 @@ mod tests {
         let (adapter, handle) = RecordingProvider::new();
         let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
         let levels = |vc: &mut gpui::VisualTestContext| {
-            vc.update(|_, cx| match view.read(cx).effort_options() {
+            vc.update(|_, cx| match view.read(cx).rt(cx).effort_options() {
                 EffortOptions::Available(options) | EffortOptions::AvailableWithNote { options, .. } => options.len(),
                 EffortOptions::Unavailable(_) => 0,
             })
@@ -4072,15 +4182,15 @@ mod tests {
         let vc = cx.add_empty_window();
         let (view, _tx) = open_lane_view(vc, "s-1");
         vc.run_until_parked();
-        vc.update(|_, cx| view.update(cx, |view, cx| view.set_plan(true, cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_plan(true, cx))));
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert!(!view.plan_mode(), "the refused switch stands the pill back down");
+            assert!(!view.rt(cx).plan_mode(), "the refused switch stands the pill back down");
             assert!(
-                view.banner.as_deref().is_some_and(|banner| banner == "Not available in Codex."),
+                view.rt(cx).banner.as_deref().is_some_and(|banner| banner == "Not available in Codex."),
                 "the refusal names the provider in plain words, drew {:?}",
-                view.banner
+                view.rt(cx).banner
             );
         });
     }
@@ -4093,25 +4203,25 @@ mod tests {
         let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.set_tier_banner(
+                view.runtime().clone().update(cx, |rt, cx| rt.set_tier_banner(
                     Some(super::super::TierBanner {
                         text: "This login is on pay-as-you-go.".to_owned(),
                         blocking: true,
                         checking: false,
                     }),
                     cx,
-                );
+                ));
             });
         });
         vc.update(|_, cx| {
-            assert!(view.read(cx).tier_banner.is_none(), "a muse-account banner never parks on a provider session");
+            assert!(view.read(cx).rt(cx).tier_banner.is_none(), "a muse-account banner never parks on a provider session");
             view.update(cx, |view, cx| {
                 assert!(view.render_tier_banner(cx).is_none(), "and never draws there either");
             });
         });
         // A blocking banner would gate the send on a muse lane: here the
         // turn still leaves.
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("still sends".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("still sends".to_owned(), cx))));
         vc.run_until_parked();
         assert_eq!(
             handle.commands_of("submit-input").len(),
@@ -4188,7 +4298,7 @@ mod tests {
     fn inline_approvals(view: &Entity<SessionView>, vc: &mut gpui::VisualTestContext) -> Vec<ApprovalState> {
         vc.update(|_, cx| {
             view.read(cx)
-                .session()
+                .rt(cx).session()
                 .map(|session| {
                     session
                         .turns
@@ -4241,11 +4351,11 @@ mod tests {
             );
             // The row still stands on the waiting ask, as muse rows do.
             assert_eq!(
-                view.read(cx).row_pending(),
+                view.read(cx).rt(cx).row_pending(),
                 (Some("/tmp/probe/note.txt".to_owned()), None),
                 "the fold's pending card feeds the needs-you row"
             );
-            assert_eq!(view.read(cx).waiting_on_you(), Some((1, 0)));
+            assert_eq!(view.read(cx).rt(cx).waiting_on_you(), Some((1, 0)));
         });
     }
 
@@ -4269,7 +4379,7 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.decide_approval("ap-1".to_owned(), "accept".to_owned(), None, cx)
+                view.runtime().clone().update(cx, |rt, cx| rt.decide_approval("ap-1".to_owned(), "accept".to_owned(), None, cx))
             });
         });
         vc.run_until_parked();
@@ -4325,7 +4435,7 @@ mod tests {
         let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.inject_external_approval(
+                view.runtime().clone().update(cx, |rt, cx| rt.inject_external_approval(
                     ExternalApproval {
                         id: "ap-1".to_owned(),
                         session_id: "s-1".to_owned(),
@@ -4338,7 +4448,7 @@ mod tests {
                         decision_sent: None,
                     },
                     cx,
-                );
+                ));
             });
         });
         vc.update(|_, cx| {
@@ -4353,7 +4463,7 @@ mod tests {
         vc.update(|_, cx| {
             assert_eq!(
                 view.read(cx)
-                    .external_approvals
+                    .rt(cx).external_approvals
                     .get("ap-1")
                     .and_then(|approval| approval.decision_sent.clone()),
                 Some("accept".to_owned()),
@@ -4369,7 +4479,7 @@ mod tests {
         vc.update(|_, cx| {
             assert_eq!(
                 view.read(cx)
-                    .external_approvals
+                    .rt(cx).external_approvals
                     .get("ap-1")
                     .and_then(|approval| approval.decision_sent.clone()),
                 Some("accept".to_owned()),
@@ -4391,7 +4501,7 @@ mod tests {
         let (view, _tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
         vc.update(|_, cx| {
             assert_eq!(
-                view.read(cx).model().to_string(),
+                view.read(cx).rt(cx).model().to_string(),
                 "Sonnet",
                 "the chip names a model before the first turn, never the provider"
             );
@@ -4419,25 +4529,25 @@ mod tests {
             ..Default::default()
         };
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.models = vec![row("gx-1", false), row("gx-2", true)];
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).models = vec![row("gx-1", false), row("gx-2", true)];
             });
         });
         vc.update(|_, cx| {
             assert_eq!(
-                view.read(cx).model_id(),
+                view.read(cx).rt(cx).model_id(),
                 "gx-2",
                 "the catalog default chips when nothing else is known"
             );
         });
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.history_model = Some("gx-1".to_owned());
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).history_model = Some("gx-1".to_owned());
             });
         });
         vc.update(|_, cx| {
             assert_eq!(
-                view.read(cx).model_id(),
+                view.read(cx).rt(cx).model_id(),
                 "gx-1",
                 "the session's own history wins over the catalog default"
             );
@@ -4500,7 +4610,7 @@ mod tests {
         vc.update(|_, cx| {
             let view = view.read(cx);
             let assistants = view
-                .session()
+                .rt(cx).session()
                 .map(|session| {
                     session
                         .turns
@@ -4512,8 +4622,8 @@ mod tests {
                 })
                 .unwrap_or(0);
             assert_eq!(assistants, 1, "one user turn is one assistant turn");
-            assert!(!view.busy(), "the result settles the running state");
-            let meter = view.context();
+            assert!(!view.rt(cx).busy(), "the result settles the running state");
+            let meter = view.rt(cx).context();
             assert_eq!(meter.prompt_tokens, want_in, "prompt tokens counted once");
             assert_eq!(meter.output_tokens, want_out, "output tokens counted once");
             assert_eq!(meter.total_tokens, want_in + want_out);
@@ -4524,7 +4634,7 @@ mod tests {
     fn user_turns(view: &Entity<SessionView>, vc: &mut gpui::VisualTestContext) -> Vec<(String, String)> {
         vc.update(|_, cx| {
             view.read(cx)
-                .session()
+                .rt(cx).session()
                 .map(|session| {
                     session
                         .turns
@@ -4550,7 +4660,7 @@ mod tests {
         let vc = cx.add_empty_window();
         let (adapter, _handle) = RecordingProvider::new();
         let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("hello there".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("hello there".to_owned(), cx))));
         vc.run_until_parked();
         // Deliberately no `drain_recording`: the ack is in, no provider
         // event has reached the lane yet.
@@ -4558,7 +4668,7 @@ mod tests {
         assert_eq!(users.len(), 1, "the optimistic bubble folds on send, drew {users:?}");
         assert_eq!(users[0].1, "hello there", "the bubble shows what was typed");
         vc.update(|_, cx| {
-            assert!(view.read(cx).busy(), "the view works until the provider speaks");
+            assert!(view.read(cx).rt(cx).busy(), "the view works until the provider speaks");
         });
     }
 
@@ -4570,7 +4680,7 @@ mod tests {
         let vc = cx.add_empty_window();
         let (adapter, _handle) = RecordingProvider::new();
         let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("hello there".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("hello there".to_owned(), cx))));
         vc.run_until_parked();
         assert_eq!(user_turns(&view, vc).len(), 1, "the optimistic bubble folds on send");
         // The double's echo (user turn plus the open assistant turn).
@@ -4579,8 +4689,8 @@ mod tests {
         assert_eq!(users.len(), 1, "the echo replaces the optimistic bubble, drew {users:?}");
         assert_eq!(users[0].1, "hello there", "the surviving bubble shows what was typed");
         let running = vc.update(|_, cx| {
-            assert!(view.read(cx).busy(), "the open turn works");
-            view.read(cx).running.as_ref().map(|r| r.turn_id.clone()).expect("a running turn id")
+            assert!(view.read(cx).rt(cx).busy(), "the open turn works");
+            view.read(cx).rt(cx).running.as_ref().map(|r| r.turn_id.clone()).expect("a running turn id")
         });
         vc.update(|_, _| {
             tx.unbounded_send(provider::ProviderEvent::Deltas {
@@ -4594,7 +4704,7 @@ mod tests {
         });
         vc.run_until_parked();
         vc.update(|_, cx| {
-            assert!(!view.read(cx).busy(), "the finished turn drops the stop button");
+            assert!(!view.read(cx).rt(cx).busy(), "the finished turn drops the stop button");
         });
         assert_eq!(user_turns(&view, vc).len(), 1, "the finish keeps the one bubble");
     }
@@ -4607,12 +4717,12 @@ mod tests {
         let vc = cx.add_empty_window();
         let (adapter, _handle) = RecordingProvider::failing_submit();
         let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("hello there".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("hello there".to_owned(), cx))));
         vc.run_until_parked();
         assert!(user_turns(&view, vc).is_empty(), "the refused submit folds no bubble");
         vc.update(|_, cx| {
-            assert!(!view.read(cx).busy(), "the refused submit idles the view");
-            assert!(view.read(cx).banner.is_some(), "the refusal banners its reason");
+            assert!(!view.read(cx).rt(cx).busy(), "the refused submit idles the view");
+            assert!(view.read(cx).rt(cx).banner.is_some(), "the refusal banners its reason");
         });
     }
 
@@ -4627,13 +4737,13 @@ mod tests {
         let vc = cx.add_empty_window();
         let (adapter, _handle) = RecordingProvider::new();
         let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("hello there".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("hello there".to_owned(), cx))));
         vc.run_until_parked();
         // Deliberately no `drain_recording`: the ack is in, no provider
         // event has reached the lane yet — the window Stop is reachable in.
         vc.update(|_, cx| {
-            assert!(view.read(cx).busy(), "the view works until the provider speaks");
-            view.update(cx, |view, cx| view.interrupt(cx));
+            assert!(view.read(cx).rt(cx).busy(), "the view works until the provider speaks");
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.interrupt(cx)));
         });
         vc.run_until_parked();
         assert!(
@@ -4642,9 +4752,9 @@ mod tests {
             user_turns(&view, vc)
         );
         vc.update(|_, cx| {
-            assert!(!view.read(cx).busy(), "the early stop idles the view");
+            assert!(!view.read(cx).rt(cx).busy(), "the early stop idles the view");
             assert_eq!(
-                view.read(cx).pending_prompt.as_deref(),
+                view.read(cx).rt(cx).pending_prompt.as_deref(),
                 Some("hello there"),
                 "the retracted prompt comes back to the composer"
             );
@@ -4660,11 +4770,11 @@ mod tests {
         let vc = cx.add_empty_window();
         let (adapter, _handle) = RecordingProvider::failing_interrupt();
         let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("hello there".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("hello there".to_owned(), cx))));
         vc.run_until_parked();
         vc.update(|_, cx| {
-            assert!(view.read(cx).busy(), "the view works until the provider speaks");
-            view.update(cx, |view, cx| view.interrupt(cx));
+            assert!(view.read(cx).rt(cx).busy(), "the view works until the provider speaks");
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.interrupt(cx)));
         });
         vc.run_until_parked();
         assert!(
@@ -4673,9 +4783,9 @@ mod tests {
             user_turns(&view, vc)
         );
         vc.update(|_, cx| {
-            assert!(!view.read(cx).busy(), "the failed stop still idles the view");
+            assert!(!view.read(cx).rt(cx).busy(), "the failed stop still idles the view");
             assert_eq!(
-                view.read(cx).pending_prompt.as_deref(),
+                view.read(cx).rt(cx).pending_prompt.as_deref(),
                 Some("hello there"),
                 "the retracted prompt comes back even when the stop errors"
             );
@@ -4691,7 +4801,7 @@ mod tests {
         let vc = cx.add_empty_window();
         let (adapter, _handle) = RecordingProvider::new();
         let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("hello there".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("hello there".to_owned(), cx))));
         vc.run_until_parked();
         // The assistant turn opens first, still empty — the view runs on it.
         vc.update(|_, _| {
@@ -4710,7 +4820,7 @@ mod tests {
         });
         vc.run_until_parked();
         let started_before = vc.update(|_, cx| {
-            view.read(cx).running.as_ref().map(|r| r.started).expect("the open turn runs")
+            view.read(cx).rt(cx).running.as_ref().map(|r| r.started).expect("the open turn runs")
         });
         // Separate the two instants past any clock granularity, so a reset
         // cannot hide inside one tick.
@@ -4736,7 +4846,7 @@ mod tests {
         assert_eq!(users.len(), 1, "the echo replaces the bubble, drew {users:?}");
         vc.update(|_, cx| {
             let started_after =
-                view.read(cx).running.as_ref().map(|r| r.started).expect("the turn still runs");
+                view.read(cx).rt(cx).running.as_ref().map(|r| r.started).expect("the turn still runs");
             assert_eq!(
                 started_after, started_before,
                 "the reorder keeps the original start instant"
@@ -4782,7 +4892,7 @@ mod tests {
         vc.update(|_, cx| {
             let order: Vec<String> = view
                 .read(cx)
-                .session()
+                .rt(cx).session()
                 .map(|s| s.turns.iter().map(|t| t.id().to_owned()).collect())
                 .unwrap_or_default();
             assert_eq!(order, vec!["u-1".to_owned(), "a-1".to_owned()], "user before its reply");
@@ -4798,9 +4908,9 @@ mod tests {
         let vc = cx.add_empty_window();
         let (adapter, _handle) = RecordingProvider::new();
         let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("first".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("first".to_owned(), cx))));
         vc.run_until_parked();
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("second".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("second".to_owned(), cx))));
         vc.run_until_parked();
         assert_eq!(user_turns(&view, vc).len(), 2, "two sends fold two bubbles");
         vc.update(|_, _| {
@@ -4834,7 +4944,7 @@ mod tests {
         assert_eq!(users.len(), 2, "both echoes replace, never append, drew {users:?}");
         vc.update(|_, cx| {
             assert!(
-                view.read(cx).pending_optimistic.is_empty(),
+                view.read(cx).rt(cx).pending_optimistic.is_empty(),
                 "no pending optimistic turn is left behind"
             );
         });
@@ -4851,14 +4961,14 @@ mod tests {
         let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.submit_pack("PACK-BODY".to_owned(), "pack summary".to_owned(), cx)
+                view.runtime().clone().update(cx, |rt, cx| rt.submit_pack("PACK-BODY".to_owned(), "pack summary".to_owned(), cx))
             })
         });
         vc.run_until_parked();
         // Deliberately no `drain_recording`: the ack is in, no provider
         // event has reached the lane yet.
         vc.update(|_, cx| {
-            assert!(view.read(cx).busy(), "the pack works until the provider speaks");
+            assert!(view.read(cx).rt(cx).busy(), "the pack works until the provider speaks");
         });
         assert!(user_turns(&view, vc).is_empty(), "the pack folds no bubble of its own");
         drain_recording(&view, &tx, vc);
@@ -4866,10 +4976,10 @@ mod tests {
         assert_eq!(users.len(), 1, "the echo lands the one bubble, drew {users:?}");
         assert_eq!(users[0].1, "pack summary", "the bubble shows the short summary");
         vc.update(|_, cx| {
-            assert!(view.read(cx).busy(), "the open turn works");
+            assert!(view.read(cx).rt(cx).busy(), "the open turn works");
         });
         let running = vc.update(|_, cx| {
-            view.read(cx).running.as_ref().map(|r| r.turn_id.clone()).expect("a running turn id")
+            view.read(cx).rt(cx).running.as_ref().map(|r| r.turn_id.clone()).expect("a running turn id")
         });
         vc.update(|_, _| {
             tx.unbounded_send(provider::ProviderEvent::Deltas {
@@ -4883,7 +4993,7 @@ mod tests {
         });
         vc.run_until_parked();
         vc.update(|_, cx| {
-            assert!(!view.read(cx).busy(), "the finished pack turn drops the stop button");
+            assert!(!view.read(cx).rt(cx).busy(), "the finished pack turn drops the stop button");
         });
         assert_eq!(user_turns(&view, vc).len(), 1, "the finish keeps the one bubble");
     }
@@ -5084,7 +5194,7 @@ mod tests {
             vc.update(|_, cx| {
                 let view = view.read(cx);
                 assert_eq!(view.draft_text(cx), "", "{provider_id}: the sent words leave the composer");
-                assert!(view.banner.is_none(), "{provider_id}: no refusal banner, drew {:?}", view.banner);
+                assert!(view.rt(cx).banner.is_none(), "{provider_id}: no refusal banner, drew {:?}", view.rt(cx).banner);
                 assert!(!view.card_has_keys(cx), "{provider_id}: a settled card holds no keys");
             });
             drop(sandbox);
@@ -5102,7 +5212,7 @@ mod tests {
     fn the_stack_clears_the_band_measured_inside_a_draw(cx: &mut gpui::TestAppContext) {
         let sandbox = crate::providers::TestEnvSandbox::enter("stack-clears-band");
         let (vc, view, _tx, _handle) = keyed_lane(cx, &sandbox, "codex");
-        vc.update(|_, cx| view.update(cx, |view, cx| view.step_child_lost(cx))).expect("the child loss lands");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.step_child_lost(cx)))).expect("the child loss lands");
         // The column rebuilt with no band measured yet, then the frames a
         // capture draws by hand with nothing else waking the window.
         vc.update(|_, cx| {
@@ -5180,9 +5290,9 @@ mod tests {
         );
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert!(view.external_approvals.get("ap-1").is_none(), "the parked tap is gone");
+            assert!(view.rt(cx).external_approvals.get("ap-1").is_none(), "the parked tap is gone");
             assert!(!view.card_has_keys(cx), "the dropped card holds no keys");
-            assert!(view.banner.is_none(), "no refusal banner, drew {:?}", view.banner);
+            assert!(view.rt(cx).banner.is_none(), "no refusal banner, drew {:?}", view.rt(cx).banner);
         });
         vc.simulate_input("after");
         vc.simulate_keystrokes("enter");
@@ -5200,10 +5310,10 @@ mod tests {
         let vc = cx.add_empty_window();
         let (adapter, _handle) = RecordingProvider::new();
         let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("work".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("work".to_owned(), cx))));
         vc.run_until_parked();
         drain_recording(&view, &tx, vc);
-        let turn_id = vc.update(|_, cx| view.read(cx).running.as_ref().expect("a running turn").turn_id.clone());
+        let turn_id = vc.update(|_, cx| view.read(cx).rt(cx).running.as_ref().expect("a running turn").turn_id.clone());
         vc.update(|_, _| {
             tx.unbounded_send(provider::ProviderEvent::Deltas {
                 session_id: Some("s-1".to_owned()),
@@ -5218,9 +5328,9 @@ mod tests {
         vc.update(|_, cx| view.update(cx, |view, cx| view.refresh_render_cache(cx)));
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert!(view.busy(), "the turn is still open");
-            assert!(view.reply_complete_for_running_turn(), "the reply arrived whole");
-            assert!(!view.on_reminder_tail(), "only Muse reports a reminder tail");
+            assert!(view.rt(cx).busy(), "the turn is still open");
+            assert!(view.rt(cx).reply_complete_for_running_turn(), "the reply arrived whole");
+            assert!(!view.rt(cx).on_reminder_tail(), "only Muse reports a reminder tail");
         });
         // Even after a token reading lands, a Codex turn open past its reply
         // keeps reading as working: the stop button stays, the row too.
@@ -5231,8 +5341,8 @@ mod tests {
         vc.run_until_parked();
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert!(!view.saving_memories(), "no tail on Codex");
-            assert!(view.working(), "Codex still reads working");
+            assert!(!view.rt(cx).saving_memories(), "no tail on Codex");
+            assert!(view.rt(cx).working(), "Codex still reads working");
         });
     }
 
@@ -5252,17 +5362,17 @@ mod tests {
         tx: &futures::channel::mpsc::UnboundedSender<provider::ProviderEvent>,
     ) -> String {
         use aui_protocol::{Block, Delta};
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("work".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("work".to_owned(), cx))));
         vc.run_until_parked();
         drain_recording(view, tx, vc);
         // Muse reports its turns' lifecycle: `turn/started` arms the row.
         let opened = vc.update(|_, cx| {
-            view.read(cx).store.session().and_then(|s| s.turns.last().map(|t| t.id().to_owned())).expect("the reply turn")
+            view.read(cx).rt(cx).store.session().and_then(|s| s.turns.last().map(|t| t.id().to_owned())).expect("the reply turn")
         });
         tx.unbounded_send(provider::ProviderEvent::TurnRunning { session_id: "s-1".into(), turn_id: opened })
             .expect("the lane channel is open");
         vc.run_until_parked();
-        let turn_id = vc.update(|_, cx| view.read(cx).running.as_ref().expect("a running turn").turn_id.clone());
+        let turn_id = vc.update(|_, cx| view.read(cx).rt(cx).running.as_ref().expect("a running turn").turn_id.clone());
         vc.update(|_, _| {
             tx.unbounded_send(provider::ProviderEvent::Deltas {
                 session_id: Some("s-1".to_owned()),
@@ -5291,7 +5401,7 @@ mod tests {
         let seen = std::rc::Rc::new(std::cell::Cell::new(0usize));
         let seen_in = seen.clone();
         let _sub = vc.update(|_, cx| {
-            cx.subscribe(&view, move |_, event: &super::super::SessionEvent, _| {
+            cx.subscribe(&view.read(cx).runtime().clone(), move |_, event: &super::super::SessionEvent, _| {
                 if matches!(event, super::super::SessionEvent::ReplyComplete { .. }) {
                     seen_in.set(seen_in.get() + 1);
                 }
@@ -5300,8 +5410,8 @@ mod tests {
         muse_reply_whole(vc, &view, &tx);
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert!(!view.saving_memories(), "no token reading yet: the call may still be composing a tool call");
-            assert!(view.working());
+            assert!(!view.rt(cx).saving_memories(), "no token reading yet: the call may still be composing a tool call");
+            assert!(view.rt(cx).working());
         });
         vc.update(|_, _| {
             tx.unbounded_send(provider::ProviderEvent::SessionFacts { session_id: "s-1".into(), side: usage_side(40) })
@@ -5311,11 +5421,11 @@ mod tests {
         vc.update(|_, cx| view.update(cx, |view, cx| view.refresh_render_cache(cx)));
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert!(view.busy(), "the turn itself is still open");
-            assert!(view.saving_memories(), "Muse is saving memories");
-            assert!(!view.working(), "the reply reads as a finished turn: send, not stop");
-            assert!(view.inline_progress().is_none(), "no working row in the transcript");
-            assert!(view.render_status().is_some(), "the quiet note stands by the composer");
+            assert!(view.rt(cx).busy(), "the turn itself is still open");
+            assert!(view.rt(cx).saving_memories(), "Muse is saving memories");
+            assert!(!view.rt(cx).working(), "the reply reads as a finished turn: send, not stop");
+            assert!(view.inline_progress(cx).is_none(), "no working row in the transcript");
+            assert!(view.render_status(cx).is_some(), "the quiet note stands by the composer");
         });
         assert_eq!(seen.get(), 1, "the row is told once, on the edge");
     }
@@ -5337,14 +5447,14 @@ mod tests {
                 .expect("the lane channel is open");
         });
         vc.run_until_parked();
-        assert!(vc.update(|_, cx| view.read(cx).saving_memories()));
-        vc.update(|_, cx| view.update(cx, |view, cx| view.send_text("next".to_owned(), cx)));
+        assert!(vc.update(|_, cx| view.read(cx).rt(cx).saving_memories()));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("next".to_owned(), cx))));
         vc.run_until_parked();
         drain_recording(&view, &tx, vc);
         let user_bubbles = |vc: &mut gpui::VisualTestContext| {
             vc.update(|_, cx| {
                 view.read(cx)
-                    .store
+                    .rt(cx).store
                     .session()
                     .map(|s| s.turns.iter().filter(|t| matches!(t, Turn::User { text, .. } if text == "next")).count())
                     .unwrap_or(0)
@@ -5358,9 +5468,9 @@ mod tests {
         );
         vc.update(|_, cx| {
             let view = view.read(cx);
-            assert_eq!(view.store.side().queued.len(), 1, "Muse holds it in its queue");
-            assert!(!view.working(), "still the finished turn, still sendable");
-            assert_eq!(view.running.as_ref().map(|r| r.turn_id.clone()), Some(first.clone()));
+            assert_eq!(view.rt(cx).store.side().queued.len(), 1, "Muse holds it in its queue");
+            assert!(!view.rt(cx).working(), "still the finished turn, still sendable");
+            assert_eq!(view.rt(cx).running.as_ref().map(|r| r.turn_id.clone()), Some(first.clone()));
         });
         // Muse completes the turn: the queued submit starts.
         handle.complete_open_turn();
@@ -5370,11 +5480,11 @@ mod tests {
         assert_eq!(user_bubbles(vc), 1, "the echo replaced the bubble in place");
         vc.update(|_, cx| {
             let view = view.read(cx);
-            let running = view.running.as_ref().map(|r| r.turn_id.clone());
+            let running = view.rt(cx).running.as_ref().map(|r| r.turn_id.clone());
             assert!(running.is_some() && running != Some(first.clone()), "the queued turn runs now");
-            assert!(view.working(), "and reads as working");
-            assert!(!view.saving_memories());
-            assert!(view.pending_optimistic.is_empty(), "no bubble left waiting");
+            assert!(view.rt(cx).working(), "and reads as working");
+            assert!(!view.rt(cx).saving_memories());
+            assert!(view.rt(cx).pending_optimistic.is_empty(), "no bubble left waiting");
         });
     }
 
@@ -5423,7 +5533,7 @@ mod tests {
                 };
                 let view = cx.new(|cx| SessionView::new("synthetic-full".to_owned(), host, window, cx));
                 view.update(cx, |view, cx| {
-                    view.fold_provider_events(events, cx);
+                    view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(events, cx));
                     view.refresh_render_cache(cx);
                 });
                 view

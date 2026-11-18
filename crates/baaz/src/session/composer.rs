@@ -1,8 +1,10 @@
 //! The composer's own surfaces: the `/`, `@`, model, effort and mode
 //! menus, the prompt history the arrows walk, and pasted or attached images.
 //!
-//! Part of [`SessionView`]; see [`crate::session`] for what
-//! the entity owns and why these are its own files.
+//! Part of [`SessionRuntime`] (the model half: what it does to the
+//! session) and [`SessionView`] (the drawing half: fields, menus, focus);
+//! see [`crate::session`] for what each entity owns and why these are
+//! their own files.
 
 use super::*;
 use crate::overlays::{EffortOption, EffortOptions, effort_detail, effort_label, muse_efforts};
@@ -14,8 +16,8 @@ impl SessionView {
     /// history.
     pub(super) fn on_draft_changed(&mut self, cx: &mut Context<Self>) {
         self.note_draft(cx);
-        if self.history.walking() {
-            self.history.reset();
+        if self.runtime.read(cx).history.walking() {
+            self.runtime.as_mut(cx).history.reset();
         }
         let (draft, caret) = self.draft_and_caret(cx);
         let token = caret_token(&draft, caret);
@@ -86,24 +88,24 @@ impl SessionView {
         }
         let selected = match kind {
             MenuKind::Model => {
-                self.load_models(cx);
+                self.runtime.update(cx, |rt, cx| rt.load_models(cx));
                 // The check follows the chip, not the catalog's active
                 // flag: `model_menu_checked` names the row, or no row.
-                self.model_menu_checked().unwrap_or(self.models.len())
+                self.runtime.read(cx).model_menu_checked().unwrap_or(self.runtime.read(cx).models.len())
             }
-            MenuKind::Effort => match self.effort_options() {
+            MenuKind::Effort => match self.runtime.read(cx).effort_options() {
                 EffortOptions::Unavailable(_) => 0,
                 listed => {
                     listed.options().and_then(|options| {
-                        options.iter().position(|option| option.effort == self.effort)
+                        options.iter().position(|option| option.effort == self.runtime.read(cx).effort)
                     })
                     .unwrap_or(0)
                 }
             },
-            MenuKind::Mode => MODES.iter().position(|m| *m == self.mode()).unwrap_or(0),
-            MenuKind::Provider => Self::provider_rows(self.provider_kind(), self.has_turns())
+            MenuKind::Mode => MODES.iter().position(|m| *m == self.runtime.read(cx).mode()).unwrap_or(0),
+            MenuKind::Provider => SessionRuntime::provider_rows(self.runtime.read(cx).provider_kind(), self.runtime.read(cx).has_turns())
                 .iter()
-                .position(|row| row.id == self.provider_kind().as_str())
+                .position(|row| row.id == self.runtime.read(cx).provider_kind().as_str())
                 .unwrap_or(0),
             _ => 0,
         };
@@ -149,9 +151,9 @@ impl SessionView {
     pub fn menu_rows(&self, cx: &gpui::App) -> usize {
         let overlays = self.overlays.read(cx);
         match overlays.menu().map(|m| m.kind) {
-            Some(MenuKind::Model) if self.models.is_empty() && self.models_error.is_some() => 1,
-            Some(MenuKind::Model) => self.models.len(),
-            Some(MenuKind::Effort) => match self.effort_options().options() {
+            Some(MenuKind::Model) if self.runtime.read(cx).models.is_empty() && self.runtime.read(cx).models_error.is_some() => 1,
+            Some(MenuKind::Model) => self.runtime.read(cx).models.len(),
+            Some(MenuKind::Effort) => match self.runtime.read(cx).effort_options().options() {
                 Some(options) => options.len(),
                 // The reason row, like the model picker's: zero rows is a
                 // failure, not an empty state.
@@ -159,7 +161,7 @@ impl SessionView {
             },
             Some(MenuKind::Mode) => MODES.len(),
             Some(MenuKind::Provider) => {
-                Self::provider_rows(self.provider_kind(), self.has_turns()).len()
+                SessionRuntime::provider_rows(self.runtime.read(cx).provider_kind(), self.runtime.read(cx).has_turns()).len()
             }
             Some(MenuKind::Command) => {
                 let filter = overlays.menu().map(|m| m.filter.clone()).unwrap_or_default();
@@ -199,9 +201,9 @@ impl SessionView {
         match kind {
             MenuKind::Model => {
                 let selected = self.menu_selected(cx).unwrap_or(selected);
-                if let Some(model) = self.models.get(selected).map(|m| m.model_id.clone()) {
+                if let Some(model) = self.runtime.read(cx).models.get(selected).map(|m| m.model_id.clone()) {
                     self.pick_model(&model, cx);
-                } else if let Some(reason) = self.models_error.clone() {
+                } else if let Some(reason) = self.runtime.read(cx).models_error.clone() {
                     // The reason row: restates why there is no catalog,
                     // then closes. Every row acts on click; none goes dead.
                     self.toast("Models unavailable", reason, cx);
@@ -209,9 +211,9 @@ impl SessionView {
                 }
             }
             // The slider sets the effort live (D4): Enter only closes.
-            MenuKind::Effort if !self.effort_levels().is_empty() => self.close_menu(cx),
+            MenuKind::Effort if !self.runtime.read(cx).effort_levels().is_empty() => self.close_menu(cx),
             MenuKind::Effort => {
-                let listed = self.effort_options();
+                let listed = self.runtime.read(cx).effort_options();
                 if let Some(option) =
                     listed.options().and_then(|options| options.get(selected))
                 {
@@ -230,9 +232,9 @@ impl SessionView {
                 }
             }
             MenuKind::Provider => {
-                let rows = Self::provider_rows_for(
-                    self.provider_kind(),
-                    self.has_turns(),
+                let rows = SessionRuntime::provider_rows_for(
+                    self.runtime.read(cx).provider_kind(),
+                    self.runtime.read(cx).has_turns(),
                     &crate::settings_providers::live_visible_provider_ids(),
                 );
                 if let Some(row) = rows.get(selected) {
@@ -276,7 +278,7 @@ impl SessionView {
         let name = self
             .overlays
             .read(cx)
-            .skills_for(&self.workspace)
+            .skills_for(&self.runtime.read(cx).workspace)
             .iter()
             .find(|s| s.id == id.as_ref())
             .map(|s| s.name.clone());
@@ -286,13 +288,15 @@ impl SessionView {
     }
 
     pub(super) fn pick_model(&mut self, model_id: &str, cx: &mut Context<Self>) {
-        self.set_model(model_id, cx);
+        self.runtime.update(cx, |rt, cx| rt.set_model(model_id, cx));
         cx.emit(SessionEvent::ModelSelected { model_id: model_id.to_owned() });
         self.close_menu(cx);
     }
+}
 
+impl SessionRuntime {
     /// The model menu's checked row: the row equal to the chip's
-    /// [`SessionView::model_id`]. `None` when nothing matches — an empty
+    /// [`SessionRuntime::model_id`]. `None` when nothing matches — an empty
     /// chip, or a chip the catalog omits — so the menu checks nothing
     /// rather than the catalog's `is_active` row (or the first row, before
     /// any catalog folds). The caller maps `None` past the last row, which
@@ -331,7 +335,7 @@ impl SessionView {
         }
     }
 
-    /// The muse arm of [`SessionView::effort_options`]: the selected
+    /// The muse arm of [`SessionRuntime::effort_options`]: the selected
     /// catalog row's tiers, `Default` first and described as the row's
     /// `defaultReasoningEffort` when it names one. A row with no tiers (an
     /// older host, `"unknown"`, or no row at all) offers the whole closed
@@ -402,7 +406,7 @@ impl SessionView {
     /// range, the same default the owner's config names.
     const CODEX_EMPTY_CATALOG_LEVELS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
-    /// The Codex arm of [`SessionView::effort_options`]: the selected
+    /// The Codex arm of [`SessionRuntime::effort_options`]: the selected
     /// model's levels out of the folded catalog, `Default` first. A level
     /// the closed enum cannot spell is skipped, never fabricated; a model
     /// with no row still offers the catalog's union with the muted note
@@ -473,15 +477,19 @@ impl SessionView {
             .map(str::to_owned)
             .collect()
     }
+}
 
+impl SessionView {
     /// Pick a reasoning effort. Applies to a session with turns exactly as
     /// to a fresh one — effort, like model, is switchable mid-session and
     /// rides the next turn — and the chip reads the pick at once.
     pub(super) fn pick_effort(&mut self, effort: Option<ReasoningEffort>, cx: &mut Context<Self>) {
-        self.set_effort(effort, cx);
+        self.runtime.update(cx, |rt, cx| rt.set_effort(effort, cx));
         self.close_menu(cx);
     }
+}
 
+impl SessionRuntime {
     /// Sets the effort without closing the menu: the slider reports each
     /// stop as it is dragged, and the chip's label follows live (D4).
     pub(super) fn set_effort(&mut self, effort: Option<ReasoningEffort>, cx: &mut Context<Self>) {
@@ -496,24 +504,26 @@ impl SessionView {
     pub(super) fn effort_levels(&self) -> Vec<ReasoningEffort> {
         self.effort_options().options().map(|options| options.iter().filter_map(|o| o.effort).collect()).unwrap_or_default()
     }
+}
 
+impl SessionView {
     /// ← / → in the open menu (D4).
     pub fn step_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
         let kind = self.overlays.read(cx).menu().map(|m| m.kind);
         match kind {
             Some(MenuKind::Effort) => {
-                let levels = self.effort_levels();
+                let levels = self.runtime.read(cx).effort_levels();
                 if levels.is_empty() {
                     return;
                 }
-                let at = self.effort.and_then(|e| levels.iter().position(|l| *l == e));
+                let at = self.runtime.read(cx).effort.and_then(|e| levels.iter().position(|l| *l == e));
                 let next = match (at, delta.signum()) {
                     (None, 1) => Some(0),
                     (None, _) => None,
                     (Some(i), d) => Some((i as isize + d).clamp(0, levels.len() as isize - 1) as usize),
                 };
                 if let Some(next) = next {
-                    self.set_effort(Some(levels[next]), cx);
+                    self.runtime.update(cx, |rt, cx| rt.set_effort(Some(levels[next]), cx));
                 }
             }
             Some(MenuKind::Model) => {
@@ -527,8 +537,10 @@ impl SessionView {
             _ => {}
         }
     }
+}
 
-    /// The Claude Code arm of [`SessionView::effort_options`]: the selected
+impl SessionRuntime {
+    /// The Claude Code arm of [`SessionRuntime::effort_options`]: the selected
     /// catalog value's own `supportedEffortLevels`, `Default` first. A row
     /// that names no levels (Haiku, or `supportsEffort: false`) explains
     /// itself instead of listing levels; a resolved full id the menu never
@@ -654,13 +666,17 @@ impl SessionView {
         }
         options
     }
+}
 
+impl SessionView {
     /// The session's project display name, for the empty state. Synced by
     /// the window on every activation, so a rename lands without reopening.
     pub(crate) fn set_project_name(&mut self, name: Option<String>) {
         self.project_name = name;
     }
+}
 
+impl SessionRuntime {
     /// A new session's starting effort, from its project's defaults: applied
     /// before the first turn, reporting nothing back — it already is what
     /// the project says.
@@ -668,19 +684,21 @@ impl SessionView {
         self.effort = effort;
         cx.notify();
     }
+}
 
+impl SessionView {
     pub(super) fn pick_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
         // The picker has no disabled row: an unavailable mode restates its
         // reason and closes, rather than sending a switch the provider
         // refuses (Claude Code: "auto mode unavailable for this model").
-        if let Some(reason) = self.mode_unavailable(mode) {
+        if let Some(reason) = self.runtime.read(cx).mode_unavailable(mode) {
             self.toast(format!("{} unavailable", mode.label()), reason, cx);
             self.close_menu(cx);
             return;
         }
         // The person answered the Auto-fallback banner: it comes down.
-        self.dismiss_mode_fallback(cx);
-        self.set_mode(mode, cx);
+        self.runtime.update(cx, |rt, cx| rt.dismiss_mode_fallback(cx));
+        self.runtime.update(cx, |rt, cx| rt.set_mode(mode, cx));
         cx.emit(SessionEvent::ModeSelected { mode });
         self.close_menu(cx);
     }
@@ -691,14 +709,16 @@ impl SessionView {
     /// leaving Auto) moves the check with it, never leaving it on a mode the
     /// chip no longer names.
     pub(super) fn sync_mode_menu_check(&mut self, cx: &mut Context<Self>) {
-        let checked = MODES.iter().position(|mode| *mode == self.mode()).unwrap_or(0);
+        let checked = MODES.iter().position(|mode| *mode == self.runtime.read(cx).mode()).unwrap_or(0);
         self.overlays.update(cx, |overlays, _| {
             if let Some(menu) = overlays.menu_mut().filter(|menu| menu.kind == MenuKind::Mode) {
                 menu.selected = checked;
             }
         });
     }
+}
 
+impl SessionRuntime {
     /// Why `mode` cannot be picked on the chip's model — "Not available
     /// for Haiku" — when the catalog says that model cannot run it; `None`
     /// when it can, or when nothing says otherwise.
@@ -766,7 +786,9 @@ impl SessionView {
             })
             .unwrap_or_default()
     }
+}
 
+impl SessionView {
     /// A click (or Enter) on a provider menu row. A `handoff:<wire>` row
     /// starts a handoff to that backend (a lossy re-prompt, never a lane
     /// swap); a plain wire id keeps the old contract. Picking the
@@ -779,7 +801,7 @@ impl SessionView {
     pub(super) fn pick_provider(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(rest) = id.strip_prefix("handoff:") {
             let picked = ProviderId::parse(rest);
-            if picked == self.provider_kind() {
+            if picked == self.runtime.read(cx).provider_kind() {
                 self.close_menu(cx);
                 return;
             }
@@ -788,7 +810,7 @@ impl SessionView {
             return;
         }
         let picked = ProviderId::parse(id);
-        if picked == self.provider_kind() {
+        if picked == self.runtime.read(cx).provider_kind() {
             self.close_menu(cx);
             return;
         }
@@ -803,7 +825,7 @@ impl SessionView {
             self.close_menu(cx);
             return;
         }
-        if self.has_turns() {
+        if self.runtime.read(cx).has_turns() {
             // A session cannot change provider in place: the hand-off
             // confirm says what crosses over, once (D4).
             cx.emit(SessionEvent::HandoffRequested { provider: picked, headless: false });
@@ -834,7 +856,9 @@ impl SessionView {
     pub(crate) fn plus_open(&self, cx: &gpui::App) -> bool {
         self.overlays.read(cx).is_open(MenuKind::Plus)
     }
+}
 
+impl SessionRuntime {
     /// The provider menu's rows for a session on `current`.
     ///
     /// A fresh session offers the three backends as a swap. A session
@@ -875,7 +899,9 @@ impl SessionView {
         }
         rows
     }
+}
 
+impl SessionView {
     /// Run one client-side slash command (spec §3.10).
     ///
     /// `argument` is whatever followed the command when it was typed; the `/`
@@ -892,25 +918,25 @@ impl SessionView {
             Command::Effort => self.toggle_picker(MenuKind::Effort, cx),
             Command::Mode => self.toggle_picker(MenuKind::Mode, cx),
             Command::Plan => {
-                let on = !self.plan;
-                self.set_plan(on, cx);
+                let on = !self.runtime.read(cx).plan;
+                self.runtime.update(cx, |rt, cx| rt.set_plan(on, cx));
             }
-            Command::Compact => self.compact(cx),
+            Command::Compact => self.runtime.update(cx, |rt, cx| rt.compact(cx)),
             Command::Clear => cx.emit(SessionEvent::NewSession),
             // `/handoff` opens the provider picker on the handoff rows: a
             // session with turns offers "Hand off to X…" there. With no
             // turns there is nothing to carry, so it says so instead of
             // opening a menu whose handoff rows would all refuse.
             Command::Handoff => {
-                if self.has_turns() {
+                if self.runtime.read(cx).has_turns() {
                     self.toggle_picker(MenuKind::Provider, cx);
                 } else {
-                    self.set_banner("Nothing to hand off yet — send a turn first.", None, cx);
+                    self.runtime.update(cx, |rt, cx| rt.set_banner("Nothing to hand off yet — send a turn first.", None, cx));
                 }
             }
             Command::Logout => cx.emit(SessionEvent::Logout),
             Command::Status | Command::Usage => {
-                let detail = self.status_text(cx);
+                let detail = self.runtime.read(cx).status_text(cx);
                 cx.emit(SessionEvent::Status { detail });
             }
             Command::Help => {
@@ -926,8 +952,8 @@ impl SessionView {
                     cx.emit(SessionEvent::ForkPicker);
                 } else {
                     match argument.parse::<usize>() {
-                        Ok(n) => self.fork_nth(n, cx),
-                        Err(_) => self.set_banner("`/fork` takes a turn number, e.g. `/fork 2`.", None, cx),
+                        Ok(n) => self.runtime.update(cx, |rt, cx| rt.fork_nth(n, cx)),
+                        Err(_) => self.runtime.update(cx, |rt, cx| rt.set_banner("`/fork` takes a turn number, e.g. `/fork 2`.", None, cx)),
                     }
                 }
             }
@@ -963,7 +989,9 @@ impl SessionView {
             | Command::NewTerminalCmd => cx.emit(SessionEvent::WindowCommand(command)),
         }
     }
+}
 
+impl SessionRuntime {
     /// The `/status` and `/usage` body: everything the session knows about
     /// itself, from the fold rather than from what the app last sent.
     pub(super) fn status_text(&self, cx: &gpui::App) -> String {
@@ -985,7 +1013,9 @@ impl SessionView {
             self.workspace,
         )
     }
+}
 
+impl SessionView {
     /// Replace the `/…` or `@…` token the caret is in with `insertion`.
     pub(super) fn replace_token(&mut self, insertion: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(at) = self.overlays.read(cx).menu().map(|m| m.at) else { return };
@@ -1013,14 +1043,14 @@ impl SessionView {
     /// ↑ on the first line of the draft.
     pub fn history_prev(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let draft = self.composer.read(cx).value().to_string();
-        if let Some(text) = self.history.prev(&draft) {
+        if let Some(text) = self.runtime.update(cx, |rt, _| rt.history.prev(&draft)) {
             self.set_history_value(text, window, cx);
         }
     }
 
     /// ↓ on the last line of the draft.
     pub fn history_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.history.next() {
+        if let Some(text) = self.runtime.update(cx, |rt, _| rt.history.next()) {
             self.set_history_value(text, window, cx);
         }
     }
@@ -1046,7 +1076,9 @@ impl SessionView {
         self.note_draft(cx);
         cx.notify();
     }
+}
 
+impl SessionRuntime {
     // ----------------------------------------------------------------- images
 
     /// An image offered to a provider that takes none (docs/82 0.7): it
@@ -1055,7 +1087,9 @@ impl SessionView {
         self.banner = Some(format!("Images are not available in {}.", self.provider_kind().label()));
         self.banner_action = None;
     }
+}
 
+impl SessionView {
     /// ⌘V with an image on the clipboard.
     ///
     /// Returns `false` when the clipboard holds no image, so the caller can let
@@ -1065,13 +1099,15 @@ impl SessionView {
         let mut pasted = false;
         for entry in item.into_entries() {
             if let ClipboardEntry::Image(image) = entry {
-                self.attach_bytes("pasted", image.bytes.clone(), cx);
+                self.runtime.update(cx, |rt, cx| rt.attach_bytes("pasted", image.bytes.clone(), cx));
                 pasted = true;
             }
         }
         pasted
     }
+}
 
+impl SessionRuntime {
     /// The `+` menu's "Attach file or photo", and the drop of files from
     /// Finder. Image extensions attach as images; everything else is extracted
     /// to text by `attachments` (MSP has no file part to carry the bytes).
@@ -1238,12 +1274,14 @@ impl SessionView {
     pub fn attachments_pending(&self) -> bool {
         self.images.iter().any(|image| image.pending)
     }
+}
 
+impl SessionView {
     /// Z7a: attach already-held screenshot bytes (a browser page capture) as
     /// an image chip. The existing image path owns the decode off the frame;
     /// this is its entry point for bytes that never touched the filesystem.
     pub(crate) fn attach_screenshot(&mut self, name: String, bytes: Vec<u8>, cx: &mut Context<Self>) {
-        self.attach_bytes(&name, bytes, cx);
+        self.runtime.update(cx, |rt, cx| rt.attach_bytes(&name, bytes, cx));
     }
 
     /// Z7a: append a text block (browser annotations) to the draft without
@@ -1276,7 +1314,7 @@ impl SessionView {
         });
         self.tasks.push(cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else { return };
-            let _ = this.update(cx, |this, cx| this.attach_paths(paths, cx));
+            let _ = this.update(cx, |this, cx| this.runtime.update(cx, |rt, cx| rt.attach_paths(paths, cx)));
         }));
     }
 

@@ -2,12 +2,12 @@
 //! created-files index, the prompt history, restored prompts, and paging a
 //! lane's history in.
 //!
-//! Part of [`SessionView`]; see [`crate::session`] for what
-//! the entity owns and why these are its own files.
+//! Part of [`SessionRuntime`]; see [`crate::session`] for what the
+//! entity owns and why these are its own files.
 
 use super::*;
 
-impl SessionView {
+impl SessionRuntime {
     // ---------------------------------------------------------------- events
 
     /// A completed turn's created files, into the search index's `files_fts`.
@@ -100,10 +100,9 @@ impl SessionView {
         self.loading_history = true;
         cx.notify();
     }
-
 }
 
-impl SessionView {
+impl SessionRuntime {
     /// Page a lane's history in, oldest first: the backfill for a session
     /// its provider opened without items (Muse resumes metadata-only and
     /// pages, so a long transcript draws page by page instead of after one
@@ -165,7 +164,7 @@ impl SessionView {
         if !self.backfill_running {
             return;
         }
-        self.follow = true;
+        cx.emit(RuntimeEvent::EntriesAppended);
         if std::mem::take(&mut self.backfill_first) {
             crate::log::trace_mark("HistoryReady");
             cx.emit(SessionEvent::HistoryReady);
@@ -373,7 +372,7 @@ for line in sys.stdin:
 
     /// What the hub reports for `s-1`, folded into the view.
     fn report(view: &Entity<SessionView>, vc: &mut gpui::VisualTestContext, events: Vec<provider::ProviderEvent>) {
-        vc.update(|_, cx| view.update(cx, |view, cx| view.fold_provider_events(events, cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(events, cx))));
     }
 
     /// The hub's report of a reclaimed queued turn (`t-q`); `echoed` is
@@ -395,7 +394,7 @@ for line in sys.stdin:
     fn queue_and_click(view: &Entity<SessionView>, vc: &mut gpui::VisualTestContext, why: Unqueue, queued_text: &str) {
         let mut side = provider::facts::SessionSide::default();
         side.queued.push(provider::facts::QueuedTurn { turn_id: "t-q".into(), request_id: "c-q".into() });
-        vc.update(|_, cx| view.update(cx, |view, _| view.remember_command("c-q", queued_text)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, _| rt.remember_command("c-q", queued_text))));
         report(
             view,
             vc,
@@ -405,8 +404,8 @@ for line in sys.stdin:
             ],
         );
         vc.update(|_, cx| {
-            assert!(view.read(cx).busy(), "the fixture turn is running");
-            view.update(cx, |view, cx| view.unqueue("t-q", why, queued_text.to_owned(), cx));
+            assert!(view.read(cx).rt(cx).busy(), "the fixture turn is running");
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.unqueue("t-q", why, queued_text.to_owned(), cx)));
         });
     }
 
@@ -424,7 +423,7 @@ for line in sys.stdin:
 
     fn pending_prompt_of(view: &Entity<SessionView>, vc: &mut gpui::VisualTestContext) -> Option<String> {
         vc.run_until_parked();
-        vc.update(|_, cx| view.read(cx).pending_prompt.clone())
+        vc.update(|_, cx| view.read(cx).rt(cx).pending_prompt.clone())
     }
 
     /// The reported turn: queue a message, Steer it, the unqueue lands —
@@ -442,7 +441,7 @@ for line in sys.stdin:
         wait_for_wire(&stub, vc, "turn/steer");
         assert_eq!(stub.steer_texts(), vec!["the queued words".to_owned()]);
         assert_eq!(pending_prompt_of(&view, vc), None, "no duplicate in the composer");
-        vc.update(|_, cx| assert_eq!(view.read(cx).banner, None));
+        vc.update(|_, cx| assert_eq!(view.read(cx).rt(cx).banner, None));
     }
 
     /// The tick hazard: an unqueue without the command echo still steers,
@@ -482,7 +481,7 @@ for line in sys.stdin:
             std::thread::sleep(Duration::from_millis(10));
         };
         assert_eq!(restored.as_deref(), Some("the queued words"));
-        vc.update(|_, cx| assert!(view.read(cx).banner.is_some(), "the person sees why"));
+        vc.update(|_, cx| assert!(view.read(cx).rt(cx).banner.is_some(), "the person sees why"));
     }
 
     /// The turn ended mid-reclaim: the steer has nowhere to go, so the words
@@ -493,10 +492,10 @@ for line in sys.stdin:
         let (client, _stub) = StubServe::start("steer-ended", &[]);
         let vc = cx.add_empty_window();
         let view = open_live_view(vc, client, "/tmp/unqueue-steer-ended");
-        vc.update(|_, cx| view.update(cx, |view, cx| view.steer_text("the queued words".to_owned(), cx)));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.steer_text("the queued words".to_owned(), cx))));
         assert_eq!(pending_prompt_of(&view, vc).as_deref(), Some("the queued words"));
         vc.update(|_, cx| {
-            let banner = view.read(cx).banner.clone().unwrap_or_default();
+            let banner = view.read(cx).rt(cx).banner.clone().unwrap_or_default();
             assert!(banner.contains("ended"), "the banner says why, got: {banner}");
         });
     }
@@ -572,8 +571,8 @@ for line in sys.stdin:
         );
         assert_eq!(pending_prompt_of(&view, vc), None);
         vc.update(|_, cx| {
-            assert_eq!(view.read(cx).banner, None);
-            assert_eq!(view.read(cx).store.side().queued.len(), 0, "the row leaves the strip");
+            assert_eq!(view.read(cx).rt(cx).banner, None);
+            assert_eq!(view.read(cx).rt(cx).store.side().queued.len(), 0, "the row leaves the strip");
         });
         std::thread::sleep(Duration::from_millis(300));
         vc.run_until_parked();
@@ -590,17 +589,17 @@ for line in sys.stdin:
         let view = open_live_view(vc, client, "/tmp/send-anyway");
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.set_tier_banner(
+                view.runtime().clone().update(cx, |rt, cx| rt.set_tier_banner(
                     Some(crate::session::TierBanner { text: "payg".to_owned(), blocking: true, checking: false }),
                     cx,
-                );
-                view.send_text("bill me".to_owned(), cx);
+                ));
+                view.runtime().clone().update(cx, |rt, cx| rt.send_text("bill me".to_owned(), cx));
             })
         });
         assert_eq!(pending_prompt_of(&view, vc).as_deref(), Some("bill me"), "the guard holds the words back");
         assert!(stub.saw("turn/start").is_none(), "nothing left while the guard blocks");
         assert_eq!(
-            vc.update(|_, cx| view.read(cx).banner.clone()).as_deref(),
+            vc.update(|_, cx| view.read(cx).rt(cx).banner.clone()).as_deref(),
             Some(crate::session::commands::BILLING_HELD),
             "a held send says why, rather than reading as a dead button"
         );
@@ -608,7 +607,7 @@ for line in sys.stdin:
         wait_for_wire(&stub, vc, "turn/start");
         let start = stub.saw("turn/start").expect("the press sent a turn");
         assert!(start.to_string().contains("bill me"), "the held-back words are the turn: {start}");
-        assert_eq!(vc.update(|_, cx| view.read(cx).banner.clone()), None, "the notice leaves with the send");
+        assert_eq!(vc.update(|_, cx| view.read(cx).rt(cx).banner.clone()), None, "the notice leaves with the send");
     }
 
     /// Quick picks never interleave on the wire, and the latest wins: the
@@ -622,9 +621,9 @@ for line in sys.stdin:
         let view = open_live_view(vc, client, "/tmp/mode-serial");
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.set_mode(PermissionMode::AllowAll, cx);
-                view.set_mode(PermissionMode::PromptUnmatched, cx);
-                view.set_mode(PermissionMode::DenyUnmatched, cx);
+                view.runtime().clone().update(cx, |rt, cx| rt.set_mode(PermissionMode::AllowAll, cx));
+                view.runtime().clone().update(cx, |rt, cx| rt.set_mode(PermissionMode::PromptUnmatched, cx));
+                view.runtime().clone().update(cx, |rt, cx| rt.set_mode(PermissionMode::DenyUnmatched, cx));
             })
         });
         let deadline = Instant::now() + Duration::from_secs(15);

@@ -809,8 +809,8 @@ impl Harness {
         let mut entry = entry.clone();
         if let Some(view) = self.active.clone() {
             let view = view.read(cx);
-            if view.session_id == id {
-                let (approval, question) = view.row_pending();
+            if view.rt(cx).session_id == id {
+                let (approval, question) = view.rt(cx).row_pending();
                 if approval.is_some() {
                     entry.approval_command = approval;
                 }
@@ -818,10 +818,10 @@ impl Harness {
                     entry.pending_question = question;
                 }
                 if entry.last_ask.as_deref().map(str::trim).is_none_or(|s| s.is_empty()) {
-                    entry.last_ask = view.last_user_text();
+                    entry.last_ask = view.rt(cx).last_user_text();
                 }
                 if entry.description.trim().is_empty() {
-                    if let Some(summary) = view.last_summary_text() {
+                    if let Some(summary) = view.rt(cx).last_summary_text() {
                         entry.description = summary;
                     }
                 }

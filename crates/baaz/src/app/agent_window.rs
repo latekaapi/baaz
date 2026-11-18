@@ -396,12 +396,12 @@ impl Harness {
             .registry
             .browser_chat()
             .cloned()
-            .filter(|view| !view.read(cx).busy() && !view.read(cx).is_starting())
-            .filter(|view| Some(view.read(cx).provider_kind()) == provider);
+            .filter(|view| !view.read(cx).rt(cx).busy() && !view.read(cx).rt(cx).is_starting())
+            .filter(|view| Some(view.read(cx).rt(cx).provider_kind()) == provider);
         let session = match reuse {
             Some(view) => {
-                view.update(cx, |view, cx| view.send_or_queue(prompt, cx));
-                Some(view.read(cx).session_id.clone())
+                view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_or_queue(prompt, cx)));
+                Some(view.read(cx).rt(cx).session_id.clone())
             }
             None => self.start_browser_chat(prompt, window, cx),
         };
@@ -446,14 +446,14 @@ impl Harness {
         let Some(view) = self.registry.browser_chat().cloned() else { return };
         let due: Vec<String> = view
             .read(cx)
-            .pending_external_approvals()
+            .rt(cx).pending_external_approvals()
             .into_iter()
             .filter(|(id, headline)| headline.contains("mcp__baaz__browser_") && !self.browser.read(cx).agent_window.auto_accepted.contains(id))
             .map(|(id, _)| id)
             .collect();
         for id in due {
             self.browser.update(cx, |browser, _| browser.agent_window.auto_accepted.insert(id.clone()));
-            view.update(cx, |view, cx| view.answer_external(&id, true, cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.answer_external(&id, true, cx)));
         }
     }
 
@@ -466,10 +466,10 @@ impl Harness {
         let (busy, id, steps, asks) = {
             let view = view.read(cx);
             (
-                view.busy() || view.is_starting(),
-                view.session_id.clone(),
-                view.transcript_session().map(last_turn_steps).unwrap_or(0),
-                view.pending_external_approvals().iter().any(|(_, h)| !h.contains("mcp__baaz__browser_")) || (view.pending_external_approvals().is_empty() && view.pending_approval_line().is_some()),
+                view.rt(cx).busy() || view.rt(cx).is_starting(),
+                view.rt(cx).session_id.clone(),
+                view.rt(cx).transcript_session().map(last_turn_steps).unwrap_or(0),
+                view.rt(cx).pending_external_approvals().iter().any(|(_, h)| !h.contains("mcp__baaz__browser_")) || (view.rt(cx).pending_external_approvals().is_empty() && view.rt(cx).pending_approval_line().is_some()),
             )
         };
         match self.browser.read(cx).agent_window.line_ui.clone() {
@@ -504,8 +504,8 @@ impl Harness {
             LineUi::Answer { question, session } => {
                 let view = self.find_view(session, cx)?;
                 let view = view.read(cx);
-                let busy = view.busy() || view.is_starting();
-                let answer = view.transcript_session().and_then(|s| settled_answer(s, busy));
+                let busy = view.rt(cx).busy() || view.rt(cx).is_starting();
+                let answer = view.rt(cx).transcript_session().and_then(|s| settled_answer(s, busy));
                 let title = self.page_on_screen(cx).map(|(_, title, _)| title);
                 Some(LineState::Answer {
                     question: question.clone().into(),
@@ -571,7 +571,7 @@ impl Harness {
             }
             LineIntent::Stop => {
                 if let Some(view) = self.registry.browser_chat().cloned() {
-                    view.update(cx, |view, cx| view.interrupt(cx));
+                    view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.interrupt(cx)));
                 }
                 self.browser.update(cx, |browser, _| browser.agent_window.line_ui = LineUi::Ask);
                 cx.notify();
@@ -596,9 +596,9 @@ impl Harness {
                 match self.registry.browser_chat().cloned() {
                     Some(view) => view.update(cx, |view, cx| {
                         if queue {
-                            view.send_or_queue(text, cx);
+                            view.runtime().clone().update(cx, |rt, cx| rt.send_or_queue(text, cx));
                         } else {
-                            view.steer_or_send(text, cx);
+                            view.runtime().clone().update(cx, |rt, cx| rt.steer_or_send(text, cx));
                         }
                     }),
                     None => self.ask_browser_chat(&text, false, false, window, cx),
@@ -624,8 +624,8 @@ impl Harness {
                     view.update(cx, |view, cx| {
                         // The question names the newest provider approval:
                         // answer that one, by id.
-                        match view.pending_external_approvals().last().map(|(id, _)| id.clone()) {
-                            Some(id) => view.answer_external(&id, index == 0, cx),
+                        match view.rt(cx).pending_external_approvals().last().map(|(id, _)| id.clone()) {
+                            Some(id) => view.runtime().clone().update(cx, |rt, cx| rt.answer_external(&id, index == 0, cx)),
                             None if index == 0 => {
                                 view.allow_pending(window, cx);
                             }
@@ -710,7 +710,7 @@ impl Harness {
         // open tabs and work (its task folder, Done closes tabs) — no turn.
         self.terminal_service.register_session(&id, std::env::temp_dir());
         let view = cx.new(|cx| crate::session::SessionView::new(id.clone(), host, window, cx));
-        view.update(cx, |view, cx| view.load_fixture(session, cx));
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.load_fixture(session, cx)));
         self.set_override(&id, |meta| {
             meta.hidden = true;
             meta.browser_chat = true;
@@ -786,7 +786,7 @@ impl Harness {
             .iter()
             .map(|(session, _)| {
                 let entry = self.session_list.read(cx).sessions.iter().find(|e| &e.id == session);
-                let view_busy = self.find_view(session, cx).is_some_and(|v| v.read(cx).busy());
+                let view_busy = self.find_view(session, cx).is_some_and(|v| v.read(cx).rt(cx).busy());
                 let working = entry.is_some_and(|e| e.running) || view_busy || self.terminal_service.agent_activity(session).is_some();
                 (session.clone(), working)
             })

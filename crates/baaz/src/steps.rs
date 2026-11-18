@@ -519,7 +519,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
             // it (docs/71 §2): no child, no turn. No session records a
             // step failure.
             let view = this.active.clone().ok_or("no open session")?;
-            view.update(cx, |view, cx| view.step_child_lost(cx))
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.step_child_lost(cx)))
         },
     },
     WindowVerb {
@@ -527,7 +527,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
         run: |this, _, _, cx| {
             // The banner a typed auth failure raises, on the open session's
             // provider; no session records a step failure.
-            let id = this.active.as_ref().map(|view| view.read(cx).provider_kind()).ok_or("no open session")?;
+            let id = this.active.as_ref().map(|view| view.read(cx).rt(cx).provider_kind()).ok_or("no open session")?;
             this.provider_model.update(cx, |model, _| model.raise_typed_signed_out(id));
             cx.notify();
             Ok(())
@@ -968,14 +968,14 @@ fn post_key_event(code: u16, _flags: u64) {
 /// The open session's `--steps` verbs.
 pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "draft", run: |v, rest, window, cx| { v.set_draft(rest.to_owned(), window, cx); Ok(()) } },
-    SessionVerb { verb: "send", run: |v, rest, _, cx| v.step_send(rest, cx) },
+    SessionVerb { verb: "send", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_send(rest, cx)) },
     // The billing banner's "Send anyway", as a verb: sends what the guard
     // held back — **costs a turn** when there is anything to send.
     SessionVerb { verb: "send-anyway", run: |v, _, window, cx| v.step_send_anyway(window, cx) },
-    SessionVerb { verb: "steer", run: |v, rest, _, cx| v.step_steer(rest, cx) },
+    SessionVerb { verb: "steer", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_steer(rest, cx)) },
     SessionVerb { verb: "model", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Model, cx); Ok(()) } },
     SessionVerb { verb: "effort", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Effort, cx); Ok(()) } },
-    SessionVerb { verb: "fixture-models", run: |v, _, _, cx| v.step_fixture_models(cx) },
+    SessionVerb { verb: "fixture-models", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_fixture_models(cx)) },
     SessionVerb { verb: "submenu", run: |v, _, _, cx| v.step_submenu(cx) },
     SessionVerb { verb: "provider", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Provider, cx); Ok(()) } },
     SessionVerb { verb: "mode", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Mode, cx); Ok(()) } },
@@ -988,28 +988,28 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     },
     SessionVerb { verb: "hide", run: |_, _, _, cx| { cx.emit(SessionEvent::Hide); Ok(()) } },
     SessionVerb { verb: "resume", run: |_, _, _, cx| { cx.emit(SessionEvent::Resume); Ok(()) } },
-    SessionVerb { verb: "setmodel", run: |v, rest, _, cx| v.step_setmodel(rest, cx) },
+    SessionVerb { verb: "setmodel", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_setmodel(rest, cx)) },
     SessionVerb { verb: "setprovider", run: |v, rest, _, cx| v.step_setprovider(rest, cx) },
     // `handoff:<provider>`: start the lossy re-prompt to that backend,
     // headless — the command line already asked, so no confirm dialog.
     // Refusals (no turns, a pending question or approval, a same-provider
     // pick) record a step failure and change nothing.
-    SessionVerb { verb: "handoff", run: |v, rest, _, cx| v.step_handoff(rest, cx) },
+    SessionVerb { verb: "handoff", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_handoff(rest, cx)) },
     SessionVerb { verb: "seteffort", run: |v, rest, _, cx| v.step_seteffort(rest, cx) },
-    SessionVerb { verb: "compact", run: |v, _, _, cx| v.step_compact(cx) },
+    SessionVerb { verb: "compact", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_compact(cx)) },
     SessionVerb { verb: "meter", run: |v, _, _, cx| v.step_meter(cx) },
-    SessionVerb { verb: "context", run: |v, rest, _, cx| v.step_context(rest, cx) },
-    SessionVerb { verb: "plan", run: |v, _, _, cx| { v.set_plan(true, cx); Ok(()) } },
-    SessionVerb { verb: "image", run: |v, rest, _, cx| v.step_attach(rest, cx) },
-    SessionVerb { verb: "file", run: |v, rest, _, cx| v.step_attach(rest, cx) },
+    SessionVerb { verb: "context", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_context(rest, cx)) },
+    SessionVerb { verb: "plan", run: |v, _, _, cx| { v.runtime().clone().update(cx, |rt, cx| rt.set_plan(true, cx)); Ok(()) } },
+    SessionVerb { verb: "image", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_attach(rest, cx)) },
+    SessionVerb { verb: "file", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_attach(rest, cx)) },
     SessionVerb { verb: "plus", run: |v, _, _, cx| v.step_plus(cx) },
     SessionVerb { verb: "drop", run: |v, _, _, cx| v.step_drop(cx) },
     SessionVerb { verb: "command", run: |v, rest, window, cx| v.step_caret_menu("/", rest, window, cx) },
     SessionVerb { verb: "mention", run: |v, rest, window, cx| v.step_caret_menu("@", rest, window, cx) },
     // `session/userShell`: free on every provider, and the only way to raise a
     // real approval without spending a turn.
-    SessionVerb { verb: "shell", run: |v, rest, _, cx| v.step_shell(rest, cx) },
-    SessionVerb { verb: "setmode", run: |v, rest, _, cx| v.step_setmode(rest, cx) },
+    SessionVerb { verb: "shell", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_shell(rest, cx)) },
+    SessionVerb { verb: "setmode", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_setmode(rest, cx)) },
     SessionVerb { verb: "choose", run: |v, rest, window, cx| v.step_choose(rest, window, cx) },
     SessionVerb { verb: "feedback", run: |v, rest, window, cx| v.step_feedback(rest, window, cx) },
     SessionVerb { verb: "answer", run: |v, rest, _, cx| v.step_answer(rest, cx) },
@@ -1029,8 +1029,8 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "mid", run: |v, _, _, cx| v.step_mid(cx) },
     SessionVerb { verb: "expand-groups", run: |v, _, _, cx| { v.expand_all_groups(cx); Ok(()) } },
     SessionVerb { verb: "bench", run: |v, rest, _, cx| v.step_bench(rest, cx) },
-    SessionVerb { verb: "fork", run: |v, _, _, cx| v.step_fork(cx) },
-    SessionVerb { verb: "retry", run: |v, _, _, cx| v.step_retry(cx) },
+    SessionVerb { verb: "fork", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_fork(cx)) },
+    SessionVerb { verb: "retry", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_retry(cx)) },
     // `wait` is handled by the runners, which are the only thing that can let
     // the wire catch up; reaching a table means it slipped through.
     SessionVerb { verb: "wait", run: |_, _, _, _| Err("`wait` belongs to the runner".into()) },
@@ -1285,7 +1285,7 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
             for _ in 0..ATTACH_WAIT_POLLS {
                 let pending = this
                     .read_with(cx, |this, cx| {
-                        this.active.as_ref().is_some_and(|view| view.read(cx).attachments_pending())
+                        this.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).attachments_pending())
                     })
                     .unwrap_or(false);
                 if !pending {

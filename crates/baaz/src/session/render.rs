@@ -1,8 +1,8 @@
 //! One frame of the centre pane: the transcript column (cached) and the
 //! composer band (live, composed by the application root).
 //!
-//! Part of [`SessionView`]; see [`crate::session`] for what
-//! the entity owns and why these are its own files.
+//! Part of [`SessionView`]; see [`crate::session`] for what the entity
+//! owns and why these are its own files.
 
 use super::*;
 use aui_tokens::TextRole;
@@ -66,9 +66,9 @@ impl SessionView {
         // transcript, because that is what refreshes the render cache the
         // pending-approval answer is now read from (finding `performance-2`).
         self.capture.set_pending_approval(
-            self.newest_pending_approval().is_some() || self.external_approvals.has_pending(),
+            self.newest_pending_approval().is_some() || self.runtime.read(cx).external_approvals.has_pending(),
         );
-        let status = self.render_status();
+        let status = self.render_status(cx);
         let external = self.render_external_approvals(window, cx);
         let needs_you = self.render_needs_you(cx);
         let banner = self.render_banner(cx);
@@ -133,7 +133,7 @@ impl SessionView {
         // A restored prompt lands only in an empty composer: a stop's ack
         // can arrive after the person has started typing the next message,
         // and that text wins over the retracted one.
-        if let Some(text) = self.pending_prompt.take() {
+        if let Some(text) = self.runtime.update(cx, |rt, _| rt.pending_prompt.take()) {
             if self.composer.read(cx).value().trim().is_empty() {
                 self.composer.update(cx, |state, cx| state.set_value(text, window, cx));
                 self.note_draft(cx);
@@ -161,7 +161,7 @@ impl SessionView {
     /// band, the signed-out banner included; the session's own stack floats
     /// right above that and reports its height.
     pub fn render_jump_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.list_state.is_scrolled_to_end().unwrap_or(true) || self.cached_turns.is_empty() || self.waiting_on_you().is_some() {
+        if self.list_state.is_scrolled_to_end().unwrap_or(true) || self.cached_turns.is_empty() || self.runtime.read(cx).waiting_on_you().is_some() {
             return None;
         }
         let jump = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
@@ -216,7 +216,7 @@ impl SessionView {
     /// An external drop landed: take the overlay down and attach the paths.
     pub(crate) fn drop_external(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
         self.dragging = false;
-        self.attach_paths(paths.paths().to_vec(), cx);
+        self.runtime.update(cx, |rt, cx| rt.attach_paths(paths.paths().to_vec(), cx));
     }
 
     /// One frame of the transcript: sync the cache, then compose from it.
@@ -242,11 +242,11 @@ impl SessionView {
             aui_motion::request_frame(window);
         }
         self.sync_render_cache(cx);
-        if let Some(sent_at) = self.send_trace_turns {
+        if let Some(sent_at) = self.runtime.read(cx).send_trace_turns {
             let replied = self.cached_turns.len() >= sent_at + 2
                 && matches!(self.cached_turns.last().map(|turn| &**turn), Some(aui_protocol::Turn::Assistant { .. }));
             if replied {
-                self.send_trace_turns = None;
+                self.runtime.update(cx, |rt, _| rt.send_trace_turns = None);
                 crate::log::send_reply_painted();
             }
         }
@@ -304,7 +304,7 @@ impl SessionView {
     /// A sent quote was pressed (docs/43 §0): scroll back to its source
     /// turn, then flash the span it was taken from, once the scroll lands.
     pub(super) fn scroll_to_quote(&mut self, turn: &str, words: &str, cx: &mut Context<Self>) {
-        self.quote_flash_pending = self.sent_quote_spans.get(&(turn.to_string(), words.trim_end().to_string())).cloned();
+        self.quote_flash_pending = self.runtime.read(cx).sent_quote_spans.get(&(turn.to_string(), words.trim_end().to_string())).cloned();
         self.scroll_to_turn(turn, cx);
         if self.quote_scroll.is_none() {
             self.start_quote_flash();
@@ -351,20 +351,20 @@ impl SessionView {
     ///
     /// Steady-state frames share one snapshot: re-snapshot only when the fold
     /// grew or shrank under us, or when `follow` says the content changed.
-    pub(super) fn sync_render_cache(&mut self, cx: &gpui::App) {
-        let live_len = self.store.session().map(|s| s.turns.len()).unwrap_or(0);
+    pub(super) fn sync_render_cache(&mut self, cx: &mut gpui::App) {
+        let live_len = self.runtime.read(cx).store.session().map(|s| s.turns.len()).unwrap_or(0);
         // The cache holds more than the fold: the view-side handoff prefix
         // and its one divider, minus the hidden pack bubble and the pack's
         // hidden acknowledgement.
         let expected = live_len
-            + self.handoff_prefix.len()
-            + usize::from(self.handoff_divider.is_some())
+            + self.runtime.read(cx).handoff_prefix.len()
+            + usize::from(self.runtime.read(cx).handoff_divider.is_some())
             - usize::from(self.handoff_pack_hidden.is_some())
             - usize::from(self.handoff_pack_reply_hidden.is_some());
         // B12: a settle flips the last turn from live rows to the fold
         // without adding a turn, so a busy flip rebuilds the row mapping
         // too — otherwise the settled mapping would draw on live rows.
-        let busy = self.working();
+        let busy = self.runtime.read(cx).working();
         if expected != self.cached_turns.len() || self.follow || busy != self.synced_busy {
             self.synced_busy = busy;
             self.refresh_render_cache(cx);
@@ -378,7 +378,7 @@ impl SessionView {
     /// itself is immediate, so this is what a fresh session shows on its
     /// first frames.
     pub(super) fn empty_or_loading(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.loading_history {
+        if self.runtime.read(cx).loading_history {
             super::note_centre_loading_paint();
             return Self::loading_row();
         }
@@ -387,12 +387,12 @@ impl SessionView {
         // The project's display name, not the folder's: a rename changes one
         // without touching the other.
         let display = self.project_name.clone().unwrap_or_else(|| {
-            std::path::Path::new(&self.workspace)
+            std::path::Path::new(&self.runtime.read(cx).workspace)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.workspace.clone())
+                .unwrap_or_else(|| self.runtime.read(cx).workspace.clone())
         });
-        transcript::empty_state(self.provider_kind(), &display, cx)
+        transcript::empty_state(self.runtime.read(cx).provider_kind(), &display, cx)
     }
 
     /// Every intent a card can raise, bound once per frame.
@@ -424,8 +424,8 @@ impl SessionView {
             // A provider session's approval cards ask in the provider's
             // name ("Allow Claude Code to write this file?"); the muse
             // lane keeps its own title.
-            approval_host: (self.provider_kind() != ProviderId::Muse)
-                .then(|| self.provider_kind().label().to_owned()),
+            approval_host: (self.runtime.read(cx).provider_kind() != ProviderId::Muse)
+                .then(|| self.runtime.read(cx).provider_kind().label().to_owned()),
             titles: Rc::clone(&self.titles),
             at_rest: self.at_rest,
             // One clock per frame for every turn age, and the one turn (if
@@ -435,7 +435,7 @@ impl SessionView {
             full_output: Rc::clone(&self.cached_full_output),
             show_full_output: {
                 let show = cx.listener(|this: &mut Self, id: &String, _, cx| {
-                    this.show_full_output(id.clone(), cx);
+                    this.runtime.update(cx, |rt, cx| rt.show_full_output(id.clone(), cx));
                 });
                 Some(Rc::new(move |id: String, window: &mut Window, cx: &mut gpui::App| {
                     show(&id, window, cx)
@@ -446,7 +446,7 @@ impl SessionView {
             open_output: {
                 let open = cx.listener(|this: &mut Self, out: &transcript::OutputOpen, _, cx| {
                     if out.fetchable {
-                        this.show_full_output(out.block_id.clone(), cx);
+                        this.runtime.update(cx, |rt, cx| rt.show_full_output(out.block_id.clone(), cx));
                     }
                     cx.emit(SessionEvent::OpenOutput(out.clone()));
                 });
@@ -540,7 +540,7 @@ impl SessionView {
             // shows, omitted when it knows no such skill.
             skill_scopes: {
                 let mut scopes = std::collections::HashMap::new();
-                for row in self.overlays.read(cx).skills_for(&self.workspace) {
+                for row in self.overlays.read(cx).skills_for(&self.runtime.read(cx).workspace) {
                     scopes.insert(row.name.clone(), crate::skills::scope_word(row.scope()).to_owned());
                 }
                 Rc::new(scopes)
@@ -590,9 +590,9 @@ impl SessionView {
             // with the carried turns on screen the back-link has nothing to
             // add, so a snapshot divider stands alone.
             handoff_back: self
-                .handoff_origin
+                .rt(cx).handoff_origin
                 .as_ref()
-                .filter(|_| self.handoff_prefix.is_empty())
+                .filter(|_| self.runtime.read(cx).handoff_prefix.is_empty())
                 .map(|origin| {
                     let source = origin.source_session.clone();
                     let open = cx.listener(|_: &mut Self, id: &String, _, cx| {
@@ -612,7 +612,7 @@ impl SessionView {
             terminal_live: live,
             // Z6b: file-card headers shorten against this workspace.
             // Display only — the blocks keep their full targets.
-            workspace_root: self.workspace.clone(),
+            workspace_root: self.runtime.read(cx).workspace.clone(),
             // Q1b: first-seen tool-call starts for the live run rows,
             // stamped where applied deltas materialise below.
             sent: Rc::clone(&self.sent_pairs),
@@ -713,7 +713,7 @@ impl SessionView {
     /// the new tail and nothing else; a page landing during the backfill
     /// re-hints instead, because a thousand events of unhinted rows above a
     /// tail-pinned reader is exactly the H2 stack.
-    pub(super) fn sync_virtual_list(&mut self, counts: &[(String, usize)]) {
+    pub(super) fn sync_virtual_list(&mut self, counts: &[(String, usize)], cx: &gpui::App) {
         let count: usize = counts.iter().map(|(_, n)| n).sum();
         // Rows above the first turn a refresh rebuilt since the last sync
         // are unchanged, so only the rebuilt suffix is compared and copied
@@ -742,7 +742,7 @@ impl SessionView {
             self.list_len = count;
             self.synced_counts.truncate(same);
             self.synced_counts.extend_from_slice(&counts[same..]);
-            if old == 0 || self.loading_history {
+            if old == 0 || self.runtime.read(cx).loading_history {
                 if gesture {
                     // The count still moves (a splice never resets), but the
                     // re-hint waits: new rows ride no hint for a few frames
@@ -843,7 +843,7 @@ impl SessionView {
         // The turn's progress, inline under the last message (owner
         // 2026-10-14, after Claude Desktop): it scrolls with the transcript
         // instead of standing pinned over the composer.
-        let progress = self.inline_progress();
+        let progress = self.inline_progress(cx);
         // Whether the list stood at its end as this frame began (see
         // `note_list_height`). Arriving there is the person reading the
         // session to its end: tell the application, outside this draw (an
@@ -851,7 +851,7 @@ impl SessionView {
         // in-draw notify).
         let was_at_end = self.at_end_before;
         self.at_end_before = self.list_state.is_scrolled_to_end().unwrap_or(true);
-        if self.at_end_before && !was_at_end && !self.loading_history {
+        if self.at_end_before && !was_at_end && !self.runtime.read(cx).loading_history {
             let view = cx.entity().downgrade();
             cx.defer(move |cx| {
                 let _ = view.update(cx, |_, cx| cx.emit(SessionEvent::SeenToEnd));
@@ -860,7 +860,7 @@ impl SessionView {
         // The list's end clears the floating band and the stack above it.
         let tail_h = super::TAIL_SPACER_H + self.bottom_inset + self.stack_h.get();
         let counts = std::mem::take(&mut self.row_counts);
-        self.sync_virtual_list(&counts);
+        self.sync_virtual_list(&counts, cx);
         self.row_counts = counts;
         let last_turn = self.cached_turns.len().saturating_sub(1);
         let last_row = self.rows.len().saturating_sub(1);
@@ -869,7 +869,7 @@ impl SessionView {
         let rows = self.rows.clone();
         // Read before the `'static` row closure below: replayed history
         // draws settled while nothing is live (see the `settled` flag).
-        let idle = !self.working();
+        let idle = !self.runtime.read(cx).working();
         let folds = Rc::new(folds);
         let width_report = cx.entity().downgrade();
         // The wrapper is a flex column so the virtual list's own
@@ -1047,19 +1047,20 @@ impl SessionView {
     /// The fold owns the fetch handle (`outputRef`); this view owns the
     /// result. Called when the fold changes (length drift or `follow`), never
     /// per frame, so steady-state frames share one `Rc`.
-    pub(crate) fn refresh_render_cache(&mut self, cx: &gpui::App) {
+    pub(crate) fn refresh_render_cache(&mut self, cx: &mut gpui::App) {
         // Settings › General › "Fold finished turns", from the layout global.
         let fold = crate::layout::Layout::get(cx).fold_finished_turns;
         // The fold names the turns it wrote since the last refresh (perf
         // P1, docs/51 #6). Taken once: both paths below read the same set.
-        let dirty =
-            if self.store.session().is_some() { self.store.take_dirty() } else { None };
+        let dirty = self
+            .runtime
+            .update(cx, |rt, _| if rt.store.session().is_some() { rt.store.take_dirty() } else { None });
         if let Some(dirty) = dirty.as_ref() {
-            if self.refresh_render_suffix(dirty, fold) {
+            if self.refresh_render_suffix(dirty, fold, cx) {
                 return;
             }
         }
-        self.refresh_render_full(dirty, fold);
+        self.refresh_render_full(dirty, fold, cx);
     }
 
     /// How many turns the render cache holds (`--perf-turn`).
@@ -1087,8 +1088,8 @@ impl SessionView {
     /// The whole-transcript refresh: every turn reconsidered, every row
     /// counted. What a fresh session, a handoff view, a removed turn or a
     /// toggle takes; streaming takes [`Self::refresh_render_suffix`].
-    fn refresh_render_full(&mut self, dirty: Option<HashSet<String>>, fold: bool) {
-        if self.store.session().is_some() {
+    fn refresh_render_full(&mut self, dirty: Option<HashSet<String>>, fold: bool, cx: &gpui::App) {
+        if self.runtime.read(cx).store.session().is_some() {
             // Only the turns that changed are copied. The rest hand back the
             // `Rc` the previous snapshot already held, so a streaming chunk
             // costs one turn's clone rather than the transcript's
@@ -1113,11 +1114,11 @@ impl SessionView {
             // turns stay in history, only undrawn.
             let empty: &[Turn] = &[];
             let own: &[Turn] =
-                self.store.session().map(|s| s.turns.as_slice()).unwrap_or(empty);
+                self.runtime.read(cx).store.session().map(|s| s.turns.as_slice()).unwrap_or(empty);
             let hidden = crate::handoff_snapshot::first_pack_user_id(
                 own,
-                self.handoff_pack_full.as_deref(),
-                self.handoff_pack_display.as_deref(),
+                self.runtime.read(cx).handoff_pack_full.as_deref(),
+                self.runtime.read(cx).handoff_pack_display.as_deref(),
             );
             self.handoff_pack_hidden = hidden.clone();
             let hidden_reply =
@@ -1126,10 +1127,10 @@ impl SessionView {
             // `true` marks a fold turn (the dirty set speaks for it); the
             // view-side prefix and divider always compare.
             let visible: Vec<(&Turn, bool)> = self
-                .handoff_prefix
+                .rt(cx).handoff_prefix
                 .iter()
                 .map(|rc| (rc as &Turn, false))
-                .chain(self.handoff_divider.iter().map(|rc| (rc as &Turn, false)))
+                .chain(self.runtime.read(cx).handoff_divider.iter().map(|rc| (rc as &Turn, false)))
                 .chain(
                     own.iter()
                         .filter(|turn| {
@@ -1155,9 +1156,9 @@ impl SessionView {
             self.cached_turns = Rc::new(turns);
             // D4: what each user turn was sent with, paired by text.
             let mut pairs = HashMap::new();
-            crate::sent::pair_from(&self.cached_turns, &self.sent_items, 0, &mut self.sent_cursors, &mut pairs);
+            crate::sent::pair_from(&self.cached_turns, &self.runtime.read(cx).sent_items, 0, &mut self.sent_cursors, &mut pairs);
             self.sent_pairs = Rc::new(pairs);
-            self.sent_cursor_items = self.sent_items.len();
+            self.sent_cursor_items = self.runtime.read(cx).sent_items.len();
             // Q1b: first-seen wall times for tool calls, on the frame's
             // own clock — the live run rows tick from these, never from
             // summed durations.
@@ -1174,9 +1175,9 @@ impl SessionView {
         // `transcript_list`.
         self.row_counts.clear();
         Rc::make_mut(&mut self.rows).clear();
-        self.rebuild_rows_from(0, fold);
+        self.rebuild_rows_from(0, fold, cx);
         self.suffix_inputs = Some((self.toggled_gen, fold));
-        self.refresh_card_state(0);
+        self.refresh_card_state(0, cx);
     }
 
     /// Bring `rows` and `row_counts` up to date from turn `from` on, keeping
@@ -1187,7 +1188,7 @@ impl SessionView {
     /// real, hinted list item that renders as one fixed-height row
     /// (`TAIL_SPACER_H`) in `transcript_list`. Each turn's count is
     /// memoised against its snapshot `Rc` (see `row_memo`).
-    fn rebuild_rows_from(&mut self, from: usize, fold: bool) {
+    fn rebuild_rows_from(&mut self, from: usize, fold: bool, cx: &gpui::App) {
         // Everything above `from` keeps its rows: the offset is what is left
         // once the tail's rows (and the spacer) come off — summed over the
         // tail, never the prefix, so a chunk at 3,000 turns adds 3 counts,
@@ -1201,7 +1202,7 @@ impl SessionView {
             self.row_counts.iter().map(|(_, n)| n).sum()
         };
         let last_turn = self.cached_turns.len().saturating_sub(1);
-        let live_tail = self.working() && !crate::clock::deterministic();
+        let live_tail = self.runtime.read(cx).working() && !crate::clock::deterministic();
         self.row_counts.truncate(from);
         let rows = Rc::make_mut(&mut self.rows);
         rows.truncate(offset);
@@ -1236,14 +1237,14 @@ impl SessionView {
     /// turn transcript per chunk (perf P1: 6.7 ms → see docs/51). `false`
     /// means "not this kind of change": the caller runs the full refresh
     /// with the same dirty set.
-    fn refresh_render_suffix(&mut self, dirty: &HashSet<String>, fold: bool) -> bool {
+    fn refresh_render_suffix(&mut self, dirty: &HashSet<String>, fold: bool, cx: &gpui::App) -> bool {
         /// More changed turns than this is a page or a replay, not a stream.
         const SUFFIX_LIMIT: usize = 64;
         // A handoff view interleaves view-side turns and hides two of the
         // fold's: the full refresh owns that mapping.
-        if !self.handoff_prefix.is_empty()
-            || self.handoff_divider.is_some()
-            || self.handoff_pack_full.is_some()
+        if !self.runtime.read(cx).handoff_prefix.is_empty()
+            || self.runtime.read(cx).handoff_divider.is_some()
+            || self.runtime.read(cx).handoff_pack_full.is_some()
             || self.handoff_pack_hidden.is_some()
             || self.handoff_pack_reply_hidden.is_some()
         {
@@ -1253,7 +1254,7 @@ impl SessionView {
         if self.suffix_inputs != Some((self.toggled_gen, fold)) {
             return false;
         }
-        let Some(session) = self.store.session() else { return false };
+        let Some(session) = self.runtime.read(cx).store.session() else { return false };
         let own = &session.turns;
         let old_len = self.cached_turns.len();
         if old_len == 0 || own.len() < old_len || self.row_counts.len() != old_len + 1 {
@@ -1303,22 +1304,22 @@ impl SessionView {
         }
         // D4 pairs: re-paired from `from` only, unless what was sent moved
         // (a new item can pair an older turn), which re-pairs everything.
-        if self.sent_cursor_items == self.sent_items.len() && self.sent_cursors.len() > from {
+        if self.sent_cursor_items == self.runtime.read(cx).sent_items.len() && self.sent_cursors.len() > from {
             let pairs = Rc::make_mut(&mut self.sent_pairs);
             for turn in &tail_old {
                 pairs.remove(turn.id());
             }
-            crate::sent::pair_from(&self.cached_turns, &self.sent_items, from, &mut self.sent_cursors, pairs);
+            crate::sent::pair_from(&self.cached_turns, &self.runtime.read(cx).sent_items, from, &mut self.sent_cursors, pairs);
         } else {
             let mut pairs = HashMap::new();
-            crate::sent::pair_from(&self.cached_turns, &self.sent_items, 0, &mut self.sent_cursors, &mut pairs);
+            crate::sent::pair_from(&self.cached_turns, &self.runtime.read(cx).sent_items, 0, &mut self.sent_cursors, &mut pairs);
             self.sent_pairs = Rc::new(pairs);
-            self.sent_cursor_items = self.sent_items.len();
+            self.sent_cursor_items = self.runtime.read(cx).sent_items.len();
         }
         let now_ms = self.frame_clock_ms(from);
         transcript::note_tool_starts(&self.cached_turns[from..], &mut self.tool_first_seen, now_ms);
-        self.rebuild_rows_from(from, fold);
-        self.refresh_card_state(from);
+        self.rebuild_rows_from(from, fold, cx);
+        self.refresh_card_state(from, cx);
         true
     }
 
@@ -1355,7 +1356,7 @@ impl SessionView {
     /// 0.79 ms a chunk at 3,000 turns, more than everything else a chunk
     /// costs); the summary then reads the sites, which are the few turns
     /// holding a pending card, an open question or a shell call.
-    fn refresh_card_state(&mut self, from: usize) {
+    fn refresh_card_state(&mut self, from: usize, cx: &gpui::App) {
         let keep = self.card_sites.partition_point(|site| site.turn_ix < from);
         self.card_sites.truncate(keep);
         for (turn_ix, turn) in self.cached_turns.iter().enumerate().skip(from) {
@@ -1387,11 +1388,11 @@ impl SessionView {
         // (live 2026-10-17). The same walk finds whether each still waits.
         let mut feedback_live = false;
         let mut clarify_live = false;
-        let stored = &self.store.side().stored_outputs;
+        let stored = &self.runtime.read(cx).store.side().stored_outputs;
         for site in &self.card_sites {
             // A turn that is over settles its cards for key purposes, as it
             // does for the row (`row_pending`): nothing can answer them.
-            let over = self.turn_over(&site.turn_id);
+            let over = self.runtime.read(cx).turn_over(&site.turn_id);
             if !over {
                 for (id, choices) in &site.pending {
                     pending = Some((id.clone(), choices.clone()));
@@ -1403,7 +1404,7 @@ impl SessionView {
             }
             for id in &site.shells {
                 if stored.contains_key(id.as_str()) {
-                    let state = match self.full_outputs.get(id) {
+                    let state = match self.runtime.read(cx).full_outputs.get(id) {
                         Some(full_output::Fetch::Fetching) => FullOutputState::Fetching,
                         Some(full_output::Fetch::Ready { lines, capped }) => {
                             FullOutputState::Ready { lines: lines.clone(), capped: *capped }
@@ -1458,7 +1459,7 @@ impl SessionView {
                     return;
                 }
                 let highlight = parse_link_lines(&path);
-                let workspace = PathBuf::from(&self.workspace);
+                let workspace = PathBuf::from(&self.runtime.read(cx).workspace);
                 let abs = resolve_link_path(&workspace, &path);
                 // A picture opens in the image view (an agent's screenshot
                 // lives outside the workspace, where Files cannot show it).
@@ -1480,7 +1481,7 @@ impl SessionView {
     pub(super) fn reveal_workspace_path(&mut self, raw: &str, cx: &mut Context<Self>) {
         // A trailing `:line` is a viewer hint, not part of the path.
         let path_part = raw.split(':').next().unwrap_or(raw);
-        let workspace = PathBuf::from(&self.workspace);
+        let workspace = PathBuf::from(&self.runtime.read(cx).workspace);
         let path = resolve_link_path(&workspace, raw);
         match std::fs::metadata(&path) {
             Ok(_) => open_externally(&path, cx),
@@ -1518,7 +1519,7 @@ impl SessionView {
         let _ = window;
         match action {
             AssistantTurnAction::Copy => {
-                let text = self.assistant_text(&turn_id).unwrap_or_default();
+                let text = self.assistant_text(&turn_id, cx).unwrap_or_default();
                 if !text.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                     self.hold_copy(turn_id, cx);
@@ -1572,8 +1573,8 @@ impl SessionView {
     }
 
     /// An assistant turn's prose, for Copy: every text block joined.
-    pub(super) fn assistant_text(&self, turn_id: &str) -> Option<String> {
-        let session = self.store.session()?;
+    pub(super) fn assistant_text(&self, turn_id: &str, cx: &gpui::App) -> Option<String> {
+        let session = self.runtime.read(cx).store.session()?;
         session.turns.iter().find_map(|turn| match turn {
             Turn::Assistant { id, blocks, .. } if id == turn_id => {
                 let texts: Vec<&str> = blocks
@@ -1636,8 +1637,8 @@ impl SessionView {
     /// The turn's own markdown source for the scripted selection steps: a
     /// user turn is one view, an assistant turn's first text block is the
     /// source the step holds. `None` for a turn with no text to hold.
-    fn step_turn_source(&self, index: usize) -> Option<(String, String)> {
-        self.store.session().and_then(|session| {
+    fn step_turn_source(&self, index: usize, cx: &gpui::App) -> Option<(String, String)> {
+        self.runtime.read(cx).store.session().and_then(|session| {
             session.turns.get(index).and_then(|turn| match turn {
                 Turn::User { id, text, .. } => Some((id.clone(), text.clone())),
                 Turn::Assistant { id, blocks, .. } => blocks.iter().find_map(|block| match block {
@@ -1669,7 +1670,7 @@ impl SessionView {
             std::mem::swap(&mut from, &mut to);
         }
         let (turn_id, source) =
-            self.step_turn_source(index).ok_or_else(|| format!("turn {index} has no text to select"))?;
+            self.step_turn_source(index, cx).ok_or_else(|| format!("turn {index} has no text to select"))?;
         // Clamp to the source so the highlight never addresses bytes that
         // are not there; an emptied range holds nothing rather than a lie.
         from = from.min(source.len());
@@ -1695,7 +1696,7 @@ impl SessionView {
     pub(crate) fn step_select_span(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let index = rest.trim().parse::<usize>().map_err(|_| format!("`{rest}` is not a turn index"))?;
         let (turn_id, source) =
-            self.step_turn_source(index).ok_or_else(|| format!("turn {index} has no text to select"))?;
+            self.step_turn_source(index, cx).ok_or_else(|| format!("turn {index} has no text to select"))?;
         let span = aui::transcript::message_select_all(&source)
             .ok_or_else(|| format!("turn {index} has no selectable text"))?;
         let held = Rc::make_mut(&mut self.span_held);
@@ -1712,7 +1713,7 @@ impl SessionView {
     /// that is not a number, or an index past the transcript.
     pub(crate) fn step_copy(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let index = rest.trim().parse::<usize>().map_err(|_| format!("`{rest}` is not a turn index"))?;
-        let session = self.store.session().cloned().ok_or("no transcript to copy from")?;
+        let session = self.runtime.read(cx).store.session().cloned().ok_or("no transcript to copy from")?;
         let turn = session
             .turns
             .get(index)
@@ -1731,7 +1732,7 @@ impl SessionView {
     /// Open every tool group for a screenshot: group keys default closed, so
     /// marking them toggled opens them; calls default open.
     pub(crate) fn expand_all_groups(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.store.session().cloned() else {
+        let Some(session) = self.runtime.read(cx).store.session().cloned() else {
             return;
         };
         for turn in &session.turns {
@@ -1754,7 +1755,7 @@ impl SessionView {
     /// a click on a card and a keystroke on the same card run the same code.
     pub(super) fn card_intents(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Cards {
         let choose = cx.listener(|this: &mut Self, (approval, choice, feedback): &(String, String, Option<String>), _, cx| {
-            this.decide_approval(approval.clone(), choice.clone(), feedback.clone(), cx);
+            this.runtime.update(cx, |rt, cx| rt.decide_approval(approval.clone(), choice.clone(), feedback.clone(), cx));
         });
         let feedback_toggle = cx.listener(|this: &mut Self, (approval, choice): &(String, Option<String>), window, cx| {
             this.toggle_feedback(approval.clone(), choice.clone(), window, cx);
@@ -1766,11 +1767,11 @@ impl SessionView {
             this.toggle_preview(id.clone(), *index, cx);
         });
         let answer = cx.listener(|this: &mut Self, id: &String, _, cx| this.answer_question(id.clone(), cx));
-        let skip = cx.listener(|this: &mut Self, id: &String, _, cx| this.skip_question(id.clone(), cx));
+        let skip = cx.listener(|this: &mut Self, id: &String, _, cx| this.runtime.update(cx, |rt, cx| rt.skip_question(id.clone(), cx)));
         let clarify = cx.listener(|this: &mut Self, id: &String, window, cx| {
             this.clarify_question(id.clone(), window, cx);
         });
-        let retry = cx.listener(|this: &mut Self, id: &String, _, cx| this.retry_turn(id.clone(), cx));
+        let retry = cx.listener(|this: &mut Self, id: &String, _, cx| this.runtime.update(cx, |rt, cx| rt.retry_turn(id.clone(), cx)));
         let back = cx.listener(|this: &mut Self, id: &String, _, cx| this.wizard_back(id.clone(), cx));
         // The two text fields are the app's, exactly as the composer's editor
         // is: the cards are handed an element and never a character.
@@ -1815,11 +1816,11 @@ impl SessionView {
             clarify: Rc::new(move |id, window, cx| clarify(&id, window, cx)),
             clarify_open: self.clarify_open.clone(),
             clarify_slot: std::cell::RefCell::new(clarify_slot),
-            countdowns: self.countdowns(),
-            wizard: self.wizards(),
+            countdowns: self.runtime.read(cx).countdowns(),
+            wizard: self.runtime.read(cx).wizards(),
             back: Rc::new(move |id, window, cx| back(&id, window, cx)),
             retry: Rc::new(move |id, window, cx| retry(&id, window, cx)),
-            retryable_turns: self.retryable_turns(),
+            retryable_turns: self.runtime.read(cx).retryable_turns(),
         }
     }
 
@@ -1830,12 +1831,12 @@ impl SessionView {
     /// trace reads as thinking; otherwise the generic working/finishing pair
     /// the row always had. The timer, the `esc` hint and the queued/memory
     /// notes are unchanged.
-    fn status_phase(&self) -> String {
+    fn status_phase(&self, cx: &gpui::App) -> String {
         // Blocked on the person beats everything, in the muse words: a
         // provider-lane approval lives beside the fold, never inside it,
         // so the block scan below cannot see it — without this the status
         // read "Finishing up…" while a Codex approval waited.
-        if let Some((approvals, questions)) = self.waiting_on_you() {
+        if let Some((approvals, questions)) = self.runtime.read(cx).waiting_on_you() {
             if approvals > 0 {
                 return "Waiting for approval…".to_owned();
             }
@@ -1843,7 +1844,7 @@ impl SessionView {
                 return "Waiting for your answer…".to_owned();
             }
         }
-        if let Some(running) = self.running.as_ref() {
+        if let Some(running) = self.runtime.read(cx).running.as_ref() {
             let blocks = self.cached_turns.iter().find(|turn| turn.id() == running.turn_id).and_then(
                 |turn| match turn.as_ref() {
                     Turn::Assistant { blocks, .. } => Some(blocks.as_slice()),
@@ -1861,10 +1862,10 @@ impl SessionView {
 
     /// The live status line: history loading, or a running turn with its
     /// elapsed time and the interrupt hint.
-    pub(super) fn render_status(&self) -> Option<AnyElement> {
+    pub(super) fn render_status(&self, cx: &gpui::App) -> Option<AnyElement> {
         // A scheduled retry outranks "Working…": the turn is not working, it is
         // waiting out a backoff, and saying which is the whole point of the row.
-        if let Some((attempt, max, remaining_ms, reason)) = self.retry_countdown() {
+        if let Some((attempt, max, remaining_ms, reason)) = self.runtime.read(cx).retry_countdown() {
             return Some(
                 h_flex()
                     .w_full()
@@ -1874,13 +1875,13 @@ impl SessionView {
                     .into_any_element(),
             );
         }
-        let row = if self.loading_history {
+        let row = if self.runtime.read(cx).loading_history {
             status_row("status", "Loading history\u{2026}").lead(StatusLead::Spinner).shimmer(true)
-        } else if self.saving_memories() {
+        } else if self.runtime.read(cx).saving_memories() {
             // The reply is done and the provider is saving memories before
             // it closes the turn (owner 2026-10-30): one quiet line by the
             // composer — no spinner, no timer — gone at `turn/completed`.
-            status_row("status", format!("{} is saving memories\u{2026}", self.provider_kind().label()))
+            status_row("status", format!("{} is saving memories\u{2026}", self.runtime.read(cx).provider_kind().label()))
         } else {
             // A running turn reports inline, in the transcript
             // ([`Self::inline_progress`]); nothing stands over the composer.
@@ -1902,20 +1903,20 @@ impl SessionView {
     /// line) and streaming text has its caret. Otherwise the phase off the
     /// fold (`Thinking…`, `Waiting for approval…`, `Finishing up…`,
     /// `Working…`), the turn's elapsed time and what is queued.
-    pub(super) fn inline_progress(&self) -> Option<InlineProgress> {
-        if self.loading_history || !self.working() || self.retry_countdown().is_some() {
+    pub(super) fn inline_progress(&self, cx: &gpui::App) -> Option<InlineProgress> {
+        if self.runtime.read(cx).loading_history || !self.runtime.read(cx).working() || self.runtime.read(cx).retry_countdown().is_some() {
             return None;
         }
-        let phase = self.status_phase();
-        if phase.starts_with("Running ") || self.running_text_streams() {
+        let phase = self.status_phase(cx);
+        if phase.starts_with("Running ") || self.running_text_streams(cx) {
             return None;
         }
         {
-            let elapsed = self.running.as_ref().map(|r| crate::clock::elapsed_since(r.started).as_millis() as u64).unwrap_or(0);
+            let elapsed = self.runtime.read(cx).running.as_ref().map(|r| crate::clock::elapsed_since(r.started).as_millis() as u64).unwrap_or(0);
             // The reminder tail never reaches here: it reads as a finished
             // turn (`working` is false), with its quiet note by the composer.
             let elapsed = (elapsed > 0).then(|| transcript::elapsed(elapsed));
-            let queued = self.store.side().queued.len();
+            let queued = self.runtime.read(cx).store.side().queued.len();
             let note = (queued > 0).then(|| format!("{queued} queued"));
             Some(InlineProgress { phase, elapsed, note })
         }
@@ -1923,8 +1924,8 @@ impl SessionView {
 
     /// Whether the running turn's newest block is text still arriving: the
     /// caret is then the progress, and the inline row stands down.
-    fn running_text_streams(&self) -> bool {
-        let Some(running) = self.running.as_ref() else { return false };
+    fn running_text_streams(&self, cx: &gpui::App) -> bool {
+        let Some(running) = self.runtime.read(cx).running.as_ref() else { return false };
         self.cached_turns.iter().find(|turn| turn.id() == running.turn_id).is_some_and(|turn| match turn.as_ref() {
             Turn::Assistant { blocks, .. } => matches!(blocks.last(), Some(Block::Text { streaming: true, .. })),
             Turn::User { .. } => false,
@@ -1947,7 +1948,6 @@ impl SessionView {
         }
         Some(reason.to_owned())
     }
-
 fn status_phase_for_blocks(blocks: &[Block]) -> Option<String> {
     use aui_protocol::{ApprovalState, ThinkingState};
     if blocks.iter().any(|block| matches!(block, Block::Approval { state: ApprovalState::Pending, .. })) {
@@ -2024,13 +2024,13 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// Its action is the error's own way out where there is one — "Retry" for a
     /// wire that said "not now" — and a plain dismiss otherwise.
     pub(super) fn render_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let message = self.banner.clone()?;
-        if self.banner_action == Some(crate::session::BannerAction::RetryNow) {
-            if let Some(failure) = self.child_failure.clone() {
+        let message = self.runtime.read(cx).banner.clone()?;
+        if self.runtime.read(cx).banner_action == Some(crate::session::BannerAction::RetryNow) {
+            if let Some(failure) = self.runtime.read(cx).child_failure.clone() {
                 return Some(self.render_child_failure(&failure, cx));
             }
         }
-        let label = match self.banner_action {
+        let label = match self.runtime.read(cx).banner_action {
             Some(crate::session::BannerAction::OpenProviders) => "Enable",
             Some(crate::session::BannerAction::RetryNow) => "Retry now",
             Some(_) => "Retry",
@@ -2038,9 +2038,9 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         };
         // A lost child is not an error the person made: the quiet banner
         // (docs/71 §2), with its way back.
-        let lost = self.banner_action == Some(crate::session::BannerAction::RetryNow);
+        let lost = self.runtime.read(cx).banner_action == Some(crate::session::BannerAction::RetryNow);
         let kind = if lost { BannerKind::Info } else { BannerKind::Error };
-        let press = cx.listener(|this: &mut Self, _: &(), _, cx| this.run_banner_action(cx));
+        let press = cx.listener(|this: &mut Self, _: &(), _, cx| this.runtime.update(cx, |rt, cx| rt.run_banner_action(cx)));
         let row = banner("session-banner", kind, vec![BannerRun::Text(message.clone().into())])
             .action(label, BannerActionStyle::Ghost)
             .on_action(move |window, cx| press(&(), window, cx));
@@ -2069,10 +2069,10 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// Retry · the kind's action · Providers…, each with a role and label.
     fn render_child_failure(&self, failure: &crate::session::ChildFailure, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
-        let label = self.provider_kind().label();
+        let label = self.runtime.read(cx).provider_kind().label();
         let (lead, tail) = Self::child_failure_words(failure.kind, label);
         let sentence = format!("{lead} {tail}");
-        let retry = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.run_banner_action(cx));
+        let retry = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.runtime.update(cx, |rt, cx| rt.run_banner_action(cx)));
         let providers = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(SessionEvent::OpenProviders));
         let mut actions = h_flex().gap(px(scale::SP_2)).child(
             div()
@@ -2145,10 +2145,10 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// way through; an unknown plan is a quiet `Info` line that blocks nothing.
     pub(super) fn render_tier_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Muse-account surface: never drawn on another provider's session.
-        if !self.provider_kind().has_billing_tier() {
+        if !self.runtime.read(cx).provider_kind().has_billing_tier() {
             return None;
         }
-        let guard = self.tier_banner.clone()?;
+        let guard = self.runtime.read(cx).tier_banner.clone()?;
         let sign_out = cx.listener(|_: &mut Self, _: &(), _, cx| cx.emit(SessionEvent::Logout));
         let through = cx.listener(move |view: &mut Self, _: &(), window, cx| view.send_anyway(window, cx));
         let recheck = cx.listener(|_: &mut Self, _: &(), _, cx| cx.emit(SessionEvent::TierRecheck));
@@ -2185,7 +2185,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// Only when the pending card is actually out of view — a banner pointing at
     /// a card the reader is already reading is noise.
     pub(super) fn render_needs_you(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (approvals, questions) = self.waiting_on_you()?;
+        let (approvals, questions) = self.runtime.read(cx).waiting_on_you()?;
         let at_tail = self.list_state.is_scrolled_to_end().unwrap_or(true);
         // A card with its field open is the one being answered: the reader
         // is at it, and the band would only cover its send row.
@@ -2201,7 +2201,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             this.list_state.scroll_to_end();
             cx.notify();
         });
-        let banner = needs_you_banner("needs-you", self.provider_kind().waiting_headline(), detail);
+        let banner = needs_you_banner("needs-you", self.runtime.read(cx).provider_kind().waiting_headline(), detail);
         let banner = if crate::clock::deterministic() { banner.at_rest() } else { banner };
         Some(
             div()
@@ -2216,20 +2216,20 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// The queued strip: exactly what `SideState::queued` holds, in server
     /// order.
     pub(super) fn render_queue(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let side = self.store.side();
+        let side = self.runtime.read(cx).store.side();
         // A tail send's row is drawn as its bubble instead.
-        if side.queued.iter().all(|q| self.tail_queued.contains_key(&q.turn_id)) {
+        if side.queued.iter().all(|q| self.runtime.read(cx).tail_queued.contains_key(&q.turn_id)) {
             return None;
         }
-        let editing = self.unqueueing.clone();
+        let editing = self.runtime.read(cx).unqueueing.clone();
         let rows: Vec<QueueStripRow> = side
             .queued
             .iter()
-            .filter(|q| !self.tail_queued.contains_key(&q.turn_id))
+            .filter(|q| !self.runtime.read(cx).tail_queued.contains_key(&q.turn_id))
             .map(|q| {
                 let row = QueueStripRow::new(
                     q.turn_id.clone(),
-                    self.store.command_text(&q.request_id).unwrap_or_default().to_owned(),
+                    self.runtime.read(cx).store.command_text(&q.request_id).unwrap_or_default().to_owned(),
                 );
                 if editing.get(&q.turn_id).is_some_and(|pending| pending.kind == Unqueue::Edit) {
                     row.editing()
@@ -2247,15 +2247,15 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             // The row's text, captured now: by the time `turn/unqueued`
             // lands the fold may no longer be able to echo it back.
             let text = this
-                .store
+                .rt(cx).store
                 .side()
                 .queued
                 .iter()
                 .find(|row| row.turn_id == id.as_ref())
-                .and_then(|row| this.store.command_text(&row.request_id))
+                .and_then(|row| this.runtime.read(cx).store.command_text(&row.request_id))
                 .unwrap_or_default()
                 .to_owned();
-            this.unqueue(id.as_ref(), why, text, cx);
+            this.runtime.update(cx, |rt, cx| rt.unqueue(id.as_ref(), why, text, cx));
         });
         Some(
             div()
@@ -2388,14 +2388,14 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         let commands: Vec<Command> = Command::ALL
             .into_iter()
             .filter(|c| c.slash().trim_start_matches('/').to_lowercase().starts_with(&needle))
-            .filter(|c| c.offered_on(self.provider_kind()))
+            .filter(|c| c.offered_on(self.runtime.read(cx).provider_kind()))
             .collect();
         // D64: the menu shares the page's catalog — Off hidden — then the
         // menu's own prefix match and the F7 command-name shadow rule.
         let skill_rows: Vec<skills::Skill> = self
             .overlays
             .read(cx)
-            .skills_for(&self.workspace)
+            .skills_for(&self.runtime.read(cx).workspace)
             .iter()
             .filter(|s| s.in_slash_menu())
             .filter(|s| s.name.to_lowercase().starts_with(&needle))
@@ -2420,23 +2420,23 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// session's root: a rank for another root's files never shows here.
     pub(super) fn mention_rows(&self, filter: &str, cx: &gpui::App) -> Vec<String> {
         let overlays = self.overlays.read(cx);
-        let files = overlays.files_for(&self.workspace);
+        let files = overlays.files_for(&self.runtime.read(cx).workspace);
         if filter.is_empty() {
             return files.iter().take(files::VISIBLE).map(|entry| entry.path.clone()).collect();
         }
-        if self.mention_cache_for == filter
-            && self.mention_cache_root == self.workspace
-            && self.mention_files_len == files.len()
+        if self.mention.cache_for == filter
+            && self.mention.root == self.runtime.read(cx).workspace
+            && self.mention.files_len == files.len()
         {
-            return self.mention_cache.clone();
+            return self.mention.cache.clone();
         }
         // A rank is in flight (or not yet started): show the previous rank
         // while it narrows this filter, rather than an empty menu for a frame.
-        if !self.mention_cache_for.is_empty()
-            && self.mention_cache_root == self.workspace
-            && filter.starts_with(&self.mention_cache_for)
+        if !self.mention.cache_for.is_empty()
+            && self.mention.root == self.runtime.read(cx).workspace
+            && filter.starts_with(&self.mention.cache_for)
         {
-            return self.mention_cache.clone();
+            return self.mention.cache.clone();
         }
         Vec::new()
     }
@@ -2449,22 +2449,22 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         if filter.is_empty() {
             return;
         }
-        let root = self.workspace.clone();
+        let root = self.runtime.read(cx).workspace.clone();
         let files: Vec<files::FileEntry> = self.overlays.read(cx).files_for(&root).to_vec();
         let files_len = files.len();
-        if self.mention_cache_for == filter && self.mention_cache_root == root && self.mention_files_len == files_len {
+        if self.mention.cache_for == filter && self.mention.root == root && self.mention.files_len == files_len {
             return;
         }
-        if self.mention_pending.as_deref() == Some(filter.as_str())
-            && self.mention_cache_root == root
-            && self.mention_files_len == files_len
+        if self.mention.pending.as_deref() == Some(filter.as_str())
+            && self.mention.root == root
+            && self.mention.files_len == files_len
         {
             return;
         }
-        self.mention_epoch += 1;
-        let epoch = self.mention_epoch;
-        self.mention_pending = Some(filter.clone());
-        self.mention_files_len = files_len;
+        self.mention.epoch += 1;
+        let epoch = self.mention.epoch;
+        self.mention.pending = Some(filter.clone());
+        self.mention.files_len = files_len;
         // The cache says what it was ranked for, exactly: a newer keystroke
         // always starts a newer rank (bumping the epoch), so whatever lands
         // here is either current or dropped above. The root rides along, so a
@@ -2474,25 +2474,25 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         let work =
             move || files::filter(&files, &filter).into_iter().map(|entry| entry.path.clone()).collect::<Vec<_>>();
         self.wire_call(cx, work, move |this: &mut Self, rows, cx| {
-            if this.mention_epoch != epoch {
+            if this.mention.epoch != epoch {
                 return;
             }
-            this.mention_pending = None;
-            this.mention_cache_for = wanted;
-            this.mention_cache_root = wanted_root;
-            this.mention_cache = rows;
+            this.mention.pending = None;
+            this.mention.cache_for = wanted;
+            this.mention.root = wanted_root;
+            this.mention.cache = rows;
             cx.notify();
         });
     }
 
     pub(super) fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {
-        let blocked = self.context().pressure == ContextPressure::Blocked;
+        let blocked = self.runtime.read(cx).context().pressure == ContextPressure::Blocked;
         let intent = cx.listener(|this: &mut Self, intent: &ComposerIntent, window, cx| match intent {
             ComposerIntent::Send => this.send(window, cx),
-            ComposerIntent::Stop => this.interrupt(cx),
+            ComposerIntent::Stop => this.runtime.update(cx, |rt, cx| rt.interrupt(cx)),
             ComposerIntent::Steer => this.steer(window, cx),
-            ComposerIntent::Compact => this.compact(cx),
-            ComposerIntent::ExitPlan => this.set_plan(false, cx),
+            ComposerIntent::Compact => this.runtime.update(cx, |rt, cx| rt.compact(cx)),
+            ComposerIntent::ExitPlan => this.runtime.update(cx, |rt, cx| rt.set_plan(false, cx)),
             ComposerIntent::Attach => this.prompt_for_image(cx),
             ComposerIntent::Model => this.toggle_picker(MenuKind::Model, cx),
             ComposerIntent::Effort => this.toggle_picker(MenuKind::Effort, cx),
@@ -2502,10 +2502,12 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 this.toggle_plus_menu(cx);
             }
             ComposerIntent::RemoveChip(id) => {
-                this.images.retain(|image| image.id != id.as_ref());
-                this.files.retain(|file| file.id != id.as_ref());
-                this.quotes.retain(|quote| quote.id != id.as_ref());
-                this.failed_chips.retain(|(chip, _, _)| chip != id.as_ref());
+                this.runtime.update(cx, |rt, _| {
+                    rt.images.retain(|image| image.id != id.as_ref());
+                    rt.files.retain(|file| file.id != id.as_ref());
+                    rt.quotes.retain(|quote| quote.id != id.as_ref());
+                    rt.failed_chips.retain(|(chip, _, _)| chip != id.as_ref());
+                });
                 cx.notify();
             }
         });
@@ -2542,16 +2544,16 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         // never shows the Muse "M".
         // v3 (canvas "Baaz v3", Composer A): one raised card with text
         // controls, on the transcript measure.
-        let mut element = composer("composer", &self.composer, self.display_provider().icon(), self.model())
+        let mut element = composer("composer", &self.composer, self.runtime.read(cx).display_provider().icon(), self.runtime.read(cx).model())
             .docked(true)
             .raised(true)
-            .mode(self.mode_label())
-            .effort(crate::overlays::effort_label(self.effort))
-            .context(self.context())
+            .mode(self.runtime.read(cx).mode_label())
+            .effort(crate::overlays::effort_label(self.runtime.read(cx).effort))
+            .context(self.runtime.read(cx).context())
             .context_open(self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Meter))
-            .plan(self.plan)
+            .plan(self.runtime.read(cx).plan)
             .chips(
-                self.images
+                self.runtime.read(cx).images
                     .iter()
                     .map(|image| ComposerChip {
                         id: image.id.clone().into(),
@@ -2562,7 +2564,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         detail: None,
                         state: if image.pending { ComposerChipState::Uploading } else { ComposerChipState::Ready },
                     })
-                    .chain(self.files.iter().map(|file| ComposerChip {
+                    .chain(self.runtime.read(cx).files.iter().map(|file| ComposerChip {
                         id: file.id.clone().into(),
                         kind: ComposerChipKind::File,
                         label: file.name.clone().into(),
@@ -2571,7 +2573,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         detail: Some(file.detail().into()),
                         state: ComposerChipState::Ready,
                     }))
-                    .chain(self.failed_chips.iter().map(|(id, name, reason)| ComposerChip {
+                    .chain(self.runtime.read(cx).failed_chips.iter().map(|(id, name, reason)| ComposerChip {
                         id: id.clone().into(),
                         kind: ComposerChipKind::File,
                         label: name.clone().into(),
@@ -2583,7 +2585,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     .collect(),
             )
             .quotes(
-                self.quotes
+                self.runtime.read(cx).quotes
                     .iter()
                     .map(|quote| aui::composer::ComposerQuote {
                         id: quote.id.clone().into(),
@@ -2592,7 +2594,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     })
                     .collect(),
             )
-            .streaming(self.working())
+            .streaming(self.runtime.read(cx).working())
             // Blocked context is the server refusing to take more, so the
             // composer refuses too and the meter offers the way out.
             // The draft's emptiness is a maintained flag, not a copy of the
@@ -2600,9 +2602,9 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             // `performance-8`).
             .can_send(
                 !blocked
-                    && !self.input_locked
-                    && !self.attachments_pending()
-                    && (!self.draft_empty || !self.images.is_empty() || !self.files.is_empty()),
+                    && !self.runtime.read(cx).input_locked
+                    && !self.runtime.read(cx).attachments_pending()
+                    && (!self.draft_empty || !self.runtime.read(cx).images.is_empty() || !self.runtime.read(cx).files.is_empty()),
             )
             .plus_menu(plus_open, Some(plus_item))
             .on_intent(move |i, window, cx| intent(&i, window, cx));
@@ -2624,9 +2626,9 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// submenu where the provider lists levels (D4), its context limit and
     /// its `default` / `active` badges; with no catalog and a reason, the
     /// one reason row (never an empty menu).
-    pub(crate) fn model_menu_rows(&self) -> Vec<PickerRow> {
+    pub(crate) fn model_menu_rows(&self, cx: &gpui::App) -> Vec<PickerRow> {
         let mut rows: Vec<PickerRow> = self
-            .models
+            .rt(cx).models
             .iter()
             .map(|m| {
                 let mut row = PickerRow::new(
@@ -2647,9 +2649,9 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 }
                 // D4: a model whose levels the provider lists opens
                 // them as a nested submenu (Default first).
-                if let Some(options) = self.effort_options_for(Some(&m.model_id)).options() {
+                if let Some(options) = self.runtime.read(cx).effort_options_for(Some(&m.model_id)).options() {
                     if options.len() > 1 {
-                        let current = if m.is_active { options.iter().position(|o| o.effort == self.effort) } else { None };
+                        let current = if m.is_active { options.iter().position(|o| o.effort == self.runtime.read(cx).effort) } else { None };
                         row = row.submenu(PickerSubmenu {
                             title: format!("Reasoning effort · {}", m.display_label).into(),
                             rows: options
@@ -2667,7 +2669,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         // reason in its detail line, the way an `Unavailable`
         // capability explains itself. Never an empty menu.
         if rows.is_empty() {
-            if let Some(reason) = self.models_error.clone() {
+            if let Some(reason) = self.runtime.read(cx).models_error.clone() {
                 rows.push(PickerRow::new(
                     MODEL_UNAVAILABLE_ROW.to_owned(),
                     "Models unavailable".to_owned(),
@@ -2689,7 +2691,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 // pushed in (it draws right after, in this same frame).
                 let Some(picker) = self.model_picker(cx) else { return Vec::new() };
                 let sub_open = self.overlays.read(cx).menu().is_some_and(|m| m.sub_open);
-                let rows = self.model_menu_rows();
+                let rows = self.model_menu_rows(cx);
                 picker.update(cx, |picker, cx| {
                     picker.push_facts(cx, |delegate| {
                         delegate.rows = rows;
@@ -2698,10 +2700,10 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 });
                 vec![(ComposerChipAnchor::Model, picker.into_any_element())]
             }
-            MenuKind::Effort if !self.effort_levels().is_empty() => {
+            MenuKind::Effort if !self.runtime.read(cx).effort_levels().is_empty() => {
                 // D4 (docs/41 §2.10; the owner chose the slider, 2026-10-14):
                 // the levels as stops, Default a row under the separator.
-                let listed = self.effort_options();
+                let listed = self.runtime.read(cx).effort_options();
                 let options = listed.options().unwrap_or_default();
                 let levels: Vec<PickerRow> = options
                     .iter()
@@ -2719,10 +2721,10 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     None => base,
                 };
                 let default_row = PickerRow::new(crate::overlays::effort_row_id(None), crate::overlays::effort_label(None), default_detail);
-                let current = self.effort.and_then(|e| self.effort_levels().iter().position(|l| *l == e));
+                let current = self.runtime.read(cx).effort.and_then(|e| self.runtime.read(cx).effort_levels().iter().position(|l| *l == e));
                 let change = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
-                    if let Some(effort) = this.effort_levels().into_iter().find(|e| crate::overlays::effort_row_id(Some(*e)) == id.as_ref()) {
-                        this.set_effort(Some(effort), cx);
+                    if let Some(effort) = this.runtime.read(cx).effort_levels().into_iter().find(|e| crate::overlays::effort_row_id(Some(*e)) == id.as_ref()) {
+                        this.runtime.update(cx, |rt, cx| rt.set_effort(Some(effort), cx));
                     }
                 });
                 let pick_default = cx.listener(|this: &mut Self, _: &SharedString, _, cx| this.pick_effort(None, cx));
@@ -2739,7 +2741,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 // never from a constant: a model change re-derives them.
                 // With no control the menu carries the typed reason row,
                 // the way the model picker does for an empty catalog.
-                let listed = self.effort_options();
+                let listed = self.runtime.read(cx).effort_options();
                 let mut rows: Vec<PickerRow> = listed
                     .options()
                     .map(|options| {
@@ -2782,14 +2784,14 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 let pick = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
                     if id.as_ref() == crate::overlays::EFFORT_UNAVAILABLE_ROW {
                         if let crate::overlays::EffortOptions::Unavailable(reason) =
-                            this.effort_options()
+                            this.runtime.read(cx).effort_options()
                         {
                             this.toast("Effort unavailable", reason, cx);
                         }
                         this.close_menu(cx);
                         return;
                     }
-                    if let Some(options) = this.effort_options().options() {
+                    if let Some(options) = this.runtime.read(cx).effort_options().options() {
                         if let Some(option) = options
                             .iter()
                             .find(|o| crate::overlays::effort_row_id(o.effort) == id.as_ref())
@@ -2812,9 +2814,9 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         // An unavailable mode says why on its detail line;
                         // the pick restates it rather than switching.
                         let detail = self
-                            .mode_unavailable(*mode)
+                            .rt(cx).mode_unavailable(*mode)
                             .unwrap_or_else(|| {
-                                crate::providers::mode_description(self.provider_kind(), *mode).to_owned()
+                                crate::providers::mode_description(self.runtime.read(cx).provider_kind(), *mode).to_owned()
                             });
                         PickerRow::new(format!("{mode:?}"), mode.label(), detail)
                     })
@@ -2832,7 +2834,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 vec![(ComposerChipAnchor::Mode, menu.into_any_element())]
             }
             MenuKind::Provider => {
-                let rows = provider_picker_rows(self.provider_kind(), self.has_turns());
+                let rows = provider_picker_rows(self.runtime.read(cx).provider_kind(), self.runtime.read(cx).has_turns());
                 let pick = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
                     this.pick_provider(id.as_ref(), cx);
                 });
@@ -2858,14 +2860,14 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
 }
 
 /// The provider menu's rows for a session on `current`, drawn from
-/// [`SessionView::provider_rows`]: a fresh session offers the three
+/// [`SessionRuntime::provider_rows`]: a fresh session offers the three
 /// backends as a swap; a session with turns keeps its lane, so every
 /// other backend reads as "Hand off to X…" followed by "New session on
 /// X". The picker component has no disabled state, so the typed reason
 /// rides as prose (the way an `Unavailable` capability explains itself)
 /// and every row still acts on click.
 fn provider_picker_rows(current: ProviderId, has_turns: bool) -> Vec<PickerRow> {
-    SessionView::provider_rows_for(
+    SessionRuntime::provider_rows_for(
         current,
         has_turns,
         &crate::settings_providers::live_visible_provider_ids(),
@@ -3173,12 +3175,12 @@ impl SessionView {
                         ));
                         let press = press.on_click(cx.listener(
                             move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                                this.decide_external_approval(
+                                this.runtime.update(cx, |rt, cx| rt.decide_external_approval(
                                     approval_id.clone(),
                                     choice,
                                     None,
                                     cx,
-                                );
+                                ));
                             },
                         ));
                         div()
@@ -3248,18 +3250,18 @@ mod tests {
             };
             let view = cx.new(|cx| crate::session::SessionView::new("synthetic-stress-300".to_owned(), host, window, cx));
             view.update(cx, |view, cx| {
-                view.fold_provider_events(events, cx);
+                view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(events, cx));
                 view.refresh_render_cache(cx);
                 // Something sent with an attachment pairs with a user turn.
                 let text = match view.cached_turns.iter().find(|turn| matches!(&***turn, Turn::User { .. })).map(|t| &**t) {
                     Some(Turn::User { text, .. }) => text.clone(),
                     _ => panic!("the capture has a user turn"),
                 };
-                view.sent_items.push(crate::sent::SentItem { text, annotations: Some(Default::default()), ..Default::default() });
-                view.refresh_render_full(None, crate::layout::Layout::get(cx).fold_finished_turns);
+                view.runtime().as_mut(cx).sent_items.push(crate::sent::SentItem { text, annotations: Some(Default::default()), ..Default::default() });
+                view.refresh_render_full(None, crate::layout::Layout::get(cx).fold_finished_turns, cx);
                 for n in 0..5 {
                     for event in renamed_turn(&mut folder, &last_turn, 900 + n) {
-                        view.fold_provider_events(vec![event], cx);
+                        view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(vec![event], cx));
                         view.refresh_render_cache(cx);
                     }
                 }
@@ -3273,7 +3275,7 @@ mod tests {
                     view.cached_turns.len(),
                 );
                 assert!(!streamed.3.is_empty(), "the sent item paired");
-                view.refresh_render_full(None, crate::layout::Layout::get(cx).fold_finished_turns);
+                view.refresh_render_full(None, crate::layout::Layout::get(cx).fold_finished_turns, cx);
                 let full = (
                     view.rows.as_ref().clone(),
                     view.row_counts.clone(),
@@ -3325,11 +3327,11 @@ mod tests {
             let grown_view = |extra: usize, next: &mut usize, window: &mut Window, cx: &mut gpui::App| {
                 let view = new_view(window, cx);
                 view.update(cx, |view, cx| {
-                    view.fold_provider_events(events.clone(), cx);
+                    view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(events.clone(), cx));
                     for _ in 0..extra {
                         *next += 1;
                         let turn = renamed_turn(&mut folder.borrow_mut(), &last_turn, *next);
-                        view.fold_provider_events(turn, cx);
+                        view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(turn, cx));
                     }
                     view.refresh_render_cache(cx);
                 });
@@ -3354,7 +3356,7 @@ mod tests {
                             let turn = renamed_turn(&mut folder.borrow_mut(), &last_turn, next);
                             view.update(cx, |view, cx| {
                                 for event in turn {
-                                    view.fold_provider_events(vec![event], cx);
+                                    view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(vec![event], cx));
                                     view.refresh_render_cache(cx);
                                 }
                             });
@@ -3367,12 +3369,12 @@ mod tests {
             }
             let view = new_view(window, cx);
             view.update(cx, |view, cx| {
-                view.fold_provider_events(events.clone(), cx);
+                view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(events.clone(), cx));
                 view.refresh_render_cache(cx);
                 assert!(view.cached_turns.len() >= 300, "the capture folded: {} turns", view.cached_turns.len());
             });
             c.bench_function("render_cache/full_300", |b| {
-                b.iter(|| view.update(cx, |view, cx| view.refresh_render_full(None, crate::layout::Layout::get(cx).fold_finished_turns)))
+                b.iter(|| view.update(cx, |view, cx| view.refresh_render_full(None, crate::layout::Layout::get(cx).fold_finished_turns, cx)))
             });
             c.final_summary();
         });
@@ -3620,7 +3622,7 @@ mod tests {
             view.update(cx, |view, cx| {
                 std::rc::Rc::make_mut(&mut view.span_held).insert(owner.clone(), (source.clone(), span.clone()));
                 view.step_quote(window, cx).expect("a held span quotes");
-                let quote = view.quotes.first().cloned().expect("a quote");
+                let quote = view.rt(cx).quotes.first().cloned().expect("a quote");
                 assert_eq!(quote.text, "ok 12 passed\n``` not a fence", "the output's own text, ANSI stripped, fence kept intact");
                 assert_eq!(quote.source.as_deref(), Some("t-1"), "the source is the turn");
                 assert_eq!(quote.code, Some(("shell".to_string(), 2)), "a shell code quote of two lines");
@@ -3654,10 +3656,10 @@ mod tests {
                     is_default: default,
                     ..Default::default()
                 };
-                view.apply_model_catalog(vec![row("spark", false), row("spark-contributor", true)], "meta", cx);
-                let ids: Vec<&str> = view.models.iter().map(|m| m.model_id.as_str()).collect();
+                view.runtime().clone().update(cx, |rt, cx| rt.apply_model_catalog(vec![row("spark", false), row("spark-contributor", true)], "meta", cx));
+                let ids: Vec<&str> = view.rt(cx).models.iter().map(|m| m.model_id.as_str()).collect();
                 assert_eq!(ids, ["spark", "spark-contributor"], "no row for the provider id");
-                assert_eq!(view.model_id(), "spark-contributor", "the chip reads the default model");
+                assert_eq!(view.rt(cx).model_id(), "spark-contributor", "the chip reads the default model");
             })
         });
     }
@@ -3682,8 +3684,8 @@ mod tests {
         });
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                assert_eq!(view.provider_kind(), crate::providers::ProviderId::Muse);
-                view.fold_provider_events(
+                assert_eq!(view.rt(cx).provider_kind(), crate::providers::ProviderId::Muse);
+                view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(
                     vec![provider::ProviderEvent::Deltas {
                         session_id: Some("s-1".to_owned()),
                         deltas: vec![Delta::TurnStarted {
@@ -3696,14 +3698,14 @@ mod tests {
                         }],
                     }],
                     cx,
-                );
-                assert!(!view.busy(), "a history turn with no end is not work in progress");
+                ));
+                assert!(!view.rt(cx).busy(), "a history turn with no end is not work in progress");
                 // A live start still is.
-                view.fold_provider_events(
+                view.runtime().clone().update(cx, |rt, cx| rt.fold_provider_events(
                     vec![provider::ProviderEvent::TurnRunning { session_id: "s-1".into(), turn_id: "a-new".into() }],
                     cx,
-                );
-                assert!(view.busy(), "the announced turn runs");
+                ));
+                assert!(view.rt(cx).busy(), "the announced turn runs");
             })
         });
     }
@@ -3734,12 +3736,12 @@ mod tests {
         // Quoting keeps the span with the draft …
         vc.update(|window, cx| {
             view.update(cx, |view, cx| view.add_quote_with_span("the words".into(), Some("t-1".into()), None, Some(("t-1".into(), span.clone())), window, cx));
-            assert_eq!(view.read(cx).quotes[0].span.as_ref().map(|(_, s)| s), Some(&span));
+            assert_eq!(view.read(cx).rt(cx).quotes[0].span.as_ref().map(|(_, s)| s), Some(&span));
         });
         // … and a sent one is remembered by its source and words.
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.sent_quote_spans.insert(("t-1".into(), "the words".into()), ("t-1".into(), span.clone()));
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).sent_quote_spans.insert(("t-1".into(), "the words".into()), ("t-1".into(), span.clone()));
             })
         });
         vc.update(|_, cx| {
@@ -4026,9 +4028,9 @@ mod tests {
         let view = handoff_destination(vc, "dest-1", "codex");
         let pack = "Continuing a session handed off from Claude Code. Context follows.";
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
-                view.store.apply_deltas(vec![
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.runtime().as_mut(cx).store.apply_deltas(vec![
                         aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
                         aui_protocol::Delta::TurnStarted {
                             turn: handoff_reply("a2", "Got it — ready to continue…"),
@@ -4038,7 +4040,7 @@ mod tests {
                 );
             });
             view.update(cx, |view, cx| {
-                view.show_handoff_prefix(
+                view.runtime().clone().update(cx, |rt, cx| rt.show_handoff_prefix(
                     handoff_origin(ProviderId::ClaudeCode),
                     vec![
                         handoff_user("u1", "Name three ferry routes"),
@@ -4053,7 +4055,7 @@ mod tests {
                     Some(pack.to_owned()),
                     Some("Handed off from Claude Code: the goal".to_owned()),
                     cx,
-                );
+                ));
             });
         });
         assert_eq!(
@@ -4071,7 +4073,7 @@ mod tests {
         // only the frame does not draw it.
         let folded: Vec<String> = vc.update(|_, cx| {
             view.read(cx)
-                .session()
+                .rt(cx).session()
                 .map(|s| s.turns.iter().map(|t| t.id().to_owned()).collect())
                 .unwrap_or_default()
         });
@@ -4084,9 +4086,9 @@ mod tests {
         let vc = cx.add_empty_window();
         let view = handoff_destination(vc, "dest-r", "codex");
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
-                view.store.apply_deltas(vec![
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.runtime().as_mut(cx).store.apply_deltas(vec![
                         // A replay substitutes the summary for the whole pack.
                         aui_protocol::Delta::TurnStarted {
                             turn: handoff_user("u-pack", "Handed off from Muse: the goal"),
@@ -4098,14 +4100,14 @@ mod tests {
                 );
             });
             view.update(cx, |view, cx| {
-                view.show_handoff_prefix(
+                view.runtime().clone().update(cx, |rt, cx| rt.show_handoff_prefix(
                     handoff_origin(ProviderId::Muse),
                     vec![],
                     crate::handoff_snapshot::fallback_text(ProviderId::Muse),
                     Some("Continuing a session handed off from Muse. Context follows.".to_owned()),
                     Some("Handed off from Muse: the goal".to_owned()),
                     cx,
-                );
+                ));
             });
         });
         // The pack bubble hides by its summary — and the acknowledgement
@@ -4124,22 +4126,22 @@ mod tests {
         let vc = cx.add_empty_window();
         let view = handoff_destination(vc, "dest-k", "codex");
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
-                view.store.apply_deltas(vec![aui_protocol::Delta::TurnStarted {
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.runtime().as_mut(cx).store.apply_deltas(vec![aui_protocol::Delta::TurnStarted {
                         turn: handoff_user("u1", "A real first prompt"),
                     }],
                 );
             });
             view.update(cx, |view, cx| {
-                view.show_handoff_prefix(
+                view.runtime().clone().update(cx, |rt, cx| rt.show_handoff_prefix(
                     handoff_origin(ProviderId::Muse),
                     vec![],
                     crate::handoff_snapshot::fallback_text(ProviderId::Muse),
                     Some("Continuing a session handed off from Muse".to_owned()),
                     Some("Handed off from Muse: x".to_owned()),
                     cx,
-                );
+                ));
             });
         });
         assert_eq!(cached_ids(vc, &view), vec!["handoff-divider-dest-k", "u1"]);
@@ -4153,15 +4155,15 @@ mod tests {
         let vc = cx.add_empty_window();
         let view_b = handoff_destination(vc, "hop-b", "claude-code");
         vc.update(|_, cx| {
-            view_b.update(cx, |view, _| {
-                view.store.ensure_live(aui_protocol::Provider::Claude, "m", "/tmp/ws");
-                view.store.apply_deltas(vec![aui_protocol::Delta::TurnStarted {
+            view_b.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).store.ensure_live(aui_protocol::Provider::Claude, "m", "/tmp/ws");
+                view.runtime().as_mut(cx).store.apply_deltas(vec![aui_protocol::Delta::TurnStarted {
                         turn: handoff_reply("ab", "Got it — ready to continue…"),
                     }],
                 );
             });
             view_b.update(cx, |view, cx| {
-                view.show_handoff_prefix(
+                view.runtime().clone().update(cx, |rt, cx| rt.show_handoff_prefix(
                     handoff_origin(ProviderId::Muse),
                     vec![
                         handoff_user("ua", "Plan Greyport"),
@@ -4176,7 +4178,7 @@ mod tests {
                     Some("pack-a".to_owned()),
                     Some("display-a".to_owned()),
                     cx,
-                );
+                ));
             });
         });
         let prefix_b: Vec<aui_protocol::Turn> = vc.update(|_, cx| {
@@ -4184,15 +4186,15 @@ mod tests {
         });
         let view_c = handoff_destination(vc, "hop-c", "codex");
         vc.update(|_, cx| {
-            view_c.update(cx, |view, _| {
-                view.store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
-                view.store.apply_deltas(vec![aui_protocol::Delta::TurnStarted {
+            view_c.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.runtime().as_mut(cx).store.apply_deltas(vec![aui_protocol::Delta::TurnStarted {
                         turn: handoff_reply("ac", "Got it — ready to continue…"),
                     }],
                 );
             });
             view_c.update(cx, |view, cx| {
-                view.show_handoff_prefix(
+                view.runtime().clone().update(cx, |rt, cx| rt.show_handoff_prefix(
                     crate::handoff::HandoffOrigin {
                         source_session: "hop-b".to_owned(),
                         from: ProviderId::ClaudeCode,
@@ -4208,7 +4210,7 @@ mod tests {
                     Some("pack-b".to_owned()),
                     Some("display-b".to_owned()),
                     cx,
-                );
+                ));
             });
         });
         assert_eq!(
@@ -4233,10 +4235,10 @@ mod tests {
         let display = "Handed off from Claude Code: the goal";
         let reason = "model `gpt-6-astra` does not exist or you lack access";
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
                 // turn/started, then the pack's terminal failure.
-                view.store.apply_deltas(vec![
+                view.runtime().as_mut(cx).store.apply_deltas(vec![
                         aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
                         aui_protocol::Delta::TurnStarted {
                             turn: aui_protocol::Turn::Assistant {
@@ -4257,10 +4259,10 @@ mod tests {
                     ],
                 );
             });
-            view.update(cx, |view, cx| view.note_handoff_pack(pack.to_owned(), display.to_owned(), cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.note_handoff_pack(pack.to_owned(), display.to_owned(), cx)));
         });
         assert_eq!(
-            vc.update(|_, cx| view.read(cx).pack_turn_failed_reason()),
+            vc.update(|_, cx| view.read(cx).rt(cx).pack_turn_failed_reason()),
             Some(reason.to_owned()),
             "the failed pack turn reports the turn's reason"
         );
@@ -4268,9 +4270,9 @@ mod tests {
         // the same failure still reports.
         let view_display = handoff_destination(vc, "dest-fd", "muse");
         vc.update(|_, cx| {
-            view_display.update(cx, |view, _| {
-                view.store.ensure_live(aui_protocol::Provider::Muse, "m", "/tmp/ws");
-                view.store.apply_deltas(vec![
+            view_display.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).store.ensure_live(aui_protocol::Provider::Muse, "m", "/tmp/ws");
+                view.runtime().as_mut(cx).store.apply_deltas(vec![
                         aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", display) },
                         aui_protocol::Delta::TurnStarted {
                             turn: aui_protocol::Turn::Assistant {
@@ -4288,11 +4290,11 @@ mod tests {
                 );
             });
             view_display.update(cx, |view, cx| {
-                view.note_handoff_pack(pack.to_owned(), display.to_owned(), cx)
+                view.runtime().clone().update(cx, |rt, cx| rt.note_handoff_pack(pack.to_owned(), display.to_owned(), cx))
             });
         });
         assert_eq!(
-            vc.update(|_, cx| view_display.read(cx).pack_turn_failed_reason()),
+            vc.update(|_, cx| view_display.read(cx).rt(cx).pack_turn_failed_reason()),
             Some(reason.to_owned()),
             "the display form matches too"
         );
@@ -4307,9 +4309,9 @@ mod tests {
         let view = handoff_destination(vc, "dest-ok", "codex");
         let pack = "Continuing a session handed off from Claude Code. Context follows.";
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
-                view.store.apply_deltas(vec![
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).store.ensure_live(aui_protocol::Provider::Codex, "gpt-5", "/tmp/ws");
+                view.runtime().as_mut(cx).store.apply_deltas(vec![
                         aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
                         aui_protocol::Delta::TurnStarted {
                             turn: handoff_reply("a-pack", "Got it — ready to continue…"),
@@ -4331,10 +4333,10 @@ mod tests {
                     ],
                 );
             });
-            view.update(cx, |view, cx| view.note_handoff_pack(pack.to_owned(), "display".to_owned(), cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.note_handoff_pack(pack.to_owned(), "display".to_owned(), cx)));
         });
         assert_eq!(
-            vc.update(|_, cx| view.read(cx).pack_turn_failed_reason()),
+            vc.update(|_, cx| view.read(cx).rt(cx).pack_turn_failed_reason()),
             None,
             "an answered pack turn reports nothing, whatever later turns do"
         );
@@ -4350,12 +4352,12 @@ mod tests {
         let view = handoff_destination(vc, "dest-recoverable", "codex");
         let pack = "Continuing a session handed off from Claude Code. Context follows.";
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.store.ensure_live(aui_protocol::Provider::Codex,
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).store.ensure_live(aui_protocol::Provider::Codex,
                     "gpt-5",
                     "/tmp/ws",
                 );
-                view.store.apply_deltas(vec![
+                view.runtime().as_mut(cx).store.apply_deltas(vec![
                         aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
                         aui_protocol::Delta::TurnStarted {
                             turn: aui_protocol::Turn::Assistant {
@@ -4386,10 +4388,10 @@ mod tests {
                     ],
                 );
             });
-            view.update(cx, |view, cx| view.note_handoff_pack(pack.to_owned(), "display".to_owned(), cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.note_handoff_pack(pack.to_owned(), "display".to_owned(), cx)));
         });
         assert_eq!(
-            vc.update(|_, cx| view.read(cx).pack_turn_failed_reason()),
+            vc.update(|_, cx| view.read(cx).rt(cx).pack_turn_failed_reason()),
             None,
             "a reply that answers past its error card completed; it did not fail"
         );
@@ -4405,12 +4407,12 @@ mod tests {
         let pack = "Continuing a session handed off from Claude Code. Context follows.";
         let reason = "model `gpt-6-astra` does not exist or you lack access";
         vc.update(|_, cx| {
-            view.update(cx, |view, _| {
-                view.store.ensure_live(aui_protocol::Provider::Codex,
+            view.update(cx, |view, cx| {
+                view.runtime().as_mut(cx).store.ensure_live(aui_protocol::Provider::Codex,
                     "gpt-5",
                     "/tmp/ws",
                 );
-                view.store.apply_deltas(vec![
+                view.runtime().as_mut(cx).store.apply_deltas(vec![
                         aui_protocol::Delta::TurnStarted { turn: handoff_user("u-pack", pack) },
                         aui_protocol::Delta::TurnStarted {
                             turn: aui_protocol::Turn::Assistant {
@@ -4437,10 +4439,10 @@ mod tests {
                     ],
                 );
             });
-            view.update(cx, |view, cx| view.note_handoff_pack(pack.to_owned(), "display".to_owned(), cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.note_handoff_pack(pack.to_owned(), "display".to_owned(), cx)));
         });
         assert_eq!(
-            vc.update(|_, cx| view.read(cx).pack_turn_failed_reason()),
+            vc.update(|_, cx| view.read(cx).rt(cx).pack_turn_failed_reason()),
             Some(reason.to_owned()),
             "a reply ending on its error failed, even past partial text"
         );

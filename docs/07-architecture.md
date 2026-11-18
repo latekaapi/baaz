@@ -107,7 +107,7 @@ The adapter crates:
 | `provider-muse` | the Muse adapter. `MuseHub` owns the one `muse serve` child; each session is a `MuseLane` adapter on it. The only seam crate allowed to depend on `muse-client`. `replay.rs` turns a capture into the same `ProviderEvent`s for `--replay` and `--bench` |
 | `provider-claude-code` | one `claude` child per session over stream-json stdio, with its own fold, controls channel and `CLAUDE_CONFIG_DIR=<state>/claude-home` |
 | `provider-codex` | one `codex app-server` child per session over JSON-RPC (it sends requests back, notably approvals), with `CODEX_HOME=<state>/codex-home` |
-| `session-store` | `SessionStore`: one session's transcript folded from neutral deltas, plus its side facts. Pure; every `SessionView` holds one |
+| `session-store` | `SessionStore`: one session's transcript folded from neutral deltas, plus its side facts. Pure; every `SessionRuntime` holds one |
 | `mcp-bridge` | a stdio MCP server exposing Baaz's terminal and browser tools to an agent, forwarding to the app's socket |
 
 `crates/baaz/src/providers.rs` builds providers through a `ProviderFactory`:
@@ -119,7 +119,7 @@ pinned, then `connect`. `crates/baaz/tests/seam_ratchet.rs` keeps
 ## 4. Entities and ownership
 
 Production `Render` impls: `Harness` (`app.rs`), `SessionView`
-(`session/render.rs`), `SidebarPane` (`sidebar_view.rs`, a view of its own
+(`session/render.rs`, over a `SessionRuntime` that draws nothing), `SidebarPane` (`sidebar_view.rs`, a view of its own
 since task 4.7), the region
 entities `RightPane` (`right_pane.rs`), `TerminalDock`
 (`terminal/dock.rs`), `SkillsPage` (`skills_page.rs`), `SettingsPage`
@@ -130,7 +130,7 @@ entities `RightPane` (`right_pane.rs`), `TerminalDock`
 
 ### `Harness` — the window root
 
-`Harness` (`app.rs`) has 57 fields. Its methods are spread over 62
+`Harness` (`app.rs`) has 56 fields. Its methods are spread over 62
 `impl Harness` blocks in 53 files (`app/*.rs` — the sidebar's root half is
 `app/sidebar_host.rs` — the
 `browser/` seam files, `dialogs.rs`, `login.rs` and others). Roughly:
@@ -170,33 +170,61 @@ own hover and scroll, and the facts the root pushes as it composes the shell
 Browse's rows — a notify only when they moved). `on_frame` does not touch
 it (`tests/sidebar_view_ratchet.rs`).
 
-### `SessionView` — one session
+### `SessionRuntime` and `SessionView` — one session (task 4.8)
 
-`SessionView` (`session.rs`, 157 fields) owns one session's
-`SessionStore`, its lane, the composer and its menus, the virtual-list
-bookkeeping, approvals and questions, quote/selection and handoff state.
-Its methods live under `session/`: `lane.rs` (the provider lane),
-`commands.rs`, `composer.rs`, `approvals.rs`, `questions.rs`, `shell.rs`,
-`clocks.rs`, `handoff.rs`, `events.rs`, `scripting.rs` and `render.rs`.
+A session is two entities. `SessionRuntime` (`session/runtime.rs`, no
+`Render`) is the model: its `SessionStore`, the lane (the `Provider` handle
+behind its mutex and the drain task), the turn state (sending, running, the
+queue, the optimistic bubbles, aliases), approvals and questions, the model,
+effort and mode picks, plan mode, the outgoing attachments (every submit
+path reads them, headless ones included), the prompt history, the banners,
+the clocks, the start queue and the handoff state. `SessionView`
+(`session.rs`, 68 fields) draws one runtime: the composer and the card
+fields, the virtual-list bookkeeping and render caches, folds, spans and the
+quote flow, the `@` rank (`MentionRank`), and the overlays handle. It holds
+`Entity<SessionRuntime>`, observes it (a runtime notify redraws the view,
+never the root) and maps each `RuntimeEvent` to one list operation
+(`EntriesAppended` / `EntryUpdated(ix)` / `EntriesRemoved` /
+`ApprovalRequested` → refresh from the change and keep the tail;
+`ApprovalDecided` closes the field open on it; `CardsChanged` rebuilds the
+card cache; `MenusStale` re-reads the open menu's check; `Toast`). The
+person's intents go the other way: the view calls the runtime (submit,
+interrupt, decide, answer, picks). Both halves' methods live under
+`session/`: `lane.rs` (the provider lane), `commands.rs`, `composer.rs`,
+`approvals.rs`, `questions.rs`, `shell.rs`, `clocks.rs`, `handoff.rs`,
+`events.rs`, `scripting.rs` (each file's `impl SessionRuntime` and
+`impl SessionView` blocks side by side) and `render.rs` (view only).
 
-The lane (`session/lane.rs`) is fixed per view: `Lane::Opening` while a new
-child answers `OpenSession`, then `Lane::Provider` exactly once. One gpui
-task per view drains its event stream and calls `on_provider_event`, so
-the store has one writer. Dropping a view calls `shutdown_lane`, which hangs
-up a Claude Code or Codex child. A view reports upward by emitting
-`SessionEvent` (43 variants), which `Harness::on_session_event`
-(`app/lifecycle.rs`) handles.
+The lane (`session/lane.rs`) is fixed per runtime: `Lane::Opening` while a
+new child answers `OpenSession`, then `Lane::Provider` exactly once. One gpui
+task per runtime drains its event stream and calls `on_provider_event`, so
+the store has one writer, with or without a view. Dropping the runtime (never
+a view) calls `shutdown_lane`, which hangs up a Claude Code or Codex child.
+The runtime reports upward by emitting `SessionEvent`, which
+`Harness::on_session_event` (`app/sessions/events.rs`) handles; the view
+emits the same type for what the person asked of the window (links, slash
+commands, picks). A fold batch that lands with nothing in flight — a
+reopen's replay — settles its finished turns in one
+`SessionEvent::HistoryReplayed`, which the root settles once
+(`settle_turns`: one seed compare-and-write, one batch of ledger rows, one
+row rejoin; docs/81 A F14).
 
-### `SessionRegistry` — every live view
+### `SessionRegistry` — every live session
 
-A view lives in one of three places: the centre (`Harness::active`, still a
-field passed in), the parked MRU, or the chat on the Browse agent line.
-`SessionRegistry` (`app/registry.rs`) owns the last two and one event
-subscription per live view. Every question about all views goes through it:
-`live`, `find`, `iter_running`, `resubscribe`, `shutdown_all`. It caps idle
-parked views at 8 (`SESSION_CACHE_LIMIT` in `app/lifecycle.rs`); a view
-with a draft or with work in hand (`SessionView::must_stay_alive`: a turn
-running or starting, a pending approval or question) is never evicted.
+A session lives in one of three places: the centre (`Harness::active`, a
+view, still a field passed in), the parked MRU, or the chat on the Browse
+agent line. `SessionRegistry` (`app/registry.rs`) owns the last two — each
+parked entry a runtime with its view, or with none once evicted — and one
+subscription per live runtime plus one per live view. Every question about
+all sessions goes through it: `live` (views), `runtimes`, `find`,
+`find_runtime`, `iter_running`, `resubscribe`, `shutdown_all`. It caps
+parked *views* at 8 (`SESSION_CACHE_LIMIT` in `app/sessions/open.rs`);
+drafts keep theirs. Past the cap a session with work in hand
+(`SessionRuntime::must_stay_alive`: a turn running or starting, a pending
+approval or question) loses only its view — its runtime runs on, settles
+its row and lands its ledger row — and an idle one goes whole. Reopening a
+view-less session builds a view over its runtime (`cache_take`). Quit
+shuts runtimes down, not views.
 
 ### The rest
 
@@ -272,25 +300,28 @@ sessions with no project default to `~/baaz-sessions`
 
 ## 6. One turn, end to end
 
-1. **Composer.** Submit builds `Command::SubmitInput` (`session/commands.rs`)
-   and calls `SessionView::provider_send` (`session/lane.rs`).
+1. **Composer.** The view's send hands the words to the runtime, whose
+   submit builds `Command::SubmitInput` (`session/commands.rs`) and calls
+   `SessionRuntime::provider_send` (`session/lane.rs`).
 2. **Off the UI thread.** `ProviderCall::provider_call` (`wire.rs`) runs
-   `Provider::send` on the background executor under the view's
+   `Provider::send` on the background executor under the runtime's
    `Arc<Mutex<Provider>>`. The gate checks the capability, then the adapter's
    `dispatch` writes to the child's stdin (Muse: through the hub's writer).
-3. **Ack.** The completion returns through `update`. On success the view
+3. **Ack.** The completion returns through `update`. On success the runtime
    emits `SessionEvent::ProviderTurnAccepted`; on refusal it shows a banner.
 4. **Events.** The child writes output; the adapter's pump folds each line
    into `ProviderEvent`s (Muse: `muse-reader` → hub fold → per-lane channel).
 5. **Bridge.** The lane's `muse-bridge-N` thread moves them onto a futures
-   channel; the view's lane task awaits it on the UI thread.
-6. **Fold.** `on_provider_event` handles taps (approvals, questions, banners)
-   and passes `Deltas` to `SessionStore::apply_deltas`, then `cx.notify()`.
-7. **Render.** `SessionView`'s cached subtree re-renders; `transcript.rs`
-   maps turns to `aui` elements on a virtual list.
-8. **Settle.** `TurnSettled` ends the turn; the lane emits
+   channel; the runtime's lane task awaits it on the UI thread.
+6. **Fold.** The runtime's `on_provider_event` handles taps (approvals,
+   questions, banners) and passes `Deltas` to `SessionStore::apply_deltas`,
+   then says which entry moved (`RuntimeEvent`) and `cx.notify()`s itself.
+7. **Render.** The view over it (if any) maps the event to one list
+   operation and its cached subtree re-renders; the root is not notified.
+   `transcript.rs` maps turns to `aui` elements on a virtual list.
+8. **Settle.** `TurnSettled` ends the turn; the runtime emits
    `ProviderTurnOutcome` and `ProviderTurnFinished` (usage ledger row,
-   title, byline).
+   title, byline) — or, for a reopen's replay, one `HistoryReplayed`.
 
 **How a sidebar row learns.** The registry's subscription delivers each
 `SessionEvent` to `Harness::on_session_event`, which updates the row in
@@ -336,7 +367,7 @@ These are true of the code today.
   `muse serve` are spawned with a plain `Command`; their own children are
   not killed with them.
 - **`muse serve` is not shut down at quit.** Nothing calls
-  `MuseHub::shutdown`; quit shuts down each view's lane, which ends Claude
+  `MuseHub::shutdown`; quit shuts down each runtime's lane, which ends Claude
   Code and Codex children only. After a Muse child exits, `reconnect` respawns
   it at once, with no backoff.
 - **Not every state file is a `JsonStore`.** The caches, journals,

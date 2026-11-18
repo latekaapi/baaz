@@ -2097,7 +2097,7 @@ impl Harness {
 
     /// The active session id for the page's restore record, if any.
     fn settings_active_id(&self, cx: &mut Context<Self>) -> Option<String> {
-        self.active.as_ref().map(|view| view.read(cx).session_id.clone())
+        self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone())
     }
 
     /// Open the Settings page on the Providers section: where the account

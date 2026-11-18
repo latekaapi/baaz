@@ -8,7 +8,9 @@
 use super::*;
 
 /// How many parked session views the MRU keeps (folds keep an MRU of eight
-/// too, so a parked view's own fold never grows past it either).
+/// too, so a parked view's own fold never grows past it either). A session
+/// past the cap with work in hand keeps its runtime, not its view
+/// (docs/82 4.8).
 pub(super) const SESSION_CACHE_LIMIT: usize = 8;
 
 /// What `new_session_in` does about the target project's draft.
@@ -85,7 +87,7 @@ impl Harness {
         self.registry
             .live(self.active.as_ref())
             .iter()
-            .flat_map(|view| view.read(cx).cached_muse_catalog_ids())
+            .flat_map(|view| view.read(cx).rt(cx).cached_muse_catalog_ids())
             .collect()
     }
 
@@ -300,7 +302,7 @@ impl Harness {
             return false;
         }
         let Some(view) = self.find_view(session_id, cx) else { return false };
-        view.read(cx).session().is_none_or(|session| session.turns.is_empty())
+        view.read(cx).rt(cx).session().is_none_or(|session| session.turns.is_empty())
     }
 
     /// Whether the draft's view already rides `wanted`'s lane: a muse draft
@@ -315,7 +317,7 @@ impl Harness {
         if is_local_draft(draft_id) && self.muse_slot.is_ready() {
             return false;
         }
-        view.read(cx).provider_kind() == wanted
+        view.read(cx).rt(cx).provider_kind() == wanted
     }
 
     /// Reopen a live draft's view: the active one when it is already open,
@@ -324,13 +326,13 @@ impl Harness {
     /// still around to open.
     fn open_draft(&mut self, draft_id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let moving = self.open_state.pending_draft.take();
-        if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == draft_id) {
+        if self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).session_id == draft_id) {
             if let Some(view) = self.active.clone() {
                 Self::land_moving_draft(&view, moving, window, cx);
             }
             return true;
         }
-        let Some(view) = self.cache_take(draft_id) else {
+        let Some(view) = self.cache_take(draft_id, window, cx) else {
             self.open_state.pending_draft = moving;
             return false;
         };
@@ -388,13 +390,13 @@ impl Harness {
             terminal_host: Some(self.terminal_host(cx)),
         };
         let view = cx.new(|cx| SessionView::new(draft_id.clone(), host, window, cx));
-        view.update(cx, |view, cx| view.load_history(cx));
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.load_history(cx)));
         // Live, Muse is starting under this draft: the chip and the model
         // menu say so (the promotion replaces the view once it is up).
         let starting = !self.scripted_chrome()
             && !self.muse_slot.is_ready()
             && matches!(self.wire, crate::app::Wire::Connecting | crate::app::Wire::Reconnecting);
-        view.update(cx, |view, vc| view.set_muse_starting(starting, vc));
+        view.read(cx).runtime().clone().update(cx, |rt, cx| rt.set_muse_starting(starting, cx));
         // The Ask's session is this draft: key the draft to it before the
         // view lands, so `activate` takes it here — and only here.
         self.browser.update(cx, |browser, _| browser.key_pending_ask(&draft_id));
@@ -417,7 +419,7 @@ impl Harness {
                 cx.notify();
             });
             if let Some(effort) = effort {
-                view.update(cx, |view, vc| view.set_initial_effort(Some(effort), vc));
+                view.read(cx).runtime().clone().update(cx, |rt, cx| rt.set_initial_effort(Some(effort), cx));
             }
             Self::land_moving_draft(&view, moving, window, cx);
         } else if moving.is_some() {
@@ -464,7 +466,7 @@ impl Harness {
             || self.session_list.read(cx).provider_sessions.contains_key(session_id)
             || self.session_list.read(cx).index.contains_key(session_id)
             || self.registry.is_parked(session_id)
-            || self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id)
+            || self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).session_id == session_id)
     }
 
     /// Open a chain member itself, bypassing the head redirect: the X3a
@@ -523,7 +525,7 @@ impl Harness {
         // old view's pane restored, and clicking the still-active session
         // stays there without reopening it.
         if self.cancel_pending_switch(cx)
-            && self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id)
+            && self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).session_id == session_id)
         {
             return;
         }
@@ -552,7 +554,7 @@ impl Harness {
             // under its request id) just activates: it is no listed
             // session, and nothing must write a record for it.
             if !self.session_list.read(cx).provider_sessions.contains_key(&session_id) {
-                if let Some(view) = self.cache_take(&session_id) {
+                if let Some(view) = self.cache_take(&session_id, window, cx) {
                     crate::log::trace_reset();
                     crate::log::trace_mark("cache-hit");
                     self.activate(view, quiet, window, cx);
@@ -572,7 +574,7 @@ impl Harness {
             crate::log::trace_reset();
             crate::log::trace_mark(&format!("resume {} {}", record.provider, session_id.chars().take(8).collect::<String>()));
             crate::log::trace_arm_first_frame();
-            if let Some(view) = self.cache_take(&session_id) {
+            if let Some(view) = self.cache_take(&session_id, window, cx) {
                 crate::log::trace_mark("cache-hit");
                 self.activate(view, quiet, window, cx);
                 return;
@@ -591,7 +593,7 @@ impl Harness {
             // whose capture is folded): keep it, so a click on the open
             // row selects without wiping the folded transcript for a
             // blank local view. The highlight above already moved.
-            if self.active.as_ref().is_some_and(|view| view.read(cx).session_id == session_id) {
+            if self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).session_id == session_id) {
                 return;
             }
             // Traced like the live switch below, so the offline perf
@@ -599,7 +601,7 @@ impl Harness {
             crate::log::trace_reset();
             crate::log::trace_mark(&format!("resume {}", session_id.chars().take(8).collect::<String>()));
             crate::log::trace_arm_first_frame();
-            if let Some(view) = self.cache_take(&session_id) {
+            if let Some(view) = self.cache_take(&session_id, window, cx) {
                 crate::log::trace_mark("cache-hit");
                 self.activate(view, quiet, window, cx);
             } else {
@@ -607,7 +609,7 @@ impl Harness {
                 // An existing session opens loading, never the hero —
                 // even with no client behind it.
                 if let Some(view) = self.active.clone() {
-                    view.update(cx, |view, cx| view.mark_history_loading(cx));
+                    view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.mark_history_loading(cx)));
                     self.attach_handoff_prefix(&view, cx);
                 }
             }
@@ -762,7 +764,7 @@ impl Harness {
         let overlays = self.overlays.clone();
         let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone(), terminal_host: Some(self.terminal_host(cx)) };
         let view = cx.new(|cx| SessionView::new(session_id.clone(), host, window, cx));
-        view.update(cx, |view, cx| view.load_history(cx));
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.load_history(cx)));
         self.activate(view, quiet, window, cx);
         self.adopt_session_project(&session_id, cx);
         cx.notify();
@@ -808,11 +810,11 @@ impl Harness {
         let views = self.registry.live(self.active.as_ref());
         for view in &views {
             let seen = view.read(cx);
-            let id = seen.provider_kind();
+            let id = seen.rt(cx).provider_kind();
             if !due.contains(&id) {
                 continue;
             }
-            if let Some(report) = seen.lane_usage() {
+            if let Some(report) = seen.rt(cx).lane_usage() {
                 lanes.push((id, report));
             }
         }
@@ -900,7 +902,7 @@ impl Harness {
         self.cancel_pending_switch(cx);
         // A provider draft that never landed (opening, or its open failed)
         // takes its provisional names with it.
-        let never_landed = self.find_view(session_id, cx).is_some_and(|view| view.read(cx).is_opening_lane());
+        let never_landed = self.find_view(session_id, cx).is_some_and(|view| view.read(cx).rt(cx).is_opening_lane());
         if never_landed {
             self.forget_provisional(session_id, cx);
         }
@@ -908,15 +910,13 @@ impl Harness {
         // view; the dropped view's subscription fires nothing after this,
         // so this only hangs up children and forgets handles — never while
         // an event for the closed view is still dispatching through them.
-        if self.active.clone().is_some_and(|view| view.read(cx).session_id == session_id) {
+        if self.active.clone().is_some_and(|view| view.read(cx).rt(cx).session_id == session_id) {
             if let Some(view) = self.active.take() {
-                view.update(cx, |view, _| view.shutdown_lane());
+                view.read(cx).runtime().clone().update(cx, |rt, _| rt.shutdown_lane());
             }
             self.open_state.pending_id = None;
         }
-        if let Some(view) = self.cache_take(session_id) {
-            view.update(cx, |view, _| view.shutdown_lane());
-        }
+        self.cache_drop(session_id, cx);
         // A provider draft that never sent leaves no transcript anywhere —
         // no live turns, no replayed ones, not even a first prompt — so its
         // record leaves with its view instead of lingering as a row the
@@ -984,7 +984,7 @@ impl Harness {
         // The UI points at what is open: the row highlight and the header
         // label read this, never the view, so every swap refreshes it here
         // rather than at each call site.
-        let session_id = view.read(cx).session_id.clone();
+        let session_id = view.read(cx).rt(cx).session_id.clone();
         self.open_state.pending_id = Some(session_id.clone());
         if quiet {
             self.sidebar_pane.update(cx, |pane, cx| pane.set_reveal(None, false, cx));
@@ -1012,26 +1012,27 @@ impl Harness {
         if !replaced {
             self.park_active(cx);
         }
-        // One subscription per live view: the view being activated plus
-        // every parked view the MRU still holds. A parked provider lane
-        // keeps its child and drain task, so its turn and approval events
-        // still fire — with only the active view subscribed they reached
-        // no one and the parked row froze (B3b). Rebuilt from the live
-        // views on every activation, so a dropped view's subscription
-        // leaves with it and a re-activated view is never subscribed
-        // twice. Parked transcripts never re-render through these: the
-        // row-affecting arms read the parked fold without touching its UI.
+        // One subscription per live runtime and per live view: the session
+        // being activated plus every parked one the MRU still holds, with a
+        // view or without. A parked runtime keeps its child and drain task,
+        // so its turn and approval events still fire — with only the active
+        // view subscribed they reached no one and the parked row froze
+        // (B3b). Rebuilt from the live sessions on every activation, so a
+        // dropped one's subscription leaves with it and a re-activated one
+        // is never subscribed twice. Parked transcripts never re-render
+        // through these: the row-affecting arms read the parked fold
+        // without touching its UI.
         self.registry.resubscribe(Some(&view), cx);
         let titles: HashMap<String, String> =
             self.session_list.read(cx).sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
-        if view.read(cx).provider_kind().has_billing_tier() {
+        if view.read(cx).rt(cx).provider_kind().has_billing_tier() {
             self.tier_probe_on_muse_lane(cx);
         }
         let tier_banner = self.tier_banner();
         view.update(cx, |view, cx| {
-            view.set_context(titles, self.user_shell);
+            view.set_context(titles);
             view.set_at_rest(self.still());
-            view.set_tier_banner(tier_banner, cx);
+            view.runtime().clone().update(cx, |rt, cx| rt.set_tier_banner(tier_banner, cx));
         });
         // The swap must repaint the centre even when every push above was
         // `set` without `notify`: a parked view reuses its retained subtree
@@ -1041,8 +1042,8 @@ impl Harness {
         self.active = Some(view.clone());
         // Reopening a session that stands at its end reads it (task 3.1);
         // one still loading reads on its `HistoryReady`.
-        if view.read(cx).at_transcript_end() && !view.read(cx).history_loading() {
-            let session_id = view.read(cx).session_id.clone();
+        if view.read(cx).at_transcript_end() && !view.read(cx).rt(cx).history_loading() {
+            let session_id = view.read(cx).rt(cx).session_id.clone();
             self.mark_read(&session_id, cx);
         }
         self.focus_composer = true;
@@ -1050,7 +1051,7 @@ impl Harness {
         // `/create-skill ` draft and the composer focused. Never sent. The
         // arm survives a non-muse activation untouched — the draft is a muse
         // skill prompt, so it waits for a muse session.
-        if view.read(cx).provider_kind().writes_skills_by_prompt() && self.skills_page.update(cx, |page, _| page.take_create_draft()) {
+        if view.read(cx).rt(cx).provider_kind().writes_skills_by_prompt() && self.skills_page.update(cx, |page, _| page.take_create_draft()) {
             let draft = crate::skills_page::create_skill_draft().to_owned();
             view.update(cx, |view, cx| {
                 view.set_draft(draft, window, cx);
@@ -1104,51 +1105,75 @@ impl Harness {
 
     pub(super) fn park_active(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self.active.take() else { return };
-        let session_id = view.read(cx).session_id.clone();
+        let session_id = view.read(cx).rt(cx).session_id.clone();
         // A replayed capture parks only in a scripted window (`--replay`,
         // offline): there it is the session, and switching away and back
         // must find its transcript rather than a blank local view (the
         // offline switch budget in `scripts/perf-budgets.py` times exactly
         // that). A live window never holds a replay worth keeping.
-        let cacheable = (!view.read(cx).is_replay() || self.args.offline)
+        let cacheable = (!view.read(cx).rt(cx).is_replay() || self.args.offline)
             && !self.session_list.read(cx).overrides.get(&session_id).is_some_and(|m| m.hidden)
             && !self.session_list.read(cx).overrides.get(&session_id).is_some_and(|m| m.archived);
         if cacheable {
-            self.registry.park(session_id, view);
+            self.registry.park(session_id, view, cx);
             // Views named in `drafts` are never evicted from the MRU: the
-            // draft outlives whatever else was parked since. Nor is a view
-            // with work in hand (`must_stay_alive`): one still starting — a
-            // provider draft whose child has not answered (project-less
-            // ones are in no `drafts`) holds the sends queued meanwhile —
-            // or one with a turn running or the person's answer pending,
-            // whose drop would shut its lane and kill the child mid-turn
-            // (docs/81 A F1). Only idle views count toward the cap.
+            // draft outlives whatever else was parked since. Past the cap a
+            // session with work in hand (`must_stay_alive`) — one still
+            // starting (a provider draft whose child has not answered holds
+            // the sends queued meanwhile), or one with a turn running or
+            // the person's answer pending — loses only its view: its
+            // runtime runs on, and shutting it would kill the child
+            // mid-turn (docs/81 A F1, docs/82 4.8). An idle one goes whole.
             let drafts: std::collections::HashSet<String> = self.open_state.drafts.values().cloned().collect();
             let evicted = self.registry.evict_idle(&drafts, SESSION_CACHE_LIMIT, cx);
-            for (id, view) in evicted {
-                if view.read(cx).is_opening_lane() {
+            for (id, runtime) in evicted {
+                if runtime.read(cx).is_opening_lane() {
                     self.forget_provisional(&id, cx);
                 }
             }
         }
     }
 
-    /// Take a parked view back out of the MRU.
-    pub(super) fn cache_take(&mut self, session_id: &str) -> Option<Entity<SessionView>> {
-        self.registry.take(session_id)
+    /// Take a parked session back out of the MRU, as a view: its own when
+    /// the cap kept it, else a new one built over its runtime — the turn
+    /// it ran meanwhile already folded there (docs/82 4.8).
+    pub(super) fn cache_take(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<SessionView>> {
+        let (runtime, view) = self.registry.take(session_id)?;
+        if let Some(view) = view {
+            return Some(view);
+        }
+        let (provider_id, workspace) = {
+            let rt = runtime.read(cx);
+            (rt.provider_kind().as_str().to_owned(), rt.workspace_path().to_owned())
+        };
+        let host = SessionHost {
+            provider_id,
+            workspace,
+            overlays: self.overlays.clone(),
+            capture: self.capture.clone(),
+            terminal_host: Some(self.terminal_host(cx)),
+        };
+        Some(cx.new(|cx| SessionView::over(runtime, host, window, cx)))
     }
 
-    /// Whether any session this window has open — the active view, or one
-    /// parked in the MRU cache — has a turn in flight
-    /// ([`SessionView::is_sending`]: submitted and no `turn/started` yet, or
+    /// Take a parked session out of the MRU and shut its lane down: a close
+    /// or a swap that replaces it.
+    pub(super) fn cache_drop(&mut self, session_id: &str, cx: &mut Context<Self>) -> Option<Entity<SessionRuntime>> {
+        let (runtime, _) = self.registry.take(session_id)?;
+        runtime.update(cx, |rt, _| rt.shutdown_lane());
+        Some(runtime)
+    }
+
+    /// Whether any session this window has open — the active one, or one
+    /// parked in the MRU (with its view or without) — has a turn in flight
+    /// ([`SessionRuntime::is_sending`]: submitted and no `turn/started` yet, or
     /// the server says it runs).
     ///
     /// What a `--screenshot` run checks, bounded, before it quits
     /// ([`crate::shot::capture_and_quit`]): quitting under a running turn
-    /// kills its `muse` child and orphans it. A cached view only reflects
-    /// whatever it last knew — live events reach `self.active` alone
-    /// ([`Harness::route`]) — so this is best-effort for a session parked
-    /// mid-turn, same as every other read of parked state in this module.
+    /// kills its `muse` child and orphans it. Every runtime keeps folding
+    /// its own lane's events, parked or not, so this reads each session's
+    /// own state.
     pub(crate) fn any_turn_running(&self, cx: &App) -> bool {
         !self.registry.iter_running(self.active.as_ref(), cx).is_empty()
     }

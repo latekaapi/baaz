@@ -178,5 +178,7 @@ fn file_cards_show_workspace_relative_paths() {
     pin(&transcript, "display_target(call, &folds.workspace_root", "lone cards shorten");
     pin(&transcript, "display_group_block", "grouped cards shorten");
     let render = read_repo("crates/baaz/src/session/render.rs");
-    pin(&render, "workspace_root: self.workspace.clone()", "view passes its root");
+    // The workspace is the session's (docs/82 4.8): the view reads it off
+    // its runtime.
+    pin(&render, "workspace_root: self.runtime.read(cx).workspace.clone()", "view passes its root");
 }

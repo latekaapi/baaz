@@ -229,7 +229,7 @@ impl Harness {
     /// A hidden session is never loaded — the row is gone and so is the
     /// transcript — so the active one is closed when it is the one hidden.
     pub(super) fn hide_session(&mut self, session_id: String, cx: &mut Context<Self>) {
-        if self.active.as_ref().is_some_and(|a| a.read(cx).session_id == session_id) {
+        if self.active.as_ref().is_some_and(|a| a.read(cx).rt(cx).session_id == session_id) {
             self.active = None;
         }
         self.hide_batch(
@@ -334,7 +334,7 @@ impl Harness {
         // The whole chain, head included: archiving names the head, the
         // expansion covers the members.
         let members = self.chain_members(&session_id, cx);
-        let was_active = self.active.as_ref().is_some_and(|a| a.read(cx).session_id == session_id);
+        let was_active = self.active.as_ref().is_some_and(|a| a.read(cx).rt(cx).session_id == session_id);
         // Archived sessions are never cached: a parked view of one is
         // dropped, and reopening (after Undo) pages it afresh.
         self.registry.forget_where(|id| members.iter().any(|member| member == id));
@@ -380,11 +380,11 @@ impl Harness {
     ///
     /// `view` is the session that finished — often a parked one, never
     /// assumed to be the open one (docs/81 A F3).
-    pub(super) fn record_last_summary(&mut self, view: &Entity<SessionView>, cx: &mut Context<Self>) {
+    pub(super) fn record_last_summary(&mut self, runtime: &Entity<SessionRuntime>, cx: &mut Context<Self>) {
         let (session_id, summary, ask) = (
-            view.read(cx).session_id.clone(),
-            view.read(cx).last_summary_text(),
-            view.read(cx).last_user_text(),
+            runtime.read(cx).session_id.clone(),
+            runtime.read(cx).last_summary_text(),
+            runtime.read(cx).last_user_text(),
         );
         if summary.is_none() && ask.is_none() {
             return;
@@ -444,18 +444,18 @@ impl Harness {
         let mut started_running = started;
         if started {
             if let Some(view) = self.active.clone() {
-                if view.read(cx).session_id == session_id && !view.read(cx).working() {
+                if view.read(cx).rt(cx).session_id == session_id && !view.read(cx).rt(cx).working() {
                     started_running = false;
                 }
             }
         }
-        // The live view applies its lane's events before the row syncs: a
-        // parked provider lane's fold is as current as the
-        // open view's, so its row re-reads it the same way (B3b).
-        let view_truth = self.registry.find(self.active.as_ref(), session_id, cx).map(|view| {
-            let view = view.read(cx);
-            let (approval, question) = view.row_pending();
-            (approval, question, view.working())
+        // The live runtime applies its lane's events before the row syncs:
+        // a parked (or view-less) runtime's fold is as current as the
+        // open one's, so its row re-reads it the same way (B3b).
+        let view_truth = self.registry.find_runtime(self.active.as_ref(), session_id, cx).map(|runtime| {
+            let runtime = runtime.read(cx);
+            let (approval, question) = runtime.row_pending();
+            (approval, question, runtime.working())
         });
         let changed = self.session_list.update(cx, |list, _| {
             let Some(entry) = list.sessions.iter_mut().find(|entry| entry.id == session_id) else {
@@ -569,7 +569,7 @@ impl Harness {
     pub(crate) fn reading_at_end(&self, session_id: &str, cx: &gpui::App) -> bool {
         self.active.as_ref().is_some_and(|view| {
             let view = view.read(cx);
-            view.session_id == session_id && view.at_transcript_end()
+            view.rt(cx).session_id == session_id && view.at_transcript_end()
         })
     }
 
@@ -586,7 +586,7 @@ impl Harness {
     /// and stays rowless until its first send reveals it; only a real
     /// handoff head keeps its row while still empty.
     pub(crate) fn active_id(&self, cx: &gpui::App) -> Option<String> {
-        self.active.as_ref().map(|a| a.read(cx).session_id.clone())
+        self.active.as_ref().map(|a| a.read(cx).rt(cx).session_id.clone())
     }
 
 
@@ -770,8 +770,8 @@ impl Harness {
     ///
     /// `view` is the session whose transcript speaks — the emitter of the
     /// event, which may be parked (docs/81 A F3).
-    pub(super) fn title_from_transcript(&mut self, view: &Entity<SessionView>, cx: &mut Context<Self>) {
-        let session_id = view.read(cx).session_id.clone();
+    pub(super) fn title_from_transcript(&mut self, runtime: &Entity<SessionRuntime>, cx: &mut Context<Self>) {
+        let session_id = runtime.read(cx).session_id.clone();
         // A handoff destination keeps the chain title: no rename from the
         // pack or anything after it (Y2a).
         if crate::sidebar::is_handoff_dest(&session_id, &self.session_list.read(cx).provider_sessions, &self.session_list.read(cx).overrides) {
@@ -785,7 +785,7 @@ impl Harness {
         if has_title {
             return;
         }
-        let view = view.read(cx);
+        let view = runtime.read(cx);
         // Either form is cut the row's own way: overlong shell commands used
         // to fill the crumb and the row uncut.
         let title = view

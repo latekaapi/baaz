@@ -34,7 +34,7 @@ fn q4_pending_provider_switch_hides_the_previous_transcript(cx: &mut gpui::TestA
     });
     vc.run_until_parked();
     let first = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).rt(cx).session_id.clone()
     });
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
@@ -66,7 +66,7 @@ fn q4_pending_provider_switch_hides_the_previous_transcript(cx: &mut gpui::TestA
             let active_id =
                 harness.active.clone().expect("previous view stays until the open lands");
             assert_eq!(
-                active_id.read(cx).session_id,
+                active_id.read(cx).rt(cx).session_id,
                 first,
                 "the previous view is still the active entity mid-switch"
             );
@@ -102,7 +102,7 @@ fn q4_pending_provider_switch_hides_the_previous_transcript(cx: &mut gpui::TestA
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("the destination landed");
-            assert_eq!(view.read(cx).session_id, "s-codex-old", "the destination is open");
+            assert_eq!(view.read(cx).rt(cx).session_id, "s-codex-old", "the destination is open");
             assert!(
                 harness.pending_switch_dest(cx).is_none(),
                 "no pending loading state once the switch landed"
@@ -156,7 +156,7 @@ fn q4c_pending_pane_stays_neutral_and_saves_nothing(cx: &mut gpui::TestAppContex
     });
     vc.run_until_parked();
     let first = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).rt(cx).session_id.clone()
     });
     // The still-open session stands on an open Files pane with a
     // stored URL; the live kind then moves to Browser with no webview
@@ -287,7 +287,7 @@ fn q4c_pending_pane_stays_neutral_and_saves_nothing(cx: &mut gpui::TestAppContex
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("the destination landed");
-            assert_eq!(view.read(cx).session_id, "s-codex-old", "the destination is open");
+            assert_eq!(view.read(cx).rt(cx).session_id, "s-codex-old", "the destination is open");
             assert!(
                 harness.pending_switch_dest(cx).is_none(),
                 "no loading state outlives the landing"
@@ -338,7 +338,7 @@ fn q4b_clicking_the_active_session_cancels_without_reopening(cx: &mut gpui::Test
     });
     vc.run_until_parked();
     let first = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).rt(cx).session_id.clone()
     });
     y2b2_set_draft(vc, &baaz, "hello unsent");
     vc.update(|_, cx| {
@@ -374,7 +374,7 @@ fn q4b_clicking_the_active_session_cancels_without_reopening(cx: &mut gpui::Test
                 "the selection follows the restored session"
             );
             let view = harness.active.clone().expect("the session stays open");
-            assert_eq!(view.read(cx).session_id, first, "still the same view");
+            assert_eq!(view.read(cx).rt(cx).session_id, first, "still the same view");
             assert_eq!(
                 view.read(cx).draft_text(cx),
                 "hello unsent",
@@ -387,7 +387,7 @@ fn q4b_clicking_the_active_session_cancels_without_reopening(cx: &mut gpui::Test
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("the session is still open");
-            assert_eq!(view.read(cx).session_id, first, "no switch ever landed");
+            assert_eq!(view.read(cx).rt(cx).session_id, first, "no switch ever landed");
             assert!(
                 !harness.registry.is_parked("s-codex-old"),
                 "the discarded destination parks no view"
@@ -451,7 +451,7 @@ fn q4b_late_landing_never_steals_the_centre(cx: &mut gpui::TestAppContext) {
     });
     vc.run_until_parked();
     let first = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).rt(cx).session_id.clone()
     });
     y2b2_set_draft(vc, &baaz, "hello unsent");
     vc.update(|_, cx| {
@@ -545,7 +545,7 @@ fn q4b_late_landing_never_steals_the_centre(cx: &mut gpui::TestAppContext) {
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("a session is open");
             assert_eq!(
-                view.read(cx).session_id, "s-codex-second",
+                view.read(cx).rt(cx).session_id, "s-codex-second",
                 "the newer click wins, not the late landing"
             );
             assert!(!harness.open_state.switch_pending, "the switch landed");
@@ -618,7 +618,7 @@ fn q4c_fork_pending_loses_to_a_cached_landing(cx: &mut gpui::TestAppContext) {
     });
     vc.run_until_parked();
     let first = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).rt(cx).session_id.clone()
     });
     vc.update(|_, cx| {
         baaz.update(cx, z4_seed_stored_codex);
@@ -659,7 +659,7 @@ fn q4c_fork_pending_loses_to_a_cached_landing(cx: &mut gpui::TestAppContext) {
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("the cached lane is open");
             assert_eq!(
-                view.read(cx).session_id,
+                view.read(cx).rt(cx).session_id,
                 first,
                 "the click lands on the cached lane"
             );
@@ -671,7 +671,7 @@ fn q4c_fork_pending_loses_to_a_cached_landing(cx: &mut gpui::TestAppContext) {
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("a session is open");
             assert_eq!(
-                view.read(cx).session_id, first,
+                view.read(cx).rt(cx).session_id, first,
                 "the late fork never steals the centre"
             );
             assert!(!harness.open_state.switch_pending, "nothing is still opening");
@@ -726,7 +726,7 @@ fn q4c_retry_pending_loses_to_a_cached_landing(cx: &mut gpui::TestAppContext) {
     });
     vc.run_until_parked();
     let first = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).rt(cx).session_id.clone()
     });
     vc.update(|_, cx| {
         baaz.update(cx, z4_seed_stored_codex);
@@ -785,7 +785,7 @@ fn q4c_retry_pending_loses_to_a_cached_landing(cx: &mut gpui::TestAppContext) {
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("a session is open");
             assert_eq!(
-                view.read(cx).session_id, first,
+                view.read(cx).rt(cx).session_id, first,
                 "the late retry never steals the centre"
             );
             assert!(!harness.open_state.switch_pending, "nothing is still opening");
@@ -841,7 +841,7 @@ fn q4c_cancel_back_to_the_open_session_rearms_focus(cx: &mut gpui::TestAppContex
     });
     vc.run_until_parked();
     let first = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the first lane opened").read(cx).rt(cx).session_id.clone()
     });
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
@@ -874,7 +874,7 @@ fn q4c_cancel_back_to_the_open_session_rearms_focus(cx: &mut gpui::TestAppContex
                 "cancelling back re-arms the restored session's composer focus"
             );
             let view = harness.active.clone().expect("the session stays open");
-            assert_eq!(view.read(cx).session_id, first, "still the same view");
+            assert_eq!(view.read(cx).rt(cx).session_id, first, "still the same view");
             assert!(
                 crate::layout::Layout::get(cx).right_open,
                 "the restored session's pane is exactly as it was"
@@ -886,7 +886,7 @@ fn q4c_cancel_back_to_the_open_session_rearms_focus(cx: &mut gpui::TestAppContex
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("the session is still open");
-            assert_eq!(view.read(cx).session_id, first, "no switch ever landed");
+            assert_eq!(view.read(cx).rt(cx).session_id, first, "no switch ever landed");
         });
     });
     lane_restore(state);
@@ -954,7 +954,7 @@ fn q4b_actions_target_nothing_while_pending(cx: &mut gpui::TestAppContext) {
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("the destination landed");
-            assert_eq!(view.read(cx).session_id, "s-codex-old", "the destination is open");
+            assert_eq!(view.read(cx).rt(cx).session_id, "s-codex-old", "the destination is open");
             let fired = std::rc::Rc::new(std::cell::Cell::new(false));
             let probe = fired.clone();
             harness.with_session(cx, move |_view, _vc| {
@@ -981,8 +981,8 @@ fn switch_provider_replaces_the_fresh_draft_without_leaking_its_view(
     let old = vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the draft opened");
-        assert!(view.read(cx).provider_kind() == ProviderId::Muse, "the draft starts on the muse lane");
-        view.read(cx).session_id.clone()
+        assert!(view.read(cx).rt(cx).provider_kind() == ProviderId::Muse, "the draft starts on the muse lane");
+        view.read(cx).rt(cx).session_id.clone()
     });
     // The `SwitchProvider` handler's own sequence: remember the pick,
     // close the empty draft's view, start on the pick.
@@ -998,8 +998,8 @@ fn switch_provider_replaces_the_fresh_draft_without_leaking_its_view(
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the replacement opened");
-        assert_ne!(view.read(cx).session_id, old, "the draft did not survive the switch");
-        assert!(view.read(cx).provider_kind() != ProviderId::Muse, "the replacement rides the provider lane");
+        assert_ne!(view.read(cx).rt(cx).session_id, old, "the draft did not survive the switch");
+        assert!(view.read(cx).rt(cx).provider_kind() != ProviderId::Muse, "the replacement rides the provider lane");
         assert!(
             !harness.registry.is_parked(&old),
             "the discarded draft was closed, never parked"
@@ -1035,7 +1035,7 @@ fn switch_provider_through_the_handler_leaves_one_row_and_one_open(
     let draft = vc.update(|_, cx| {
         let harness = baaz.read(cx);
         assert_eq!(opens_of(&opens), 1, "the draft opens one child");
-        harness.active.clone().expect("the draft opened").read(cx).session_id.clone()
+        harness.active.clone().expect("the draft opened").read(cx).rt(cx).session_id.clone()
     });
     // Through the real `SwitchProvider` event, not the handler's steps
     // by hand: the close is synchronous, the replacement starts on a
@@ -1046,7 +1046,7 @@ fn switch_provider_through_the_handler_leaves_one_row_and_one_open(
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("the draft is open");
             harness.on_session_event(
-                view,
+                view.read(cx).runtime().clone(),
                 &SessionEvent::SwitchProvider { provider: ProviderId::ClaudeCode },
                 cx,
             );
@@ -1057,7 +1057,7 @@ fn switch_provider_through_the_handler_leaves_one_row_and_one_open(
         let harness = baaz.read(cx);
         assert_eq!(opens_of(&opens), 2, "draft plus exactly one replacement");
         let view = harness.active.clone().expect("the replacement opened");
-        assert_eq!(view.read(cx).provider_kind(), ProviderId::ClaudeCode);
+        assert_eq!(view.read(cx).rt(cx).provider_kind(), ProviderId::ClaudeCode);
         // (No id inequality: the scripted double mints one fixed id,
         // so draft and replacement share it; the lane change above is
         // what proves the replacement.)
@@ -1065,7 +1065,7 @@ fn switch_provider_through_the_handler_leaves_one_row_and_one_open(
         let rows: Vec<_> =
             harness.session_list.read(cx).sessions.iter().filter(|entry| !entry.provider.lists_sessions()).collect();
         assert_eq!(rows.len(), 1, "exactly one provider row names the lane");
-        assert_eq!(rows[0].id, view.read(cx).session_id, "the row is the replacement");
+        assert_eq!(rows[0].id, view.read(cx).rt(cx).session_id, "the row is the replacement");
         assert!(!harness.open_state.switch_pending, "the switch landed");
     });
     lane_restore(state);
@@ -1100,7 +1100,7 @@ fn y2b_switch_keeps_old_view_until_open_lands_and_carries_draft(
     });
     vc.run_until_parked();
     let old = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the draft opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the draft opened").read(cx).rt(cx).session_id.clone()
     });
     // An unsent draft waiting on the old view.
     vc.update(|window, cx| {
@@ -1114,7 +1114,7 @@ fn y2b_switch_keeps_old_view_until_open_lands_and_carries_draft(
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("the draft is open");
             harness.on_session_event(
-                view,
+                view.read(cx).runtime().clone(),
                 &SessionEvent::SwitchProvider { provider: ProviderId::ClaudeCode },
                 cx,
             );
@@ -1124,16 +1124,16 @@ fn y2b_switch_keeps_old_view_until_open_lands_and_carries_draft(
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("old view stays until the open lands");
-        assert_eq!(view.read(cx).session_id, old, "still the old view mid-switch");
+        assert_eq!(view.read(cx).rt(cx).session_id, old, "still the old view mid-switch");
         assert_eq!(
             harness.open_state.pending_id.as_deref(),
             Some(old.as_str()),
             "the header still names the session mid-switch"
         );
         assert_eq!(harness.open_state.replacing_id(), Some(old.as_str()));
-        assert!(view.read(cx).is_input_locked(), "composer input disabled mid-switch");
+        assert!(view.read(cx).rt(cx).is_input_locked(), "composer input disabled mid-switch");
         assert_eq!(
-            view.read(cx).display_provider(),
+            view.read(cx).rt(cx).display_provider(),
             ProviderId::ClaudeCode,
             "chip already shows the pick mid-switch"
         );
@@ -1143,9 +1143,9 @@ fn y2b_switch_keeps_old_view_until_open_lands_and_carries_draft(
         let harness = baaz.read(cx);
         assert_eq!(opens_of(&opens), 2, "draft plus exactly one replacement");
         let view = harness.active.clone().expect("the replacement opened");
-        assert_eq!(view.read(cx).provider_kind(), ProviderId::ClaudeCode);
+        assert_eq!(view.read(cx).rt(cx).provider_kind(), ProviderId::ClaudeCode);
         assert_eq!(view.read(cx).draft_text(cx), "hello unsent", "unsent draft carries across");
-        assert!(!view.read(cx).is_input_locked(), "the new view takes sends");
+        assert!(!view.read(cx).rt(cx).is_input_locked(), "the new view takes sends");
         assert!(harness.open_state.replacing_id().is_none(), "the marker clears on landing");
         let total = usize::from(harness.active.is_some()) + harness.registry.parked_len();
         assert_eq!(total, 1, "exactly one view exists after the swap");
@@ -1178,7 +1178,7 @@ fn y2b_failed_open_fails_on_the_replacement_with_the_text(cx: &mut gpui::TestApp
     let old = vc.update(|window, cx| {
         let view = baaz.read(cx).active.clone().expect("the lane opened");
         view.update(cx, |view, cx| view.set_draft("hello unsent".to_owned(), window, cx));
-        view.read(cx).session_id.clone()
+        view.read(cx).rt(cx).session_id.clone()
     });
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
@@ -1189,7 +1189,7 @@ fn y2b_failed_open_fails_on_the_replacement_with_the_text(cx: &mut gpui::TestApp
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("the lane is open");
             harness.on_session_event(
-                view,
+                view.read(cx).runtime().clone(),
                 &SessionEvent::SwitchProvider { provider: ProviderId::ClaudeCode },
                 cx,
             );
@@ -1219,7 +1219,7 @@ fn y2b2_switch(vc: &mut gpui::VisualTestContext, baaz: &gpui::Entity<Harness>, p
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("the old view is open");
-            harness.on_session_event(view, &SessionEvent::SwitchProvider { provider }, cx);
+            harness.on_session_event(view.read(cx).runtime().clone(), &SessionEvent::SwitchProvider { provider }, cx);
         });
     });
 }
@@ -1274,7 +1274,7 @@ fn y2b2_clicking_another_session_parks_the_switched_draft(cx: &mut gpui::TestApp
     let switched = vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the replacement is the centre");
-        assert_eq!(view.read(cx).provider_kind(), ProviderId::ClaudeCode, "drawn on the click");
+        assert_eq!(view.read(cx).rt(cx).provider_kind(), ProviderId::ClaudeCode, "drawn on the click");
         assert_eq!(view.read(cx).draft_text(cx), "hello unsent", "the typed text carried");
         assert!(harness.open_state.replacing_id().is_none(), "nothing waits to be replaced");
         assert!(!harness.registry.is_parked(&first), "the old draft closed");
@@ -1287,20 +1287,20 @@ fn y2b2_clicking_another_session_parks_the_switched_draft(cx: &mut gpui::TestApp
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the clicked lane is open");
-        assert_eq!(view.read(cx).session_id, second, "the click wins");
+        assert_eq!(view.read(cx).rt(cx).session_id, second, "the click wins");
         assert!(!harness.open_state.switch_pending, "the verbs are released");
         assert!(
             harness.registry.is_view_parked(&switched),
             "the replacement parks like any draft"
         );
         assert_eq!(switched.read(cx).draft_text(cx), "hello unsent", "its text stays with it");
-        assert!(!switched.read(cx).is_opening_lane(), "its open landed on the parked draft");
+        assert!(!switched.read(cx).rt(cx).is_opening_lane(), "its open landed on the parked draft");
         assert!(
             !harness.session_list.read(cx).provider_sessions.contains_key(&first),
             "the replaced draft persists nowhere"
         );
     });
-    let landed = vc.update(|_, cx| switched.read(cx).session_id.clone());
+    let landed = vc.update(|_, cx| switched.read(cx).rt(cx).session_id.clone());
     let locked = shared.inner.lock().expect("y2b2");
     assert_eq!(locked.created.len(), 3, "both lanes plus exactly one switch open");
     assert_eq!(locked.shutdowns, vec![first.clone()], "only the replaced draft's child hangs up");
@@ -1332,9 +1332,9 @@ fn a_draft_switch_draws_the_new_provider_before_its_child_answers(cx: &mut gpui:
     vc.update(|_, cx| {
         let view = baaz.read(cx).active.clone().expect("the draft");
         view.update(cx, |view, cx| {
-            view.set_mode(PermissionMode::DenyUnmatched, cx);
-            view.set_initial_effort(Some(ReasoningEffort::High), cx);
-            view.show_disabled_notice(ProviderId::Codex, cx);
+            view.runtime().clone().update(cx, |rt, cx| rt.set_mode(PermissionMode::DenyUnmatched, cx));
+            view.runtime().clone().update(cx, |rt, cx| rt.set_initial_effort(Some(ReasoningEffort::High), cx));
+            view.runtime().clone().update(cx, |rt, cx| rt.show_disabled_notice(ProviderId::Codex, cx));
         });
     });
     y2b2_switch(vc, &baaz, ProviderId::ClaudeCode);
@@ -1344,12 +1344,12 @@ fn a_draft_switch_draws_the_new_provider_before_its_child_answers(cx: &mut gpui:
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the replacement is the centre");
         let view = view.read(cx);
-        assert_ne!(view.session_id, old);
-        assert!(view.is_opening_lane(), "drawn before the child answers");
-        assert_eq!(view.display_provider(), ProviderId::ClaudeCode);
+        assert_ne!(view.rt(cx).session_id, old);
+        assert!(view.rt(cx).is_opening_lane(), "drawn before the child answers");
+        assert_eq!(view.rt(cx).display_provider(), ProviderId::ClaudeCode);
         assert_eq!(view.draft_text(cx), "carry me");
-        assert_eq!(view.draft_settings(), (PermissionMode::DenyUnmatched, Some(ReasoningEffort::High)));
-        assert_eq!(view.banner_text(), None, "no old-provider banner");
+        assert_eq!(view.rt(cx).draft_settings(), (PermissionMode::DenyUnmatched, Some(ReasoningEffort::High)));
+        assert_eq!(view.rt(cx).banner_text(), None, "no old-provider banner");
         assert!(harness.registry.parked_len() == 0, "the old draft closed");
     });
     assert_eq!(shared.inner.lock().expect("y2b2").shutdowns, vec![old], "its child hung up");
@@ -1386,7 +1386,7 @@ fn y2b2_new_session_reopens_the_switched_draft(cx: &mut gpui::TestAppContext) {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the draft is open");
         assert!(view == switched, "the switched draft, not a new one");
-        assert_eq!(view.read(cx).provider_kind(), ProviderId::ClaudeCode);
+        assert_eq!(view.read(cx).rt(cx).provider_kind(), ProviderId::ClaudeCode);
         assert_eq!(view.read(cx).draft_text(cx), "hello unsent");
         assert!(harness.open_state.replacing_id().is_none());
         assert!(!harness.open_state.switch_pending, "the verbs are released");
@@ -1429,7 +1429,7 @@ fn y2b2_second_switch_supersedes_the_first(cx: &mut gpui::TestAppContext) {
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the replacement opened");
-        assert_eq!(view.read(cx).provider_kind(), ProviderId::Codex, "the last pick wins");
+        assert_eq!(view.read(cx).rt(cx).provider_kind(), ProviderId::Codex, "the last pick wins");
         assert_eq!(harness.new_provider, ProviderId::Codex.as_str(), "the chip matches the lane");
         assert_eq!(
             view.read(cx).draft_text(cx),
@@ -1442,14 +1442,14 @@ fn y2b2_second_switch_supersedes_the_first(cx: &mut gpui::TestAppContext) {
         let records: Vec<String> = harness.session_list.read(cx).provider_sessions.keys().cloned().collect();
         assert_eq!(
             records,
-            vec![view.read(cx).session_id.clone()],
+            vec![view.read(cx).rt(cx).session_id.clone()],
             "only the landed session persists, drew {records:?}"
         );
     });
     let locked = shared.inner.lock().expect("y2b2");
     assert_eq!(locked.created.len(), 3, "the lane plus one open per switch");
     let live = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the replacement opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the replacement opened").read(cx).rt(cx).session_id.clone()
     });
     assert!(!locked.shutdowns.contains(&live), "the landed child is never shut down");
     assert_eq!(locked.shutdowns.len(), 2, "the replaced lane and the discarded open shut down");
@@ -1478,7 +1478,7 @@ fn y2b2_closing_the_switched_draft_discards_its_open(cx: &mut gpui::TestAppConte
     y2b2_switch(vc, &baaz, ProviderId::ClaudeCode);
     y2b2_drain_until_opens(vc, &shared, 2);
     let switched = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the replacement").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the replacement").read(cx).rt(cx).session_id.clone()
     });
     assert_ne!(switched, old);
     vc.update(|_, cx| {
@@ -1559,7 +1559,7 @@ fn y2b2_quit_discards_the_switched_drafts_open(cx: &mut gpui::TestAppContext) {
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the replacement is still the centre");
-        assert!(view.read(cx).is_opening_lane(), "no late open attaches after quit");
+        assert!(view.read(cx).rt(cx).is_opening_lane(), "no late open attaches after quit");
         assert!(harness.open_state.replacing_id().is_none(), "the marker is gone");
         assert!(!harness.open_state.switch_pending, "the verbs are released");
     });
@@ -1601,14 +1601,14 @@ fn a_late_finishing_earlier_open_never_steals_the_lane(cx: &mut gpui::TestAppCon
         assert_eq!(opens_of(&opens), 2, "both asks spawned");
         let view = harness.active.clone().expect("a lane opened");
         assert_eq!(
-            view.read(cx).provider_kind(),
+            view.read(cx).rt(cx).provider_kind(),
             ProviderId::ClaudeCode,
             "the last ask wins, however the finishes order"
         );
         let rows: Vec<_> =
             harness.session_list.read(cx).sessions.iter().filter(|entry| !entry.provider.lists_sessions()).collect();
         assert_eq!(rows.len(), 1, "the stale finish leaves no row");
-        assert_eq!(rows[0].id, view.read(cx).session_id, "the row is the winner");
+        assert_eq!(rows[0].id, view.read(cx).rt(cx).session_id, "the row is the winner");
         assert!(!harness.open_state.switch_pending, "the switch landed");
     });
     lane_restore(state);
@@ -1627,7 +1627,7 @@ fn closing_a_provider_view_hangs_up_its_child(cx: &mut gpui::TestAppContext) {
         });
     });
     let open_id = vc.update(|_, cx| {
-        baaz.read(cx).active.clone().expect("the lane opened").read(cx).session_id.clone()
+        baaz.read(cx).active.clone().expect("the lane opened").read(cx).rt(cx).session_id.clone()
     });
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| harness.close_view(&open_id, cx));

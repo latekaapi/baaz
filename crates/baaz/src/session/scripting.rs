@@ -1,13 +1,15 @@
-//! `--steps` for a session view: the verbs that drive one session from
+//! `--steps` for a session: the verbs that drive one session from
 //! the command line, for screenshots and smoke runs.
 //!
-//! Part of [`SessionView`]; see [`crate::session`] for what
-//! the entity owns and why these are its own files.
+//! Part of [`SessionRuntime`] (the model half: what it does to the
+//! session) and [`SessionView`] (the drawing half: fields, menus, focus);
+//! see [`crate::session`] for what each entity owns and why these are
+//! their own files.
 
 use super::*;
 use crate::steps::StepResult;
 
-impl SessionView {
+impl SessionRuntime {
     // -------------------------------------------------------------- scripting
 
     // One handler per `--steps` verb that needs more than a single existing
@@ -58,22 +60,26 @@ impl SessionView {
             None => Ok(()),
         }
     }
+}
 
+impl SessionView {
     /// `send-anyway`: the billing banner's "Send anyway" — sends what the
     /// guard held back (the restored prompt, or the composer's draft and
     /// attachments). Fails, changing nothing, when nothing is held to send.
     pub(crate) fn step_send_anyway(&mut self, window: &mut Window, cx: &mut Context<Self>) -> StepResult {
-        let held = self.pending_prompt.is_some()
+        let held = self.runtime.read(cx).pending_prompt.is_some()
             || !self.draft_is_empty(cx)
-            || !self.images.is_empty()
-            || !self.files.is_empty();
+            || !self.runtime.read(cx).images.is_empty()
+            || !self.runtime.read(cx).files.is_empty();
         if !held {
             return Err("nothing held back to send".into());
         }
         self.send_anyway(window, cx);
         Ok(())
     }
+}
 
+impl SessionRuntime {
     /// `steer:<text>`: interject `text` into the running turn. Fails on
     /// empty text, when the provider does not offer steering, when no turn
     /// is running, or with no provider lane — each of which banners and
@@ -94,7 +100,9 @@ impl SessionView {
         self.steer_text(rest.to_owned(), cx);
         refusal.map_or(Ok(()), Err)
     }
+}
 
+impl SessionView {
     /// `confirm`: Enter on the open composer menu. Fails when no menu is
     /// open (Enter on nothing).
     pub(crate) fn step_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) -> StepResult {
@@ -104,7 +112,9 @@ impl SessionView {
         self.confirm_menu(window, cx);
         Ok(())
     }
+}
 
+impl SessionRuntime {
     /// `setmodel:<id>`: pick a model without opening the picker. Fails,
     /// changing nothing, on an empty id, when the provider does not offer
     /// model switching, or when the session's catalog is known and does not
@@ -218,7 +228,9 @@ impl SessionView {
         self.fork(None, cx);
         lane.map_or(Ok(()), Err)
     }
+}
 
+impl SessionView {
     /// `name:<title>`: `/name <title>`, renaming the session. Fails on an
     /// empty name — which the command would read as "open the field" or
     /// "clear the name", neither of which is naming.
@@ -229,7 +241,9 @@ impl SessionView {
         self.run_command_with(crate::overlays::Command::Name, rest.to_owned(), window, cx);
         Ok(())
     }
+}
 
+impl SessionRuntime {
     /// `fixture-models`: a fixed three-row catalog shaped like Muse's own
     /// (owner screenshot 2026-10-30), each row listing reasoning levels so
     /// it opens a submenu — offline, no catalog request, nothing persisted.
@@ -257,7 +271,9 @@ impl SessionView {
         cx.notify();
         Ok(())
     }
+}
 
+impl SessionView {
     /// `submenu`: open the model menu's highlighted row's submenu, as the
     /// → key does. Fails when the model menu is not open, or when the
     /// highlighted row lists no reasoning levels (it has no submenu to
@@ -266,7 +282,7 @@ impl SessionView {
         let Some(selected) = self.model_picker(cx).map(|picker| picker.read(cx).selected()) else {
             return Err("the model menu is not open".into());
         };
-        if self.models.get(selected).is_none_or(|row| row.efforts.is_empty()) {
+        if self.runtime.read(cx).models.get(selected).is_none_or(|row| row.efforts.is_empty()) {
             return Err("the highlighted model row has no submenu".into());
         }
         self.overlays.update(cx, |overlays, _| {
@@ -290,7 +306,9 @@ impl SessionView {
         cx.notify();
         Ok(())
     }
+}
 
+impl SessionRuntime {
     /// `context:<used>/<window>/<level>`: a pressure state the echo provider
     /// cannot be pushed into — a synthetic `session/contextUsage`, only ever
     /// reachable from this flag. An empty payload clears it; one that does
@@ -305,7 +323,9 @@ impl SessionView {
         cx.notify();
         Ok(())
     }
+}
 
+impl SessionView {
     /// `plus`: toggle the composer's `+` menu.
     pub(crate) fn step_plus(&mut self, cx: &mut Context<Self>) -> StepResult {
         // The click's own path, so a scripted open closes any open menu too.
@@ -328,7 +348,9 @@ impl SessionView {
         self.on_draft_changed(cx);
         Ok(())
     }
+}
 
+impl SessionRuntime {
     /// `setmode:<mode>`: `session/setApprovalMode`, without opening the
     /// picker. An unknown mode fails and changes nothing.
     pub(crate) fn step_setmode(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
@@ -340,7 +362,9 @@ impl SessionView {
         self.set_mode(mode, cx);
         Ok(())
     }
+}
 
+impl SessionView {
     /// `setprovider:<id>`: the provider picker's menu row as a verb —
     /// the same [`SessionView::pick_provider`] the click and Enter
     /// paths call, so the no-live-switch invariant holds here too: a
@@ -359,7 +383,7 @@ impl SessionView {
             .find(|p| p.as_str() == id)
             .copied()
             .ok_or_else(|| format!("unknown provider `{rest}`; known providers are muse, claude-code, codex"))?;
-        if picked == self.provider_kind() {
+        if picked == self.runtime.read(cx).provider_kind() {
             self.pick_provider(picked.as_str(), cx);
             return Ok(());
         }
@@ -367,7 +391,7 @@ impl SessionView {
             self.pick_provider(picked.as_str(), cx);
             return Err(format!("{} is disabled in Settings → Providers", picked.label()));
         }
-        if self.has_turns() {
+        if self.runtime.read(cx).has_turns() {
             self.pick_provider(picked.as_str(), cx);
             return Err(format!(
                 "`setprovider:{id}` on a session with turns starts a new session on {} instead of swapping this one",
@@ -420,15 +444,15 @@ impl SessionView {
                 return Ok(());
             }
             let feedback = self.feedback_open.is_some().then(|| self.feedback.read(cx).value().to_string());
-            self.decide_approval(approval_id, choice.id.clone(), feedback, cx);
+            self.runtime.update(cx, |rt, cx| rt.decide_approval(approval_id, choice.id.clone(), feedback, cx));
             return Ok(());
         }
-        let tap = self.external_approvals.pending().last().cloned().cloned().ok_or("no approval is pending")?;
+        let tap = self.runtime.read(cx).external_approvals.pending().last().cloned().cloned().ok_or("no approval is pending")?;
         let choices = crate::providers::ApprovalChoice::all();
         let choice = choices
             .get(n - 1)
             .ok_or_else(|| format!("the pending approval has {} choices, not {n}", choices.len()))?;
-        self.decide_external_approval(tap.id.clone(), *choice, None, cx);
+        self.runtime.update(cx, |rt, cx| rt.decide_external_approval(tap.id.clone(), *choice, None, cx));
         Ok(())
     }
 
@@ -448,7 +472,9 @@ impl SessionView {
         cx.notify();
         Ok(())
     }
+}
 
+impl SessionRuntime {
     /// Why a question command would be refused here: the provider does not
     /// offer questions, or there is no provider lane to carry the answer.
     fn step_questions_refusal(&self) -> Option<String> {
@@ -458,14 +484,16 @@ impl SessionView {
         }
         self.step_lane_refusal()
     }
+}
 
+impl SessionView {
     /// `answer:<label>` / `answers:<a|b>`: pick options on the newest question
     /// and send them. Fails, picking nothing, with no question pending, no
     /// label given, or a label the question does not offer; fails after the
     /// attempt when the answer is refused (no questions capability, no
     /// lane).
     pub(crate) fn step_answer(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
-        let (block_id, labels) = self.newest_pending_question().ok_or("no question is pending")?;
+        let (block_id, labels) = self.runtime.read(cx).newest_pending_question().ok_or("no question is pending")?;
         let wanted: Vec<&str> = rest.split('|').map(str::trim).filter(|s| !s.is_empty()).collect();
         if wanted.is_empty() {
             return Err("no option label given".into());
@@ -478,7 +506,7 @@ impl SessionView {
                 .ok_or_else(|| format!("no option labelled `{label}`; the options are {}", labels.join(", ")))?;
             indices.push(index);
         }
-        let refusal = self.step_questions_refusal();
+        let refusal = self.runtime.read(cx).step_questions_refusal();
         for index in indices {
             self.select_option(block_id.clone(), index, cx);
         }
@@ -492,14 +520,14 @@ impl SessionView {
     /// pending, and when a send is refused (no questions capability, no
     /// lane).
     pub(crate) fn step_clarify(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> StepResult {
-        let (block_id, _) = self.newest_pending_question().ok_or("no question is pending")?;
+        let (block_id, _) = self.runtime.read(cx).newest_pending_question().ok_or("no question is pending")?;
         self.clarify_open = Some(block_id.clone());
         self.clarify.update(cx, |state, cx| state.set_value(rest.to_owned(), window, cx));
         if rest.trim().is_empty() {
             cx.notify();
             return Ok(());
         }
-        let refusal = self.step_questions_refusal();
+        let refusal = self.runtime.read(cx).step_questions_refusal();
         self.send_clarification(&block_id, window, cx);
         refusal.map_or(Ok(()), Err)
     }
@@ -509,7 +537,7 @@ impl SessionView {
     /// question pending, or an index past its options.
     pub(crate) fn step_preview(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
         let n = rest.trim().parse::<usize>().map_err(|_| format!("`{rest}` is not an option index"))?;
-        let (block_id, labels) = self.newest_pending_question().ok_or("no question is pending")?;
+        let (block_id, labels) = self.runtime.read(cx).newest_pending_question().ok_or("no question is pending")?;
         if n >= labels.len() {
             return Err(format!("the question has {} options; there is no option {n}", labels.len()));
         }
@@ -520,7 +548,7 @@ impl SessionView {
     /// `select:<label>`: pick without sending, for a capture of a half-answered
     /// card. Fails with no question pending or a label it does not offer.
     pub(crate) fn step_select(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
-        let (block_id, labels) = self.newest_pending_question().ok_or("no question is pending")?;
+        let (block_id, labels) = self.runtime.read(cx).newest_pending_question().ok_or("no question is pending")?;
         let index = labels
             .iter()
             .position(|l| l == rest)
@@ -532,9 +560,9 @@ impl SessionView {
     /// `skip`: decline the newest question. Fails with no question pending,
     /// and when the decline is refused (no questions capability, no lane).
     pub(crate) fn step_skip(&mut self, cx: &mut Context<Self>) -> StepResult {
-        let (block_id, _) = self.newest_pending_question().ok_or("no question is pending")?;
-        let refusal = self.step_questions_refusal();
-        self.skip_question(block_id, cx);
+        let (block_id, _) = self.runtime.read(cx).newest_pending_question().ok_or("no question is pending")?;
+        let refusal = self.runtime.read(cx).step_questions_refusal();
+        self.runtime.update(cx, |rt, cx| rt.skip_question(block_id, cx));
         refusal.map_or(Ok(()), Err)
     }
 
@@ -581,7 +609,9 @@ impl SessionView {
         }));
         Ok(())
     }
+}
 
+impl SessionRuntime {
     /// `retry`: retry the newest failed turn. Fails when no turn failed, or
     /// when this app does not remember what the failed turn sent (a turn
     /// that arrived through a backfill), so there is nothing to resend.
@@ -593,7 +623,9 @@ impl SessionView {
         self.retry_turn(turn_id, cx);
         Ok(())
     }
+}
 
+impl SessionView {
     /// The newest approval still awaiting a decision, and its current choices.
     ///
     /// Read from the transcript rather than from the pending map, because the
@@ -608,7 +640,9 @@ impl SessionView {
     ) -> Option<&(String, Vec<aui_protocol::ApprovalChoice>)> {
         self.cached_pending_approval.as_ref()
     }
+}
 
+impl SessionRuntime {
     /// The newest question still awaiting an answer, and its option labels.
     pub(super) fn newest_pending_question(&self) -> Option<(String, Vec<String>)> {
         let session = self.session()?;

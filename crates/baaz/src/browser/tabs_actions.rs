@@ -10,7 +10,7 @@ impl Harness {
     pub(crate) fn browser_key(&self, cx: &gpui::App) -> String {
         self.active
             .as_ref()
-            .map(|view| view.read(cx).session_id.clone())
+            .map(|view| view.read(cx).rt(cx).session_id.clone())
             .unwrap_or_else(|| HOME_KEY.to_owned())
     }
 

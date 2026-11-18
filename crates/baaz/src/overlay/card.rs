@@ -127,12 +127,12 @@ impl Harness {
     fn browser_chat_title(&self, cx: &App) -> String {
         let Some(view) = self.registry.browser_chat() else { return "New chat".into() };
         let view = view.read(cx);
-        if let Some(meta) = self.session_list.read(cx).overrides.get(&view.session_id) {
+        if let Some(meta) = self.session_list.read(cx).overrides.get(&view.rt(cx).session_id) {
             if let Some(title) = meta.name.clone().or_else(|| meta.generated_title.clone()) {
                 return title;
             }
         }
-        let first = view.transcript_session().and_then(|s| {
+        let first = view.rt(cx).transcript_session().and_then(|s| {
             s.turns.iter().find_map(|turn| match turn {
                 aui_protocol::Turn::User { text, .. } => Some(crate::app::agent_window::strip_page_prompt(text.as_str()).to_owned()),
                 _ => None,
@@ -156,9 +156,9 @@ impl Harness {
         let (transcript, model) = match self.registry.browser_chat() {
             Some(view) => {
                 let view = view.read(cx);
-                let busy = view.busy() || view.is_starting();
-                let model = model_label(&view.model());
-                let transcript = match view.transcript_session() {
+                let busy = view.rt(cx).busy() || view.rt(cx).is_starting();
+                let model = model_label(&view.rt(cx).model());
+                let transcript = match view.rt(cx).transcript_session() {
                     Some(session) => crate::app::agent_window::agent_transcript(session, &title, &model, busy),
                     None => empty_transcript(&title, &model, busy),
                 };
@@ -176,17 +176,17 @@ impl Harness {
         let asking = self.registry.browser_chat().and_then(|view| {
             let view = view.read(cx);
             // Its own browser tools are accepted for it (`auto_accept_browser_tools`).
-            match view.pending_external_approvals().last() {
+            match view.rt(cx).pending_external_approvals().last() {
                 Some((_, headline)) if headline.contains("mcp__baaz__browser_") => None,
                 Some((_, headline)) => {
-                    let line = view.pending_approval_line().unwrap_or_else(|| headline.clone());
+                    let line = view.rt(cx).pending_approval_line().unwrap_or_else(|| headline.clone());
                     // No detail on the provider's card: the waiting call's own.
-                    match view.transcript_session().and_then(crate::app::agent_window::pending_call_detail) {
+                    match view.rt(cx).transcript_session().and_then(crate::app::agent_window::pending_call_detail) {
                         Some(detail) if !line.contains(" — ") => Some(format!("{line} — {detail}")),
                         _ => Some(line),
                     }
                 }
-                None => view.pending_approval_line(),
+                None => view.rt(cx).pending_approval_line(),
             }
         });
         if let Some(line) = asking {

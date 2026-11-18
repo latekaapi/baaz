@@ -423,7 +423,7 @@ impl Harness {
             PaletteKind::Fork => PaletteRows::Plain(
                 self.active
                     .as_ref()
-                    .map(|view| view.read(cx).fork_turns())
+                    .map(|view| view.read(cx).rt(cx).fork_turns())
                     .unwrap_or_default()
                     .into_iter()
                     .take(crate::app::PALETTE_ROWS)

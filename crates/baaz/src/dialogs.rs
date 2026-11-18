@@ -335,8 +335,8 @@ impl Harness {
         self.registry
             .iter_running(self.active.as_ref(), cx)
             .iter()
-            .map(|view| {
-                let id = view.read(cx).session_id.clone();
+            .map(|runtime| {
+                let id = runtime.read(cx).session_id.clone();
                 if self.is_browser_chat(&id, cx) {
                     return "Browser assistant".to_owned();
                 }
@@ -422,7 +422,7 @@ impl Harness {
 
     /// The open session's provider, for the menus that offer per provider.
     pub(crate) fn active_provider(&self, cx: &gpui::App) -> Option<crate::providers::ProviderId> {
-        self.active.as_ref().map(|view| view.read(cx).provider_kind())
+        self.active.as_ref().map(|view| view.read(cx).rt(cx).provider_kind())
     }
 
 
@@ -512,7 +512,7 @@ impl Harness {
                 }
             }
             PaletteKind::Fork => {
-                self.with_session(cx, |view, vc| view.fork(Some(id.to_string()), vc));
+                self.with_session(cx, |view, vc| view.runtime().clone().update(vc, |rt, cx| rt.fork(Some(id.to_string()), cx)));
             }
             PaletteKind::Commands => {
                 if let Some(command) = Command::parse(&id) {
@@ -1448,7 +1448,7 @@ mod tests {
         vc.run_until_parked();
         let (pending, drafts, header, row) = vc.update(|_, cx| {
             let b = baaz.read(cx);
-            let id = b.active.as_ref().map(|v| v.read(cx).session_id.clone()).expect("the replay is open");
+            let id = b.active.as_ref().map(|v| v.read(cx).rt(cx).session_id.clone()).expect("the replay is open");
             (b.open_state.pending_id.clone(), b.open_state.drafts.len(), b.collapsed_head_label(&b.chain_head(&id, cx), cx), b.session_list.read(cx).sessions.first().map(|r| r.label.clone()))
         });
         assert_eq!(pending, None, "nothing is opening over the replay");
@@ -1559,7 +1559,7 @@ mod tests {
         let view = vc.update(|_, cx| baaz.read(cx).active.clone()).expect("the replay opens a session");
         // The `@` picker's rows: a walked root, seeded rather than walked.
         vc.update(|_, cx| {
-            let root = view.read(cx).workspace_path().to_owned();
+            let root = view.read(cx).rt(cx).workspace_path().to_owned();
             let entries = (0..8)
                 .map(|i| format!("src/file{i}.rs"))
                 .map(|path| crate::files::FileEntry { lower: path.to_lowercase(), path })

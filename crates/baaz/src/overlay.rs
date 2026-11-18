@@ -744,7 +744,7 @@ impl Harness {
                     crate::browser::tabs::Owner::Person => None,
                 })
         } else {
-            self.active.as_ref().map(|view| view.read(cx).session_id.clone())
+            self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone())
         };
         shown
             .filter(|session| self.terminal_service.agent_activity(session).is_some())
@@ -951,7 +951,7 @@ impl Harness {
         }
         let state = self.existing_browser(cx)?;
         let page = state.read(cx);
-        let agent = self.active.as_ref().map(|v| v.read(cx).session_id.clone()).map(|id| self.session_lane_provider(&id, cx));
+        let agent = self.active.as_ref().map(|v| v.read(cx).rt(cx).session_id.clone()).map(|id| self.session_lane_provider(&id, cx));
         let name = agent.map(|p| p.label()).unwrap_or("Muse");
         let menu_open = {
             let pane = self.right_pane.read(cx);

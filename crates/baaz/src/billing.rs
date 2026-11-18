@@ -207,7 +207,7 @@ impl Harness {
     pub(crate) fn push_tier(&mut self, cx: &mut Context<Self>) {
         let banner = self.tier_banner();
         if let Some(view) = self.active.clone() {
-            view.update(cx, |view, cx| view.set_tier_banner(banner, cx));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_tier_banner(banner, cx)));
         }
         cx.notify();
     }

@@ -415,7 +415,7 @@ impl Harness {
                 // The screenshot still rides as an image the agent can see;
                 // the batch (D4) remembers it, the pins and the notes so the
                 // sent turn draws as one annotation turn.
-                let session = self.active.as_ref().map(|view| view.read(cx).session_id.clone());
+                let session = self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone());
                 let shot_path = match (&screenshot, &session) {
                     (Some(bytes), Some(session)) => crate::sent::save_picture(session, "png", bytes),
                     _ => None,
@@ -429,7 +429,7 @@ impl Harness {
                     Some(view) => {
                         view.update(cx, |view, cx| {
                             view.append_draft_block(block, window, cx);
-                            view.set_annotation_draft(batch, cx);
+                            view.runtime().clone().update(cx, |rt, cx| rt.set_annotation_draft(batch, cx));
                         });
                         // The batch now lives in the composer: the panel
                         // empties, as the spec's "the batch becomes the

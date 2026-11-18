@@ -152,7 +152,7 @@ fn open_b3_destination(
             });
             harness.merge_provider_rows(cx);
             seed_b3_handoff(harness, "b3-src");
-            harness.active.clone().expect("the lane is open").read(cx).session_id.clone()
+            harness.active.clone().expect("the lane is open").read(cx).rt(cx).session_id.clone()
         })
     })
 }
@@ -182,7 +182,7 @@ fn land_shows_the_prefix_before_the_pack_submits(cx: &mut gpui::TestAppContext) 
             assert!(harness.handoff_state.pending.is_none(), "landing consumes the pending open");
             let view = harness.active.clone().expect("the destination");
             assert!(
-                view.read(cx).has_handoff_prefix(),
+                view.read(cx).rt(cx).has_handoff_prefix(),
                 "the prefix lands before the pack submits"
             );
             assert!(
@@ -206,7 +206,7 @@ fn land_shows_the_prefix_before_the_pack_submits(cx: &mut gpui::TestAppContext) 
             );
             let view = harness.active.clone().expect("the destination");
             assert!(
-                view.read(cx).has_handoff_prefix(),
+                view.read(cx).rt(cx).has_handoff_prefix(),
                 "the acknowledgement keeps the landed prefix"
             );
             let ids: Vec<String> = view.update(cx, |view, cx| {
@@ -299,11 +299,11 @@ fn a_pack_turn_that_fails_fails_the_handoff(cx: &mut gpui::TestAppContext) {
             harness.open("dest-m".to_owned(), false, window, cx);
             let view = harness.active.clone().expect("the destination is open");
             view.update(cx, |view, cx| {
-                view.note_handoff_pack(
+                view.runtime().clone().update(cx, |rt, cx| rt.note_handoff_pack(
                     pack_full.to_owned(),
                     "Handed off from Claude Code: Chart the ferry routes".to_owned(),
                     cx,
-                );
+                ));
             });
             let mut session =
                 aui_protocol::Session::new("src-m", aui_protocol::Provider::Claude, "m", "/tmp/ws");
@@ -360,16 +360,16 @@ fn a_pack_turn_that_fails_fails_the_handoff(cx: &mut gpui::TestAppContext) {
             let view = harness.active.clone().expect("the destination is open");
             let event = |method: &str, params: serde_json::Value| crate::session::wire_note(method, "dest-m", params);
             view.update(cx, |view, cx| {
-                view.apply(
+                view.runtime().clone().update(cx, |rt, cx| rt.apply(
                     event("session/started", serde_json::json!({"session": {"sessionId": "dest-m"}})),
                     cx,
-                )
+                ))
             });
             view.update(cx, |view, cx| {
-                view.apply(event("turn/started", serde_json::json!({"turnId": "t-1"})), cx)
+                view.runtime().clone().update(cx, |rt, cx| rt.apply(event("turn/started", serde_json::json!({"turnId": "t-1"})), cx))
             });
             view.update(cx, |view, cx| {
-                view.apply(
+                view.runtime().clone().update(cx, |rt, cx| rt.apply(
                     event(
                         "item/completed",
                         serde_json::json!({"item": {
@@ -382,10 +382,10 @@ fn a_pack_turn_that_fails_fails_the_handoff(cx: &mut gpui::TestAppContext) {
                         }}),
                     ),
                     cx,
-                )
+                ))
             });
             view.update(cx, |view, cx| {
-                view.apply(
+                view.runtime().clone().update(cx, |rt, cx| rt.apply(
                     event(
                         "turn/completed",
                         serde_json::json!({"turnId": "t-1", "terminal": "failed", "error": {
@@ -394,10 +394,10 @@ fn a_pack_turn_that_fails_fails_the_handoff(cx: &mut gpui::TestAppContext) {
                         }}),
                     ),
                     cx,
-                )
+                ))
             });
             let open = harness.active.clone().expect("the open view");
-            harness.maybe_rewrite_byline(&open, cx);
+            harness.maybe_rewrite_byline(&open.read(cx).runtime().clone(), cx);
             let run = harness.handoff_state.runs.get("src-m").expect("the run");
             assert!(
                 matches!(run.state, aui_protocol::HandoffState::Failed { .. }),
@@ -548,11 +548,11 @@ fn a_completed_pack_turn_activates_and_a_later_failure_stays_out(cx: &mut gpui::
             harness.open("dest-m2".to_owned(), false, window, cx);
             let view = harness.active.clone().expect("the destination is open");
             view.update(cx, |view, cx| {
-                view.note_handoff_pack(
+                view.runtime().clone().update(cx, |rt, cx| rt.note_handoff_pack(
                     pack_full.to_owned(),
                     "Handed off from Claude Code: Chart the ferry routes".to_owned(),
                     cx,
-                );
+                ));
             });
             let mut session =
                 aui_protocol::Session::new("src-m2", aui_protocol::Provider::Claude, "m", "/tmp/ws");
@@ -603,16 +603,16 @@ fn a_completed_pack_turn_activates_and_a_later_failure_stays_out(cx: &mut gpui::
             let view = harness.active.clone().expect("the destination is open");
             let event = |method: &str, params: serde_json::Value| crate::session::wire_note(method, "dest-m2", params);
             view.update(cx, |view, cx| {
-                view.apply(
+                view.runtime().clone().update(cx, |rt, cx| rt.apply(
                     event("session/started", serde_json::json!({"session": {"sessionId": "dest-m2"}})),
                     cx,
-                )
+                ))
             });
             view.update(cx, |view, cx| {
-                view.apply(event("turn/started", serde_json::json!({"turnId": "t-1"})), cx)
+                view.runtime().clone().update(cx, |rt, cx| rt.apply(event("turn/started", serde_json::json!({"turnId": "t-1"})), cx))
             });
             view.update(cx, |view, cx| {
-                view.apply(
+                view.runtime().clone().update(cx, |rt, cx| rt.apply(
                     event(
                         "item/completed",
                         serde_json::json!({"item": {
@@ -625,10 +625,10 @@ fn a_completed_pack_turn_activates_and_a_later_failure_stays_out(cx: &mut gpui::
                         }}),
                     ),
                     cx,
-                )
+                ))
             });
             view.update(cx, |view, cx| {
-                view.apply(
+                view.runtime().clone().update(cx, |rt, cx| rt.apply(
                     event(
                         "item/completed",
                         serde_json::json!({"item": {
@@ -641,16 +641,16 @@ fn a_completed_pack_turn_activates_and_a_later_failure_stays_out(cx: &mut gpui::
                         }}),
                     ),
                     cx,
-                )
+                ))
             });
             view.update(cx, |view, cx| {
-                view.apply(
+                view.runtime().clone().update(cx, |rt, cx| rt.apply(
                     event("turn/completed", serde_json::json!({"turnId": "t-1", "terminal": "completed"})),
                     cx,
-                )
+                ))
             });
             let open = harness.active.clone().expect("the open view");
-            harness.maybe_rewrite_byline(&open, cx);
+            harness.maybe_rewrite_byline(&open.read(cx).runtime().clone(), cx);
             let run = harness.handoff_state.runs.get("src-m2").expect("the run");
             assert!(
                 matches!(run.state, aui_protocol::HandoffState::Prepared),
@@ -672,10 +672,10 @@ fn a_completed_pack_turn_activates_and_a_later_failure_stays_out(cx: &mut gpui::
             // A later turn settling failed: the destination owns its
             // turns now, so the active handoff stays active and linked.
             view.update(cx, |view, cx| {
-                view.apply(event("turn/started", serde_json::json!({"turnId": "t-2"})), cx)
+                view.runtime().clone().update(cx, |rt, cx| rt.apply(event("turn/started", serde_json::json!({"turnId": "t-2"})), cx))
             });
             view.update(cx, |view, cx| {
-                view.apply(
+                view.runtime().clone().update(cx, |rt, cx| rt.apply(
                     event(
                         "item/completed",
                         serde_json::json!({"item": {
@@ -688,10 +688,10 @@ fn a_completed_pack_turn_activates_and_a_later_failure_stays_out(cx: &mut gpui::
                         }}),
                     ),
                     cx,
-                )
+                ))
             });
             view.update(cx, |view, cx| {
-                view.apply(
+                view.runtime().clone().update(cx, |rt, cx| rt.apply(
                     event(
                         "turn/completed",
                         serde_json::json!({"turnId": "t-2", "terminal": "failed", "error": {
@@ -700,10 +700,10 @@ fn a_completed_pack_turn_activates_and_a_later_failure_stays_out(cx: &mut gpui::
                         }}),
                     ),
                     cx,
-                )
+                ))
             });
             let open = harness.active.clone().expect("the open view");
-            harness.maybe_rewrite_byline(&open, cx);
+            harness.maybe_rewrite_byline(&open.read(cx).runtime().clone(), cx);
             let run = harness.handoff_state.runs.get("src-m2").expect("the run");
             assert!(
                 matches!(run.state, aui_protocol::HandoffState::Activated),
@@ -792,11 +792,11 @@ fn a_destination_error_before_ack_fails_the_handoff(cx: &mut gpui::TestAppContex
             harness.open("dest-me".to_owned(), false, window, cx);
             let view = harness.active.clone().expect("the destination is open");
             view.update(cx, |view, cx| {
-                view.note_handoff_pack(
+                view.runtime().clone().update(cx, |rt, cx| rt.note_handoff_pack(
                     "Continuing a session handed off from Claude Code. Context follows.".to_owned(),
                     "Handed off from Claude Code: Chart the ferry routes".to_owned(),
                     cx,
-                );
+                ));
             });
             let mut session =
                 aui_protocol::Session::new("src-me", aui_protocol::Provider::Claude, "m", "/tmp/ws");
@@ -836,7 +836,7 @@ fn a_destination_error_before_ack_fails_the_handoff(cx: &mut gpui::TestAppContex
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let view = harness.active.clone().expect("the destination is open");
-            harness.on_session_event(view, &crate::session::SessionEvent::Closed, cx);
+            harness.on_session_event(view.read(cx).runtime().clone(), &crate::session::SessionEvent::Closed, cx);
             let run = harness.handoff_state.runs.get("src-me").expect("the run");
             assert!(
                 matches!(run.state, aui_protocol::HandoffState::Failed { .. }),
@@ -900,7 +900,7 @@ fn opening_a_chain_member_opens_the_head(cx: &mut gpui::TestAppContext) {
     vc.update(|_, cx| {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the member open lands somewhere");
-        assert_eq!(view.read(cx).session_id, "chain-c", "a member id opens the head");
+        assert_eq!(view.read(cx).rt(cx).session_id, "chain-c", "a member id opens the head");
         assert_eq!(harness.open_state.pending_id.as_deref(), Some("chain-c"), "the head row is selected");
     });
     // Y2a, one identity: header, window title and selection all
@@ -1263,7 +1263,7 @@ fn the_fallback_source_link_opens_the_source_itself(cx: &mut gpui::TestAppContex
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the bypass open lands somewhere");
         assert_eq!(
-            view.read(cx).session_id,
+            view.read(cx).rt(cx).session_id,
             "old-muse",
             "the explicit source path bypasses the redirect"
         );

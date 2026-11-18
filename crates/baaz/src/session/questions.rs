@@ -1,8 +1,10 @@
 //! Structured questions: selection, previews, clarification and the
 //! answer that settles one.
 //!
-//! Part of [`SessionView`]; see [`crate::session`] for what
-//! the entity owns and why these are its own files.
+//! Part of [`SessionRuntime`] (the model half: what it does to the
+//! session) and [`SessionView`] (the drawing half: fields, menus, focus);
+//! see [`crate::session`] for what each entity owns and why these are
+//! their own files.
 
 use super::*;
 
@@ -13,7 +15,7 @@ impl SessionView {
     /// questions, one at a time) a single choice advances on its own; a
     /// pick-all waits for Next (docs/41 §2.6).
     pub fn select_option(&mut self, block_id: String, index: usize, cx: &mut Context<Self>) {
-        let pending = self.question(&block_id);
+        let pending = self.runtime.read(cx).question(&block_id);
         let multi = pending.as_ref().is_some_and(|q| q.multi);
         let selected = self.selections.entry(block_id.clone()).or_default();
         match (multi, selected.iter().position(|i| *i == index)) {
@@ -29,7 +31,9 @@ impl SessionView {
         }
         cx.notify();
     }
+}
 
+impl SessionRuntime {
     /// The wizard steps of every pending several-question prompt (D4), by
     /// block id: which question it is, of how many, and whether it is the
     /// one showing — the first whose answer is not yet gathered.
@@ -55,15 +59,17 @@ impl SessionView {
         }
         out
     }
+}
 
+impl SessionView {
     /// "Back" in a wizard: the previous question's gathered answer is taken
     /// back, so it shows again with its pick.
     pub fn wizard_back(&mut self, block_id: String, cx: &mut Context<Self>) {
         let Some((input_id, question_id)) = block_id.split_once(':') else { return };
-        let Some(request) = self.store.side().pending_prompts.get(input_id) else { return };
+        let Some(request) = self.runtime.read(cx).store.side().pending_prompts.get(input_id) else { return };
         let Some(at) = request.questions.iter().position(|q| q.id == question_id) else { return };
         let Some(previous) = at.checked_sub(1).and_then(|i| request.questions.get(i)).map(|q| q.id.clone()) else { return };
-        if let Some(gathered) = self.answers.get_mut(input_id) {
+        if let Some(gathered) = self.runtime.as_mut(cx).answers.get_mut(input_id) {
             gathered.remove(&previous);
         }
         cx.notify();
@@ -80,7 +86,9 @@ impl SessionView {
         }
         cx.notify();
     }
+}
 
+impl SessionRuntime {
     /// The pending question a block id names.
     ///
     /// The fold names a question block `"<userInputId>:<questionId>"`, because
@@ -144,7 +152,9 @@ impl SessionView {
         cx.notify();
         false
     }
+}
 
+impl SessionView {
     /// "Continue" on a question.
     ///
     /// MSP settles the whole prompt at once and keys answers on option
@@ -159,10 +169,10 @@ impl SessionView {
     /// The card settles only when the provider's delta answers it back —
     /// never on this press.
     fn answer_provider_question(&mut self, block_id: String, cx: &mut Context<Self>) {
-        if !self.check_questions_gate(cx) {
+        if !self.runtime.update(cx, |rt, cx| rt.check_questions_gate(cx)) {
             return;
         }
-        let Some(pending) = self.provider_question(&block_id) else { return };
+        let Some(pending) = self.runtime.read(cx).provider_question(&block_id) else { return };
         let selected = self.selections.get(&block_id).cloned().unwrap_or_default();
         if selected.is_empty() {
             return;
@@ -175,12 +185,19 @@ impl SessionView {
             free_text: None,
             note: None,
         };
-        // A prompt of several questions (a wizard) settles once: answers
-        // wait here until its last question is answered.
-        let input_id = pending.input_id.clone();
+        let (input_id, questions) = (pending.input_id.clone(), pending.questions);
+        self.runtime.update(cx, |rt, cx| rt.gather_answer(input_id, questions, answer, cx));
+    }
+}
+
+impl SessionRuntime {
+    /// One answered question of a provider prompt. A prompt of several
+    /// questions (a wizard) settles once: answers wait here until its last
+    /// question is answered, then go as one `AnswerQuestion`.
+    fn gather_answer(&mut self, input_id: String, questions: usize, answer: provider::QuestionAnswer, cx: &mut Context<Self>) {
         let gathered = self.answers.entry(input_id.clone()).or_default();
-        gathered.insert(pending.question_id.clone(), answer);
-        if gathered.len() < pending.questions {
+        gathered.insert(answer.question_id.clone(), answer);
+        if gathered.len() < questions {
             cx.notify();
             return;
         }
@@ -199,7 +216,9 @@ impl SessionView {
         });
         cx.notify();
     }
+}
 
+impl SessionRuntime {
     /// "Skip": `userInput/cancel`.
     pub fn skip_question(&mut self, block_id: String, cx: &mut Context<Self>) {
         if !self.check_questions_gate(cx) {
@@ -222,7 +241,9 @@ impl SessionView {
         });
         cx.notify();
     }
+}
 
+impl SessionView {
     /// "Explain instead": open the field, or send what is in it.
     pub fn clarify_question(&mut self, block_id: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.clarify_open.as_deref() == Some(block_id.as_str()) {
@@ -239,10 +260,10 @@ impl SessionView {
         // The provider lane clarifies with free text instead of the offered
         // options — the "let me explain" path — gated like every question
         // command.
-        if !self.check_questions_gate(cx) {
+        if !self.runtime.update(cx, |rt, cx| rt.check_questions_gate(cx)) {
             return;
         }
-        let Some(pending) = self.provider_question(block_id) else { return };
+        let Some(pending) = self.runtime.read(cx).provider_question(block_id) else { return };
         let content = self.clarify.read(cx).value().to_string();
         if content.trim().is_empty() {
             return;
@@ -251,19 +272,21 @@ impl SessionView {
         self.clarify.update(cx, |state, cx| state.set_value("", window, cx));
         let command = ProviderCommand::ClarifyQuestion {
             request_id: provider::new_request_id(),
-            session_id: self.session_id.clone(),
+            session_id: self.runtime.read(cx).session_id.clone(),
             question: pending.input_id.clone(),
             text: content,
         };
         let input_id = pending.input_id.clone();
-        self.provider_send(command, cx, move |this, result, cx| {
+        self.runtime.update(cx, |rt, cx| rt.provider_send(command, cx, move |this, result, cx| {
             if let Err(error) = result {
                 this.settle_provider_failed(&input_id, &error, cx);
             }
-        });
+        }));
         cx.notify();
     }
+}
 
+impl SessionRuntime {
     /// The ways a question's settlement can lose, by the provider's hint:
     /// someone already settled it (the settlement is on its way), or the
     /// answer was refused (pick again).

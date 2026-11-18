@@ -123,8 +123,8 @@ fn park(tasks: &mut Vec<Task<()>>, task: Task<()>) {
 /// after the entity is gone is dropped rather than panicking, exactly as
 /// before.
 ///
-/// Every provider-lane command a session view sends goes through
-/// [`ProviderCall::provider_call`] (`SessionView::provider_send`).
+/// Every provider-lane command a session sends goes through
+/// [`ProviderCall::provider_call`] (`SessionRuntime::provider_send`).
 pub trait ProviderCall: WireCall {
     /// Run `command` through [`Provider::send`] on the background executor
     /// and hand its result to `then` on the UI thread.
