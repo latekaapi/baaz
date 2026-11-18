@@ -1262,11 +1262,14 @@ impl Harness {
                 email: String::new(),
             });
             this.wire = Wire::Ready;
-            // The capture opens once the root exists, before the first frame
-            // draws (it used to open from that frame's render): the fold,
-            // the replayed row and the boot script all land in one update,
-            // and the first frame draws them.
-            cx.defer_in(window, |this, window, cx| this.open_replay(window, cx));
+            // The capture opens here, while the root is built, so the first
+            // frame draws the folded rows and measures them (it used to open
+            // from that frame's render). Deferred, it landed after
+            // `open_window` had drawn frame one: an offscreen capture window
+            // draws no other frame before the shot, so the rows stayed at
+            // their estimated heights and a `wheel:` step at a fixed delay
+            // scrolled estimates — the jump-pill captures lost their pill.
+            this.open_replay(window, cx);
             return this;
         }
         if this.args.offline {

@@ -323,10 +323,14 @@ fn the_duties_follow_their_causes() {
     assert!(floats.contains("cx.on_next_frame(window,"), "the floats sync after the layout that moved their anchors");
     let app = std::fs::read_to_string(src().join("app.rs")).expect("app.rs reads");
     assert!(app.contains("this.install_window_sync(window, cx);"), "the root wires its lifecycle when it is built");
+    // Synchronously, inside `Harness::new`: deferred, the fold landed after
+    // `open_window` drew frame one, and an offscreen capture draws no other
+    // frame before its shot (the jump-pill captures scrolled estimates).
     assert!(
-        app.contains("cx.defer_in(window, |this, window, cx| this.open_replay(window, cx));"),
-        "a replay opens when the root is built, not from a frame"
+        app.contains("            this.open_replay(window, cx);\n            return this;"),
+        "a replay opens while the root is built, before frame one, not from a frame or a defer"
     );
+    assert!(!app.contains("this.open_replay(window, cx));"), "no deferred or next-frame replay open");
     for gone in ["window_title_key", "transcript_scroll_sweep:", "focus_composer: bool,\n    /// What the billing"] {
         assert!(!app.contains(gone), "app.rs still has `{gone}`");
     }

@@ -573,8 +573,10 @@ ENTRIES = {
     # on real sessions, never claimed from these captures. No baselines:
     # generate on main after merge, never to silence a finding.
     "transcript-folded":    {"idle": ["--bench", "fixtures/msp/synthetic-toolgroup.jsonl"]},
-    "transcript-live":      {"idle": ["--bench", "--bench-open-turn",
-                                      "fixtures/msp/synthetic-toolgroup.jsonl"]},
+    # `--bench` takes the capture as its own value: the flag after it would
+    # be read as the path (the entry printed usage and never ran).
+    "transcript-live":      {"idle": ["--bench", "fixtures/msp/synthetic-toolgroup.jsonl",
+                                      "--bench-open-turn"]},
     # Y5: the first-run Connect your providers screen, offline with scripted
     # statuses (`BAAZ_PROVIDER_STATUS_SCRIPT` — the only statuses a
     # deterministic run reports). `connect-first-run` is mixed rows
