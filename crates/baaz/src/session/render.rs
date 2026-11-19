@@ -3146,6 +3146,58 @@ mod tests {
         });
     }
 
+    /// docs/82 5.7: an ACP recording (`fixtures/acp/permission.jsonl`) folds
+    /// through the registry — its provider's own `replay`, no adapter named
+    /// here — into the blocks the transcript draws, on a session of that
+    /// provider, and the view draws them.
+    #[cfg(feature = "probe")]
+    #[gpui::test]
+    fn an_acp_recording_renders_its_blocks(cx: &mut gpui::TestAppContext) {
+        use aui_protocol::{ApprovalState, Block, ToolKind, ToolStatus};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/acp/permission.jsonl");
+        let text = std::fs::read_to_string(&path).expect("the fixture reads");
+        let (id, replay) = crate::providers::replay(&text).expect("a registered provider reads the recording");
+        assert_eq!(id.as_str(), "acp", "the recording is ACP's own");
+        let vc = cx.add_empty_window();
+        let view = vc.update(|window, cx| {
+            let host = crate::session::SessionHost {
+                provider_id: id.as_str().to_owned(),
+                workspace: "/tmp/acp-recording".to_owned(),
+                overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                capture: crate::runtime::CaptureToken::default(),
+                terminal_host: None,
+            };
+            let view = cx.new(|cx| crate::session::SessionView::new("acp-recording".to_owned(), host, window, cx));
+            view.update(cx, |view, cx| {
+                view.runtime().clone().update(cx, |rt, cx| rt.load_replay(replay, cx));
+                view.refresh_render_cache(cx);
+            });
+            view
+        });
+        vc.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.rt(cx).session_id, "sess-permission", "the view follows the recording's session");
+            let turns: Vec<&Turn> = view.cached_turns.iter().map(|turn| &**turn).collect();
+            assert!(matches!(turns.first(), Some(Turn::User { text, .. }) if text == "Run the test suite."), "{turns:?}");
+            let Some(Turn::Assistant { blocks, .. }) = turns.get(1) else { panic!("the agent's turn: {turns:?}") };
+            assert!(matches!(&blocks[0], Block::Text { text, streaming: false } if text == "I'll run the tests."), "{blocks:?}");
+            assert!(
+                matches!(&blocks[1], Block::ToolCall { kind: ToolKind::Shell, status: ToolStatus::Success, target, .. } if target == "cargo test --workspace"),
+                "{blocks:?}"
+            );
+            assert!(
+                matches!(&blocks[2], Block::Approval { state: ApprovalState::AllowedOnce { exit_code: 0, .. }, choices, .. } if choices.len() == 3),
+                "{blocks:?}"
+            );
+            assert!(matches!(&blocks[3], Block::Text { text, .. } if text == "All 42 tests pass."), "{blocks:?}");
+            assert!(!view.rows.is_empty(), "the transcript has rows to draw");
+        });
+        vc.draw(gpui::point(gpui::px(0.), gpui::px(0.)), gpui::size(gpui::px(900.), gpui::px(800.)), |_, _| {
+            view.clone().into_any_element()
+        });
+    }
+
     /// The render cache (docs/51 #6, P2): one streamed turn's events at the
     /// end of a 300-turn-and-growing session — apply plus
     /// `refresh_render_cache` per event, the work streaming costs before

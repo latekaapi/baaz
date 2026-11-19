@@ -46,6 +46,13 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     routes: &[],
     traits: &[ProviderTrait::ModelsLimitModes],
     capabilities: |_| crate::caps::capabilities(),
+    command_env: None,
+};
+
+/// The app's registry line for this provider (docs/82 5.7).
+pub static REGISTRATION: provider::Registration = provider::Registration {
+    descriptor: &DESCRIPTOR,
+    factory: |_client| std::sync::Arc::new(ClaudeCodeFactory),
 };
 
 /// How a Claude Code lane opens: a child per session, under Baaz's own

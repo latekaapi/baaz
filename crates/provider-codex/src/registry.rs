@@ -47,6 +47,13 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     routes: &[],
     traits: &[ProviderTrait::ModelsLimitModes, ProviderTrait::DeviceCodeSignIn],
     capabilities: |_| crate::caps::capabilities(),
+    command_env: None,
+};
+
+/// The app's registry line for this provider (docs/82 5.7).
+pub static REGISTRATION: provider::Registration = provider::Registration {
+    descriptor: &DESCRIPTOR,
+    factory: |_client| std::sync::Arc::new(CodexFactory),
 };
 
 /// Codex's modes: the `(approval, sandbox)` pair each opens a thread with

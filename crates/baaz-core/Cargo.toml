@@ -29,6 +29,9 @@ provider.workspace = true
 provider-muse.workspace = true
 provider-codex = { path = "../provider-codex" }
 provider-claude-code = { path = "../provider-claude-code" }
+# docs/82 5.7: any ACP agent the person configures, registered with one line
+# in `providers.rs`.
+provider-acp.workspace = true
 futures.workspace = true
 crossbeam-channel.workspace = true
 serde.workspace = true

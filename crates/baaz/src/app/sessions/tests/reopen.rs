@@ -980,6 +980,7 @@ fn a_records_provider_parses_strictly() {
     // never a fallback (docs/82 5.4).
     assert_eq!(ProviderId::resolve("echo"), Ok(ProviderId::Muse), "a declared route names its provider");
     assert_eq!(ProviderId::resolve("meta"), Ok(ProviderId::Muse));
-    assert!(ProviderId::resolve("acp").is_err(), "an unknown id is an error, not Muse");
+    assert!(ProviderId::resolve("gemini").is_err(), "an unknown id is an error, not Muse");
+    assert_eq!(ProviderId::resolve("acp").map(ProviderId::as_str), Ok("acp"), "a registered key, offered or not (docs/82 5.7)");
     assert!(ProviderId::resolve("").is_err());
 }

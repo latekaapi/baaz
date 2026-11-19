@@ -31,8 +31,8 @@ a git-ignored `.cargo/config.toml` patches the eight `aui*` crates to
 ships by tagging `agentic-ui`, then bumping the tag here.
 
 The workspace members are `baaz`, `provider`, `provider-muse`,
-`provider-claude-code`, `provider-codex`, `muse-client`, `muse-adapter`,
-`session-store` and `mcp-bridge`. `crates/baaz-cef-helper` is its own
+`provider-claude-code`, `provider-codex`, `provider-acp`, `muse-client`,
+`muse-adapter`, `session-store` and `mcp-bridge`. `crates/baaz-cef-helper` is its own
 workspace on purpose: building it pulls in CEF, so only
 `scripts/bundle.sh` builds it. The `cef` feature of `baaz` is off by
 default; without it the browser pane uses WKWebView.
@@ -61,6 +61,7 @@ Threads in the `baaz` process, by job:
 | `muse-hub-reader` | `crates/provider-muse/src/hub.rs` | fold Muse events and route them to per-session lanes |
 | `provider-claude-code-pump`, `-stdin`, stderr | `crates/provider-claude-code/src/child.rs` | one set per `claude` child; stdin has one writer thread |
 | `provider-codex-pump`, `-stdin`, stderr, `codex-rate-limits`, `codex-effort` | `crates/provider-codex/src/child.rs`, `lib.rs` | one set per Codex child; stdin has one writer thread, so the pump never waits on a write |
+| `provider-acp-pump`, `-stdin`, stderr | `crates/provider-acp/src/child.rs` | one set per ACP agent child; stdin has one writer thread |
 | `pid-ledger-sweep` | `crates/provider-runtime/src/ledger.rs` | once at launch: ends the children a Baaz that died left running (only children proven its own) |
 | `muse-bridge-N` | `crates/baaz/src/conn.rs` | one per lane: forwards a crossbeam receiver onto a futures channel the UI task awaits (the name is historical; every provider uses it) |
 | `store:<file>` | `crates/baaz/src/store.rs` | one writer per `JsonStore` file, started on first save |
@@ -114,17 +115,22 @@ The adapter crates:
 | `provider-muse` | the Muse adapter. `MuseHub` owns the one `muse serve` child; each session is a `MuseLane` adapter on it. The only seam crate allowed to depend on `muse-client`. `replay.rs` turns a capture into the same `ProviderEvent`s for `--replay` and `--bench` |
 | `provider-claude-code` | one `claude` child per session over stream-json stdio, with its own fold, controls channel and `CLAUDE_CONFIG_DIR=<state>/claude-home` |
 | `provider-codex` | one `codex app-server` child per session over JSON-RPC (it sends requests back, notably approvals), with `CODEX_HOME=<state>/codex-home` |
-| `transcript-core` | `TranscriptBuilder`, the one transcript builder under all three folds (docs/82 5.3): a fold names blocks by stable id (`tool:<id>`, `approval:<id>`, …) and the builder owns their positions and emits the positional `Delta`s; it also owns the tool-verb table, the baaz terminal-tool cards, diffs and their stats, the todo states, approval cards and child-loss settlement. Depends on `aui-protocol` (and `serde_json`) only |
+| `provider-acp` | any Agent Client Protocol agent (docs/82 5.7): one child per session over JSON-RPC stdio (`initialize`, `session/new`/`load`/`prompt`/`cancel`, `session/update`, `session/request_permission`), its capabilities from the agent's `initialize` answer. The agent is the command line in `BAAZ_ACP_AGENT`; unset, the provider is not offered. Tested from hand-written `fixtures/acp/*.jsonl` on a stand-in only |
+| `transcript-core` | `TranscriptBuilder`, the one transcript builder under every fold (docs/82 5.3, 5.7): a fold names blocks by stable id (`tool:<id>`, `approval:<id>`, …) and the builder owns their positions and emits the positional `Delta`s; it also owns the tool-verb table, the baaz terminal-tool cards, diffs and their stats, the todo states, approval cards and child-loss settlement. Depends on `aui-protocol` (and `serde_json`) only |
 | `session-store` | `SessionStore`: one session's transcript folded from neutral deltas, plus its side facts. Pure; every `SessionRuntime` holds one |
 | `mcp-bridge` | a stdio MCP server exposing Baaz's terminal and browser tools to an agent, forwarding to the app's socket |
 
 Each adapter crate registers itself (docs/82 5.4): a `ProviderDescriptor`
-(key, label, icon, binaries and env override, install and update commands,
-docs, version floor, account label, declared modes and traits) and a
-`ProviderFactory` that opens lanes from a `SessionSpawn` (state dir, owner
-home, MCP servers, owner-MCP opt-in). `crates/baaz-core/src/providers.rs` is
-the registry: `ProviderId::descriptor` names each registration, and the
-window's `Registry` holds the factories — Muse's is also its hub's slot
+(key, label, icon, binaries and env override — or, for a provider the person
+configures, the env var holding its command line — install and update
+commands, docs, version floor, account label, declared modes and traits) and
+a `ProviderFactory` that opens lanes from a `SessionSpawn` (state dir, owner
+home, MCP servers, owner-MCP opt-in) and folds its own recordings for
+`--replay`; both ride one `provider::Registration`.
+`crates/baaz-core/src/providers.rs` is the registry: its `REGISTRATIONS`
+table lists one line per adapter (ACP joined with one, docs/82 5.7),
+`ProviderId` is a handle on one entry by key, and the window's `Registry`
+holds the factories — Muse's is also its hub's slot
 (`SharedChild`), so a Muse open waits for the hub while Claude Code and
 Codex spawn a child with the terminal relay and their Baaz-owned home
 pinned. The app asks for traits (`ProviderTrait`), never "is it Muse"; an

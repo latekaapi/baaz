@@ -1,0 +1,16 @@
+# load.jsonl — a stored session re-opened with session/load: its turns stream back, then one more prompt.
+# HAND-WRITTEN, not a wire capture (docs/82 5.7): no ACP agent was run to make it.
+# Message shapes follow the Agent Client Protocol v1 schema (agentclientprotocol.com).
+# Played by crates/provider-acp/tests/fixtures/acp_agent.py; folded by provider_acp::replay.
+{"_dir": "client->agent", "frame": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}, "clientInfo": {"name": "baaz", "version": "0.1.0"}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": true, "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false}, "mcpCapabilities": {"http": false, "sse": false}}, "agentInfo": {"name": "stand-in-agent", "title": "Stand-in Agent", "version": "0.4.2"}, "authMethods": []}}}
+{"_dir": "client->agent", "frame": {"jsonrpc": "2.0", "id": 2, "method": "session/load", "params": {"sessionId": "sess-stored", "cwd": "/Users/ada/work/acme-web", "mcpServers": []}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-stored", "update": {"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "Which file holds the retry helper?"}}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-stored", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "It lives in `src/net.rs`."}}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-stored", "update": {"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "Show me its signature."}}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-stored", "update": {"sessionUpdate": "tool_call", "toolCallId": "call-old-read", "title": "Read src/net.rs", "kind": "read", "status": "completed", "locations": [{"path": "/Users/ada/work/acme-web/src/net.rs"}], "content": [{"type": "content", "content": {"type": "text", "text": "pub fn retry_with_backoff<T>(op: impl FnMut() -> Result<T>) -> Result<T>"}}]}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-stored", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "`retry_with_backoff<T>(op) -> Result<T>`."}}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "id": 2, "result": null}}
+{"_dir": "client->agent", "frame": {"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {"sessionId": "sess-stored", "prompt": [{"type": "text", "text": "Thanks \u2014 and where is it called from?"}]}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-stored", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "From `fetch_manifest` and `upload_artifact`."}}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}

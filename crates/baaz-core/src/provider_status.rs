@@ -1225,6 +1225,10 @@ fn probe_provider(
                 }
             }
         }
+        // A provider with no sign-in probe of its own (an ACP agent signs
+        // in on its own terms, docs/82 5.7): installed, sign-in not
+        // verified — never Signed out.
+        _ => status.auth = Auth::Unverified,
     }
     status.checked_at = Some(now_secs());
     status
@@ -2087,9 +2091,10 @@ mod tests {
         let probes = Probes {
             resolve: Arc::new(move |id| {
                 Some(PathBuf::from(match id {
-                    ProviderId::Muse => "/bin/muse",
-                    ProviderId::ClaudeCode => "/bin/claude",
-                    ProviderId::Codex => "/bin/codex",
+                    ProviderId::Muse => "/bin/muse".to_owned(),
+                    ProviderId::ClaudeCode => "/bin/claude".to_owned(),
+                    ProviderId::Codex => "/bin/codex".to_owned(),
+                    other => format!("/bin/{}", other.as_str()),
                 }))
             }),
             run: Arc::new(move |program, args| {
@@ -2855,7 +2860,7 @@ mod tests {
         // spends another's window.
         let now = Instant::now();
         let all = ProviderId::all();
-        assert_eq!(usage_refresh_due(&HashMap::new(), &all, now), Vec::from(all), "never refreshed counts as due");
+        assert_eq!(usage_refresh_due(&HashMap::new(), &all, now), all, "never refreshed counts as due");
         let mut last = HashMap::new();
         last.insert(ProviderId::ClaudeCode, now);
         assert!(usage_refresh_due(&last, &[ProviderId::ClaudeCode], now).is_empty(), "seconds later it rides");
@@ -2884,7 +2889,7 @@ mod tests {
             status
         };
         let statuses = vec![connected(ProviderId::Muse), connected(ProviderId::ClaudeCode), connected(ProviderId::Codex)];
-        assert_eq!(usage_refresh_targets(&statuses), Vec::from(ProviderId::all()));
+        assert_eq!(usage_refresh_targets(&statuses), ProviderId::all());
         let mut disabled = connected(ProviderId::Codex);
         disabled.enabled = false;
         let statuses = vec![connected(ProviderId::Muse), connected(ProviderId::ClaudeCode), disabled];

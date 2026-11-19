@@ -36,6 +36,12 @@ impl Capture {
     /// Read `path`. Lines that do not frame are logged to stderr and skipped.
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let text = std::fs::read_to_string(path)?;
+        Ok(Self::parse(&text, &path.display().to_string()))
+    }
+
+    /// Read a capture's text; `source` names it in the stderr line a line
+    /// that does not frame gets.
+    pub fn parse(text: &str, source: &str) -> Self {
         let mut raw = Vec::new();
         let mut sent = Vec::new();
         for (number, line) in text.lines().enumerate() {
@@ -50,10 +56,10 @@ impl Capture {
                 Ok(Some(frame::Frame::Response { result, .. })) => raw.extend(page_result_events(&result)),
                 Ok(Some(frame)) => raw.extend(MuseEvent::from_frame(frame)),
                 Ok(None) => {}
-                Err(error) => eprintln!("{}:{}: {error}", path.display(), number + 1),
+                Err(error) => eprintln!("{source}:{}: {error}", number + 1),
             }
         }
-        Ok(Self { raw, sent })
+        Self { raw, sent }
     }
 
     /// The session the capture names first, if it names one.

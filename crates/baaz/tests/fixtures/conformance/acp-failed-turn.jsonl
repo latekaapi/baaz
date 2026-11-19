@@ -1,0 +1,10 @@
+# acp-failed-turn.jsonl — HAND-WRITTEN, not a wire capture (docs/71 §6, docs/82 5.7).
+# fixtures/acp/answer.jsonl with its prompt answered by a JSON-RPC error instead of a stop
+# reason: the turn fails with the agent's own words. No ACP agent was run to make it.
+{"_dir": "client->agent", "frame": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}, "clientInfo": {"name": "baaz", "version": "0.1.0"}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": true, "promptCapabilities": {"image": false}}, "agentInfo": {"name": "stand-in-agent", "title": "Stand-in Agent", "version": "0.4.2"}, "authMethods": []}}}
+{"_dir": "client->agent", "frame": {"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": "/Users/ada/work/acme-web", "mcpServers": []}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "sess-failed"}}}
+{"_dir": "client->agent", "frame": {"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {"sessionId": "sess-failed", "prompt": [{"type": "text", "text": "Summarise the changes."}]}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-failed", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Reading the diff\u2026"}}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "id": 3, "error": {"code": -32603, "message": "Internal error: the model stream closed unexpectedly (simulated)"}}}

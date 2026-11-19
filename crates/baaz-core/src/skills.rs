@@ -508,7 +508,7 @@ fn run_cli(program: &str, args: &[&str], dir: Option<&std::path::Path>) -> Optio
 /// Whether `program` is a test's stand-in: a file under the temp dir, never
 /// a bare name or an installed binary.
 #[cfg(any(test, feature = "test-support"))]
-fn is_stand_in(program: &str) -> bool {
+pub(crate) fn is_stand_in(program: &str) -> bool {
     let canonical = |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let path = std::path::Path::new(program);
     if !path.is_absolute() {

@@ -65,6 +65,13 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         ProviderTrait::AccountOnConnection,
     ],
     capabilities: |version| crate::capabilities_for_version(version.unwrap_or(crate::MUSE_MCP_VERSION_FLOOR)),
+    command_env: None,
+};
+
+/// The app's registry line for this provider (docs/82 5.7).
+pub static REGISTRATION: provider::Registration = provider::Registration {
+    descriptor: &DESCRIPTOR,
+    factory: |client| std::sync::Arc::new(MuseFactory::new(client.clone())),
 };
 
 /// Muse's modes are MSP's own four. Read-only refuses an unmatched MCP
@@ -173,6 +180,16 @@ impl MuseFactory {
 impl ProviderFactory for MuseFactory {
     fn descriptor(&self) -> &'static ProviderDescriptor {
         &DESCRIPTOR
+    }
+
+    /// A Muse session-log capture (`--> ` / `<-- ` lines), folded through
+    /// the same translation a hub lane runs ([`crate::replay::Capture`]).
+    fn replay(&self, recording: &str) -> Option<provider::Replay> {
+        let capture = crate::replay::Capture::parse(recording, "replay");
+        if capture.is_empty() {
+            return None;
+        }
+        Some(provider::Replay { session_id: capture.session_id(), sent: capture.sent.clone(), events: capture.events() })
     }
 
     /// A connected lane on the hub, waiting up to [`MUSE_START_WAIT`] while

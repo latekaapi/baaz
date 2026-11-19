@@ -115,6 +115,8 @@ crates/provider-runtime       the process runtime under every adapter
 crates/transcript-core        one transcript builder under every provider's fold
 crates/provider-claude-code   Claude Code over stream-json stdio
 crates/provider-codex         Codex over `codex app-server` (JSON-RPC)
+crates/provider-acp           any Agent Client Protocol agent (JSON-RPC over
+                              stdio), set up with `BAAZ_ACP_AGENT`
 crates/provider-muse          Muse Code over MSP, on muse-client + muse-adapter
 crates/muse-client            the `muse serve` transport
 crates/muse-adapter           folds Muse's view events into the session model

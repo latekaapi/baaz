@@ -460,8 +460,9 @@ fn the_core_names_muse_only_where_listed_and_never_more() {
 }
 
 /// The adapter crates, one per wire: Muse's (`provider-muse` over
-/// `muse-client`), Claude Code's and Codex's.
-const ADAPTER_CRATES: [&str; 3] = ["provider_muse", "provider_codex", "provider_claude_code"];
+/// `muse-client`), Claude Code's, Codex's and ACP's (docs/82 5.7: no file
+/// but the registry names it).
+const ADAPTER_CRATES: [&str; 4] = ["provider_muse", "provider_codex", "provider_claude_code", "provider_acp"];
 
 /// The registry: the one file that names the adapter crates'
 /// registrations (descriptors and factories).
@@ -471,10 +472,10 @@ const REGISTRY: &str = "baaz-core/providers.rs";
 /// each with why. The list may only shrink: a file that stops naming an
 /// adapter must leave it, and a file not listed may not start.
 const WIRE_EXCEPTIONS: [(&str, &str); 18] = [
-    ("app.rs", "a `--replay` capture is Muse's own session-log format (provider_muse::replay)"),
+    ("app.rs", "the `--bench` replay drives a Muse-format capture event by event (provider_muse::replay)"),
     ("bench.rs", "the bench drives a Muse-format capture"),
     ("perf_turn.rs", "the perf budget folds a Muse-format capture"),
-    ("session.rs", "the read-only replay lane and capture loading (provider_muse::replay)"),
+    ("session.rs", "the read-only replay lane (provider_muse::replay)"),
     ("session/runtime.rs", "the capture folder and Codex's per-model effort table (5.5 declares efforts)"),
     ("session/composer.rs", "Claude Code's effort levels and model-id normalising (5.5 declares efforts)"),
     ("session/commands.rs", "Claude Code's and Codex's effort tables (5.5 declares efforts)"),
@@ -505,8 +506,9 @@ fn files_reaching_an_adapter() -> Vec<String> {
     hits
 }
 
-/// docs/82 5.4: the seam ratchet covers all three wires. No app code
-/// reaches into an adapter crate — Muse's, Claude Code's or Codex's —
+/// docs/82 5.4, 5.7: the seam ratchet covers every wire. No app code
+/// reaches into an adapter crate — Muse's, Claude Code's, Codex's or
+/// ACP's —
 /// except through the registry, or where [`WIRE_EXCEPTIONS`] says why.
 #[test]
 fn no_app_code_reaches_an_adapter_except_through_the_registry() {

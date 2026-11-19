@@ -85,6 +85,15 @@ pub struct ProviderDescriptor {
     /// Its capability table at a CLI version (its declared floor when the
     /// version is not known): the adapter's own evidence, never a copy.
     pub capabilities: fn(Option<&str>) -> CapabilitySet,
+    /// Where its command comes from when the person configures it rather
+    /// than Baaz finding a known CLI (docs/82 5.7: an ACP agent is whatever
+    /// the person installed): the environment variable holding the command
+    /// line — the program, then its arguments, split on whitespace. A
+    /// provider that declares one is offered only while the variable names
+    /// a command ([`Self::offered`]; rule 13: an agent nobody configured has
+    /// nothing to run). `None` for a provider Baaz finds by
+    /// [`Self::binaries`].
+    pub command_env: Option<&'static str>,
 }
 
 impl ProviderDescriptor {
@@ -102,6 +111,54 @@ impl ProviderDescriptor {
     pub fn answers_to(&self, raw: &str) -> bool {
         self.key == raw || self.routes.contains(&raw)
     }
+
+    /// The command line the person configured ([`Self::command_env`]),
+    /// program first; `None` for a provider Baaz finds itself, and for one
+    /// nobody configured.
+    pub fn configured_command(&self) -> Option<Vec<String>> {
+        let line = std::env::var(self.command_env?).ok()?;
+        command_words(&line)
+    }
+
+    /// Whether the app offers this provider at all: always for one Baaz
+    /// finds itself; for one the person configures, only while it is
+    /// configured.
+    pub fn offered(&self) -> bool {
+        self.command_env.is_none() || self.configured_command().is_some()
+    }
+}
+
+/// A configured command line as words: the program, then its arguments,
+/// split on whitespace (no quoting). `None` when it names nothing.
+pub fn command_words(line: &str) -> Option<Vec<String>> {
+    let words: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
+    (!words.is_empty()).then_some(words)
+}
+
+/// One adapter crate's entry in the app's registry table: its declaration
+/// and how to make its factory. Each adapter exports one; the app lists
+/// them, one line per provider, and names an adapter nowhere else
+/// (docs/82 5.4, 5.7).
+pub struct Registration {
+    /// The provider's declaration.
+    pub descriptor: &'static ProviderDescriptor,
+    /// Its factory, for a window whose client identifies as `client`.
+    pub factory: fn(&ConnectInfo) -> Arc<dyn ProviderFactory>,
+}
+
+/// A recording of one session, folded the way its live lane folds the
+/// wire but with no child and no credential: what `--replay` opens
+/// (docs/82 5.7). Each provider reads its own recordings
+/// ([`ProviderFactory::replay`]).
+#[derive(Clone, Debug, Default)]
+pub struct Replay {
+    /// The session the recording names, when it names one.
+    pub session_id: Option<String>,
+    /// `(command id, words)` for each prompt the recording sent: what a
+    /// failed turn's Retry and the first-prompt title read.
+    pub sent: Vec<(String, String)>,
+    /// The folded events, in order.
+    pub events: Vec<ProviderEvent>,
 }
 
 /// One approval mode as the adapter runs it: the neutral mode it maps to,
@@ -314,6 +371,13 @@ pub trait ProviderFactory: Send + Sync {
     fn shared_child(&self) -> Option<&dyn SharedChild> {
         None
     }
+
+    /// `recording`, folded with no child, when it is one of this
+    /// provider's own recordings; `None` when it is not (another
+    /// provider's, or nothing anyone reads).
+    fn replay(&self, _recording: &str) -> Option<Replay> {
+        None
+    }
 }
 
 /// What came back from starting a shared child.
@@ -477,6 +541,7 @@ mod tests {
             use crate::ProviderAdapter as _;
             crate::scripted::ScriptedProvider::new().capabilities()
         },
+        command_env: None,
     };
 
     struct Plain(&'static str);
@@ -508,6 +573,29 @@ mod tests {
         assert_eq!(registry.iter().count(), 1);
         let error = registry.get("plain").expect("registered").open(&SessionSpawn::new(ConnectInfo::new("test", "0"), PathBuf::new())).err();
         assert!(error.map(|e| e.to_string()).unwrap_or_default().contains("second"), "the second registration answers");
+    }
+
+    #[test]
+    fn a_configured_provider_is_offered_only_while_its_command_is_set() {
+        static CONFIGURED: ProviderDescriptor = ProviderDescriptor {
+            key: "configured",
+            command_env: Some("BAAZ_TEST_REGISTRY_CONFIGURED_COMMAND"),
+            ..PLAIN
+        };
+        assert!(PLAIN.offered(), "a provider Baaz finds itself is always offered");
+        assert_eq!(PLAIN.configured_command(), None);
+        std::env::remove_var("BAAZ_TEST_REGISTRY_CONFIGURED_COMMAND");
+        assert!(!CONFIGURED.offered(), "nobody configured it: nothing to run, not offered");
+        std::env::set_var("BAAZ_TEST_REGISTRY_CONFIGURED_COMMAND", "   ");
+        assert!(!CONFIGURED.offered(), "a blank command names nothing");
+        std::env::set_var("BAAZ_TEST_REGISTRY_CONFIGURED_COMMAND", " /opt/agent  --acp  -v ");
+        assert_eq!(
+            CONFIGURED.configured_command(),
+            Some(vec!["/opt/agent".to_owned(), "--acp".to_owned(), "-v".to_owned()]),
+            "program first, then its arguments, split on whitespace"
+        );
+        assert!(CONFIGURED.offered());
+        std::env::remove_var("BAAZ_TEST_REGISTRY_CONFIGURED_COMMAND");
     }
 
     #[test]

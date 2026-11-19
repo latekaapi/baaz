@@ -8,7 +8,9 @@
 //! * Claude Code and Codex: `tests/fixtures/conformance/fake_agent.py`
 //!   (`fixtures/claude-code/*.jsonl`, `fixtures/codex/*.jsonl`);
 //! * Muse: `tests/fixtures/conformance/msp_replay.py` through the real hub
-//!   (`fixtures/msp/*.jsonl`).
+//!   (`fixtures/msp/*.jsonl`);
+//! * ACP: `crates/provider-acp/tests/fixtures/acp_agent.py`
+//!   (`fixtures/acp/*.jsonl`, hand-written: docs/82 5.7).
 //!
 //! The driver replays the client half: it opens (or resumes) the session
 //! the fixture recorded, submits one prompt per recorded turn, interrupts
@@ -17,9 +19,9 @@
 //! answers every question. Each command, its ack and every event land in
 //! one [`Trace`] in the order the driver saw them.
 //!
-//! The suite is parameterised over [`ADAPTERS`]: a new adapter (5.7's ACP)
-//! joins with one line there and a `cases` function that lists its
-//! fixtures.
+//! The suite is parameterised over [`ADAPTERS`]: an adapter joins with one
+//! line there and a `cases` function that lists its fixtures (ACP did, in
+//! docs/82 5.7).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -47,10 +49,11 @@ pub struct Adapter {
 }
 
 /// The adapters the suite runs. A new adapter joins here.
-pub const ADAPTERS: [Adapter; 3] = [
+pub const ADAPTERS: [Adapter; 4] = [
     Adapter { agent: Agent::ClaudeCode, cases: claude_cases },
     Adapter { agent: Agent::Codex, cases: codex_cases },
     Adapter { agent: Agent::Muse, cases: muse_cases },
+    Adapter { agent: Agent::Acp, cases: acp_cases },
 ];
 
 /// How the session starts.
@@ -358,6 +361,60 @@ pub fn muse_case(path: &Path) -> Case {
     }
 }
 
+// -------------------------------------------------------------------- ACP
+
+/// Every `fixtures/acp` recording, played by `acp_agent.py`: the driver
+/// opens (`session/new`) or re-opens (`session/load`) the session it
+/// records, submits per `session/prompt`, interrupts per `session/cancel`
+/// and decides the permission with the recorded option.
+fn acp_cases() -> Vec<Case> {
+    jsonl("acp").iter().map(|path| acp_case(path)).collect()
+}
+
+/// One ACP recording, as the driver plays it.
+pub fn acp_case(path: &Path) -> Case {
+    let frames = lines(path);
+    let client = |frame: &&serde_json::Value| frame["_dir"] == "client->agent";
+    let mut start = Start::Open;
+    let mut steps = Vec::new();
+    let mut choice = "allow-once".to_owned();
+    let mut prompts = Vec::new();
+    for frame in frames.iter().filter(client) {
+        let body = &frame["frame"];
+        match body["method"].as_str() {
+            Some("session/load") => {
+                let session = body["params"]["sessionId"].as_str().unwrap_or_default().to_owned();
+                start = Start::Resume { session, stored: None };
+            }
+            Some("session/prompt") => {
+                steps.push(Step::Submit);
+                prompts.push(body["id"].clone());
+            }
+            Some("session/cancel") => steps.push(Step::Interrupt),
+            None => {
+                if let Some(option) = body["result"]["outcome"]["optionId"].as_str() {
+                    choice = option.to_owned();
+                }
+            }
+            _ => {}
+        }
+    }
+    // Every prompt answered (with a stop reason or an error), or the agent
+    // died: either way the wire ended every turn it opened.
+    let answered = prompts.iter().all(|id| {
+        frames.iter().any(|frame| frame["_dir"] == "agent->client" && frame["frame"]["id"] == *id && frame["frame"].get("method").is_none())
+    });
+    let died = frames.iter().any(|frame| frame.get("exit").is_some());
+    Case {
+        name: format!("acp/{}", stem(path)),
+        plan: path.to_string_lossy().into_owned(),
+        start,
+        steps,
+        choice,
+        expect: Expect { closed: answered || died, wire_usage: None },
+    }
+}
+
 // ---------------------------------------------------------------- driver
 
 /// One adapter on its stand-in, recording everything into a trace.
@@ -625,6 +682,9 @@ pub fn run(agent: Agent, case: &Case) -> (Trace, Vec<Violation>) {
             driver.send(Sent::Open, command)
         }
         Start::Resume { session, stored } => {
+            if agent == Agent::Acp {
+                super::plant_acp_workspace(&driver.dir, session);
+            }
             if let Some(stored) = stored {
                 let slug = driver.dir.join("claude-home/projects/-conformance");
                 std::fs::create_dir_all(&slug).expect("slug dir");

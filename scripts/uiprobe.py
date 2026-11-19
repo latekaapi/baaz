@@ -826,6 +826,25 @@ ENTRIES.update({
                                 "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-commands-state-")}},
 })
 
+# docs/82 5.7 (provider #4): a hand-written ACP recording replayed into the
+# app through the registry (`--replay` asks every registered provider; ACP's
+# own `replay` reads it), offline, with no agent configured or run. The
+# session is the ACP provider's: its badge, its label on its own row.
+#   acp-transcript   fixtures/acp/plan.jsonl: the plan card refined in place,
+#                    a read, an edit with its diff chip, the reply
+#   acp-approval     fixtures/acp/permission.jsonl: a shell call that asked
+#                    first, allowed once (Once / Always here / Deny), and ran
+ENTRIES.update({
+    "acp-transcript":          {"shot": ["--no-connect", "--login", "signed-in",
+                                         "--replay", "fixtures/acp/plan.jsonl",
+                                         "--steps", "wait:1500;end"],
+                                "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-acp-state-")}},
+    "acp-approval":            {"shot": ["--no-connect", "--login", "signed-in",
+                                         "--replay", "fixtures/acp/permission.jsonl",
+                                         "--steps", "wait:1500;end"],
+                                "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-acp-approval-state-")}},
+})
+
 ENTRIES.update({
     "jump-pill":               _jump_entry("--tier", "subscription"),
     "jump-pill-plan-banner":   _jump_entry("--tier", "unknown"),

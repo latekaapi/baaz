@@ -27,9 +27,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The names rule 14 keeps out of shared copy. "Claude" covers "Claude
-/// Code"; case-sensitive, so wire keys (`claude-code`, `codex`) and env
-/// names (`ANTHROPIC_API_KEY`) are not words of copy.
-const NAMES: [&str; 5] = ["Muse", "Claude", "Codex", "OpenAI", "Anthropic"];
+/// Code"; "ACP" is the ACP provider's own label (docs/82 5.7), which lives
+/// in its descriptor; case-sensitive, so wire keys (`claude-code`, `codex`,
+/// `acp`) and env names (`ANTHROPIC_API_KEY`, `BAAZ_ACP_AGENT`) are not
+/// words of copy.
+const NAMES: [&str; 6] = ["Muse", "Claude", "Codex", "OpenAI", "Anthropic", "ACP"];
 
 /// Calls whose literal arguments are logs, panics or assertions — never
 /// drawn on screen.

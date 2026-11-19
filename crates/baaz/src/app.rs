@@ -3139,26 +3139,44 @@ impl Harness {
         let workspace = sidebar::replay_workspace(&path)
             .map(|root| projects::canonical_str(&root))
             .unwrap_or_else(|| self.workspace(cx));
-        let (provider, workspace) = (self.args.provider.clone(), workspace);
-        let overlays = self.overlays.clone();
-        let capture = self.capture.clone();
         // `--bench` through the shell drives the stream itself, event by
         // event, so the view opens in bench-replay state instead of folding
         // the capture at once.
         let bench = self.args.bench_shell;
+        // Anything else folds through the registry: the provider whose own
+        // recording it is reads it (docs/82 5.7), and the session is that
+        // provider's — unless the flag already names it in its own words (a
+        // route).
+        let replayed = (!bench).then(|| std::fs::read_to_string(&path).map(|text| crate::providers::replay(&text)));
+        let provider = match &replayed {
+            Some(Ok(Some((id, _)))) if crate::providers::ProviderId::resolve(&self.args.provider).ok() != Some(*id) => {
+                id.as_str().to_owned()
+            }
+            _ => self.args.provider.clone(),
+        };
+        let overlays = self.overlays.clone();
+        let capture = self.capture.clone();
         // The capture names its own session; this id is a placeholder the view
         // replaces the moment the first line is folded.
         let view = cx.new(|cx| {
             let host = SessionHost { provider_id: provider, workspace, overlays, capture, terminal_host: None };
             let mut view = SessionView::new("replay".to_owned(), host, window, cx);
             view.set_at_rest(at_rest);
-            match provider_muse::replay::Capture::load(&path) {
-                Ok(capture) if bench => {
-                    let id = capture.session_id().unwrap_or_else(|| "bench".to_owned());
-                    view.runtime().clone().update(cx, |rt, cx| rt.begin_bench_replay(id, capture.sent, cx));
-                }
-                Ok(capture) => view.runtime().clone().update(cx, |rt, cx| rt.load_capture(capture, cx)),
-                Err(error) => view.runtime().clone().update(cx, |rt, cx| rt.show_banner(&format!("{}: {error}", path.display()), cx)),
+            let failed = |error: String, view: &mut SessionView, cx: &mut Context<SessionView>| {
+                view.runtime().clone().update(cx, |rt, cx| rt.show_banner(&format!("{}: {error}", path.display()), cx));
+            };
+            match replayed {
+                // The bench drives a Muse-format capture event by event.
+                None => match provider_muse::replay::Capture::load(&path) {
+                    Ok(capture) => {
+                        let id = capture.session_id().unwrap_or_else(|| "bench".to_owned());
+                        view.runtime().clone().update(cx, |rt, cx| rt.begin_bench_replay(id, capture.sent, cx));
+                    }
+                    Err(error) => failed(error.to_string(), &mut view, cx),
+                },
+                Some(Ok(Some((_, replay)))) => view.runtime().clone().update(cx, |rt, cx| rt.load_replay(replay, cx)),
+                Some(Ok(None)) => failed("no registered provider reads this recording".to_owned(), &mut view, cx),
+                Some(Err(error)) => failed(error.to_string(), &mut view, cx),
             }
             view.runtime().clone().update(cx, |rt, cx| rt.load_history(cx));
             view

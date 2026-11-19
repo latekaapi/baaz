@@ -2256,21 +2256,22 @@ pub(crate) enum ListJump {
 
 impl SessionRuntime {
     #[cfg(feature = "probe")]
-    /// Fold a capture into this view: `--replay` (decision A0). The capture
-    /// folds through the same translation a live Muse lane does, at once and
-    /// with no child and no wire, so screenshots cost nothing. The view
-    /// follows the capture's own session id, learns the prompts its turns
-    /// were sent with, and a turn the capture leaves open reads running.
-    pub fn load_capture(&mut self, capture: provider_muse::replay::Capture, cx: &mut Context<Self>) {
+    /// Fold a recording into this view: `--replay` (decision A0). The
+    /// recording folds through the same translation its provider's live
+    /// lane runs (its factory's `replay`, docs/82 5.7), at once and with no
+    /// child and no wire, so screenshots cost nothing. The view follows the
+    /// recording's own session id, learns the prompts its turns were sent
+    /// with, and a turn the recording leaves open reads running.
+    pub fn load_replay(&mut self, replay: provider::Replay, cx: &mut Context<Self>) {
         self.replay = true;
-        if let Some(id) = capture.session_id() {
+        if let Some(id) = replay.session_id {
             self.session_id = id;
             self.store.rename(&self.session_id);
         }
-        for (command_id, text) in capture.sent.clone() {
-            self.remember_command(&command_id, &text);
+        for (command_id, text) in &replay.sent {
+            self.remember_command(command_id, text);
         }
-        self.fold_provider_events(capture.events(), cx);
+        self.fold_provider_events(replay.events, cx);
         self.observe_clocks(cx);
         cx.emit(RuntimeEvent::EntriesAppended);
     }

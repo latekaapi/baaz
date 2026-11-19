@@ -33,10 +33,11 @@ const INSTALL_DIRS: [&str; 5] = ["/opt/homebrew/bin/", "/usr/local/bin/", "/.loc
 
 /// Calls that start (or resolve, then start) the program their first
 /// argument names.
-const SPAWNERS: [&str; 10] = [
+const SPAWNERS: [&str; 11] = [
     "Command::new(",
     "ClaudeCodeAdapter::new(",
     "CodexAdapter::new(",
+    "AcpAdapter::new(",
     "MuseHub::connect(",
     "MuseClient::spawn(",
     "MuseClient::connect(",

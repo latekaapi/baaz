@@ -7,10 +7,12 @@
 //! modes, and the traits that name what it offers beyond the seam) and a
 //! [`ProviderFactory`](provider::ProviderFactory) that opens its lanes.
 //! [`ProviderId`] is the app's handle on one registration; this module is
-//! the one place that names the adapter crates' registrations
-//! ([`ProviderId::descriptor`], [`Registry::for_window`]), and the rest of
-//! the app asks the registry — a trait, a label, a factory — never "is this
-//! provider X?".
+//! the one place that names the adapter crates' registrations (its
+//! `REGISTRATIONS` table: one line per provider — ACP joined with one,
+//! docs/82 5.7), and the rest of the app asks the registry — a trait, a
+//! label, a factory — never "is this provider X?". A provider the person
+//! configures (ACP) is registered always and offered only once configured
+//! ([`ProviderId::all`]).
 //!
 //! Capability maps are read live from the adapter that owns the evidence
 //! (its descriptor's `capabilities`): this registry never re-probes and
@@ -36,37 +38,93 @@ use provider::{
     SharedChild, UnknownProvider,
 };
 
+/// Every adapter this build registers, in switcher order: the one place the
+/// app names an adapter crate's registration (docs/82 5.4, 5.7). A provider
+/// joins with one line here — nothing else in the app names it.
+static REGISTRATIONS: &[&provider::Registration] = &[
+    &provider_muse::registry::REGISTRATION,
+    &provider_claude_code::registry::REGISTRATION,
+    &provider_codex::registry::REGISTRATION,
+    &provider_acp::registry::REGISTRATION,
+];
+
 /// Which backend a session belongs to: the app's handle on one registry
-/// entry. Fixed at session creation; a live session never changes lanes.
+/// entry, by its key. Fixed at session creation; a live session never
+/// changes lanes.
 ///
-/// Serialized kebab-case (`muse`, `claude-code`, `codex`) for the
-/// provider-status cache, matching each descriptor's key
-/// ([`ProviderId::as_str`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ProviderId {
+/// Serialized as the descriptor's key (`muse`, `claude-code`, `codex`,
+/// `acp`) for the provider-status cache ([`ProviderId::as_str`]); reading
+/// one back accepts only a registered key. Every value names a
+/// registration: the field is private, and the only ways to one are the
+/// registry itself and the named handles below.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProviderId(&'static str);
+
+/// The registrations the app's own code still names: Muse's shared child,
+/// Claude Code's and Codex's per-CLI details. A registration nothing in
+/// the app names (ACP) has no handle here — the app reaches it through the
+/// registry alone.
+#[allow(non_upper_case_globals)]
+impl ProviderId {
     /// The `provider-muse` registration.
-    Muse,
+    pub const Muse: ProviderId = ProviderId("muse");
     /// The `provider-claude-code` registration.
-    ClaudeCode,
+    pub const ClaudeCode: ProviderId = ProviderId("claude-code");
     /// The `provider-codex` registration.
-    Codex,
+    pub const Codex: ProviderId = ProviderId("codex");
+}
+
+impl std::fmt::Debug for ProviderId {
+    /// The key in the old enum's spelling (`ClaudeCode`), so a logged or
+    /// asserted id reads as it always did.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let camel: String = self
+            .0
+            .split('-')
+            .map(|word| {
+                let mut chars = word.chars();
+                chars.next().map(|first| first.to_uppercase().chain(chars).collect::<String>()).unwrap_or_default()
+            })
+            .collect();
+        f.write_str(&camel)
+    }
+}
+
+impl serde::Serialize for ProviderId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ProviderId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        ProviderId::parse_known(&raw).ok_or_else(|| serde::de::Error::custom(UnknownProvider(raw)))
+    }
 }
 
 impl ProviderId {
-    /// The declaration each handle stands for: the registration, and the
-    /// one place the app names a provider.
+    /// The declaration each handle stands for: its registration's.
     pub fn descriptor(self) -> &'static ProviderDescriptor {
-        match self {
-            ProviderId::Muse => &provider_muse::registry::DESCRIPTOR,
-            ProviderId::ClaudeCode => &provider_claude_code::registry::DESCRIPTOR,
-            ProviderId::Codex => &provider_codex::registry::DESCRIPTOR,
-        }
+        REGISTRATIONS
+            .iter()
+            .find(|registration| registration.descriptor.key == self.0)
+            .map(|registration| registration.descriptor)
+            .expect("every ProviderId names a registration")
     }
 
-    /// Every entry in the registry, in switcher order.
-    pub fn all() -> [ProviderId; 3] {
-        [ProviderId::Muse, ProviderId::ClaudeCode, ProviderId::Codex]
+    /// Every registration, offered or not: what a stored record or a flag
+    /// is read against.
+    pub fn registered() -> impl Iterator<Item = ProviderId> {
+        REGISTRATIONS.iter().map(|registration| ProviderId(registration.descriptor.key))
+    }
+
+    /// Every provider the app offers, in switcher order: each registration
+    /// whose descriptor says it is offered — one the person configures
+    /// ([`provider::ProviderDescriptor::command_env`]) only once it is
+    /// configured (rule 13).
+    pub fn all() -> Vec<ProviderId> {
+        ProviderId::registered().filter(|id| id.descriptor().command_env.is_none() || configured_command(*id).is_some()).collect()
     }
 
     /// Whether this provider declares `trait_`.
@@ -90,8 +148,7 @@ impl ProviderId {
     /// error, never a fallback to some provider: a record written by a
     /// build that knows a provider this one does not stays unopened.
     pub fn resolve(raw: &str) -> Result<ProviderId, UnknownProvider> {
-        ProviderId::all()
-            .into_iter()
+        ProviderId::registered()
             .find(|id| id.descriptor().answers_to(raw))
             .ok_or_else(|| UnknownProvider(raw.to_owned()))
     }
@@ -100,7 +157,7 @@ impl ProviderId {
     /// owns (a route is not a stored key). What a stored record's provider
     /// is read with.
     pub fn parse_known(raw: &str) -> Option<ProviderId> {
-        ProviderId::all().into_iter().find(|id| id.as_str() == raw)
+        ProviderId::registered().find(|id| id.as_str() == raw)
     }
 
     /// The key this provider's per-project model/effort defaults live under
@@ -127,6 +184,17 @@ impl ProviderId {
     pub fn waiting_headline(self) -> String {
         format!("{} is waiting for you.", self.label())
     }
+}
+
+/// A recording some registered provider reads, folded with no child: the
+/// provider whose own recording it is, and the fold — what `--replay`
+/// opens (docs/82 5.7). `None` when no registered provider reads it.
+pub fn replay(recording: &str) -> Option<(ProviderId, provider::Replay)> {
+    let client = crate::conn::connect_info();
+    REGISTRATIONS.iter().find_map(|registration| {
+        let replay = (registration.factory)(&client).replay(recording)?;
+        Some((ProviderId(registration.descriptor.key), replay))
+    })
 }
 
 /// What app copy calls an agent when no one provider is meant: no
@@ -237,6 +305,12 @@ pub fn resolve_program(id: ProviderId) -> Option<PathBuf> {
             path_dirs.push(dir);
         }
     }
+    // A provider the person configures runs the program its command names
+    // (docs/82 5.7), and nothing when it names none.
+    if id.descriptor().command_env.is_some() {
+        let program = configured_command(id)?.into_iter().next()?;
+        return resolve_configured(&program, &path_dirs);
+    }
     // The env override wins; then the path the person set in Settings
     // (D5 B4); either names the binary outright — a wrong one reads Not
     // installed rather than silently falling back to another.
@@ -246,6 +320,29 @@ pub fn resolve_program(id: ProviderId) -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| crate::details::path_override(id));
     resolve_program_with(id, env.as_deref(), &path_dirs, &fallback_dirs(&home))
+}
+
+/// The command line a provider the person configures runs
+/// ([`provider::ProviderDescriptor::command_env`]), when one is set. Under
+/// test only a stand-in under the temp dir counts: a developer's own
+/// configured agent never reaches a test (standing rule 4).
+fn configured_command(id: ProviderId) -> Option<Vec<String>> {
+    let words = id.descriptor().configured_command()?;
+    #[cfg(any(test, feature = "test-support"))]
+    if !crate::skills::is_stand_in(&words[0]) {
+        return None;
+    }
+    Some(words)
+}
+
+/// A configured command's program: a path as written (it must exist), a
+/// bare name on the search path. Pure, so tests drive it with a temp dir.
+fn resolve_configured(program: &str, path_dirs: &[PathBuf]) -> Option<PathBuf> {
+    if program.contains('/') {
+        let path = PathBuf::from(program);
+        return is_executable_file(&path).then_some(path);
+    }
+    path_dirs.iter().map(|dir| dir.join(program)).find(|candidate| is_executable_file(candidate))
 }
 
 /// The fixed fallbacks in search order: the home installs first, then the
@@ -344,19 +441,23 @@ enum Opens {
 
 impl Registry {
     /// The window's registry for `lanes`, around its terminal socket: each
-    /// adapter crate's factory, registered here and nowhere else.
+    /// registration's factory ([`REGISTRATIONS`]), made here and nowhere
+    /// else.
     pub fn for_window(lanes: crate::runtime::Lanes, socket: PathBuf) -> Self {
-        let muse = Arc::new(provider_muse::registry::MuseFactory::new(crate::conn::connect_info()));
-        let providers = ProviderRegistry::new()
-            .register(muse.clone())
-            .register(Arc::new(provider_claude_code::registry::ClaudeCodeFactory))
-            .register(Arc::new(provider_codex::registry::CodexFactory));
+        let client = crate::conn::connect_info();
+        let providers = REGISTRATIONS
+            .iter()
+            .fold(ProviderRegistry::new(), |providers, registration| providers.register((registration.factory)(&client)));
+        // Tests reach the shared child's slot itself: the typed factory
+        // replaces the registered one in place, under the same key.
+        #[cfg(any(test, feature = "test-support"))]
+        let muse = Arc::new(provider_muse::registry::MuseFactory::new(client));
+        #[cfg(any(test, feature = "test-support"))]
+        let providers = providers.register(muse.clone());
         let opens = match lanes {
             crate::runtime::Lanes::Spawn => Opens::Factories,
             crate::runtime::Lanes::Scripted => Opens::StandInUntilShared,
         };
-        #[cfg(not(any(test, feature = "test-support")))]
-        drop(muse);
         Self {
             providers,
             opens,
@@ -1073,7 +1174,7 @@ mod tests {
         }
     }
 
-    /// W4: the UI table is the adapter table — for all three providers.
+    /// W4: the UI table is the adapter table — for every provider.
     /// A fixture that upgrades a cell in any adapter crate fails here
     /// until the UI reads it, which it does by construction now: there is
     /// no hand-copied table left to drift.
@@ -1254,16 +1355,47 @@ mod tests {
     /// does not know opens nothing. Keys and declared routes resolve.
     #[test]
     fn an_unknown_id_is_an_error_never_a_fallback() {
-        for raw in ["", "acp", "Muse", "claude"] {
+        for raw in ["", "gemini", "Muse", "claude", "ACP"] {
             assert_eq!(ProviderId::resolve(raw), Err(provider::UnknownProvider(raw.to_owned())), "{raw:?}");
             assert_eq!(ProviderId::parse_known(raw), None, "{raw:?}");
         }
         assert_eq!(ProviderId::resolve("echo"), Ok(ProviderId::Muse), "a route the descriptor declares");
         assert_eq!(ProviderId::parse_known("echo"), None, "a route is not a stored key");
-        for id in ProviderId::all() {
+        for id in ProviderId::registered() {
             assert_eq!(ProviderId::resolve(id.as_str()), Ok(id));
             assert_eq!(ProviderId::parse_known(id.as_str()), Some(id));
         }
+    }
+
+    /// docs/82 5.7: ACP is registered by one line and offered only once the
+    /// person configures an agent; a stored key still reads back, and the
+    /// handle prints and serialises as the old enum did.
+    #[test]
+    fn a_configured_provider_is_registered_but_offered_only_once_configured() {
+        let keys: Vec<&str> = ProviderId::registered().map(ProviderId::as_str).collect();
+        assert_eq!(keys, vec!["muse", "claude-code", "codex", "acp"], "switcher order");
+        let acp = ProviderId::parse_known("acp").expect("registered");
+        assert_eq!(acp.descriptor().command_env, Some("BAAZ_ACP_AGENT"));
+        assert!(!ProviderId::all().contains(&acp), "no stand-in configured under test: not offered");
+        assert_eq!(resolve_program(acp), None, "nothing configured, nothing to run");
+        assert_eq!(format!("{:?}", ProviderId::ClaudeCode), "ClaudeCode");
+        assert_eq!(format!("{acp:?}"), "Acp");
+        assert_eq!(serde_json::to_string(&ProviderId::Codex).expect("serialises"), r#""codex""#);
+        assert_eq!(serde_json::from_str::<ProviderId>(r#""acp""#).ok(), Some(acp));
+        assert!(serde_json::from_str::<ProviderId>(r#""gemini""#).is_err(), "an unknown key never reads as some provider");
+    }
+
+    #[test]
+    fn a_configured_program_is_a_path_as_written_or_a_name_on_the_path() {
+        let dir = std::env::temp_dir().join(format!("baaz-configured-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let agent = dir.join("my-agent");
+        std::fs::write(&agent, "#!/bin/sh\n").expect("agent");
+        assert_eq!(resolve_configured(&agent.to_string_lossy(), &[]), Some(agent.clone()), "a path as written");
+        assert_eq!(resolve_configured("my-agent", std::slice::from_ref(&dir)), Some(agent.clone()), "a name on the path");
+        assert_eq!(resolve_configured("my-agent", &[]), None);
+        assert_eq!(resolve_configured("/nonexistent/baaz-test/agent", &[]), None, "a path that is not there is not installed");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Every fact the app shows about a provider is its adapter's

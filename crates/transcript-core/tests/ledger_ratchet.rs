@@ -1,6 +1,6 @@
 //! Source ratchet (docs/82 5.3): no provider fold keeps a position ledger
 //! any more. Every block position lives in `transcript-core`'s builder; a
-//! fold names cards by stable id. This scans the three folds' production
+//! fold names cards by stable id. This scans every fold's production
 //! code (comments and `#[cfg(test)]` items excluded) for the maps they used
 //! to keep and for hand-built positional deltas, and fails on any.
 
@@ -31,6 +31,10 @@ const FOLDS: &[(&str, &[&str])] = &[
             "assistant_turns", "user_keys",
         ],
     ),
+    // Written on the builder from the start (docs/82 5.7): no ledger of
+    // its own to forbid, only the positional deltas every fold may not
+    // build.
+    ("provider-acp/src/fold.rs", &[]),
 ];
 
 /// `source` with every `#[cfg(test)]` item and every comment line removed.

@@ -64,8 +64,8 @@ pub use crossbeam_channel::Receiver;
 pub use error::{ProviderError, Refusal, RefusalHint, Severity};
 pub use event::ProviderEvent;
 pub use registry::{
-    McpServer, ModeDescriptor, PlanMode, ProviderDescriptor, ProviderFactory, ProviderRegistry, ProviderTrait, SessionSpawn,
-    SharedChild, SharedStart, StoredSessions, UnknownProvider,
+    McpServer, ModeDescriptor, PlanMode, ProviderDescriptor, ProviderFactory, ProviderRegistry, ProviderTrait, Registration,
+    Replay, SessionSpawn, SharedChild, SharedStart, StoredSessions, UnknownProvider,
 };
 pub use traits::{ConnectInfo, Handshake, Provider, ProviderAdapter, STDERR_TAIL_LINES};
 pub use provider_runtime::StderrTail;

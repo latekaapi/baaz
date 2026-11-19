@@ -1,5 +1,5 @@
 //! The provider conformance suite (docs/71 §4): one scenario list, run
-//! against all three adapters, asserting the SEAM's contract — the ordered
+//! against all four adapters, asserting the SEAM's contract — the ordered
 //! `ProviderEvent`s a view depends on, approvals settled exactly once, a
 //! lost connection that leaves nothing pending and a session that revives,
 //! typed refusals where a capability is absent — never an adapter's
@@ -16,7 +16,10 @@
 //!   (`crates/provider-muse/tests/fixtures/model_list_puppet.py`) through
 //!   the hub, with its `--turn-shape` for approvals, failures, interrupts and
 //!   the crash — or `tests/fixtures/conformance/msp_replay.py`, which replays
-//!   a recorded `fixtures/msp` capture.
+//!   a recorded `fixtures/msp` capture;
+//! * ACP spawns `crates/provider-acp/tests/fixtures/acp_agent.py`, which
+//!   plays a hand-written `fixtures/acp` recording the same way (docs/82
+//!   5.7: no ACP agent was ever run for these).
 //!
 //! Four parts (docs/82 5.2):
 //!
@@ -31,7 +34,7 @@
 //!   fails, with a message that says what broke.
 //!
 //! Lives in `baaz`'s tests because baaz is the one crate that already
-//! depends on all three adapters: a new dev crate would change the lock
+//! depends on every adapter (ACP as a dev-dependency): a new dev crate would change the lock
 //! file for nothing. Hand-written fixtures (no recorded one existed) sit
 //! beside the fake and say so in their first lines; docs/71 §6 lists them.
 
@@ -59,9 +62,10 @@ enum Agent {
     ClaudeCode,
     Codex,
     Muse,
+    Acp,
 }
 
-const AGENTS: [Agent; 3] = [Agent::ClaudeCode, Agent::Codex, Agent::Muse];
+const AGENTS: [Agent; 4] = [Agent::ClaudeCode, Agent::Codex, Agent::Muse, Agent::Acp];
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -99,8 +103,8 @@ fn executable(path: &Path, body: &str) {
 }
 
 /// What one spawn of the fake child plays: a fixture spec for Claude Code
-/// and Codex (`FIXTURE[@SEGMENT][#MODE]`, see `fake_agent.py`), the puppet's
-/// flags for Muse.
+/// and Codex (`FIXTURE[@SEGMENT][#MODE]`, see `fake_agent.py`) and ACP
+/// (`FIXTURE[#MODE]`, see `acp_agent.py`), the puppet's flags for Muse.
 type Plan<'a> = &'a [&'a str];
 
 /// One adapter on its fake child, with its session, recording everything
@@ -133,6 +137,7 @@ fn wrapper(agent: Agent, dir: &Path, plans: Plan) -> PathBuf {
         Agent::ClaudeCode => "claude",
         Agent::Codex => "codex",
         Agent::Muse => "muse",
+        Agent::Acp => "agent",
     });
     let body = match agent {
         Agent::ClaudeCode | Agent::Codex => {
@@ -144,6 +149,11 @@ fn wrapper(agent: Agent, dir: &Path, plans: Plan) -> PathBuf {
                 fake.display(),
                 state.display()
             )
+        }
+        Agent::Acp => {
+            let stand_in = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../provider-acp/tests/fixtures/acp_agent.py");
+            let plans: String = plans.iter().map(|plan| format!(" --plan '{plan}'")).collect();
+            format!("#!/bin/sh\nexec /usr/bin/env python3 '{}' --state '{}'{plans} \"$@\"\n", stand_in.display(), state.display())
         }
         Agent::Muse => {
             // A recorded capture replays through its own stand-in; every
@@ -198,6 +208,12 @@ fn connect(agent: Agent, tag: &str, plans: Plan) -> (Provider, PathBuf, Option<p
             provider.connect(&info()).expect("the fake answers --version");
             (provider, dir, None)
         }
+        Agent::Acp => {
+            let adapter = provider_acp::AcpAdapter::new(&program, &[]).with_state_dir(dir.join("state-dir"));
+            let mut provider = Provider::new(adapter);
+            provider.connect(&info()).expect("the stand-in answers initialize");
+            (provider, dir, None)
+        }
         Agent::Muse => {
             let hub = provider_muse::MuseHub::connect(&program, &info()).expect("the puppet shakes hands");
             let mut lane = hub.lane();
@@ -205,6 +221,15 @@ fn connect(agent: Agent, tag: &str, plans: Plan) -> (Provider, PathBuf, Option<p
             (Provider::new(lane), dir, Some(hub))
         }
     }
+}
+
+/// Record the folder `session` ran in where the ACP adapter under `dir`
+/// keeps it: what its `session/load` must name.
+fn plant_acp_workspace(dir: &Path, session: &str) {
+    let state = dir.join("state-dir");
+    std::fs::create_dir_all(&state).expect("state dir");
+    let record = serde_json::json!({ session: dir.join("work").to_string_lossy() });
+    std::fs::write(state.join("acp-workspaces.json"), record.to_string()).expect("workspace record");
 }
 
 /// Open a fresh session on `agent`'s fake.
@@ -428,15 +453,16 @@ fn refused_as_gone(error: &ProviderError) -> bool {
 fn open_and_a_first_text_turn() {
     for agent in AGENTS {
         let plan: &[&str] = match agent {
-            Agent::ClaudeCode => &[],
-            Agent::Codex => &[],
+            Agent::ClaudeCode | Agent::Codex | Agent::Acp => &[],
             Agent::Muse => &["--emit-turn"],
         };
         let claude = [fixture("claude-code", "basic.jsonl")];
         let codex = [fixture("codex", "basic.jsonl")];
+        let acp = [fixture("acp", "answer.jsonl")];
         let owned: Vec<&str> = match agent {
             Agent::ClaudeCode => claude.iter().map(String::as_str).collect(),
             Agent::Codex => codex.iter().map(String::as_str).collect(),
+            Agent::Acp => acp.iter().map(String::as_str).collect(),
             Agent::Muse => plan.to_vec(),
         };
         let rig = open(agent, "basic", &owned);
@@ -454,9 +480,10 @@ fn open_and_a_first_text_turn() {
 /// fold tests on the msp fixtures.
 #[test]
 fn a_tool_call_lands_inside_its_turn() {
-    for agent in [Agent::ClaudeCode, Agent::Codex] {
+    for agent in [Agent::ClaudeCode, Agent::Codex, Agent::Acp] {
         let plan = match agent {
             Agent::ClaudeCode => fixture("claude-code", "read-search.jsonl"),
+            Agent::Acp => fixture("acp", "plan.jsonl"),
             _ => fixture("codex", "read-search.jsonl"),
         };
         let rig = open(agent, "tool", &[&plan]);
@@ -486,6 +513,8 @@ fn an_approval_is_asked_once_and_settles_exactly_once() {
         (Agent::Codex, fixture("codex", "approval.jsonl"), "accept"),
         (Agent::Codex, fixture("codex", "approval.jsonl"), "decline"),
         (Agent::Muse, "--turn-shape=approval".to_owned(), "c-yes"),
+        (Agent::Acp, fixture("acp", "permission.jsonl"), "allow-once"),
+        (Agent::Acp, fixture("acp", "permission-deny.jsonl"), "reject-once"),
     ];
     for (agent, plan, choice) in cases {
         let rig = open(agent, "approval", &[&plan]);
@@ -522,6 +551,7 @@ fn an_interrupt_ends_the_turn_or_is_refused_typed() {
             Agent::ClaudeCode => fixture("claude-code", "basic.jsonl"),
             Agent::Codex => fixture("codex", "interrupt.jsonl"),
             Agent::Muse => "--turn-shape=open".to_owned(),
+            Agent::Acp => fixture("acp", "cancel.jsonl"),
         };
         let rig = open(agent, "interrupt", &[&plan]);
         rig.submit("a long one").unwrap_or_else(|error| panic!("{agent:?}: {error}"));
@@ -575,6 +605,7 @@ fn a_resumed_session_replays_its_history() {
             Agent::ClaudeCode => fixture("claude-code", "basic.jsonl"),
             Agent::Codex => format!("{}@1", fixture("codex", "resume.jsonl")),
             Agent::Muse => "--emit-turn".to_owned(),
+            Agent::Acp => fixture("acp", "load.jsonl"),
         };
         let (provider, dir, hub) = connect(agent, "resume", &[&plan]);
         let session = match agent {
@@ -587,6 +618,12 @@ fn a_resumed_session_replays_its_history() {
             }
             Agent::Codex => "01a0de81-0a42-7462-9176-0ff61cb96b77".to_owned(),
             Agent::Muse => "s-resumed".to_owned(),
+            Agent::Acp => {
+                // ACP's load names the folder the session ran in, which Baaz
+                // recorded when it opened it.
+                plant_acp_workspace(&dir, "sess-stored");
+                "sess-stored".to_owned()
+            }
         };
         let events = provider.events();
         let ack = provider
@@ -630,6 +667,7 @@ fn an_error_turn_settles_failed_with_its_words() {
             Agent::ClaudeCode => hand_written("claude-failed-turn.jsonl"),
             Agent::Codex => hand_written("codex-failed-turn.jsonl"),
             Agent::Muse => "--turn-shape=failed".to_owned(),
+            Agent::Acp => hand_written("acp-failed-turn.jsonl"),
         };
         let rig = open(agent, "error", &[&plan]);
         rig.submit("this fails").unwrap_or_else(|error| panic!("{agent:?}: {error}"));
@@ -682,6 +720,10 @@ fn a_child_crash_settles_everything_and_the_session_revives() {
                 format!("{}@1", fixture("codex", "resume.jsonl")),
             ),
             Agent::Muse => ("--turn-shape=crash-at-approval".to_owned(), "--emit-turn".to_owned()),
+            Agent::Acp => (
+                format!("{}#crash-at-request", fixture("acp", "permission.jsonl")),
+                fixture("acp", "answer.jsonl"),
+            ),
         };
         let rig = open(agent, "crash", &[&first, &then]);
         rig.submit("this dies").unwrap_or_else(|error| panic!("{agent:?}: {error}"));
@@ -779,8 +821,10 @@ fn an_absent_capability_is_refused_typed() {
         Command::LogOut,
     ];
     for agent in AGENTS {
+        let acp = fixture("acp", "answer.jsonl");
         let plan: &str = match agent {
             Agent::Muse => "--emit-turn",
+            Agent::Acp => &acp,
             _ => "unused",
         };
         let (provider, dir, hub) = connect(agent, "caps", &[plan]);

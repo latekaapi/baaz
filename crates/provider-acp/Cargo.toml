@@ -1,0 +1,16 @@
+[package]
+name = "provider-acp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Any Agent Client Protocol agent behind the provider seam: ACP JSON-RPC over stdio in, neutral commands and ProviderEvents out."
+
+[dependencies]
+provider = { workspace = true }
+aui-protocol = { workspace = true }
+crossbeam-channel = { workspace = true }
+serde_json = { workspace = true }
+transcript-core = { workspace = true }

@@ -1,0 +1,14 @@
+# cancel.jsonl — the person stops a turn while a shell call runs; the agent ends it `cancelled`.
+# HAND-WRITTEN, not a wire capture (docs/82 5.7): no ACP agent was run to make it.
+# Message shapes follow the Agent Client Protocol v1 schema (agentclientprotocol.com).
+# Played by crates/provider-acp/tests/fixtures/acp_agent.py; folded by provider_acp::replay.
+{"_dir": "client->agent", "frame": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}, "clientInfo": {"name": "baaz", "version": "0.1.0"}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": true, "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false}, "mcpCapabilities": {"http": false, "sse": false}}, "agentInfo": {"name": "stand-in-agent", "title": "Stand-in Agent", "version": "0.4.2"}, "authMethods": []}}}
+{"_dir": "client->agent", "frame": {"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": "/Users/ada/work/acme-web", "mcpServers": []}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "sess-cancel"}}}
+{"_dir": "client->agent", "frame": {"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {"sessionId": "sess-cancel", "prompt": [{"type": "text", "text": "Watch the build and tell me when it settles."}]}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-cancel", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Starting the watcher."}}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-cancel", "update": {"sessionUpdate": "tool_call", "toolCallId": "call-watch", "title": "cargo watch", "kind": "execute", "status": "in_progress", "rawInput": {"command": "cargo watch -x build"}}}}}
+{"_dir": "client->agent", "frame": {"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "sess-cancel"}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-cancel", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "call-watch", "status": "failed"}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "cancelled"}}}

@@ -1,0 +1,16 @@
+# answer.jsonl — a plain answer: a thought, then the reply in chunks.
+# HAND-WRITTEN, not a wire capture (docs/82 5.7): no ACP agent was run to make it.
+# Message shapes follow the Agent Client Protocol v1 schema (agentclientprotocol.com).
+# Played by crates/provider-acp/tests/fixtures/acp_agent.py; folded by provider_acp::replay.
+{"_dir": "client->agent", "frame": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}, "clientInfo": {"name": "baaz", "version": "0.1.0"}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": true, "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false}, "mcpCapabilities": {"http": false, "sse": false}}, "agentInfo": {"name": "stand-in-agent", "title": "Stand-in Agent", "version": "0.4.2"}, "authMethods": []}}}
+{"_dir": "client->agent", "frame": {"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": "/Users/ada/work/acme-web", "mcpServers": []}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "sess-answer"}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-answer", "update": {"sessionUpdate": "available_commands_update", "availableCommands": [{"name": "review", "description": "Review the working tree's changes", "input": null}, {"name": "init", "description": "Write an AGENTS.md for this project", "input": null}]}}}}
+{"_dir": "client->agent", "frame": {"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {"sessionId": "sess-answer", "prompt": [{"type": "text", "text": "What does the retry helper in src/net.rs do?"}]}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-answer", "update": {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "The question is about the retry helper; I know this file."}}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-answer", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "`retry_with_backoff` calls the request up to **five** times, "}}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-answer", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "doubling the wait after each failure (100 ms, 200 ms, 400 ms \u2026) and giving up early on a 4xx.\n\n"}}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-answer", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "It returns the last error when every attempt fails."}}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-answer", "update": {"sessionUpdate": "usage_update", "used": 18342, "size": 200000}}}}
+{"_dir": "agent->client", "frame": {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}
