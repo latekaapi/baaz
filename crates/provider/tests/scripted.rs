@@ -125,17 +125,15 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
         match command {
             Command::OpenSession { .. }
             | Command::SubmitInput { .. }
-            | Command::FollowSession { .. } => None,
+            | Command::FollowSession { .. }
+            | Command::SelectModel { .. }
+            | Command::SelectApprovalMode { .. }
+            | Command::SetPlanMode { .. } => None,
             command @ Command::ResumeSession { .. } => Some((command, "resume-session")),
             command @ Command::ForkSession { .. } => Some((command, "fork-session")),
             command @ Command::ListSessions { .. } => Some((command, "list-sessions")),
             command @ Command::ReadSession { .. } => Some((command, "read-session")),
             command @ Command::CompactSession { .. } => Some((command, "compact-session")),
-            command @ Command::SelectModel { .. } => Some((command, "select-model")),
-            command @ Command::SelectApprovalMode { .. } => {
-                Some((command, "select-approval-mode"))
-            }
-            command @ Command::SetPlanMode { .. } => Some((command, "set-plan-mode")),
             command @ Command::RunShell { .. } => Some((command, "run-shell")),
             command @ Command::SteerInput { .. } => Some((command, "steer-input")),
             command @ Command::InterruptTurn { .. } => Some((command, "interrupt-turn")),
@@ -158,8 +156,8 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
         }
     }
 
-    // OpenSession, SubmitInput and FollowSession are the three the double
-    // implements; everything else must refuse.
+    // OpenSession, SubmitInput, FollowSession and the three session
+    // settings are what the double implements; everything else must refuse.
     let candidates: Vec<Command> = vec![
         Command::ResumeSession {
             request_id: "r".into(),
@@ -179,18 +177,6 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
         Command::ListSessions { cursor: None, limit: None, workspace: None, updated_after: None },
         Command::ReadSession { session_id: "s".into(), metadata_only: false },
         Command::CompactSession { request_id: "r".into(), session_id: "s".into(), through_turn: None },
-        Command::SelectModel {
-            request_id: "r".into(),
-            session_id: "s".into(),
-            model: "m".into(),
-            model_provider: None,
-        },
-        Command::SelectApprovalMode {
-            request_id: "r".into(),
-            session_id: "s".into(),
-            mode: aui_protocol::PermissionMode::OnRequest,
-        },
-        Command::SetPlanMode { request_id: "r".into(), session_id: "s".into(), on: true },
         Command::RunShell { request_id: "r".into(), session_id: "s".into(), command: "ls".into() },
         Command::SteerInput {
             request_id: "r".into(),
@@ -266,7 +252,7 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
     }
     // Backstop for edits to the list itself (duplicates, dropped entries):
     // new variants are caught by `classify`, not by this count.
-    assert_eq!(refused.len(), 27, "the refusal list drifted from the 27 unimplemented commands");
+    assert_eq!(refused.len(), 24, "the refusal list drifted from the 24 unimplemented commands");
     refused
 }
 
@@ -285,4 +271,41 @@ fn unimplemented_commands_are_typed_refusals_not_success() {
             other => panic!("{expected} must refuse, not answer {other:?}"),
         }
     }
+}
+
+/// The session's settings are taken as asked (docs/82 5.9): the app's
+/// offline lanes run this double under every provider's descriptor, and a
+/// control the descriptor offers must not come back refused. The mode and
+/// the plan are echoed as events, the way a real adapter reports what it
+/// switched to; a model pick is acknowledged.
+#[test]
+fn the_session_settings_are_taken_and_echoed() {
+    let mut provider = Provider::new(ScriptedProvider::new());
+    provider.connect(&ConnectInfo::new("baaz", "0.1.0")).expect("connect");
+    let events = provider.events();
+    let model = Command::SelectModel { request_id: "r".into(), session_id: "s".into(), model: "m".into(), model_provider: None };
+    assert!(matches!(provider.send(model), Ok(provider::Ack::Accepted)));
+    let mode = aui_protocol::PermissionMode::OnRequest;
+    let select = Command::SelectApprovalMode { request_id: "r".into(), session_id: "s".into(), mode };
+    assert!(matches!(provider.send(select), Ok(provider::Ack::Accepted)));
+    assert!(matches!(events.try_recv(), Ok(provider::ProviderEvent::ApprovalModeChanged { mode: m, .. }) if m == mode));
+    for on in [true, false] {
+        let plan = Command::SetPlanMode { request_id: "r".into(), session_id: "s".into(), on };
+        assert!(matches!(provider.send(plan), Ok(provider::Ack::Accepted)));
+        assert!(matches!(events.try_recv(), Ok(provider::ProviderEvent::PlanModeChanged { on: o, .. }) if o == on));
+    }
+}
+
+/// A capability taken away is declared `Unavailable` and refused at the
+/// seam, for the tests of how a refusal reads.
+#[test]
+fn a_capability_taken_away_is_refused() {
+    let mut provider = Provider::new(ScriptedProvider::new().refusing(provider::Capability::SessionConfig));
+    provider.connect(&ConnectInfo::new("baaz", "0.1.0")).expect("connect");
+    let plan = Command::SetPlanMode { request_id: "r".into(), session_id: "s".into(), on: true };
+    match provider.send(plan) {
+        Err(ProviderError::Unsupported { capability, .. }) => assert_eq!(capability, "set-plan-mode"),
+        other => panic!("a taken-away capability must refuse, not answer {other:?}"),
+    }
+    assert!(provider.events().try_recv().is_err(), "a refusal reports no switch");
 }

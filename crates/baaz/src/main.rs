@@ -676,6 +676,7 @@ fn run_bench(args: Args) {
     let (bench_bare, shell_args) = (args.bench_bare, args.clone());
     gpui_kit::application().with_assets(crate::mascot::BaazAssets).run(move |cx| {
         aui::init(theme.unwrap_or_default(), cx);
+        crate::providers::name_marks();
         // The window preferences, read once into their gpui global.
         crate::layout::Layout::init(cx);
         crate::settings::boot_type(cx);
@@ -1049,6 +1050,8 @@ fn main() {
         crate::layout::Layout::init(cx);
         // 2. One call does gpui_kit::init, the fonts, the themes and the keymap.
         aui::init(crate::settings::boot_theme(theme, cx), cx);
+        // 2b. Every provider mark carries its provider's own label.
+        crate::providers::name_marks();
         crate::settings::boot_type(cx);
         crate::log::boot_mark("aui-init-done");
         // A deterministic capture holds the platform's reduced-motion switch:

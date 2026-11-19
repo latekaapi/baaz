@@ -3,7 +3,14 @@
 //! [`ScriptedProvider`] is the honest stand-in for "a provider that is not
 //! muse": it implements [`ProviderAdapter`](crate::ProviderAdapter) from a
 //! list of canned deltas, knows how to do almost nothing, and answers
-//! everything else with the typed refusal. If writing it ever needs
+//! everything else with the typed refusal. Almost nothing is: open a
+//! session, take input, follow it, and take the session's settings (model,
+//! approval mode, plan mode) as asked — the settings because the app's
+//! offline lanes run on this double under every provider's descriptor, and
+//! a control the descriptor offers must not come back refused there (the
+//! `composer-plan` capture banners "Not available" on Claude Code's Plan,
+//! docs/82 5.9). [`ScriptedProvider::refusing`] takes a capability away
+//! again, for the tests of a refusal. If writing it ever needs
 //! something from a wire crate, the trait is wrong — it does not, and this
 //! module proves it by using nothing but `provider` and `aui-protocol`.
 //!
@@ -21,10 +28,12 @@ use crate::{
     ProviderError, ProviderEvent, ProviderId, SubmissionPart,
 };
 
-/// A provider that is not muse: canned deltas, three commands, refusals
-/// for everything else.
+/// A provider that is not muse: canned deltas, sessions, input and their
+/// settings, refusals for everything else.
 pub struct ScriptedProvider {
     inner: Arc<Inner>,
+    /// Capabilities taken away ([`ScriptedProvider::refusing`]).
+    refused: Vec<Capability>,
 }
 
 struct Inner {
@@ -61,7 +70,16 @@ impl ScriptedProvider {
                 rx,
                 session_id: session_id.into(),
             }),
+            refused: Vec::new(),
         }
+    }
+
+    /// This stand-in with `capability` taken away: declared `Unavailable`,
+    /// so the seam refuses its commands before they reach `dispatch` — a
+    /// provider that cannot do it, for a test of how a refusal reads.
+    pub fn refusing(mut self, capability: Capability) -> Self {
+        self.refused.push(capability);
+        self
     }
 
     /// `[hold <ms>] …`: how long a scripted turn stays running before it
@@ -136,6 +154,9 @@ impl ScriptedProvider {
     }
 }
 
+/// Why the stand-in refuses what it does not do.
+const REFUSAL: &str = "scripted providers only open sessions, take input and their settings, and follow them";
+
 impl Default for ScriptedProvider {
     fn default() -> Self {
         Self::new()
@@ -161,32 +182,32 @@ impl ProviderAdapter for ScriptedProvider {
     }
 
     fn capabilities(&self) -> CapabilitySet {
-        // The three implemented stories stay `Native`; everything else is
+        // The implemented stories stay `Native`; everything else is
         // `Unavailable` with the reason the old hand-rolled refusal
         // carried. `Transcript` stays `Native` even though only following
         // is implemented — the gate is a floor, and the paging arms keep
-        // their own typed refusal inside `dispatch`.
-        let off = || CapabilityState::Unavailable {
-            reason: "scripted providers only open sessions, take input, and follow them".into(),
-        };
+        // their own typed refusal inside `dispatch`. A capability taken
+        // away ([`ScriptedProvider::refusing`]) is `Unavailable` too.
+        let off = || CapabilityState::Unavailable { reason: REFUSAL.into() };
+        let on = |capability: Capability| if self.refused.contains(&capability) { off() } else { CapabilityState::Native };
         CapabilitySet::new([
-            (Capability::SessionLifecycle, CapabilityState::Native),
+            (Capability::SessionLifecycle, on(Capability::SessionLifecycle)),
             (Capability::ForkSession, off()),
             (Capability::CompactSession, off()),
-            (Capability::SessionConfig, off()),
+            (Capability::SessionConfig, on(Capability::SessionConfig)),
             (Capability::SessionShell, off()),
-            (Capability::SubmitTurn, CapabilityState::Native),
+            (Capability::SubmitTurn, on(Capability::SubmitTurn)),
             (Capability::SteerTurn, off()),
             (Capability::TurnControl, off()),
             (Capability::ModelCatalog, off()),
             (Capability::Approvals, off()),
             (Capability::Questions, off()),
-            (Capability::Transcript, CapabilityState::Native),
+            (Capability::Transcript, on(Capability::Transcript)),
             (Capability::Account, off()),
             (Capability::ClientTools, off()),
             (Capability::ReasoningTraces, off()),
             (Capability::SubagentTurns, off()),
-            (Capability::ImageInput, CapabilityState::Native),
+            (Capability::ImageInput, on(Capability::ImageInput)),
         ])
     }
 
@@ -224,10 +245,21 @@ impl ProviderAdapter for ScriptedProvider {
                 Ok(Ack::TurnAccepted { turn_id: "a-latest".into(), queued: false })
             }
             Command::FollowSession { .. } => Ok(Ack::Accepted),
-            other => Err(ProviderError::unsupported(
-                other.capability(),
-                "scripted providers only open sessions, take input, and follow them",
-            )),
+            // The session's settings, taken as asked: the mode and the plan
+            // are echoed the way a real adapter reports what it switched
+            // to, so the chip and the Plan toggle land on the event, as
+            // they do live. A model pick has no event of its own; its ack
+            // lands it.
+            Command::SelectModel { .. } => Ok(Ack::Accepted),
+            Command::SelectApprovalMode { session_id, mode, .. } => {
+                let _ = self.inner.tx.send(ProviderEvent::ApprovalModeChanged { session_id, mode });
+                Ok(Ack::Accepted)
+            }
+            Command::SetPlanMode { session_id, on, .. } => {
+                let _ = self.inner.tx.send(ProviderEvent::PlanModeChanged { session_id, on });
+                Ok(Ack::Accepted)
+            }
+            other => Err(ProviderError::unsupported(other.capability(), REFUSAL)),
         }
     }
 

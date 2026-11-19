@@ -792,9 +792,27 @@ impl SessionView {
     /// The list's laid-out width, reported once per frame from the wrapper's
     /// prepaint. A change means gpui has just dropped every row height and
     /// hint; the next sync re-hints.
+    ///
+    /// The layout that just ran at the new width reflowed the visible rows
+    /// (a narrower list wraps them taller) under the anchor the last layout
+    /// left, so a list that stood at its end before it is now short of it:
+    /// the tail, and the progress row in it, slid under the composer (task
+    /// 5.9, `right-changes-full`: 36 px, the approval footer's wrapped
+    /// line). Only the re-hint put it back, and the re-hint runs in a
+    /// render that nothing asked for: this report comes from inside a draw,
+    /// where a notify is lost, and the column is cached — a capture's hand-
+    /// drawn frames, or a window with its frame source stopped, kept the
+    /// short list for good. So an owed re-hint asks for the render past the
+    /// draw ([`Self::note_end_after_layout`], reported right after this),
+    /// and the end is pinned here from where the list stood before this
+    /// layout, never from where the reflow left it.
     pub(super) fn note_list_width(&mut self, width: f32) {
         if self.list_width.is_some_and(|last| (last - width).abs() > 0.5) {
             self.rehint = true;
+            if self.at_end_before && !self.gesture_active() {
+                self.follow = true;
+                self.list_state.scroll_to_end();
+            }
         }
         self.list_width = Some(width);
     }
@@ -817,8 +835,12 @@ impl SessionView {
     /// banner pointing at a waiting card above never came (the
     /// `transcript-full-top` capture flake). Deferred: a notify made inside
     /// the draw is dropped.
+    ///
+    /// A re-hint owed by a width change ([`Self::note_list_width`]) asks
+    /// for the same deferred draw: it runs in a render, and a cached column
+    /// is rendered only when something asks.
     pub(super) fn note_end_after_layout(&mut self, cx: &mut Context<Self>) {
-        if self.list_state.is_scrolled_to_end().unwrap_or(true) != self.at_end_before {
+        if self.rehint || self.list_state.is_scrolled_to_end().unwrap_or(true) != self.at_end_before {
             let view = cx.entity().downgrade();
             cx.defer(move |cx| {
                 let _ = view.update(cx, |_, cx| cx.notify());
@@ -988,7 +1010,11 @@ impl SessionView {
                                 // else unresolvable is an empty row, as
                                 // before.
                                 if turn_ix == turns.len() {
-                                    let tail = div().w_full().px(px(aui::transcript::QUIET_ROW_BLEED)).pb(px(tail_h));
+                                    let tail = div()
+                                        .w_full()
+                                        .px(px(aui::transcript::QUIET_ROW_BLEED))
+                                        .pb(px(tail_h))
+                                        .debug_selector(|| "transcript-tail".into());
                                     return match &progress {
                                         Some(progress) => tail.child(progress.row()).into_any_element(),
                                         None => tail.into_any_element(),

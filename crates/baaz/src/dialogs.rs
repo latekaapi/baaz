@@ -2375,4 +2375,52 @@ mod tests {
         assert!(!open(vc, MenuKind::Plus), "`+` closes its menu");
         restore_state(state);
     }
+
+    /// Task 5.9: a reader at the transcript's end stays there when the list
+    /// narrows under it. The right pane opening reflows the rows above the
+    /// tail taller (the approval card's footer, every wrapped paragraph);
+    /// the list keeps its anchor through that layout, so the end — and the
+    /// "Waiting for approval…" row in the tail — slid under the composer,
+    /// and the re-hint that followed read the list as scrolled up and kept
+    /// it there (`right-changes-full`, Gate 5: 36 px short, one wrapped
+    /// footer line). The tail's foot must sit on the list's foot.
+    #[gpui::test]
+    fn a_narrowed_transcript_keeps_its_end_and_its_progress_row(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("narrowed-end");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let mut args = test_args(&state.2);
+        args.login = crate::LoginSample::SignedIn;
+        args.replay = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/msp/synthetic-full.jsonl"));
+        let (baaz, vc) = cx.add_window_view(|window, cx| Harness::new(args, crate::runtime::CaptureToken::default(), window, cx));
+        vc.simulate_resize(gpui::size(gpui::px(1440.0), gpui::px(900.0)));
+        vc.run_until_parked();
+        // The frames a capture draws by hand.
+        let draw = |vc: &mut gpui::VisualTestContext| {
+            for _ in 0..4 {
+                vc.update(|window, cx| window.draw(cx).clear(cx));
+                vc.run_until_parked();
+            }
+        };
+        let foot_gap = |vc: &mut gpui::VisualTestContext| {
+            let tail = vc.debug_bounds("transcript-tail").expect("the tail draws");
+            let window_h = vc.update(|window, _| f32::from(window.viewport_size().height));
+            f32::from(tail.bottom()) - window_h
+        };
+        draw(vc);
+        let view = vc.update(|_, cx| baaz.read(cx).active.clone()).expect("the replay is open");
+        assert!(vc.update(|_, cx| view.read(cx).rt(cx).working()), "the replay ends mid-turn: the row is owed");
+        let before = foot_gap(vc);
+        assert!(before.abs() < 1.0, "the replay opens at its end (tail foot {before} px off the list's)");
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.step_right_width("440", cx).expect("a width");
+                harness.step_right("changes", cx).expect("the pane opens");
+            })
+        });
+        vc.run_until_parked();
+        draw(vc);
+        let after = foot_gap(vc);
+        assert!(after.abs() < 1.0, "the narrowed list kept its end (tail foot {after} px below the list's)");
+        restore_state(state);
+    }
 }

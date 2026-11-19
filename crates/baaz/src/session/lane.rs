@@ -1481,9 +1481,20 @@ mod tests {
         session_id: &str,
         provider_id: &str,
     ) -> (Entity<SessionView>, futures::channel::mpsc::UnboundedSender<provider::ProviderEvent>) {
+        open_lane_view_on(vc, session_id, provider_id, provider::scripted::ScriptedProvider::new())
+    }
+
+    /// [`open_lane_view_as`] over a given stand-in — one with a capability
+    /// taken away ([`provider::scripted::ScriptedProvider::refusing`]), for
+    /// the tests of how a refusal reads.
+    fn open_lane_view_on(
+        vc: &mut gpui::VisualTestContext,
+        session_id: &str,
+        provider_id: &str,
+        mut adapter: provider::scripted::ScriptedProvider,
+    ) -> (Entity<SessionView>, futures::channel::mpsc::UnboundedSender<provider::ProviderEvent>) {
         use provider::ProviderAdapter as _;
 
-        let mut adapter = provider::scripted::ScriptedProvider::new();
         adapter
             .connect(&provider::ConnectInfo::new("baaz", "0.0.0"))
             .expect("a scripted provider connects");
@@ -2057,8 +2068,8 @@ mod tests {
     /// the typed-reason row).
     ///
     /// Lives in baaz test code only: the provider crate's own
-    /// [`provider::scripted::ScriptedProvider`] answers just three
-    /// commands, and the crate itself is untouched.
+    /// [`provider::scripted::ScriptedProvider`] answers sessions, input and
+    /// their settings and nothing else, and the crate itself is untouched.
     struct RecordingProvider {
         inner: std::sync::Arc<RecordingInner>,
     }
@@ -3424,14 +3435,15 @@ mod tests {
     }
 
     /// W4: a refused pick un-records itself and banners the reason — the
-    /// chip never claims a model the child never took. The scripted
-    /// provider answers `SessionConfig` as `Unavailable`, so the seam
-    /// refuses before any adapter code runs.
+    /// chip never claims a model the child never took. The stand-in here
+    /// answers `SessionConfig` as `Unavailable`, so the seam refuses before
+    /// any adapter code runs.
     #[gpui::test]
     fn a_refused_model_pick_unrecords_and_banners(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
-        let (view, _tx) = open_lane_view(vc, "s-1");
+        let refusing = provider::scripted::ScriptedProvider::new().refusing(provider::Capability::SessionConfig);
+        let (view, _tx) = open_lane_view_on(vc, "s-1", "codex", refusing);
         vc.run_until_parked();
         // The background `ListModels` pull stays quiet: the reason row
         // explains the catalog, never a banner.
@@ -4465,8 +4477,10 @@ mod tests {
     fn plan_mode_stands_down_on_refusal(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
-        // A plan skill's lane (Codex has no plan mode since docs/82 5.5).
-        let (view, _tx) = open_lane_view_as(vc, "s-1", "meta");
+        // A plan skill's lane (Codex has no plan mode since docs/82 5.5),
+        // over a stand-in that refuses the session's settings.
+        let refusing = provider::scripted::ScriptedProvider::new().refusing(provider::Capability::SessionConfig);
+        let (view, _tx) = open_lane_view_on(vc, "s-1", "meta", refusing);
         vc.run_until_parked();
         vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_plan(true, cx))));
         vc.run_until_parked();

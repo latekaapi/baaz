@@ -1157,6 +1157,78 @@ impl ExternalApprovalStore {
 mod tests {
     use super::*;
 
+    /// The offline lanes run the scripted stand-in under every provider's
+    /// descriptor (docs/82 5.9): each composer control the descriptor
+    /// offers — every approval mode it declares, its own Plan toggle, the
+    /// model picker — must land there, never come back "Not available"
+    /// (the `composer-plan` capture bannered Claude Code's Plan). Each
+    /// switch lands the way a live one does: on the stand-in's own event.
+    #[test]
+    fn the_stand_in_takes_every_composer_control_a_descriptor_offers() {
+        use provider::{Command, PlanMode, ProviderEvent};
+        let session = "s-controls";
+        for id in ProviderId::registered() {
+            let lane = scripted_lane().expect("a stand-in connects");
+            let events = lane.events();
+            let key = id.as_str();
+            for mode in id.descriptor().modes {
+                let sent = lane.send(Command::SelectApprovalMode { request_id: "r".into(), session_id: session.into(), mode: mode.id });
+                assert!(sent.is_ok(), "{key}: the {} mode is refused: {sent:?}", mode.label);
+                let echoed = events.try_recv().expect("the switch reports itself");
+                assert!(matches!(echoed, ProviderEvent::ApprovalModeChanged { mode: m, .. } if m == mode.id), "{key}: drew {echoed:?}");
+            }
+            if id.descriptor().plan == PlanMode::Native {
+                for on in [true, false] {
+                    let sent = lane.send(Command::SetPlanMode { request_id: "r".into(), session_id: session.into(), on });
+                    assert!(sent.is_ok(), "{key}: Plan {on} is refused: {sent:?}");
+                    let echoed = events.try_recv().expect("the plan switch reports itself");
+                    assert!(matches!(echoed, ProviderEvent::PlanModeChanged { on: o, .. } if o == on), "{key}: drew {echoed:?}");
+                }
+            }
+            if offers(id, Capability::SessionConfig) {
+                let sent = lane.send(Command::SelectModel { request_id: "r".into(), session_id: session.into(), model: "m".into(), model_provider: None });
+                assert!(sent.is_ok(), "{key}: a model pick is refused: {sent:?}");
+            }
+        }
+    }
+
+    /// What a descriptor offers and the stand-in still refuses, each with
+    /// why no offline capture meets the refusal. A capability a descriptor
+    /// starts offering lands here or in the stand-in, by decision — never
+    /// as a "Not available" banner found in a capture.
+    const STAND_IN_REFUSES: &[(Capability, &str)] = &[
+        (Capability::ForkSession, "a fork opens a second session; no capture forks a stand-in lane"),
+        (Capability::CompactSession, "no capture sends /compact"),
+        (Capability::SteerTurn, "a stand-in turn ends as it starts, so there is nothing to steer"),
+        (Capability::TurnControl, "a stand-in turn ends as it starts, so there is nothing to stop"),
+        (Capability::ModelCatalog, "the pull is quiet: its refusal is the menu's reason row, never a banner"),
+        (Capability::Approvals, "the stand-in raises no approval, so no card answers one"),
+        (Capability::Questions, "the stand-in asks no question, so no card answers one"),
+        (Capability::Account, "captures read the account from the status script, not the lane"),
+        (Capability::ClientTools, "no command needs it"),
+        (Capability::ReasoningTraces, "no command needs it"),
+    ];
+
+    #[test]
+    fn the_stand_in_refuses_only_what_no_capture_meets() {
+        let lane = scripted_lane().expect("a stand-in connects");
+        let held = lane.capabilities();
+        for id in ProviderId::registered() {
+            for capability in Capability::all() {
+                if offers(id, capability) && !held.state(capability).allows_attempt() {
+                    assert!(
+                        STAND_IN_REFUSES.iter().any(|(refused, _)| *refused == capability),
+                        "{} offers {} and the stand-in refuses it: take it in the stand-in, or say here why no capture meets it",
+                        id.as_str(),
+                        capability.name()
+                    );
+                }
+            }
+        }
+        // The composer's own controls are never on the list.
+        assert!(STAND_IN_REFUSES.iter().all(|(refused, _)| *refused != Capability::SessionConfig));
+    }
+
     /// Read-only's detail line names what each backend still lets through
     /// on the owner's own MCP tools; every other line is the protocol's.
     #[test]

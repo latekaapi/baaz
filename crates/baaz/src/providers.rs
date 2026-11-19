@@ -24,10 +24,29 @@ impl ProviderMark for ProviderId {
     }
 
     /// The mark beside the composer model chip: each provider's own badge,
-    /// so a session never wears another provider's mark.
+    /// so a session never wears another provider's mark. Every mark is named
+    /// first ([`name_marks`]): whatever the library prints beside it is the
+    /// provider's own label, never the icon's.
     fn icon(self) -> aui_icons::Provider {
+        name_marks();
         icon_of(self.descriptor().icon)
     }
+}
+
+/// Give every registered provider's mark its provider's label, once per
+/// process, for every chip, row and card the library draws a provider's
+/// name on ([`aui::composer::name_provider`]). A mark is the icon set's,
+/// not the provider's: the ACP agent wears the neutral block the library
+/// calls "Cursor", and the composer's provider chip printed "Cursor"
+/// beside "ACP agent" (docs/82 5.9). Run at boot, after `aui::init`, and
+/// before any mark is handed out.
+pub fn name_marks() {
+    static NAMED: std::sync::Once = std::sync::Once::new();
+    NAMED.call_once(|| {
+        for id in ProviderId::registered() {
+            aui::composer::name_provider(icon_of(id.descriptor().icon), id.label());
+        }
+    });
 }
 
 /// The icon set's badge for a protocol provider identity: the two enums
@@ -76,6 +95,30 @@ mod tests {
         assert_ne!(icons[0], icons[1]);
         assert_ne!(icons[0], icons[2]);
         assert_ne!(icons[1], icons[2]);
+    }
+
+    /// A borrowed mark never supplies text (docs/82 5.9): every registered
+    /// provider's mark prints that provider's own label wherever the
+    /// library names a provider — the composer's provider chip, the connect
+    /// rows, the default picker, the hand-off cards — the ACP agent's
+    /// borrowed block included. And no two registered providers wear one
+    /// mark, so no mark can carry two names.
+    #[test]
+    fn every_mark_prints_its_own_providers_label() {
+        let ids: Vec<ProviderId> = ProviderId::registered().collect();
+        for id in &ids {
+            assert_eq!(
+                aui::composer::provider_display_name(id.icon()).to_string(),
+                id.label(),
+                "{}: the library prints the provider's label, not its mark's",
+                id.as_str()
+            );
+        }
+        for (ix, a) in ids.iter().enumerate() {
+            for b in &ids[ix + 1..] {
+                assert_ne!(a.icon(), b.icon(), "{} and {} wear one mark", a.as_str(), b.as_str());
+            }
+        }
     }
 
     /// Slash commands follow the same truth: `/compact` and `/fork` appear

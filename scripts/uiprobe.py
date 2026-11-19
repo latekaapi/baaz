@@ -478,7 +478,10 @@ ENTRIES = {
     # Offline, deterministic, free like `composer-handoff`'s send. No
     # baseline yet — generate on main after merge, never to silence a
     # finding.
-    "reopen-failed":        {"shot": ["--no-connect", "--login", "signed-in",
+    # `--provider codex`: the first scripted lane (`s-scripted`) must be the
+    # Codex one the send lands on — since 5.8 a bare `new` opens on the
+    # first connected provider in switcher order, not Muse.
+    "reopen-failed":        {"shot": ["--no-connect", "--login", "signed-in", "--provider", "codex",
                                       "--steps", "new;setprovider:codex;send:hello reopen probe;wait:3000;open:s-scripted"]},
     # Settings → Providers, open on scripted statuses covering Connected
     # (Muse), Signed out (Claude Code) and Not installed (Codex):
