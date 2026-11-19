@@ -210,7 +210,7 @@ pub(super) fn adopt_for_muse(harness: &mut Harness, dir: &std::path::Path, cx: &
     let id = harness.session_list.update(cx, |list, _| list.projects.add(dir).id.clone());
     harness.session_list.update(cx, |list, _| list.projects.current = Some(id.clone()));
     harness.current_project = Some(id.clone());
-    harness.new_provider = ProviderId::Muse.as_str().to_owned();
+    harness.provider_model.update(cx, |model, _| model.point_new_provider(ProviderId::Muse));
     id
 }
 
@@ -257,7 +257,7 @@ pub(super) fn provider_draft_window<'a>(
             harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
             let project = adopt_for_muse(harness, dir, cx);
-            harness.new_provider = ProviderId::Codex.as_str().to_owned();
+            harness.provider_model.update(cx, |model, _| model.point_new_provider(ProviderId::Codex));
             project
         })
     });

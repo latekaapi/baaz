@@ -185,7 +185,7 @@ impl Harness {
                     // A draft serves only the lane it was created on: a muse
                     // draft under a provider pick (or the reverse) is stale,
                     // dropped below, and started fresh on the pick.
-                    let wanted = self.new_provider_id();
+                    let wanted = self.new_provider_id(cx);
                     // The Ask rides only this reused draft: key it before
                     // the view lands, so `activate` takes it here — and
                     // only here.
@@ -209,8 +209,8 @@ impl Harness {
         }
         // The switcher's pick is not muse: the session opens on the provider
         // lane, and `session/start` to muse never fires for it.
-        let Some(wanted) = self.new_provider_id() else {
-            crate::baaz_log!("new session refused: no provider `{}` is registered", self.new_provider);
+        let Some(wanted) = self.new_provider_id(cx) else {
+            crate::baaz_log!("new session refused: no provider `{}` is registered", self.new_provider(cx));
             return;
         };
         // Every provider opens on its lane; Muse too, live — its lane rides
@@ -277,8 +277,8 @@ impl Harness {
         let root = root.to_path_buf();
         // Same lane branch as `new_session_in`: an unadopted root on a
         // provider pick opens on the provider lane, never as `session/start`.
-        let Some(wanted) = self.new_provider_id() else {
-            crate::baaz_log!("new session refused: no provider `{}` is registered", self.new_provider);
+        let Some(wanted) = self.new_provider_id(cx) else {
+            crate::baaz_log!("new session refused: no provider `{}` is registered", self.new_provider(cx));
             return;
         };
         if !(wanted.has(provider::ProviderTrait::LocalScriptedDraft) && self.providers.lands_inline()) {
@@ -392,7 +392,7 @@ impl Harness {
         let workspace = self.workspace(cx);
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let host = SessionHost {
-            provider_id: self.new_provider.clone(),
+            provider_id: self.new_provider(cx).to_owned(),
             workspace,
             overlays: self.overlays.clone(),
             capture: self.capture.clone(),
@@ -417,7 +417,7 @@ impl Harness {
         let effort = self
             .session_list.read(cx).projects
             .picks(self.current_project(cx))
-            .effort_for(&self.new_provider)
+            .effort_for(self.new_provider(cx))
             .as_deref()
             .and_then(projects::parse_effort);
         if let Some(view) = self.active.clone() {

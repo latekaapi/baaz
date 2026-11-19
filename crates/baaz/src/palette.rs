@@ -241,6 +241,21 @@ impl PickerDelegate for PaletteDelegate {
         Some(PalettePick::Row(id.clone()))
     }
 
+    /// docs/83 §9 (19 Nov 2026): one row-high `t-body` `fg-muted` line. A
+    /// query that left nothing says so; `/resume` and `/fork` say what is
+    /// missing. The search palette has none: its results land after the
+    /// query does, so an empty list there is often one still coming, and its
+    /// status line already says "No matches". The Projects palette always
+    /// draws its Add card, so it never reaches this.
+    fn empty_text(&self) -> Option<SharedString> {
+        match self.kind {
+            PaletteKind::Commands if !self.query.trim().is_empty() => Some("Nothing matches".into()),
+            PaletteKind::Resume => Some("No sessions yet".into()),
+            PaletteKind::Fork => Some("No completed turns yet".into()),
+            PaletteKind::Commands | PaletteKind::Projects | PaletteKind::Search => None,
+        }
+    }
+
     fn render_match(&self, ix: usize, _selected: bool) -> PaletteItem {
         let Some((id, label, detail, badge, icon)) = self.row(ix) else {
             return PaletteItem::new("", PaletteIcon::Glyph(IconName::Slash), "");
@@ -292,23 +307,14 @@ impl PickerDelegate for PaletteDelegate {
                         adopted.push(item);
                     }
                 }
-                let mut sections = Vec::new();
-                if !adopted.is_empty() {
-                    sections.push(PaletteSection::new("Projects", adopted));
-                }
-                sections.push(PaletteSection::new("Add", adding).lead(lead));
+                // A section with no rows draws nothing (the library drops
+                // it); the Add section keeps its card.
+                let sections = vec![PaletteSection::new("Projects", adopted), PaletteSection::new("Add", adding).lead(lead)];
                 ("Add or switch project".into(), sections)
             }
             PaletteKind::Search => {
                 let (sessions, files): (Vec<_>, Vec<_>) = rows.into_iter().partition(|item| item.id.starts_with("s:"));
-                let mut sections = Vec::new();
-                if !sessions.is_empty() {
-                    sections.push(PaletteSection::new("Sessions", sessions));
-                }
-                if !files.is_empty() {
-                    sections.push(PaletteSection::new("Files", files));
-                }
-                (self.status().cloned().unwrap_or_default(), sections)
+                (self.status().cloned().unwrap_or_default(), vec![PaletteSection::new("Sessions", sessions), PaletteSection::new("Files", files)])
             }
         };
         let (select, dismiss) = (frame.select.clone(), frame.dismiss.clone());
@@ -316,6 +322,9 @@ impl PickerDelegate for PaletteDelegate {
             .placeholder(placeholder)
             .on_select(move |id, window, cx| select(id, window, cx))
             .on_dismiss(move |window, cx| dismiss(window, cx));
+        if let Some(empty) = frame.empty.clone() {
+            card = card.empty(empty);
+        }
         // A scripted screenshot is a static composition, not an opening:
         // the card's enter presence never settles inside a capture.
         if self.still {

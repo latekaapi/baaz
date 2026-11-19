@@ -35,8 +35,6 @@ pub mod registry;
 pub mod replay;
 pub mod wire;
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -79,7 +77,6 @@ pub struct AcpAdapter {
     client: Mutex<Option<ConnectInfo>>,
     place: Mutex<Option<Place>>,
     relay: Mutex<Option<McpServer>>,
-    state_dir: Option<PathBuf>,
     stderr: provider::StderrTail,
 }
 
@@ -99,17 +96,8 @@ impl AcpAdapter {
             client: Mutex::new(None),
             place: Mutex::new(None),
             relay: Mutex::new(None),
-            state_dir: None,
             stderr: provider::StderrTail::new(),
         }
-    }
-
-    /// Remember where each session runs under `dir` (Baaz's state dir):
-    /// what a later `session/load` must name, since a resume carries no
-    /// folder.
-    pub fn with_state_dir(mut self, dir: PathBuf) -> Self {
-        self.state_dir = Some(dir);
-        self
     }
 
     /// Give every session the terminal relay's bridge as a stdio MCP
@@ -251,28 +239,6 @@ impl AcpAdapter {
         }
     }
 
-    /// The file that remembers where each session ran.
-    fn workspaces_file(&self) -> Option<PathBuf> {
-        Some(self.state_dir.as_ref()?.join("acp-workspaces.json"))
-    }
-
-    fn workspaces(&self) -> BTreeMap<String, String> {
-        self.workspaces_file()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
-    }
-
-    fn remember_workspace(&self, session: &str, cwd: &str) {
-        let Some(path) = self.workspaces_file() else { return };
-        let mut known = self.workspaces();
-        known.insert(session.to_owned(), cwd.to_owned());
-        if let Ok(text) = serde_json::to_string(&known) {
-            let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
-            let _ = std::fs::write(path, text);
-        }
-    }
-
     fn open_session(&self, request_id: &str, workspace: Option<&str>) -> Result<Ack, ProviderError> {
         self.revive()?;
         let cwd = workspace
@@ -303,7 +269,6 @@ impl AcpAdapter {
             }
         }
         *self.place.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Place { session: session.clone(), cwd: cwd.clone() });
-        self.remember_workspace(&session, &cwd);
         Ok(Ack::Session { session_id: session, title: None })
     }
 
@@ -322,11 +287,14 @@ impl AcpAdapter {
         ProviderError::Unavailable { reason: format!("the agent would not open a session: {error}{}", self.last_words()) }
     }
 
-    fn resume_session(&self, session_id: &str) -> Result<Ack, ProviderError> {
+    /// `session/load` in the folder the app recorded for the session (the
+    /// resume's `workspace`): the agent re-opens a session only there, and
+    /// this adapter keeps no record of its own.
+    fn resume_session(&self, session_id: &str, workspace: Option<&str>) -> Result<Ack, ProviderError> {
         if !self.handshake().is_some_and(|handshake| handshake.load_session) {
             return Err(ProviderError::unsupported("resume-session", "this agent cannot re-open a stored session"));
         }
-        let Some(cwd) = self.workspaces().get(session_id).cloned() else {
+        let Some(cwd) = workspace.filter(|workspace| !workspace.is_empty()).map(str::to_owned) else {
             return Err(ProviderError::Refused(Refusal {
                 hint: RefusalHint::HistoryMissing,
                 title: "This conversation cannot be re-opened".into(),
@@ -502,7 +470,7 @@ impl ProviderAdapter for AcpAdapter {
     fn dispatch(&self, command: Command) -> Result<Ack, ProviderError> {
         match command {
             Command::OpenSession { request_id, workspace, .. } => self.open_session(&request_id, workspace.as_deref()),
-            Command::ResumeSession { session_id, .. } => self.resume_session(&session_id),
+            Command::ResumeSession { session_id, workspace, .. } => self.resume_session(&session_id, workspace.as_deref()),
             Command::SubmitInput { request_id, session_id, parts, display_text, .. } => {
                 self.submit(&request_id, &session_id, &parts, display_text.as_deref())
             }

@@ -187,19 +187,33 @@ pub(crate) const SHADOW_PAD: f32 = scale::SP_2 + scale::SP_1;
 ///   A panel is a utility: key, never main ([`never_main_panels`]).
 ///
 /// Every overlay window goes through here, whatever it shows.
+///
+/// **Never inside an App update** (Gate 4, 19 Nov: gpui logged "handling
+/// resize … RefCell already borrowed"). Swapping the style mask resizes the
+/// panel's view (the 6 px per side [`r3_frame`] makes up for), and AppKit
+/// tells gpui at once, from inside the `setStyleMask:` call: gpui's resize
+/// callback borrows the App, so while `open_window`'s build closure (or any
+/// update) held it the resize was dropped and the float kept laying out at
+/// the size it asked for. The open tasks call this after `open_window`
+/// returns, between updates: the window is borrowed only to read its view,
+/// and the AppKit setters run with nothing borrowed.
 #[cfg(target_os = "macos")]
-fn drop_native_chrome(window: &Window, kind: OverlayKind) {
+fn drop_native_chrome(handle: AnyWindowHandle, kind: OverlayKind, cx: &mut gpui::AsyncApp) {
     use objc2::{msg_send, runtime::{AnyObject, Bool}};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+    let view = handle.update(cx, |_, window, _| {
+        let handle = HasWindowHandle::window_handle(window).ok()?;
+        match handle.as_raw() {
+            RawWindowHandle::AppKit(appkit) => Some(appkit.ns_view.as_ptr() as *mut AnyObject),
+            _ => None,
+        }
+    });
+    let Ok(Some(view)) = view else {
         return;
     };
-    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
-        return;
-    };
-    let view = appkit.ns_view.as_ptr() as *mut AnyObject;
-    // SAFETY: `view` is the live NSView gpui just made for this window, on
-    // the main thread; these are plain AppKit setters on its window.
+    // SAFETY: `view` is the live NSView gpui made for this window (it was
+    // read above, and no run-loop turn has passed since), on the main
+    // thread; these are plain AppKit setters on its window.
     unsafe {
         let ns_window: *mut AnyObject = msg_send![view, window];
         if ns_window.is_null() {
@@ -258,7 +272,7 @@ fn never_main_panels() {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn drop_native_chrome(_: &Window, _: OverlayKind) {}
+fn drop_native_chrome(_: AnyWindowHandle, _: OverlayKind, _: &mut gpui::AsyncApp) {}
 
 /// One overlay window's slot: what it shows and where (screen space), and
 /// its window once the open task has made it. One value for "wanted" and
@@ -566,7 +580,6 @@ impl Harness {
                     ..Default::default()
                 };
                 cx.open_window(options, move |window, cx| {
-                    drop_native_chrome(window, kind);
                     cx.new(|cx| {
                         let focus = cx.focus_handle();
                         window.focus(&focus, cx);
@@ -597,6 +610,10 @@ impl Harness {
                     })
                 })
             });
+            // The native chrome comes off between updates, never inside one.
+            if let Ok(opened) = &opened {
+                drop_native_chrome((*opened).into(), kind, cx);
+            }
             trace(format_args!("opened {kind:?}: {}", if opened.is_ok() { "ok" } else { "failed" }));
             let _ = this.update(cx, |this, cx| {
                 // Still wanted? Keep it; otherwise it goes straight away.
@@ -670,11 +687,14 @@ impl Harness {
                     window_background: WindowBackgroundAppearance::Transparent,
                     ..Default::default()
                 };
-                cx.open_window(options, move |window, cx| {
-                    drop_native_chrome(window, OverlayKind::Corner);
+                cx.open_window(options, move |_, cx| {
                     cx.new(|cx| OverlayView { baaz, kind: OverlayKind::Corner, focus: cx.focus_handle(), seen_active: false })
                 })
             });
+            // The native chrome comes off between updates, never inside one.
+            if let Ok(opened) = &opened {
+                drop_native_chrome((*opened).into(), OverlayKind::Corner, cx);
+            }
             trace(format_args!("opened Corner: {}", if opened.is_ok() { "ok" } else { "failed" }));
             let _ = this.update(cx, |this, cx| {
                 let print = this.corner_print(cx);
@@ -924,7 +944,6 @@ impl Harness {
                     ..Default::default()
                 };
                 cx.open_window(options, move |window, cx| {
-                    drop_native_chrome(window, OverlayKind::PageFloat);
                     cx.new(|cx| {
                         let focus = cx.focus_handle();
                         if let Some(input) = input {
@@ -935,6 +954,10 @@ impl Harness {
                     })
                 })
             });
+            // The native chrome comes off between updates, never inside one.
+            if let Ok(opened) = &opened {
+                drop_native_chrome((*opened).into(), OverlayKind::PageFloat, cx);
+            }
             let _ = this.update(cx, |this, cx| {
                 let opened = opened.ok().map(AnyWindowHandle::from);
                 if let Some(unwanted) = this.browser.update(cx, |browser, _| land(&mut browser.page_float, OverlayKind::PageFloat, bounds, opened, print)) {

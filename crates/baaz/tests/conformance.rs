@@ -209,7 +209,7 @@ fn connect(agent: Agent, tag: &str, plans: Plan) -> (Provider, PathBuf, Option<p
             (provider, dir, None)
         }
         Agent::Acp => {
-            let adapter = provider_acp::AcpAdapter::new(&program, &[]).with_state_dir(dir.join("state-dir"));
+            let adapter = provider_acp::AcpAdapter::new(&program, &[]);
             let mut provider = Provider::new(adapter);
             provider.connect(&info()).expect("the stand-in answers initialize");
             (provider, dir, None)
@@ -223,13 +223,11 @@ fn connect(agent: Agent, tag: &str, plans: Plan) -> (Provider, PathBuf, Option<p
     }
 }
 
-/// Record the folder `session` ran in where the ACP adapter under `dir`
-/// keeps it: what its `session/load` must name.
-fn plant_acp_workspace(dir: &Path, session: &str) {
-    let state = dir.join("state-dir");
-    std::fs::create_dir_all(&state).expect("state dir");
-    let record = serde_json::json!({ session: dir.join("work").to_string_lossy() });
-    std::fs::write(state.join("acp-workspaces.json"), record.to_string()).expect("workspace record");
+/// The folder a resumed session ran in, as the app's session row records
+/// it: every resume carries it, as `resume_command` sends it (ACP's
+/// `session/load` must name it).
+fn recorded_workspace(dir: &Path) -> Option<String> {
+    Some(dir.join("work").to_string_lossy().into_owned())
 }
 
 /// Open a fresh session on `agent`'s fake.
@@ -618,12 +616,9 @@ fn a_resumed_session_replays_its_history() {
             }
             Agent::Codex => "01a0de81-0a42-7462-9176-0ff61cb96b77".to_owned(),
             Agent::Muse => "s-resumed".to_owned(),
-            Agent::Acp => {
-                // ACP's load names the folder the session ran in, which Baaz
-                // recorded when it opened it.
-                plant_acp_workspace(&dir, "sess-stored");
-                "sess-stored".to_owned()
-            }
+            // ACP's load names the folder the session ran in: the resume
+            // carries the one the app recorded.
+            Agent::Acp => "sess-stored".to_owned(),
         };
         let events = provider.events();
         let ack = provider
@@ -633,6 +628,7 @@ fn a_resumed_session_replays_its_history() {
                 cursor: None,
                 metadata_only: agent == Agent::Muse,
                 mode: None,
+                workspace: recorded_workspace(&dir),
             })
             .unwrap_or_else(|error| panic!("{agent:?} resumes: {error}"));
         assert!(matches!(&ack, Ack::Session { session_id, .. } if *session_id == session), "{agent:?}: {ack:?}");

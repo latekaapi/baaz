@@ -91,6 +91,13 @@ pub fn connect_order() -> Vec<ProviderId> {
     order
 }
 
+/// The first provider in [`connect_order`]: the switcher's first, where a
+/// fallback is wanted and nothing is known (never the registry's first for
+/// being first — docs/50 P1).
+pub fn first_in_order() -> ProviderId {
+    connect_order().into_iter().next().expect("a provider is always offered")
+}
+
 /// The connect row's headline: the status headline, except a provider that
 /// has not reported yet this launch (no probe result and no cache) always
 /// reads Checking — never Not installed while a probe is pending.
@@ -876,7 +883,7 @@ impl Harness {
 
     /// What the connect screen needs from the root now (see [`ConnectFacts`]).
     pub(crate) fn connect_facts(&self, cx: &App) -> ConnectFacts {
-        ConnectFacts { new_provider: self.new_provider_id(), import_assist: self.import_connect_assist(cx) }
+        ConnectFacts { new_provider: self.new_provider_id(cx), import_assist: self.import_connect_assist(cx) }
     }
 
     /// The connect screen for this frame — facts pushed, then its view
@@ -906,8 +913,8 @@ impl Harness {
             ConnectEvent::Finish => self.finish_connect(cx),
             ConnectEvent::ProviderAction { id, action } => self.connect_provider_action(*id, *action, window, cx),
             ConnectEvent::SetDefault(id) => {
-                self.new_provider = id.as_str().to_owned();
-                crate::providers::write_last_provider(*id);
+                let id = *id;
+                self.provider_model.update(cx, |model, _| model.choose_new_provider(id));
             }
             ConnectEvent::OpenImportSheet => self.open_import_sheet(cx),
         }
@@ -984,16 +991,14 @@ impl Harness {
         // New sessions start where the footer said: the stored pick while it
         // is Connected, else the first Connected in the board's order.
         let statuses = crate::provider_status::live_statuses();
-        let current = self.new_provider_id();
+        let current = self.new_provider_id(cx);
         if let Some(id) = current.and_then(|current| connect_default(&statuses, current)) {
             if Some(id) != current {
-                self.new_provider = id.as_str().to_owned();
-                crate::providers::write_last_provider(id);
+                self.provider_model.update(cx, |model, _| model.choose_new_provider(id));
             }
         } else if !current.is_some_and(|current| crate::settings_providers::usable_provider(&statuses, current)) {
             let id = crate::settings_providers::live_default_new_provider();
-            self.new_provider = id.as_str().to_owned();
-            crate::providers::write_last_provider(id);
+            self.provider_model.update(cx, |model, _| model.choose_new_provider(id));
         }
         // Links from other apps that waited behind the screen open now.
         self.drain_external_soon(cx);
@@ -1076,9 +1081,10 @@ impl Harness {
         self.provider_model.update(cx, |model, cx| model.sync(cx));
     }
 
-    /// The statuses changed visibly: the default provider follows the
-    /// probes, a parked Muse starts once it is available, and the window
-    /// redraws (the sidebar's footer and the banners read the model).
+    /// The statuses changed visibly: a parked Muse starts once it is
+    /// available, and the window redraws (the sidebar's footer and the
+    /// banners read the model, whose default provider has followed the
+    /// probes already — `ProviderStatusModel::sync`).
     pub(crate) fn on_provider_model_event(
         &mut self,
         _model: Entity<ProviderStatusModel>,
@@ -1087,7 +1093,6 @@ impl Harness {
     ) {
         match event {
             ProviderModelEvent::Changed => {
-                self.follow_default_provider(cx);
                 self.start_muse_once_available(cx);
                 cx.notify();
             }
@@ -1115,20 +1120,6 @@ impl Harness {
         {
             self.wire = crate::app::Wire::Connecting;
             self.connect(cx);
-        }
-    }
-
-    /// With no provider picked by the person (nothing stored, no
-    /// `--provider`), the default follows the probes as they land: boot
-    /// chose it from Checking statuses, which is a placeholder.
-    fn follow_default_provider(&mut self, cx: &App) {
-        if self.args.provider_explicit || crate::providers::read_last_provider().is_some() {
-            return;
-        }
-        if let Some(id) = crate::settings_providers::default_new_provider(self.provider_statuses(cx)) {
-            if id.as_str() != self.new_provider {
-                self.new_provider = id.as_str().to_owned();
-            }
         }
     }
 

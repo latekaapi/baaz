@@ -2875,6 +2875,7 @@ mod tests {
                 cursor: None,
                 metadata_only: false,
                 mode: None,
+                workspace: None,
             })
         };
 

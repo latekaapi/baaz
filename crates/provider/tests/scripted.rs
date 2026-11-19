@@ -167,6 +167,7 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
             cursor: None,
             metadata_only: false,
             mode: None,
+            workspace: None,
         },
         Command::ForkSession {
             request_id: "r".into(),

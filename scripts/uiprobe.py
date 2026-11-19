@@ -357,6 +357,12 @@ ENTRIES = {
     # that never scrolls to its selection went unseen: nothing ever drew it.
     "palette":              {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "palette"]},
+    # 5.8 (Gate 4): the palette when the query matches nothing — no empty
+    # "Commands" heading, the one "Nothing matches" line instead.
+    # `palette:<query>` opens (never toggles) and types. No baseline yet —
+    # generate on main after merge, never to silence a finding.
+    "palette-no-match":     {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "palette:zzqxj"]},
     # The Settings page's Shortcuts section: the live keymap rows grouped
     # by category with the Reserved group folded to one row. `settings:`
     # is a window-only steps verb, so it runs with no session open. No

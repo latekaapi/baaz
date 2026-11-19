@@ -247,7 +247,7 @@ impl Harness {
         // start on when it is connected, else the first connected one in
         // switcher order. Muse's plan label still comes from its tier.
         let muse_plan = || muse_plan_label(self.tier.as_ref()).unwrap_or_default();
-        let (name, email, initial, plan, status) = footer_identity(self.provider_statuses(cx), &self.new_provider, muse_plan);
+        let (name, email, initial, plan, status) = footer_identity(self.provider_statuses(cx), self.new_provider(cx), muse_plan);
         let usage = if menu_open { self.sidebar_usage() } else { Vec::new() };
         Account {
             name: name.into(),

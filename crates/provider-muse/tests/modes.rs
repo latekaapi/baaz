@@ -48,6 +48,7 @@ impl Stub {
                 cursor: None,
                 metadata_only: true,
                 mode: None,
+                workspace: None,
             })
             .expect("resume");
         assert!(matches!(ack, Ack::Session { .. }));

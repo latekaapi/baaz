@@ -66,6 +66,13 @@ pub(crate) trait PickerDelegate: Sized + 'static {
         self.confirm(ix)
     }
 
+    /// What the picker says when the query leaves no row ([`PickerFrame::empty`]).
+    /// `None` (the default) draws nothing there: a list that is empty
+    /// until something is typed, or whose component has its own words.
+    fn empty_text(&self) -> Option<SharedString> {
+        None
+    }
+
     /// Row `ix`, drawn the way this picker's component draws its rows.
     fn render_match(&self, ix: usize, selected: bool) -> Self::Row;
 
@@ -113,6 +120,12 @@ pub(crate) struct PickerFrame {
     pub(crate) hover: IndexHandler,
     /// The component's own dismissal (a click outside, its ✕).
     pub(crate) dismiss: Handler,
+    /// The delegate's empty state when no row is left
+    /// ([`PickerDelegate::empty_text`]); `None` while there are rows. A
+    /// group with no rows draws no heading, so without this an empty
+    /// picker is its field and nothing else (Gate 4: an empty "Commands"
+    /// heading).
+    pub(crate) empty: Option<SharedString>,
     /// The picker's own focus, which [`Self::keyed`] tracks.
     focus: FocusHandle,
     on_next: Handler,
@@ -215,6 +228,23 @@ impl<D: PickerDelegate> Picker<D> {
         change(&mut self.delegate);
         let query = self.query(cx);
         self.delegate.update_matches(&query);
+    }
+
+    /// Type `query` into the picker's own field, made now if its first
+    /// frame has not come yet — a scripted step (`palette:<query>`) runs
+    /// before the picker draws. The field raises `InputEvent::Change` as a
+    /// keystroke does, so the rows narrow through the same subscription.
+    /// A picker with no field of its own (the query is typed elsewhere)
+    /// does nothing and says so.
+    #[cfg(feature = "probe")]
+    pub(crate) fn type_query(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        self.make_field(window, cx);
+        let field = self.field().cloned().ok_or("the picker has no query field")?;
+        field.update(cx, |state, cx| {
+            state.set_value(query.to_owned(), window, cx);
+            cx.emit(InputEvent::Change);
+        });
+        Ok(())
     }
 
     /// The query as it stands.
@@ -353,6 +383,7 @@ impl<D: PickerDelegate> Picker<D> {
             select,
             hover,
             dismiss: on(|picker, _, cx| picker.dismiss(cx)),
+            empty: if self.delegate.match_count() == 0 { self.delegate.empty_text() } else { None },
             focus: self.focus.clone(),
             on_next: on(|picker, _, cx| picker.move_selection(1, cx)),
             on_prev: on(|picker, _, cx| picker.move_selection(-1, cx)),

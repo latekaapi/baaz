@@ -164,8 +164,8 @@ impl Harness {
         if !provider_id.has(provider::ProviderTrait::RoutesModelVendor) {
             return OpenExtras { model_provider: None, mode: Some(mode) };
         }
-        let model_provider = if self.new_provider_id() == Some(provider_id) {
-            self.new_provider.clone()
+        let model_provider = if self.new_provider_id(cx) == Some(provider_id) {
+            self.new_provider(cx).to_owned()
         } else {
             provider_id.as_str().to_owned()
         };
@@ -1275,6 +1275,7 @@ impl Harness {
                 cursor: None,
                 metadata_only: false,
                 mode: Some(mode),
+                workspace: Some(workspace_bg.clone()),
             })?;
             // Tests drain after the resume, synchronously on the test
             // executor: no forwarding thread wakes the lane task.

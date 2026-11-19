@@ -71,11 +71,12 @@ impl ProviderFactory for AcpFactory {
     }
 
     /// The configured agent behind the gate, with the window's terminal
-    /// relay and Baaz's state dir, connected (the agent's `initialize`).
+    /// relay, connected (the agent's `initialize`). It keeps nothing under
+    /// Baaz's state dir: a resume names its folder.
     fn open(&self, spawn: &SessionSpawn) -> Result<Provider, ProviderError> {
         let program = spawn.program.as_ref().ok_or_else(not_configured)?;
         let args: Vec<String> = DESCRIPTOR.configured_command().map(|words| words[1..].to_vec()).unwrap_or_default();
-        let adapter = AcpAdapter::new(&program.to_string_lossy(), &args).with_state_dir(spawn.state_dir.clone());
+        let adapter = AcpAdapter::new(&program.to_string_lossy(), &args);
         if let Some(relay) = spawn.mcp_servers.first() {
             adapter.set_terminal_relay(relay.clone());
         }

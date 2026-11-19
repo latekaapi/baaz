@@ -117,6 +117,7 @@ fn resume_session(provider: &Provider) -> Ack {
             cursor: None,
             metadata_only: false,
             mode: None,
+            workspace: None,
         })
         .expect("resume lands")
 }

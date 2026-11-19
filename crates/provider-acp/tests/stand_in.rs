@@ -8,7 +8,7 @@
 //! dies with its request waiting, and the session that revives; a stored
 //! session re-opened with `session/load`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use aui_protocol::{ApprovalState, Block, Delta, Session, TodoState, ToolKind, ToolStatus, Turn};
@@ -64,12 +64,9 @@ impl Drop for Rig {
     }
 }
 
-fn connected(tag: &str, plans: &[&str], state_dir: Option<&Path>) -> (Provider, PathBuf) {
+fn connected(tag: &str, plans: &[&str]) -> (Provider, PathBuf) {
     let (dir, program) = stand_in(tag, plans);
-    let mut adapter = AcpAdapter::new(&program.to_string_lossy(), &[]);
-    if let Some(state) = state_dir {
-        adapter = adapter.with_state_dir(state.to_path_buf());
-    }
+    let adapter = AcpAdapter::new(&program.to_string_lossy(), &[]);
     let mut provider = Provider::new(adapter);
     let handshake = provider.connect(&ConnectInfo::new("baaz", "0.0.0-test")).expect("the stand-in shakes hands");
     assert_eq!(handshake.agent_name, "Stand-in Agent");
@@ -77,7 +74,7 @@ fn connected(tag: &str, plans: &[&str], state_dir: Option<&Path>) -> (Provider, 
 }
 
 fn open(tag: &str, plans: &[&str]) -> Rig {
-    let (provider, dir) = connected(tag, plans, None);
+    let (provider, dir) = connected(tag, plans);
     let events = provider.events();
     let ack = provider
         .send(Command::OpenSession {
@@ -283,10 +280,9 @@ fn a_child_that_dies_settles_everything_and_the_session_revives() {
 
 #[test]
 fn a_stored_session_reopens_with_its_turns_then_takes_a_prompt() {
-    let state = std::env::temp_dir().join(format!("baaz-acp-load-state-{}", std::process::id()));
-    std::fs::create_dir_all(&state).expect("state");
-    std::fs::write(state.join("acp-workspaces.json"), r#"{"sess-stored":"/Users/ada/work/acme-web"}"#).expect("seed");
-    let (provider, dir) = connected("load", &[&fixture("load.jsonl")], Some(&state));
+    // The folder rides the resume (the app's session row), as the
+    // recording's `session/load` names it.
+    let (provider, dir) = connected("load", &[&fixture("load.jsonl")]);
     let events = provider.events();
     let ack = provider
         .send(Command::ResumeSession {
@@ -295,6 +291,7 @@ fn a_stored_session_reopens_with_its_turns_then_takes_a_prompt() {
             cursor: None,
             metadata_only: false,
             mode: None,
+            workspace: Some("/Users/ada/work/acme-web".into()),
         })
         .expect("the stored session re-opens");
     assert!(matches!(&ack, Ack::Session { session_id, .. } if session_id == "sess-stored"));
@@ -308,11 +305,10 @@ fn a_stored_session_reopens_with_its_turns_then_takes_a_prompt() {
     let turn = rig.submit("Where is it called from?");
     rig.until(settled(&turn));
     assert_eq!(outcome(&rig.seen, &turn), Some(TurnOutcome::Completed));
-    let _ = std::fs::remove_dir_all(state);
-    // A session Baaz never recorded a folder for cannot be re-opened.
-    let (provider, _dir) = connected("load-unknown", &[&fixture("load.jsonl")], None);
+    // A session Baaz has no folder for cannot be re-opened.
+    let (provider, _dir) = connected("load-unknown", &[&fixture("load.jsonl")]);
     let refused = provider
-        .send(Command::ResumeSession { request_id: provider::new_request_id(), session_id: "elsewhere".into(), cursor: None, metadata_only: false, mode: None })
+        .send(Command::ResumeSession { request_id: provider::new_request_id(), session_id: "elsewhere".into(), cursor: None, metadata_only: false, mode: None, workspace: None })
         .expect_err("no folder, no load");
     assert!(refused.is_session_scoped(), "{refused:?}");
 }

@@ -343,7 +343,7 @@ fn an_unfiled_session_never_starts_in_the_launch_directory(cx: &mut gpui::TestAp
                 // First run: nothing adopted, so nothing is current.
                 harness.session_list.update(cx, |list, _| list.projects.current = None);
                 harness.session_list.update(cx, |list, _| list.projects.projects.clear());
-                harness.new_provider = provider.as_str().to_owned();
+                harness.provider_model.update(cx, |model, _| model.point_new_provider(provider));
             });
         });
         vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
@@ -515,7 +515,7 @@ fn new_after_open_lands_a_draft(cx: &mut gpui::TestAppContext, name: &str, provi
             harness.providers = harness.providers.with_opens_of(&factory);
             install_fake_muse(harness, &state.2, &state.2, &log, None);
             let project = adopt_for_muse(harness, &state.2, cx);
-            harness.new_provider = provider.as_str().to_owned();
+            harness.provider_model.update(cx, |model, _| model.point_new_provider(provider));
             z4_seed_stored_codex(harness, cx);
             // The live case: a handoff destination in this project, its
             // one turn the hidden pack acknowledgement — so its row
@@ -842,7 +842,7 @@ fn a_reopened_muse_session_is_muse_whatever_the_new_session_default(cx: &mut gpu
     for default in [ProviderId::Codex, ProviderId::ClaudeCode] {
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.new_provider = default.as_str().to_owned();
+                harness.provider_model.update(cx, |model, _| model.point_new_provider(default));
                 harness.open("muse-row".into(), true, window, cx);
             });
         });
@@ -861,7 +861,7 @@ fn a_reopened_muse_session_is_muse_whatever_the_new_session_default(cx: &mut gpu
 
 /// Adopt the harness workspace as a project holding `defaults`
 /// (per-provider model ids), park a muse view with `catalog` loaded as
-/// the active view, and point `new_provider` at `provider`: everything
+/// the active view, and point the new-session provider at `provider`: everything
 /// `new_session_params` reads in the B2fix tests below.
 fn b2fix_project(
     vc: &mut gpui::VisualTestContext,
@@ -880,7 +880,7 @@ fn b2fix_project(
                     adopted.defaults.note_model(lane, model);
                 }
             });
-            harness.new_provider = provider.to_owned();
+            harness.provider_model.update(cx, |model, _| model.point_new_provider(ProviderId::resolve(provider).expect("a registered key")));
             id
         })
     });
@@ -1090,7 +1090,7 @@ fn a_codex_default_survives_a_loaded_muse_catalog(cx: &mut gpui::TestAppContext)
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let params =
-                harness.start_model(harness.new_provider_id().expect("a registered provider"), Some(project.as_str()), cx);
+                harness.start_model(harness.new_provider_id(cx).expect("a registered provider"), Some(project.as_str()), cx);
             assert_eq!(
                 params.as_deref(),
                 Some("gpt-6-astra"),
@@ -1113,7 +1113,7 @@ fn a_claude_code_default_survives_a_loaded_muse_catalog(cx: &mut gpui::TestAppCo
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let params =
-                harness.start_model(harness.new_provider_id().expect("a registered provider"), Some(project.as_str()), cx);
+                harness.start_model(harness.new_provider_id(cx).expect("a registered provider"), Some(project.as_str()), cx);
             assert_eq!(
                 params.as_deref(),
                 Some("claude-opus-4"),
@@ -1144,7 +1144,7 @@ fn a_handoff_destination_to_muse_drops_a_foreign_default(cx: &mut gpui::TestAppC
                 prefix: Vec::new(),
             });
             let params =
-                harness.start_model(harness.new_provider_id().expect("a registered provider"), Some(project.as_str()), cx);
+                harness.start_model(harness.new_provider_id(cx).expect("a registered provider"), Some(project.as_str()), cx);
             assert_eq!(
                 params, None,
                 "a foreign default never rides a muse handoff destination"
@@ -1166,7 +1166,7 @@ fn a_muse_start_keeps_a_listed_model(cx: &mut gpui::TestAppContext) {
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let params =
-                harness.start_model(harness.new_provider_id().expect("a registered provider"), Some(project.as_str()), cx);
+                harness.start_model(harness.new_provider_id(cx).expect("a registered provider"), Some(project.as_str()), cx);
             assert_eq!(
                 params.as_deref(),
                 Some("muse-spark-1.3"),
@@ -1185,10 +1185,10 @@ fn a_second_new_while_a_switch_is_in_flight_starts_nothing(cx: &mut gpui::TestAp
     let baaz = lane_harness(vc, &state.2);
     let (factory, opens) = counting_factory();
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
-            harness.new_provider = ProviderId::Codex.as_str().to_owned();
+            harness.provider_model.update(cx, |model, _| model.point_new_provider(ProviderId::Codex));
         });
     });
     // Two `new`s back to back: the second lands while the first open

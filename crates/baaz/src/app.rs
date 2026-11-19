@@ -606,10 +606,6 @@ pub(crate) const LEASE_NOTICE: &str =
 /// The whole application.
 pub struct Harness {
     pub(crate) args: Args,
-    /// The switcher's pick: which registry entry a new session starts on.
-    /// Seeded from the command line, changed only by the picker — never by
-    /// a live session, which keeps the lane it was created on.
-    pub(crate) new_provider: String,
     /// The window's provider registry: every adapter's factory, the slot
     /// of the child a shared-child provider's lanes ride, and how this run
     /// opens lanes (the production factories spawn the real CLI; a scripted
@@ -811,7 +807,11 @@ impl Harness {
         let right_pane = cx.new(|cx| crate::right_pane::RightPane::new(right_restored, overlays.clone(), cx));
         // The Skills page, closed: it lists for the launch workspace until
         // the root pushes the current project.
-        let provider_model = cx.new(|_| crate::provider_model::ProviderStatusModel::new(overlays.clone()));
+        // It also holds where new sessions start: `--provider`, else the
+        // stored pick while it can start one, else the first that can run
+        // in switcher order — following the statuses until the person picks.
+        let explicit = args.provider_explicit.then(|| args.provider.clone());
+        let provider_model = cx.new(|_| crate::provider_model::ProviderStatusModel::new(overlays.clone(), explicit));
         let connect_screen = cx.new(|cx| crate::connect::ConnectScreen::new(provider_model.clone(), overlays.clone(), cx));
         let setup = cx.new(|cx| crate::setup::SetupHost::new(provider_model.clone(), overlays.clone(), cx));
         let settings_page = cx.new(|cx| crate::settings::SettingsPage::new(provider_model.clone(), overlays.clone(), window, cx));
@@ -847,21 +847,6 @@ impl Harness {
         // The dock draws the same tabs the service serves, and shares the
         // window's floating layer for its toasts.
         let terminal_dock = cx.new(|cx| terminal::TerminalDock::new(terminal_host, overlays.clone(), cx));
-        // The person's last pick while it can still start a session; else
-        // the first connected provider (docs/50 P1) — never Muse by default.
-        let new_provider = if args.provider_explicit {
-            args.provider.clone()
-        } else {
-            // The cached statuses, read without probing: boot never waits
-            // on (or races) a provider probe for this.
-            let statuses = crate::connect::initial_connect_statuses();
-            crate::providers::read_last_provider()
-                .filter(|id| crate::settings_providers::usable_provider(&statuses, *id))
-                .or_else(|| crate::settings_providers::default_new_provider(&statuses))
-                .unwrap_or_else(|| ProviderId::all()[0])
-                .as_str()
-                .to_owned()
-        };
         // Z7a, read once at boot: captures (`--screenshot`) and tests run the
         // scripted browser page — a native view never appears in a gpui
         // screenshot, and captures must be deterministic — while the app runs
@@ -875,7 +860,6 @@ impl Harness {
         );
         let focus_root = cx.focus_handle();
         let mut this = Self {
-            new_provider,
             args,
             providers,
             wire: Wire::Connecting,
@@ -4196,20 +4180,24 @@ impl Harness {
     /// The switcher's pick as a registry entry. `None` only for a value no
     /// registered provider answers to — which boot refuses (`--provider`)
     /// and nothing else writes — so a caller refuses rather than guessing.
-    pub(crate) fn new_provider_id(&self) -> Option<ProviderId> {
-        ProviderId::resolve(&self.new_provider).ok()
+    pub(crate) fn new_provider_id(&self, cx: &App) -> Option<ProviderId> {
+        self.provider_model.read(cx).new_provider_id()
+    }
+
+    /// The switcher's pick as its key (see [`Self::new_provider_id`]).
+    pub(crate) fn new_provider<'a>(&self, cx: &'a App) -> &'a str {
+        self.provider_model.read(cx).new_provider()
     }
 
     pub(crate) fn select_new_provider(&mut self, id: ProviderId, cx: &mut Context<Self>) {
         // A disabled provider is never the default for new sessions: fall
-        // back to the first enabled one (Muse when none is).
+        // back to the first enabled one (the switcher's first when none is).
         let id = if crate::settings_providers::live_visible_provider_ids().contains(&id) {
             id
         } else {
             crate::settings_providers::live_default_new_provider()
         };
-        self.new_provider = id.as_str().to_owned();
-        crate::providers::write_last_provider(id);
+        self.provider_model.update(cx, |model, _| model.choose_new_provider(id));
         self.ensure_provider_started(id, cx);
         cx.notify();
     }
@@ -6888,7 +6876,7 @@ mod tests {
         assert!(menu_open(vc), "the chip opens its menu");
         vc.update(|_, cx| page.update(cx, |page, cx| page.default_provider_intent(ConnectIntent::SetDefault(aui_icons::Provider::Codex), cx)));
         assert!(!menu_open(vc), "a pick closes it");
-        assert_eq!(vc.update(|_, cx| baaz.read(cx).new_provider.clone()), "codex");
+        assert_eq!(vc.update(|_, cx| baaz.read(cx).new_provider(cx).to_owned()), "codex");
         vc.update(|_, cx| page.update(cx, |page, cx| page.default_provider_intent(ConnectIntent::ToggleDefaultMenu, cx)));
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("general", cx)));
         assert!(!menu_open(vc), "leaving the page closes the menu");

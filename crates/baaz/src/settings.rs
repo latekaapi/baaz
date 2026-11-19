@@ -2402,7 +2402,7 @@ impl Harness {
         }
         let section = page.state.section.as_str();
         let mut facts = SettingsFacts {
-            new_provider: self.new_provider_id(),
+            new_provider: self.new_provider_id(cx),
             ..SettingsFacts::default()
         };
         match section {
@@ -2491,8 +2491,8 @@ impl Harness {
             SettingsEvent::FlipProvider { id, on } => self.flip_provider_enabled(*id, *on, cx),
             SettingsEvent::ProviderIntent(intent) => self.handle_provider_intent(intent.clone(), window, cx),
             SettingsEvent::SetDefaultProvider(id) => {
-                self.new_provider = id.as_str().to_owned();
-                crate::providers::write_last_provider(*id);
+                let id = *id;
+                self.provider_model.update(cx, |model, _| model.choose_new_provider(id));
                 cx.notify();
             }
             SettingsEvent::OpenConnect => self.open_connect_screen(cx),

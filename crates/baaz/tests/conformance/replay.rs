@@ -682,9 +682,6 @@ pub fn run(agent: Agent, case: &Case) -> (Trace, Vec<Violation>) {
             driver.send(Sent::Open, command)
         }
         Start::Resume { session, stored } => {
-            if agent == Agent::Acp {
-                super::plant_acp_workspace(&driver.dir, session);
-            }
             if let Some(stored) = stored {
                 let slug = driver.dir.join("claude-home/projects/-conformance");
                 std::fs::create_dir_all(&slug).expect("slug dir");
@@ -696,6 +693,7 @@ pub fn run(agent: Agent, case: &Case) -> (Trace, Vec<Violation>) {
                 cursor: None,
                 metadata_only: false,
                 mode: None,
+                workspace: super::recorded_workspace(&driver.dir),
             };
             driver.send(Sent::Resume(session.clone()), command)
         }

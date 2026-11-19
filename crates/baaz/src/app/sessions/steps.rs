@@ -180,6 +180,22 @@ impl Harness {
         Ok(())
     }
 
+    /// `palette`: toggle the ⌘K palette, as ⌘K does. `palette:<query>`:
+    /// open it (or keep it open) and type `<query>` into its field — the
+    /// empty state's capture types a query that matches nothing.
+    pub(crate) fn step_palette(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if rest.is_empty() {
+            self.open_palette(crate::overlays::PaletteKind::Commands, cx);
+            return Ok(());
+        }
+        let open = self.palette_view(cx).filter(|view| view.read(cx).delegate.kind == crate::overlays::PaletteKind::Commands);
+        let view = match open {
+            Some(view) => view,
+            None => self.show_palette(crate::overlays::PaletteKind::Commands, cx),
+        };
+        view.update(cx, |picker, cx| picker.type_query(rest, window, cx))
+    }
+
     /// `rename:<name>`: open the active row's inline field, optionally
     /// filled. No open session fails the step.
     pub(crate) fn step_rename(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {

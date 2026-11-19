@@ -100,7 +100,6 @@ impl Harness {
                     ..Default::default()
                 };
                 cx.open_window(options, move |window, cx| {
-                    drop_native_chrome(window, OverlayKind::AgentCard);
                     cx.new(|cx| {
                         let focus = cx.focus_handle();
                         window.focus(&focus, cx);
@@ -111,6 +110,10 @@ impl Harness {
                     })
                 })
             });
+            // The native chrome comes off between updates, never inside one.
+            if let Ok(opened) = &opened {
+                drop_native_chrome((*opened).into(), OverlayKind::AgentCard, cx);
+            }
             let _ = this.update(cx, |this, cx| {
                 let opened = opened.ok().map(AnyWindowHandle::from);
                 let unwanted = this.browser.update(cx, |browser, _| super::land(&mut browser.agent_window.card_float, OverlayKind::AgentCard, bounds, opened, 0));

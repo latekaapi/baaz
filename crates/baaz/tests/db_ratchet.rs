@@ -13,6 +13,12 @@
 //!
 //! When this fails, read and write the session's row through `crate::db`
 //! instead of the old file.
+//!
+//! The adapters keep no session store of their own either (docs/82 5.8):
+//! `acp-workspaces.json` (5.7's session id → folder file) is retired with no
+//! importer — the folder rides `Command::ResumeSession` from the session's
+//! row — and every JSON file an adapter's code names is listed in
+//! [`ADAPTER_JSON`] with why it is not a store Baaz keeps by session.
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +31,28 @@ const RETIRED: [&str; 7] = [
     "history.json",
     "import-journal.json",
     "session-migration-journal.json",
+];
+
+/// Stores retired with nothing to import: named nowhere at all.
+const RETIRED_UNIMPORTED: [&str; 1] = ["acp-workspaces.json"];
+
+/// The adapter crates, by directory under `crates/`.
+const ADAPTER_CRATES: [&str; 6] =
+    ["provider", "provider-runtime", "provider-muse", "provider-claude-code", "provider-codex", "provider-acp"];
+
+/// Every JSON file an adapter's non-test code names: `(file, the name as
+/// written, why it is not a store Baaz keeps by session)`. A new one is a
+/// new store until it is listed here with its reason — and one keyed by
+/// session id belongs in `baaz.db` instead.
+const ADAPTER_JSON: [(&str, &str, &str); 4] = [
+    (
+        "provider-claude-code/src/terminal.rs",
+        "{session_id}.json",
+        "the CLI's own --mcp-config input, rewritten at every spawn and never read back by Baaz",
+    ),
+    ("provider-claude-code/src/home.rs", "settings.json", "the CLI's own settings, linked from the owner's ~/.claude"),
+    ("provider-codex/src/home.rs", "auth.json", "the CLI's own credentials, linked from the owner's ~/.codex"),
+    ("provider-runtime/src/ledger.rs", "children.json", "the live-children ledger (docs/82 5.1), keyed by pid for crash cleanup"),
 ];
 
 /// The importer and its tests, by path under `crates/`.
@@ -168,4 +196,115 @@ fn a_planted_reader_is_caught() {
     let importer: Vec<(String, usize, String)> =
         lines.iter().map(|(_, n, line)| (IMPORTER[0].to_owned(), *n, line.clone())).collect();
     assert!(retired_hits(&importer).is_empty(), "the importer may read it");
+}
+
+/// `text` without its trailing test module: from a `#[cfg(test)]` that
+/// opens a `mod` to the end (the adapters keep their tests last).
+fn without_tests(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let cut = lines
+        .windows(2)
+        .position(|pair| pair[0].trim() == "#[cfg(test)]" && pair[1].trim_start().starts_with("mod "))
+        .unwrap_or(lines.len());
+    lines[..cut].join("\n")
+}
+
+/// The `"….json"` string literals in `code`.
+fn json_literals(code: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = code;
+    while let Some(start) = rest.find('"') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('"') else { break };
+        let literal = &after[..end];
+        if literal.ends_with(".json") {
+            out.push(literal.to_owned());
+        }
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+/// The JSON names in adapter code `(file, line, code)` not in [`ADAPTER_JSON`].
+fn unlisted_adapter_json(lines: &[(String, usize, String)]) -> Vec<String> {
+    lines
+        .iter()
+        .flat_map(|(file, n, code)| {
+            json_literals(code).into_iter().filter_map(move |literal| {
+                let listed = ADAPTER_JSON.iter().any(|(at, name, _)| at == file && literal.ends_with(name));
+                (!listed).then(|| format!("{file}:{n}: \"{literal}\" in {}", code.trim()))
+            })
+        })
+        .collect()
+}
+
+/// Every non-test code line of the adapter crates' `src/`.
+fn adapter_code() -> Vec<(String, usize, String)> {
+    let root = crates_dir();
+    let mut out = Vec::new();
+    for krate in ADAPTER_CRATES {
+        let mut files = Vec::new();
+        rust_files(&root.join(krate).join("src"), &mut files);
+        for path in files {
+            let rel = path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            for (n, line) in code(&without_tests(&text)) {
+                out.push((rel.clone(), n, line));
+            }
+        }
+    }
+    out
+}
+
+/// docs/82 5.8: no adapter keeps a JSON store of its own (5.7's
+/// `acp-workspaces.json` kept session id → folder outside `baaz.db`, and a
+/// forgotten session's entry stayed behind). The retired name appears
+/// nowhere, and every JSON file an adapter names is a listed non-store.
+#[test]
+fn no_adapter_keeps_a_json_store_of_its_own() {
+    let everywhere = workspace_code();
+    let named: Vec<String> = everywhere
+        .iter()
+        .filter(|(file, ..)| !file.ends_with("baaz/tests/db_ratchet.rs"))
+        .filter(|(_, _, code)| RETIRED_UNIMPORTED.iter().any(|name| names(code, name)))
+        .map(|(file, n, code)| format!("{file}:{n}: {}", code.trim()))
+        .collect();
+    assert!(named.is_empty(), "a retired adapter store is named:\n  {}", named.join("\n  "));
+    let lines = adapter_code();
+    assert!(lines.len() > 10_000, "the adapters were read ({} lines)", lines.len());
+    let found = unlisted_adapter_json(&lines);
+    assert!(
+        found.is_empty(),
+        "an adapter names a JSON file not in ADAPTER_JSON — a store keyed by session id belongs in baaz.db:\n  {}",
+        found.join("\n  ")
+    );
+    // Every listed entry is still there (a stale allowance is a hole).
+    for (file, name, _) in ADAPTER_JSON {
+        assert!(
+            lines.iter().any(|(at, _, code)| at == file && json_literals(code).iter().any(|literal| literal.ends_with(name))),
+            "{file} no longer names {name}: drop it from ADAPTER_JSON"
+        );
+    }
+}
+
+/// The adapter scan sees a planted session store, and not its test module.
+#[test]
+fn a_planted_adapter_store_is_caught() {
+    let planted = r#"fn remember(dir: &Path) {
+    let _ = std::fs::write(dir.join("acp-sessions.json"), "{}");
+}
+
+#[cfg(test)]
+mod tests {
+    fn fixture() { let _ = std::fs::read_to_string("seed.json"); }
+}
+"#;
+    let lines: Vec<(String, usize, String)> =
+        code(&without_tests(planted)).into_iter().map(|(n, line)| ("provider-acp/src/lib.rs".to_owned(), n, line)).collect();
+    let found = unlisted_adapter_json(&lines);
+    assert_eq!(found.len(), 1, "the planted store is caught, the test fixture is not: {found:?}");
+    assert!(found[0].contains("acp-sessions.json"));
+    let listed: Vec<(String, usize, String)> =
+        vec![("provider-runtime/src/ledger.rs".to_owned(), 1, r#"pub const FILE_NAME: &str = "children.json";"#.to_owned())];
+    assert!(unlisted_adapter_json(&listed).is_empty(), "a listed file passes");
 }

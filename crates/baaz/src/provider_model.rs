@@ -6,6 +6,8 @@
 //! one cheap stamp compare per frame) and holds what the window derives
 //! from it: the statuses the connect screen, the setup sheet, the
 //! sidebar's footer, Settings › Providers and the import offer read; the
+//! provider new sessions start on, which follows the statuses until the
+//! person picks one ([`NewProvider`]); the
 //! quiet per-provider sign-out banners the composer shows (D5 B5); the
 //! cards waiting on a press (Re-check, Sign out); and the one Codex sign-in
 //! flow, which the connect row, the Settings card and the setup sheet all
@@ -13,9 +15,9 @@
 //!
 //! Readers hold the entity and read it; the screens that draw it (the
 //! connect screen, the setup sheet, the Settings page) observe it, so a
-//! change redraws them without the root. What reaches past it — a default
-//! provider that follows the probes, Muse starting once it is available —
-//! goes to the root as [`ProviderModelEvent::Changed`].
+//! change redraws them without the root. What reaches past it — Muse
+//! starting once it is available, the root's redraw — goes to the root as
+//! [`ProviderModelEvent::Changed`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,8 +41,62 @@ const SETTLED_TOAST_FOR: std::time::Duration = std::time::Duration::from_secs(5)
 #[derive(Clone, Debug)]
 pub(crate) enum ProviderModelEvent {
     /// The statuses changed in a way a person can see: the root follows
-    /// (the default provider, Muse starting, a redraw).
+    /// (Muse starting, a redraw).
     Changed,
+}
+
+/// The provider new sessions start on (the composer's switcher, the
+/// footer's "New sessions start in"), and whose choice it is.
+pub(crate) struct NewProvider {
+    /// Its registry key. `--provider` may name a key no registration
+    /// answers to; a new session then refuses rather than guessing.
+    key: String,
+    /// The person chose it — `--provider`, a pick an earlier run stored, a
+    /// pick this run — so the statuses never re-pick it for them. Kept here
+    /// as well as in the store: a pick whose write failed still holds.
+    chosen: bool,
+}
+
+impl NewProvider {
+    /// At boot, over the boot statuses (the cache, never a probe): the
+    /// `--provider` key, else the stored pick while it can start a session,
+    /// else the first in switcher order that can run
+    /// ([`crate::settings_providers::default_new_provider`]) — never Muse
+    /// for being first in the registry (docs/50 P1).
+    pub(crate) fn at_boot(explicit: Option<String>, statuses: &[ProviderStatus]) -> Self {
+        Self::at_boot_with(explicit, crate::providers::read_last_provider(), statuses)
+    }
+
+    /// [`Self::at_boot`] with the stored pick handed in.
+    fn at_boot_with(explicit: Option<String>, stored: Option<ProviderId>, statuses: &[ProviderStatus]) -> Self {
+        if let Some(key) = explicit {
+            return NewProvider { key, chosen: true };
+        }
+        let id = stored
+            .filter(|id| crate::settings_providers::usable_provider(statuses, *id))
+            .or_else(|| crate::settings_providers::default_new_provider(statuses))
+            .unwrap_or_else(crate::connect::first_in_order);
+        NewProvider { key: id.as_str().to_owned(), chosen: stored.is_some() }
+    }
+
+    /// The person picked `id`.
+    fn choose(&mut self, id: ProviderId) {
+        *self = NewProvider { key: id.as_str().to_owned(), chosen: true };
+    }
+
+    /// With no pick of the person's, the default follows `statuses` as they
+    /// land: boot chose it over the cache, or over Checking rows on a first
+    /// launch, which say nothing yet. The first that can run in switcher
+    /// order (Gate 4: a first launch stayed on Muse, first in the registry,
+    /// with every provider connected). A pick is never re-picked.
+    fn follow(&mut self, statuses: &[ProviderStatus]) {
+        if self.chosen {
+            return;
+        }
+        if let Some(id) = crate::settings_providers::default_new_provider(statuses) {
+            self.key = id.as_str().to_owned();
+        }
+    }
 }
 
 /// The window's provider facts (see the module doc).
@@ -74,15 +130,20 @@ pub(crate) struct ProviderStatusModel {
     codex_generation: u64,
     /// The window's floating layer, for the settled-press toasts.
     overlays: Entity<Overlays>,
+    /// Where new sessions start ([`NewProvider`]).
+    new_provider: NewProvider,
 }
 
 impl EventEmitter<ProviderModelEvent> for ProviderStatusModel {}
 
 impl ProviderStatusModel {
-    /// The model at boot: statuses from the cache (or the script), stamped.
-    pub(crate) fn new(overlays: Entity<Overlays>) -> Self {
+    /// The model at boot: statuses from the cache (or the script), stamped,
+    /// and the new-session provider over them (`explicit`: `--provider`).
+    pub(crate) fn new(overlays: Entity<Overlays>, explicit: Option<String>) -> Self {
+        let statuses = initial_connect_statuses();
+        let new_provider = NewProvider::at_boot(explicit, &statuses);
         ProviderStatusModel {
-            statuses: initial_connect_statuses(),
+            statuses,
             stamp: status_stamp(),
             banners: HashMap::new(),
             typed_signed_out: HashSet::new(),
@@ -92,8 +153,36 @@ impl ProviderStatusModel {
             codex_cancel: Arc::new(AtomicBool::new(false)),
             codex_generation: 0,
             overlays,
+            new_provider,
         }
     }
+
+    /// The new-session provider's key, as the switcher holds it.
+    pub(crate) fn new_provider(&self) -> &str {
+        &self.new_provider.key
+    }
+
+    /// The new-session provider as a registry entry; `None` only for a
+    /// `--provider` key no registration answers to.
+    pub(crate) fn new_provider_id(&self) -> Option<ProviderId> {
+        ProviderId::resolve(&self.new_provider.key).ok()
+    }
+
+    /// The person picked `id` (the switcher, the footer's or Settings'
+    /// default, a fallback they caused): it holds for this run and is
+    /// stored for the next. The statuses never re-pick it.
+    pub(crate) fn choose_new_provider(&mut self, id: ProviderId) {
+        self.new_provider.choose(id);
+        crate::providers::write_last_provider(id);
+    }
+
+    /// Point new sessions at `id` for the next start without making it the
+    /// person's pick (the Skills page's "write one" runs on the provider
+    /// that manages skills, whatever the switcher said).
+    pub(crate) fn point_new_provider(&mut self, id: ProviderId) {
+        self.new_provider.key = id.as_str().to_owned();
+    }
+
 
     /// `id`'s status as the window shows it, Checking until a probe lands.
     pub(crate) fn status(&self, id: ProviderId) -> ProviderStatus {
@@ -140,6 +229,7 @@ impl ProviderStatusModel {
         };
         self.statuses = fresh;
         self.sync_banners();
+        self.new_provider.follow(&self.statuses);
         cx.notify();
         cx.emit(ProviderModelEvent::Changed);
     }
@@ -398,4 +488,81 @@ fn visible(statuses: &[ProviderStatus]) -> Vec<ProviderStatus> {
             status
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NewProvider;
+    use crate::provider_status::{Auth, Installed, ProviderStatus};
+    use crate::providers::ProviderId;
+
+    fn status(id: ProviderId, connected: bool) -> ProviderStatus {
+        let mut status = ProviderStatus::checking(id);
+        // Probed: a row never checked reads Checking, never Connected.
+        status.checked_at = Some(1);
+        if connected {
+            status.installed = Installed::yes("1.0", "/bin/x");
+            status.auth = Auth::SignedIn { email: Some("a@b".into()), plan: None, method: None, source: None };
+        }
+        status
+    }
+
+    fn checking() -> Vec<ProviderStatus> {
+        ProviderId::all().into_iter().map(ProviderStatus::checking).collect()
+    }
+
+    fn all_connected() -> Vec<ProviderStatus> {
+        ProviderId::all().into_iter().map(|id| status(id, true)).collect()
+    }
+
+    /// Gate 4: a first launch (no cache, nothing stored) started new
+    /// sessions on Muse, first in the registry. Boot over Checking rows
+    /// takes the switcher's first; once the statuses land, the first
+    /// connected in switcher order — not Muse with everything connected.
+    #[test]
+    fn a_first_launch_follows_the_statuses_to_the_first_connected() {
+        let mut new = NewProvider::at_boot_with(None, None, &checking());
+        assert_eq!(new.key, crate::connect::first_in_order().as_str());
+        assert_ne!(new.key, ProviderId::Muse.as_str(), "the registry's first is no default");
+        new.follow(&all_connected());
+        assert_eq!(new.key, crate::connect::connect_order()[0].as_str(), "the first connected in switcher order");
+        assert_eq!(new.key, ProviderId::ClaudeCode.as_str());
+        // Only Codex connected: Codex.
+        let statuses = vec![status(ProviderId::Muse, false), status(ProviderId::ClaudeCode, false), status(ProviderId::Codex, true)];
+        new.follow(&statuses);
+        assert_eq!(new.key, ProviderId::Codex.as_str());
+        // Only Muse connected: Muse, on the same rule as any other.
+        let statuses = vec![status(ProviderId::Muse, true), status(ProviderId::ClaudeCode, false), status(ProviderId::Codex, false)];
+        new.follow(&statuses);
+        assert_eq!(new.key, ProviderId::Muse.as_str());
+    }
+
+    /// A pick stored by an earlier run is never re-picked by the statuses.
+    #[test]
+    fn a_stored_pick_is_never_followed_away() {
+        let mut new = NewProvider::at_boot_with(None, Some(ProviderId::Muse), &all_connected());
+        assert_eq!(new.key, ProviderId::Muse.as_str());
+        new.follow(&all_connected());
+        assert_eq!(new.key, ProviderId::Muse.as_str(), "the statuses overrode a stored pick");
+    }
+
+    /// A pick made this run holds, whether or not its store write landed.
+    #[test]
+    fn a_pick_this_run_is_never_followed_away() {
+        let mut new = NewProvider::at_boot_with(None, None, &checking());
+        new.choose(ProviderId::Codex);
+        new.follow(&all_connected());
+        assert_eq!(new.key, ProviderId::Codex.as_str(), "the statuses overrode this run's pick");
+    }
+
+    /// `--provider` is the person's pick too, even one the registry refuses.
+    #[test]
+    fn the_flag_is_never_followed_away() {
+        let mut new = NewProvider::at_boot_with(Some("codex".into()), None, &checking());
+        new.follow(&all_connected());
+        assert_eq!(new.key, "codex");
+        let mut unknown = NewProvider::at_boot_with(Some("nope".into()), None, &checking());
+        unknown.follow(&all_connected());
+        assert_eq!(unknown.key, "nope", "an unknown key is refused at the open, not replaced");
+    }
 }

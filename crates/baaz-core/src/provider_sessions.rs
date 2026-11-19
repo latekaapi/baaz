@@ -351,7 +351,8 @@ pub fn clear_handoff(overrides: &mut Overrides, source: &str, dest: &str) {
 /// into the view. The caller mints `request_id` (a UUIDv7 command id, like
 /// every seam command) so this module never reaches past the provider seam
 /// for it. `mode` is the approval mode the reopened session runs in (see
-/// [`provider::Command::ResumeSession`]).
+/// [`provider::Command::ResumeSession`]); the folder is the record's own,
+/// which an agent that re-opens a session only in its folder needs.
 pub fn resume_command(
     record: &ProviderSessionRecord,
     request_id: &str,
@@ -368,6 +369,7 @@ pub fn resume_command(
         cursor: None,
         metadata_only: pages,
         mode,
+        workspace: record.workspace.clone(),
     }
 }
 

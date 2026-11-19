@@ -90,6 +90,14 @@ pub enum Command {
         /// [`Command::OpenSession`]. A backend that stores no mode with
         /// the session would otherwise come back in its own default.
         mode: Option<PermissionMode>,
+        /// The folder the session ran in, as the app recorded it (its
+        /// session row in `baaz.db`), as [`Command::OpenSession`]'s
+        /// `workspace` named it. An agent that re-opens a session only in
+        /// its folder (ACP's `session/load` takes the `cwd`) reads it here,
+        /// so no adapter keeps a session → folder store of its own; the
+        /// others find theirs where their CLI stored it. `None` when the
+        /// app has no folder for the session.
+        workspace: Option<String>,
     },
     /// Branch a session into a new one, copying history through
     /// `through_turn` (inclusive) or all completed turns when absent.

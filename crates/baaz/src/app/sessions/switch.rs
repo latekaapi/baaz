@@ -68,8 +68,7 @@ impl Harness {
         let Some(old_id) = old_id else { return };
         if let Some(old) = self.active.clone().filter(|v| v.read(cx).rt(cx).session_id == old_id) {
             let provider = old.read(cx).rt(cx).provider_kind();
-            self.new_provider = provider.as_str().to_owned();
-            crate::providers::write_last_provider(provider);
+            self.provider_model.update(cx, |model, _| model.choose_new_provider(provider));
             old.update(cx, |v, cx| {
                 v.runtime().clone().update(cx, |rt, cx| rt.set_input_locked(false, cx));
                 v.runtime().clone().update(cx, |rt, cx| rt.set_switching_to(None, cx));

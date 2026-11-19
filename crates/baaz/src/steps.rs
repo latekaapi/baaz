@@ -87,7 +87,7 @@
 //! | `search:<query>` | open the search palette, optionally on a query |
 //! | `open:<session_id>` | open a session as an outside activation does (palette, boot; scripting only) — arms the one-shot reveal |
 //! | `click:<session_id>` | open a session as a sidebar click does (scripting only) — never arms the reveal, never moves the list |
-//! | `palette` | open the command palette |
+//! | `palette` / `palette:<query>` | toggle the command palette / open it and type `<query>` in its field |
 //! | `resume` | open the resume picker |
 //! | `fork-picker` | open the fork picker |
 //! | `rename:<name>` | open the sidebar row's inline rename field |
@@ -350,7 +350,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "search", run: |this, rest, window, cx| this.step_search(rest, window, cx) },
     WindowVerb { verb: "open", run: |this, rest, window, cx| this.step_open(rest, false, window, cx) },
     WindowVerb { verb: "click", run: |this, rest, window, cx| this.step_open(rest, true, window, cx) },
-    WindowVerb { verb: "palette", run: |this, _, _, cx| { this.open_palette(PaletteKind::Commands, cx); Ok(()) } },
+    WindowVerb { verb: "palette", run: |this, rest, window, cx| this.step_palette(rest, window, cx) },
     WindowVerb { verb: "resume", run: |this, _, _, cx| { this.open_palette(PaletteKind::Resume, cx); Ok(()) } },
     WindowVerb { verb: "fork-picker", run: |this, _, _, cx| { this.open_palette(PaletteKind::Fork, cx); Ok(()) } },
     WindowVerb { verb: "rename", run: |this, rest, window, cx| this.step_rename(rest, window, cx) },

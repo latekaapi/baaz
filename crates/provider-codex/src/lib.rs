@@ -1603,6 +1603,7 @@ for line in sys.stdin:
                 cursor: None,
                 metadata_only: false,
                 mode: None,
+                workspace: None,
             })
             .expect_err("a resume with no rollout is refused");
         std::env::remove_var("FAKE_CODEX_RESUME_ERROR");
@@ -1640,6 +1641,7 @@ for line in sys.stdin:
                 cursor: None,
                 metadata_only: false,
                 mode: None,
+                workspace: None,
             })
             .expect("resumes");
         let resumed_in = at.elapsed();
@@ -1739,6 +1741,7 @@ for line in sys.stdin:
             cursor: None,
             metadata_only: false,
             mode: None,
+            workspace: None,
         });
         let took = at.elapsed();
         std::env::remove_var("FAKE_CODEX_RATE_DELAY");
@@ -1993,6 +1996,7 @@ for line in sys.stdin:
             cursor: None,
             metadata_only: false,
             mode: None,
+            workspace: None,
         });
         crate::home::clear_legacy_resume(&id);
         std::env::remove_var("FAKE_CODEX_ENV_LOG");

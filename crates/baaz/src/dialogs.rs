@@ -1580,6 +1580,64 @@ mod tests {
         restore_state(state);
     }
 
+    /// Gate 4: ⌘K with a query that matches nothing drew an empty
+    /// "Commands" heading. The picker hands the palette its empty state, the
+    /// heading goes (the library drops a section with nothing in it) and one
+    /// "Nothing matches" line is drawn — only while nothing matches.
+    #[gpui::test]
+    fn a_palette_query_that_matches_nothing_says_so(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("palette-empty");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        cx.update(crate::app::bind_keys);
+        let (baaz, vc) = cx.add_window_view(|window, cx| {
+            Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx)
+        });
+        let rows = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| baaz.read(cx).palette_view(cx).expect("the palette is open").read(cx).delegate.ids().len())
+        };
+        aui::data::arm_ax_probe(true);
+        vc.simulate_keystrokes("cmd-k");
+        vc.simulate_input("zzqxj");
+        vc.run_until_parked();
+        assert_eq!(rows(vc), 0, "the query matched a command");
+        let labels = aui::data::take_ax_labels();
+        assert!(labels.iter().any(|label| label == "Nothing matches"), "no empty line drawn: {labels:?}");
+        // A query that matches draws its rows and no empty line.
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.palette_query(cx).expect("the palette's field").update(cx, |field, cx| field.set_value(String::new(), window, cx));
+            })
+        });
+        vc.simulate_input("brow");
+        vc.run_until_parked();
+        assert!(rows(vc) > 0, "/browser no longer matches");
+        let labels = aui::data::take_ax_labels();
+        aui::data::arm_ax_probe(false);
+        assert!(!labels.iter().any(|label| label == "Nothing matches"), "an empty line beside rows: {labels:?}");
+        restore_state(state);
+    }
+
+    /// Each list's empty state: a Commands query says nothing matches (an
+    /// empty query never reaches it), `/resume` and `/fork` say what is
+    /// missing, and the search palette leaves it to its status line.
+    #[test]
+    fn each_palette_says_what_its_empty_list_means() {
+        use crate::palette::{PaletteDelegate, PaletteRows};
+        use crate::picker::PickerDelegate as _;
+        let commands = |query: &str| {
+            let mut delegate = PaletteDelegate::new(PaletteKind::Commands, PaletteRows::Commands(Vec::new()), false);
+            delegate.update_matches(query);
+            delegate.empty_text().map(|text| text.to_string())
+        };
+        assert_eq!(commands("zz").as_deref(), Some("Nothing matches"));
+        assert_eq!(commands("  "), None);
+        let plain = |kind| PaletteDelegate::new(kind, PaletteRows::Plain(Vec::new()), false).empty_text().map(|text| text.to_string());
+        assert_eq!(plain(PaletteKind::Resume).as_deref(), Some("No sessions yet"));
+        assert_eq!(plain(PaletteKind::Fork).as_deref(), Some("No completed turns yet"));
+        let search = PaletteDelegate::new(PaletteKind::Search, PaletteRows::Search { rows: Vec::new(), status: "No matches".into() }, false);
+        assert_eq!(search.empty_text(), None);
+    }
+
     /// ↑/↓ reach the palette list past its query field.
     ///
     /// The query palettes (Search, Commands, Projects) focus a `gpui_kit`

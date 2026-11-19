@@ -215,6 +215,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                 cursor: Some("c-1".into()),
                 metadata_only: true,
                 mode: None,
+                workspace: None,
             }),
             expected_params: params_of!(SessionResumeParams {
                 command_id: "cmd-resume".into(),

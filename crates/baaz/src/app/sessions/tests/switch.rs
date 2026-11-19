@@ -969,9 +969,13 @@ fn switch_provider_replaces_the_fresh_draft_without_leaking_its_view(
     let state = lane_state("switch");
     let vc = cx.add_empty_window();
     let baaz = lane_harness(vc, &state.2);
-    // A fresh muse draft first: scripted chrome opens it locally.
+    // A fresh muse draft first: scripted chrome opens it locally. Muse is
+    // named: it is no longer the default for being first in the registry.
     vc.update(|window, cx| {
-        baaz.update(cx, |harness, cx| harness.new_session_in(None, window, cx));
+        baaz.update(cx, |harness, cx| {
+            harness.provider_model.update(cx, |model, _| model.point_new_provider(ProviderId::Muse));
+            harness.new_session_in(None, window, cx);
+        });
     });
     let old = vc.update(|_, cx| {
         let harness = baaz.read(cx);
@@ -1017,10 +1021,10 @@ fn switch_provider_through_the_handler_leaves_one_row_and_one_open(
     let baaz = lane_harness(vc, &state.2);
     let (factory, opens) = counting_factory();
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
-            harness.new_provider = ProviderId::Codex.as_str().to_owned();
+            harness.provider_model.update(cx, |model, _| model.point_new_provider(ProviderId::Codex));
         });
     });
     vc.update(|window, cx| {
@@ -1084,10 +1088,10 @@ fn y2b_switch_keeps_old_view_until_open_lands_and_carries_draft(
     let baaz = lane_harness(vc, &state.2);
     let (factory, opens) = counting_factory();
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
-            harness.new_provider = ProviderId::Codex.as_str().to_owned();
+            harness.provider_model.update(cx, |model, _| model.point_new_provider(ProviderId::Codex));
         });
     });
     vc.update(|window, cx| {
@@ -1160,10 +1164,10 @@ fn y2b_failed_open_fails_on_the_replacement_with_the_text(cx: &mut gpui::TestApp
     let vc = cx.add_empty_window();
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
-        baaz.update(cx, |harness, _| {
+        baaz.update(cx, |harness, cx| {
             harness.providers = harness.providers.with_opens_of(&scripted_factory());
             mark_muse_up(harness);
-            harness.new_provider = ProviderId::Codex.as_str().to_owned();
+            harness.provider_model.update(cx, |model, _| model.point_new_provider(ProviderId::Codex));
         });
     });
     vc.update(|window, cx| {
@@ -1425,7 +1429,7 @@ fn y2b2_second_switch_supersedes_the_first(cx: &mut gpui::TestAppContext) {
         let harness = baaz.read(cx);
         let view = harness.active.clone().expect("the replacement opened");
         assert_eq!(view.read(cx).rt(cx).provider_kind(), ProviderId::Codex, "the last pick wins");
-        assert_eq!(harness.new_provider, ProviderId::Codex.as_str(), "the chip matches the lane");
+        assert_eq!(harness.new_provider(cx), ProviderId::Codex.as_str(), "the chip matches the lane");
         assert_eq!(
             view.read(cx).draft_text(cx),
             "hello unsent",
@@ -1525,6 +1529,73 @@ fn quit_hangs_up_the_browser_chat(cx: &mut gpui::TestAppContext) {
     let locked = shared.inner.lock().expect("y2b2");
     assert!(locked.shutdowns.contains(&chat), "the chat's child hangs up at quit, drew {:?}", locked.shutdowns);
     drop(locked);
+    lane_restore(state);
+}
+
+/// Gate 4 (PM-12): quitting left `muse serve` and three `mcp-bridge`
+/// grandchildren running, and they ignored SIGTERM. The quit path
+/// (`shutdown_provider_views` → the Muse hub's shutdown) now ends the shared
+/// child and its whole group. A stand-in plays `muse serve` (never the real
+/// CLI): it ignores SIGTERM and leaves three grandchildren that ignore it too.
+#[gpui::test]
+fn quit_ends_the_shared_child_and_its_whole_group(cx: &mut gpui::TestAppContext) {
+    use provider::runtime::Identity;
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("pm12-quit");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    // `<program> serve <pids>`: the stand-in's argv as the hub spawns it.
+    let script = state.2.join("muse-stand-in.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n\
+         # baaz test stand-in for `muse serve`: ignores SIGTERM, leaves three\n\
+         # helpers (mcp-bridge's place) that ignore it too, and writes the pids.\n\
+         trap '' TERM\n\
+         pids=\"$$\"\n\
+         for n in 1 2 3; do ( while :; do sleep 1; done ) & pids=\"$pids $!\"; done\n\
+         echo \"$pids\" > \"$2.tmp\" && mv \"$2.tmp\" \"$2\"\n\
+         while :; do sleep 1; done\n",
+    )
+    .expect("the stand-in writes");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("the stand-in is executable");
+    }
+    let pids_file = state.2.join("muse-stand-in.pids");
+    let hub = provider_muse::MuseHub::spawn_stand_in(&script, vec![pids_file.display().to_string()]).expect("the stand-in spawns");
+    vc.update(|_, cx| baaz.update(cx, |harness, _| harness.providers.install_test_hub(hub)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let pids = loop {
+        if let Ok(text) = std::fs::read_to_string(&pids_file) {
+            break text;
+        }
+        assert!(std::time::Instant::now() < deadline, "the stand-in never wrote its pids");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let group: Vec<Identity> =
+        pids.split_whitespace().map(|pid| Identity::of(pid.parse().expect("a pid")).expect("the process runs")).collect();
+    assert_eq!(group.len(), 4, "the child and its three helpers: {pids}");
+    assert!(group.iter().all(Identity::is_alive));
+    // A failing run leaves nothing behind either.
+    struct Reap(Vec<Identity>);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            for who in self.0.iter().filter(|who| who.is_alive()) {
+                // SAFETY: plain kill(2) on a pid whose identity was just
+                // checked live (its start time matches).
+                unsafe { libc::kill(who.pid, libc::SIGKILL) };
+            }
+        }
+    }
+    let _reap = Reap(group.clone());
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.shutdown_provider_views(cx)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while group.iter().any(Identity::is_alive) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let left: Vec<i32> = group.iter().filter(|who| who.is_alive()).map(|who| who.pid).collect();
+    assert!(left.is_empty(), "quit left these running: {left:?}");
     lane_restore(state);
 }
 

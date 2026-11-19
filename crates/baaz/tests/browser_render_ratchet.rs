@@ -152,3 +152,65 @@ fn the_reconcile_follows_the_pages() {
         assert!(!source(name).contains("states.insert("), "{name} adds no page behind the view's back");
     }
 }
+
+/// The argument text of every `marker(` call in `text`, up to its matching
+/// `)` (string literals in these files hold no parentheses that matter).
+fn call_args<'a>(text: &'a str, marker: &str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find(marker) {
+        let open = from + at + marker.len();
+        let mut depth = 1usize;
+        let mut end = open;
+        for (i, c) in text[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.push(&text[open..end]);
+        from = open;
+    }
+    out
+}
+
+/// Gate 4 (19 Nov): gpui logged "handling resize … RefCell already
+/// borrowed". A float's native chrome came off inside `open_window`'s build
+/// closure, itself inside the open task's `cx.update`; the style-mask swap
+/// resizes the panel's view and AppKit calls gpui's resize callback from
+/// inside it, which cannot borrow the App while an update holds it, so the
+/// resize was dropped. The AppKit setters now run from the open task
+/// between updates. Pinned: no float's `open_window` or `cx.update` names
+/// them, every float drops its chrome, and the helper takes the task's
+/// `AsyncApp` (no `&Window`, which only an update hands out).
+#[test]
+fn a_floats_native_chrome_comes_off_outside_any_update() {
+    let files = ["overlay.rs", "overlay/card.rs"];
+    let mut opens = 0;
+    let mut drops = 0;
+    for name in files {
+        let text = source(name);
+        for marker in ["open_window(", "cx.update("] {
+            for args in call_args(&text, marker) {
+                for platform in ["drop_native_chrome", "msg_send"] {
+                    assert!(!args.contains(platform), "{name}: `{platform}` inside `{marker}…)` — AppKit calls that resize re-enter gpui's resize callback while the App is borrowed");
+                }
+            }
+        }
+        opens += text.matches("cx.open_window(").count();
+        drops += text.matches("drop_native_chrome((*opened).into(),").count();
+    }
+    assert_eq!(opens, 4, "the four floats (overlay, corner, page float, card) open here");
+    assert_eq!(drops, opens, "every float drops its native chrome once it has opened");
+    let overlay = source("overlay.rs");
+    for signature in ["fn drop_native_chrome(handle: AnyWindowHandle, kind: OverlayKind, cx: &mut gpui::AsyncApp)", "fn drop_native_chrome(_: AnyWindowHandle, _: OverlayKind, _: &mut gpui::AsyncApp)"] {
+        assert!(overlay.contains(signature), "the chrome drop takes the open task's AsyncApp: {signature}");
+    }
+}

@@ -47,6 +47,7 @@ fn resume(provider: &Provider, session: &str) {
             cursor: None,
             metadata_only: true,
             mode: None,
+            workspace: None,
         })
         .expect("resume");
     assert!(matches!(ack, Ack::Session { ref session_id, .. } if session_id == session), "{ack:?}");

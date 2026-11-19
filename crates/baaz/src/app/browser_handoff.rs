@@ -202,7 +202,7 @@ impl Harness {
                 Candidate { target, row, words: vec![e.label.clone(), project] }
             })
             .collect();
-        let provider = self.new_provider_id().map_or("", |provider| provider.label());
+        let provider = self.new_provider_id(cx).map_or("", |provider| provider.label());
         let projects = self
             .session_list.read(cx).projects
             .sorted_available()

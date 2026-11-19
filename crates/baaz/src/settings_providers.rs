@@ -156,7 +156,7 @@ pub(crate) fn live_visible_provider_ids() -> Vec<ProviderId> {
 /// is the default for being Muse (docs/50 P1).
 pub(crate) fn default_new_provider(statuses: &[ProviderStatus]) -> Option<ProviderId> {
     use crate::provider_status::{Headline, Installed};
-    let enabled: Vec<&ProviderStatus> = ProviderId::all()
+    let enabled: Vec<&ProviderStatus> = crate::connect::connect_order()
         .into_iter()
         .filter_map(|id| statuses.iter().find(|s| s.provider == id && s.enabled))
         .collect();
@@ -178,8 +178,7 @@ pub(crate) fn usable_provider(statuses: &[ProviderStatus], id: ProviderId) -> bo
 /// [`default_new_provider`] over the live statuses; the switcher's first
 /// provider when nothing is enabled at all.
 pub(crate) fn live_default_new_provider() -> ProviderId {
-    default_new_provider(&crate::provider_status::live_statuses())
-        .unwrap_or_else(|| ProviderId::all()[0])
+    default_new_provider(&crate::provider_status::live_statuses()).unwrap_or_else(crate::connect::first_in_order)
 }
 
 /// The quiet banner an opened session on a disabled provider shows
@@ -567,10 +566,9 @@ impl Harness {
             crate::provider_status::recheck_provider(id);
         }
         // A disabled pick is never the default for new sessions again.
-        if !on && self.new_provider == id.as_str() {
+        if !on && self.new_provider(cx) == id.as_str() {
             let fallback = live_default_new_provider();
-            self.new_provider = fallback.as_str().to_owned();
-            crate::providers::write_last_provider(fallback);
+            self.provider_model.update(cx, |model, _| model.choose_new_provider(fallback));
         }
         cx.notify();
     }
@@ -742,6 +740,8 @@ mod tests {
         let mut status = ProviderStatus::checking(id);
         status.installed = installed;
         status.auth = auth;
+        // Probed: a row never checked reads Checking, never Connected.
+        status.checked_at = Some(1);
         status
     }
 
@@ -773,6 +773,18 @@ mod tests {
             p1_status(ProviderId::ClaudeCode, yes(), Auth::SignedOut),
         ];
         assert_eq!(default_new_provider(&statuses), Some(ProviderId::Muse));
+        // Every one connected: the first in switcher order (the connect
+        // board's: the per-lane CLIs first), never Muse for being first in
+        // the registry (Gate 4).
+        let statuses = [
+            p1_status(ProviderId::Muse, yes(), signed_in()),
+            p1_status(ProviderId::ClaudeCode, yes(), signed_in()),
+            p1_status(ProviderId::Codex, yes(), signed_in()),
+        ];
+        assert_eq!(default_new_provider(&statuses), Some(ProviderId::ClaudeCode));
+        // Nothing known yet (a first launch's Checking rows): the switcher's first.
+        let statuses: Vec<ProviderStatus> = ProviderId::all().into_iter().map(ProviderStatus::checking).collect();
+        assert_eq!(default_new_provider(&statuses), Some(crate::connect::first_in_order()));
         // A disabled provider is never the default.
         let mut off = p1_status(ProviderId::ClaudeCode, yes(), signed_in());
         off.enabled = false;

@@ -354,6 +354,7 @@ for line in sys.stdin:
                 cursor: None,
                 metadata_only: true,
                 mode: None,
+                workspace: None,
             })
             .expect("the stub resumes");
         let (provider, events) = crate::conn::gate_quiet(provider);

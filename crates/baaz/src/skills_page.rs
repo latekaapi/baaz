@@ -2697,7 +2697,7 @@ impl Harness {
                 .active
                 .as_ref()
                 .map(|view| view.read(cx).rt(cx).provider_kind())
-                .or_else(|| self.new_provider_id()),
+                .or_else(|| self.new_provider_id(cx)),
         }
     }
 
@@ -2766,7 +2766,7 @@ impl Harness {
             // manages, whatever the remembered provider.
             SkillsPageEvent::AskMuseToWrite => {
                 let Some(id) = crate::providers::ProviderId::with(provider::ProviderTrait::ManagedSkills) else { return };
-                self.new_provider = id.as_str().to_owned();
+                self.provider_model.update(cx, |model, _| model.point_new_provider(id));
                 self.new_session(window, cx);
             }
         }
