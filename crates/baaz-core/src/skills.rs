@@ -467,7 +467,17 @@ fn cli_command(program: &str, args: &[&str], dir: Option<&std::path::Path>) -> C
 
 /// Run `program` with `args` in `dir`, bounded by [`TIMEOUT`]. `None` is
 /// every failure mode at once: not there, non-zero exit, hung, unreadable.
+///
+/// Never reaches a real CLI under test: an app test's Skills page is built
+/// with the launch program (`muse`, resolved through `PATH`), and the full
+/// workspace run was seen starting the installed `muse skills list` from
+/// those tests (docs/82 5.2). Under test only a stand-in under the temp dir
+/// runs; anything else answers as a CLI that is not there.
 fn run_cli(program: &str, args: &[&str], dir: Option<&std::path::Path>) -> Option<Vec<u8>> {
+    #[cfg(any(test, feature = "test-support"))]
+    if !is_stand_in(program) {
+        return None;
+    }
     let mut child = cli_command(program, args, dir).spawn().ok()?;
     let deadline = std::time::Instant::now() + TIMEOUT;
     loop {
@@ -492,6 +502,19 @@ fn run_cli(program: &str, args: &[&str], dir: Option<&std::path::Path>) -> Optio
         return None;
     }
     Some(output.stdout)
+}
+
+/// Whether `program` is a test's stand-in: a file under the temp dir, never
+/// a bare name or an installed binary.
+#[cfg(any(test, feature = "test-support"))]
+fn is_stand_in(program: &str) -> bool {
+    let canonical = |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = std::path::Path::new(program);
+    if !path.is_absolute() {
+        return false;
+    }
+    let path = canonical(path);
+    [std::env::temp_dir(), std::path::PathBuf::from("/tmp")].iter().any(|root| path.starts_with(canonical(root)))
 }
 
 /// The page's list: one `muse skills list --json --workspace <root>
@@ -1008,6 +1031,26 @@ pub static SCRUB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tests never reach a real CLI: a bare `muse` (what an app test's
+    /// Skills page is built with) does not run, a stand-in under the temp
+    /// dir does.
+    #[test]
+    fn under_test_only_a_stand_in_runs() {
+        assert!(!is_stand_in("muse"));
+        assert!(!is_stand_in("/usr/bin/true"));
+        assert!(run_cli("muse", &["skills", "list", "--json"], None).is_none());
+        let dir = std::env::temp_dir().join(format!("baaz-skills-stand-in-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("stand-in dir");
+        let script = dir.join("muse");
+        std::fs::write(&script, "#!/bin/sh\necho '{}'\n").expect("stand-in");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("executable");
+        let program = script.to_string_lossy().into_owned();
+        assert!(is_stand_in(&program));
+        assert_eq!(run_cli(&program, &[], None).as_deref(), Some(&b"{}\n"[..]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     fn skill(id: &str, description: Option<&str>) -> Skill {
         Skill {

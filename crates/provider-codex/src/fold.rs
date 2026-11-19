@@ -982,8 +982,10 @@ pub struct CodexFold {
     user_started: HashSet<String>,
     /// Full submitted text → the bubble text (`SubmitInput.display_text`):
     /// the provider echoes the whole input, so the user turn shows the
-    /// short text instead. The turn-keyed map below wins when the echo
-    /// names its turn; this one covers echoes that do not.
+    /// short text instead. Recorded before `turn/start` is written, so an
+    /// echo that beats the answer still finds it (docs/81 B PM-10). The
+    /// turn-keyed map below wins when the echo names its turn; this one
+    /// covers echoes that do not, and echoes that arrive first.
     display_by_text: HashMap<String, String>,
     /// Turn id from the submit ack → the bubble text: the join the submit
     /// creates. Recorded when `turn/start` answers, read when the turn's

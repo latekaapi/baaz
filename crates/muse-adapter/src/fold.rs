@@ -144,6 +144,10 @@ struct Folded {
     /// lone groupable `ToolCall` or a `ToolGroup`. Valid only while its `gen`
     /// matches `group_gen` and it is still the turn's last block.
     open_groups: HashMap<String, OpenGroup>,
+    /// Turns `turn/started` opened and no `turn/completed` has closed yet,
+    /// oldest first: what a child that dies leaves running
+    /// ([`MuseFold::running_turns`]).
+    running: Vec<String>,
 }
 
 /// How many of a session's most recent submissions keep their composer text.
@@ -396,6 +400,20 @@ impl MuseFold {
         true
     }
 
+    /// The turns `session_id` is running — started, not yet completed —
+    /// oldest first. Empty for a session this fold never saw.
+    pub fn running_turns(&self, session_id: &str) -> Vec<String> {
+        self.sessions.get(session_id).map(|folded| folded.running.clone()).unwrap_or_default()
+    }
+
+    /// The child is gone: every approval card of `session_id` still
+    /// `Pending` settles cancelled ("Not run — turn stopped": nobody will
+    /// ever answer it, and nobody refused it). The deltas, already applied.
+    pub fn cancel_pending_approvals(&mut self, session_id: &str) -> Vec<Delta> {
+        self.last_touched = Some(session_id.to_owned());
+        self.sessions.get_mut(session_id).map(Folded::cancel_pending_approvals).unwrap_or_default()
+    }
+
     /// Record what a command was submitted with, so a later `turn/retracted` or
     /// `turn/unqueued` can hand the prompt back to the composer.
     ///
@@ -646,6 +664,7 @@ impl Folded {
             item_reasons: HashMap::new(),
             group_gen: 0,
             open_groups: HashMap::new(),
+            running: Vec::new(),
             marker_seq: 0,
             mode_seen: false,
             current_seq: None,
@@ -957,6 +976,9 @@ impl Folded {
         // that boundary. `turn/started` never fires for a steer.
         if let Some(turn_id) = params.get("turnId").and_then(Value::as_str) {
             self.side.queued.retain(|queued| queued.turn_id != turn_id);
+            if !self.running.iter().any(|running| running == turn_id) {
+                self.running.push(turn_id.to_owned());
+            }
         }
         // The assistant turn itself is created lazily by its first block: the
         // `userMessage` item — which is its own turn in `aui_protocol` — arrives
@@ -968,6 +990,7 @@ impl Folded {
         let Some(turn_id) = params.get("turnId").and_then(Value::as_str).map(str::to_owned) else {
             return Vec::new();
         };
+        self.running.retain(|running| *running != turn_id);
         let terminal = params.get("terminal").and_then(Value::as_str).unwrap_or("completed");
         let mut deltas = Vec::new();
 
@@ -1095,7 +1118,30 @@ impl Folded {
         deltas
     }
 
+    /// See [`MuseFold::cancel_pending_approvals`].
+    fn cancel_pending_approvals(&mut self) -> Vec<Delta> {
+        let mut pending = Vec::new();
+        for (at, turn) in self.session.turns.iter().enumerate() {
+            for (index, block) in turn.blocks().iter().enumerate() {
+                if let Block::Approval { state: ApprovalState::Pending, .. } = block {
+                    pending.push((self.turn_keys[at], index, block.clone()));
+                }
+            }
+        }
+        let mut deltas = Vec::new();
+        for (turn, index, mut block) in pending {
+            if let Block::Approval { state, .. } = &mut block {
+                *state = ApprovalState::Cancelled { reason: Some(TURN_STOPPED.to_owned()) };
+            }
+            deltas.extend(self.update_block(Slot { turn, block: index }, block));
+        }
+        deltas
+    }
+
     fn turn_retracted(&mut self, params: &Value) -> Vec<Delta> {
+        if let Some(turn_id) = params.get("turnId").and_then(Value::as_str) {
+            self.running.retain(|running| running != turn_id);
+        }
         let mut deltas = self.restore_and_remove(params);
         deltas.extend(self.marker_turn(MarkerKind::TurnRetracted, "Prompt retracted".to_owned()));
         deltas
@@ -1104,6 +1150,7 @@ impl Folded {
     fn turn_unqueued(&mut self, params: &Value) -> Vec<Delta> {
         if let Some(turn_id) = params.get("turnId").and_then(Value::as_str) {
             self.side.queued.retain(|q| q.turn_id != turn_id);
+            self.running.retain(|running| running != turn_id);
         }
         self.restore_and_remove(params)
     }
@@ -4537,6 +4584,54 @@ mod tests {
             }),
         ));
         deltas
+    }
+
+    /// A child that dies mid-turn (the seam's `ConnectionLost` contract,
+    /// docs/82 5.2): the fold names the turns still running, and an approval
+    /// still waiting settles cancelled once — never left `Pending` for a
+    /// decision nobody can take.
+    #[test]
+    fn a_lost_child_leaves_its_running_turns_named_and_its_approvals_cancelled() {
+        let mut fold = MuseFold::new();
+        notify(&mut fold, "turn/started", serde_json::json!({ "sessionId": "s", "turnId": "t-1" }));
+        assert_eq!(fold.running_turns("s"), vec!["t-1".to_owned()]);
+        notify(
+            &mut fold,
+            "approval/requested",
+            serde_json::json!({
+                "approvalId": "ap-1",
+                "availableChoices": [],
+                "currentRequirementId": {"approvalId": "ap-1", "sourceIndex": 0},
+                "itemId": "i-gated",
+                "judgeEscalated": false,
+                "protectedWrite": false,
+                "rawArgs": "{}",
+                "sessionId": "s",
+                "sourceRange": approval_cursor(),
+                "subject": {"kind": "shell", "command": "ls /tmp"},
+                "taskId": "task-1",
+                "toolCallId": "shell_c-1",
+                "toolName": "shell",
+                "turnId": "t-1",
+                "viewCursor": "c1",
+            }),
+        );
+        let cancelled = fold.cancel_pending_approvals("s");
+        assert!(
+            cancelled.iter().any(|delta| matches!(
+                delta,
+                Delta::BlockUpdated { block: Block::Approval { state: ApprovalState::Cancelled { .. }, .. }, .. }
+            )),
+            "the waiting card settles cancelled: {cancelled:#?}"
+        );
+        assert!(fold.cancel_pending_approvals("s").is_empty(), "and only once");
+        notify(
+            &mut fold,
+            "turn/completed",
+            serde_json::json!({ "sessionId": "s", "turnId": "t-1", "terminal": "interrupted" }),
+        );
+        assert!(fold.running_turns("s").is_empty(), "a completed turn no longer runs");
+        assert!(fold.running_turns("never-seen").is_empty());
     }
 
     fn gated_tool_item(status: &str, revision: u32) -> Value {

@@ -25,12 +25,13 @@ request named, and every `turn/start` is followed by `turn/started`, one
 `agentMessage` item echoing the prompt, and `turn/completed` for that
 session — so events for several sessions interleave on one pipe.
 
-`--turn-shape=approval|failed|open|crash` (the provider conformance suite,
-`crates/baaz/tests/conformance.rs`) replaces the echoed turn: one
-`approval/request` the turn waits on (a second decision is refused
+`--turn-shape=approval|failed|open|crash|crash-at-approval` (the provider
+conformance suite, `crates/baaz/tests/conformance.rs`) replaces the echoed
+turn: one `approval/request` the turn waits on (a second decision is refused
 `approvalAlreadyResolved`), a turn completed `failed` with an error, a turn
-that runs until `turn/interrupt`, or a child that dies with stderr right
-after the turn starts. Hand-written from this file's shapes, never a capture.
+that runs until `turn/interrupt`, a child that dies with stderr right after
+the turn starts, or one that dies with its `approval/request` still waiting.
+Hand-written from this file's shapes, never a capture.
 
 `--emit-bad-tap` makes the puppet send one malformed `approval/request`
 server request right after `initialize`: real enough to travel the reader
@@ -239,7 +240,8 @@ EMIT_TURN = False
 # each instead of the echoed turn: "approval" (the turn waits on one
 # `approval/request` until it is decided), "failed" (the turn completes
 # `failed` with an error), "open" (the turn runs until `turn/interrupt`),
-# "crash" (the child dies with stderr right after the turn starts).
+# "crash" (the child dies with stderr right after the turn starts),
+# "crash-at-approval" (it dies with an `approval/request` waiting).
 TURN_SHAPE = None
 DECIDED = set()
 # The echoed reply per session, for `session/read` after an emitted turn.
@@ -275,7 +277,13 @@ def shaped_turn(params):
     note = lambda method, body: send({"jsonrpc": "2.0", "method": method,
         "params": dict(body, sessionId=session_id, viewCursor=cursor())})
     note("turn/started", {"turnId": turn_id})
-    if TURN_SHAPE == "crash":
+    if TURN_SHAPE == "crash-at-approval":
+        # The child dies with an approval waiting on the person.
+        approval = fake_approval()
+        approval.update(sessionId=session_id, turnId=turn_id, approvalId="a-" + turn_id)
+        send({"jsonrpc": "2.0", "id": "srv-a-" + turn_id, "method": "approval/request",
+              "params": approval})
+    if TURN_SHAPE in ("crash", "crash-at-approval"):
         for line in ("fake-muse: the model stream closed unexpectedly (simulated)",
                      "fake-muse: exiting with status 1"):
             sys.stderr.write(line + "\n")

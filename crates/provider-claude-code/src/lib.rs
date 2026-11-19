@@ -2210,6 +2210,12 @@ impl Drop for ClaudeCodeAdapter {
 mod tests {
     use super::*;
 
+    /// The program an adapter that must never spawn is built with: a path
+    /// that cannot exist, so a regression that starts a child fails to
+    /// spawn instead of reaching the installed CLI (the no-real-CLI
+    /// ratchet, `provider/tests/no_real_cli.rs`).
+    const NO_CLI: &str = "/nonexistent/baaz-test/claude";
+
     fn meter_line() -> &'static str {
         r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1790384400,"rateLimitType":"seven_day","utilization":0.97,"isUsingOverage":true,"surpassedThreshold":0.75,"unifiedWindows":{"five_hour":{"utilization":0.9,"resetsAt":1790187000},"seven_day":{"utilization":0.97,"resetsAt":1790384400}}}}"#
     }
@@ -2218,7 +2224,7 @@ mod tests {
     fn read_account_is_false_until_a_meter_reading_is_seen() {
         // Fresh adapter: no meter observed, so no login claimed. A
         // hardcoded `true` fails this test.
-        let adapter = ClaudeCodeAdapter::new("claude");
+        let adapter = ClaudeCodeAdapter::new(NO_CLI);
         let ack = adapter.dispatch(Command::ReadAccount).expect("account reads");
         assert!(
             matches!(ack, Ack::Account { signed_in: false, label: None, .. }),
@@ -2944,7 +2950,7 @@ mod tests {
     fn read_account_is_true_after_a_meter_reading() {
         // A rate-limit reading from the live child is authenticated API
         // traffic observed first-hand: signed in, with the meter label.
-        let adapter = ClaudeCodeAdapter::new("claude");
+        let adapter = ClaudeCodeAdapter::new(NO_CLI);
         let frame = frame::decode_line(meter_line()).expect("meter line decodes");
         adapter.fold.lock().expect("fold mutex").apply(&frame);
         let ack = adapter.dispatch(Command::ReadAccount).expect("account reads");

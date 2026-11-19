@@ -15,7 +15,20 @@
 //! * Muse spawns the `provider-muse` puppet
 //!   (`crates/provider-muse/tests/fixtures/model_list_puppet.py`) through
 //!   the hub, with its `--turn-shape` for approvals, failures, interrupts and
-//!   the crash.
+//!   the crash — or `tests/fixtures/conformance/msp_replay.py`, which replays
+//!   a recorded `fixtures/msp` capture.
+//!
+//! Four parts (docs/82 5.2):
+//!
+//! * the scenarios below, each of which also ends by checking its whole
+//!   run against the seam invariants;
+//! * `conformance/invariants.rs` — the invariants, written once, as a
+//!   checker over the commands, acks and events a run produced;
+//! * `conformance/replay.rs` — every fixture of every adapter replayed
+//!   through its real adapter and checked (one line in its `ADAPTERS` adds
+//!   an adapter);
+//! * `conformance/faults.rs` — seeded faults that prove each invariant
+//!   fails, with a message that says what broke.
 //!
 //! Lives in `baaz`'s tests because baaz is the one crate that already
 //! depends on all three adapters: a new dev crate would change the lock
@@ -24,6 +37,13 @@
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+#[path = "conformance/faults.rs"]
+mod faults;
+#[path = "conformance/invariants.rs"]
+mod invariants;
+#[path = "conformance/replay.rs"]
+mod replay;
 
 use aui_protocol::{ApprovalState, Block, Delta, Turn};
 use provider::{
@@ -83,13 +103,15 @@ fn executable(path: &Path, body: &str) {
 /// flags for Muse.
 type Plan<'a> = &'a [&'a str];
 
-/// One adapter on its fake child, with its session.
+/// One adapter on its fake child, with its session, recording everything
+/// it sent and saw for the seam invariants ([`Rig::keeps_the_invariants`]).
 struct Rig {
     provider: Provider,
     events: crossbeam_channel::Receiver<ProviderEvent>,
     session: String,
     dir: PathBuf,
     hub: Option<provider_muse::MuseHub>,
+    trace: std::cell::RefCell<invariants::Trace>,
 }
 
 impl Drop for Rig {
@@ -124,8 +146,13 @@ fn wrapper(agent: Agent, dir: &Path, plans: Plan) -> PathBuf {
             )
         }
         Agent::Muse => {
-            let puppet =
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../provider-muse/tests/fixtures/model_list_puppet.py");
+            // A recorded capture replays through its own stand-in; every
+            // other plan is the provider-muse puppet's flags.
+            let puppet = if plans.iter().any(|plan| plan.starts_with("--replay")) {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/conformance/msp_replay.py")
+            } else {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../provider-muse/tests/fixtures/model_list_puppet.py")
+            };
             let mut cases = String::new();
             for (at, flags) in plans.iter().enumerate() {
                 let label = if at + 1 == plans.len() { "*".to_owned() } else { at.to_string() };
@@ -195,19 +222,51 @@ fn open(agent: Agent, tag: &str, plans: Plan) -> Rig {
             mode: None,
         })
         .unwrap_or_else(|error| panic!("{agent:?} opens: {error}"));
-    let Ack::Session { session_id, .. } = ack else { panic!("{agent:?} open answered {ack:?}") };
-    Rig { provider, events, session: session_id, dir, hub }
+    let Ack::Session { session_id, .. } = ack.clone() else { panic!("{agent:?} open answered {ack:?}") };
+    let rig = Rig { provider, events, session: session_id, dir, hub, trace: Default::default() };
+    rig.trace.borrow_mut().sent(invariants::Sent::Open);
+    rig.trace.borrow_mut().acked(invariants::Sent::Open, Ok(ack));
+    rig
 }
 
 impl Rig {
+    /// Send `command`, recording it, what arrived while it was in flight,
+    /// and its ack.
+    fn send(&self, sent: invariants::Sent, command: Command) -> Result<Ack, ProviderError> {
+        self.trace.borrow_mut().sent(sent.clone());
+        let result = self.provider.send(command);
+        self.trace.borrow_mut().acked(sent, result.clone());
+        result
+    }
+
     fn submit(&self, text: &str) -> Result<Ack, ProviderError> {
-        self.provider.send(Command::SubmitInput {
-            request_id: provider::new_request_id(),
-            session_id: self.session.clone(),
-            parts: vec![SubmissionPart::Text(text.into())],
-            display_text: None,
-            effort: None,
-        })
+        self.send(
+            invariants::Sent::Submit,
+            Command::SubmitInput {
+                request_id: provider::new_request_id(),
+                session_id: self.session.clone(),
+                parts: vec![SubmissionPart::Text(text.into())],
+                display_text: None,
+                effort: None,
+            },
+        )
+    }
+
+    /// The whole run so far keeps every seam invariant; `closed` when the
+    /// scenario ended every turn it started.
+    fn keeps_the_invariants(&self, agent: Agent, closed: bool) {
+        let mut trace = self.trace.borrow_mut();
+        while let Ok(event) = self.events.try_recv() {
+            trace.event(event);
+        }
+        let violations = invariants::check(&trace, &invariants::Expect { closed, wire_usage: None });
+        let listed: Vec<String> = violations.iter().map(ToString::to_string).collect();
+        assert!(
+            violations.is_empty(),
+            "{agent:?}: seam invariants broken:\n    {}\n{}",
+            listed.join("\n    "),
+            invariants::describe(&trace)
+        );
     }
 
     /// Every event until `done` holds over what was seen (or [`WAIT`]).
@@ -216,6 +275,7 @@ impl Rig {
         let deadline = Instant::now() + WAIT;
         while !done(&seen) && Instant::now() < deadline {
             if let Ok(event) = self.events.recv_timeout(Duration::from_millis(50)) {
+                self.trace.borrow_mut().event(event.clone());
                 seen.push(event);
             }
         }
@@ -226,20 +286,28 @@ impl Rig {
     fn drain(&self, quiet: Duration) -> Vec<ProviderEvent> {
         let mut seen = Vec::new();
         while let Ok(event) = self.events.recv_timeout(quiet) {
+            self.trace.borrow_mut().event(event.clone());
             seen.push(event);
         }
         seen
     }
 
     fn decide(&self, approval: &str, choice: &str) -> Result<Ack, ProviderError> {
-        self.provider.send(Command::DecideApproval {
-            request_id: provider::new_request_id(),
-            session_id: self.session.clone(),
-            approval: approval.to_owned(),
-            choice: choice.to_owned(),
-            stage_token: None,
-            feedback: None,
-        })
+        self.send(
+            invariants::Sent::Decide(approval.to_owned()),
+            Command::DecideApproval {
+                request_id: provider::new_request_id(),
+                session_id: self.session.clone(),
+                approval: approval.to_owned(),
+                choice: choice.to_owned(),
+                stage_token: None,
+                feedback: None,
+            },
+        )
+    }
+
+    fn list_pending(&self) -> Result<Ack, ProviderError> {
+        self.send(invariants::Sent::ListPending, Command::ListPending { session_id: self.session.clone() })
     }
 
     /// The fake's client frames for spawn `n`, as JSON (Claude Code and
@@ -377,6 +445,7 @@ fn open_and_a_first_text_turn() {
         let events = rig.until(finished);
         assert_turn_order(agent, &rig.session, &events);
         assert!(!lost(&events), "{agent:?}: no loss on a clean turn");
+        rig.keeps_the_invariants(agent, true);
     }
 }
 
@@ -402,6 +471,7 @@ fn a_tool_call_lands_inside_its_turn() {
             })
             .count();
         assert!(tools > 0, "{agent:?}: a tool card: {events:#?}");
+        rig.keeps_the_invariants(agent, true);
     }
 }
 
@@ -424,7 +494,7 @@ fn an_approval_is_asked_once_and_settles_exactly_once() {
         let ids = taps(&asked);
         assert_eq!(ids.len(), 1, "{agent:?} asks once: {asked:#?}");
         let approval = ids[0].clone();
-        let pending = rig.provider.send(Command::ListPending { session_id: rig.session.clone() });
+        let pending = rig.list_pending();
         if let Ok(Ack::PendingWork { approvals, .. }) = &pending {
             assert!(approvals.iter().any(|item| item.id == approval), "{agent:?}: listed while it waits");
         }
@@ -439,6 +509,7 @@ fn an_approval_is_asked_once_and_settles_exactly_once() {
             whole.extend(rest);
             assert!(a_card_settled(&whole), "{agent:?} {choice}: the card left Pending");
         }
+        rig.keeps_the_invariants(agent, true);
     }
 }
 
@@ -458,12 +529,16 @@ fn an_interrupt_ends_the_turn_or_is_refused_typed() {
             seen.iter().any(|event| matches!(event, ProviderEvent::TurnRunning { .. }))
                 || deltas(seen).iter().any(|(_, delta)| matches!(delta, Delta::TurnStarted { turn: Turn::Assistant { .. } }))
         });
-        let stop = rig.provider.send(Command::InterruptTurn {
-            request_id: provider::new_request_id(),
-            session_id: rig.session.clone(),
-            turn: None,
-            retract: false,
-        });
+        let stop = rig.send(
+            invariants::Sent::Interrupt,
+            Command::InterruptTurn {
+                request_id: provider::new_request_id(),
+                session_id: rig.session.clone(),
+                turn: None,
+                retract: false,
+            },
+        );
+        let closed = stop.is_ok();
         match stop {
             Ok(_) => {
                 let rest = rig.until(finished);
@@ -483,6 +558,7 @@ fn an_interrupt_ends_the_turn_or_is_refused_typed() {
                 );
             }
         }
+        rig.keeps_the_invariants(agent, closed);
     }
 }
 
@@ -523,12 +599,15 @@ fn a_resumed_session_replays_its_history() {
             })
             .unwrap_or_else(|error| panic!("{agent:?} resumes: {error}"));
         assert!(matches!(&ack, Ack::Session { session_id, .. } if *session_id == session), "{agent:?}: {ack:?}");
-        let rig = Rig { provider, events, session: session.clone(), dir, hub };
+        let rig = Rig { provider, events, session: session.clone(), dir, hub, trace: Default::default() };
+        rig.trace.borrow_mut().sent(invariants::Sent::Resume(session.clone()));
+        rig.trace.borrow_mut().acked(invariants::Sent::Resume(session.clone()), Ok(ack.clone()));
         let replayed = rig.drain(Duration::from_millis(300));
         if agent == Agent::Muse {
             rig.submit("after the resume").unwrap_or_else(|error| panic!("{agent:?}: {error}"));
             let turn = rig.until(finished);
             assert_turn_order(agent, &session, &turn);
+            rig.keeps_the_invariants(agent, true);
             continue;
         }
         let users = deltas(&replayed)
@@ -538,6 +617,7 @@ fn a_resumed_session_replays_its_history() {
         assert!(users > 0, "{agent:?}: the stored ask replays: {replayed:#?}");
         assert!(finished(&replayed), "{agent:?}: the stored answer replays finished");
         assert!(!lost(&replayed), "{agent:?}: a resume loses nothing");
+        rig.keeps_the_invariants(agent, true);
     }
 }
 
@@ -579,6 +659,7 @@ fn an_error_turn_settles_failed_with_its_words() {
             });
             assert!(finish.is_some_and(|at| at < failure), "{agent:?}: the finish lands before the failure");
         }
+        rig.keeps_the_invariants(agent, true);
     }
 }
 
@@ -600,7 +681,7 @@ fn a_child_crash_settles_everything_and_the_session_revives() {
                 format!("{}#crash-at-request", fixture("codex", "approval.jsonl")),
                 format!("{}@1", fixture("codex", "resume.jsonl")),
             ),
-            Agent::Muse => ("--turn-shape=crash".to_owned(), "--emit-turn".to_owned()),
+            Agent::Muse => ("--turn-shape=crash-at-approval".to_owned(), "--emit-turn".to_owned()),
         };
         let rig = open(agent, "crash", &[&first, &then]);
         rig.submit("this dies").unwrap_or_else(|error| panic!("{agent:?}: {error}"));
@@ -610,15 +691,13 @@ fn a_child_crash_settles_everything_and_the_session_revives() {
             .position(|event| matches!(event, ProviderEvent::ConnectionLost { .. }))
             .unwrap_or_else(|| panic!("{agent:?}: the loss is reported: {events:#?}"));
         let ids = taps(&events);
-        if agent != Agent::Muse {
-            assert_eq!(ids.len(), 1, "{agent:?}: the approval was waiting: {events:#?}");
-            let before = &events[..lost_at];
-            assert!(a_card_settled(before), "{agent:?}: the card settled before the loss");
-            assert!(finished(before), "{agent:?}: the turn closed before the loss");
-        }
+        let before = &events[..lost_at];
+        assert_eq!(ids.len(), 1, "{agent:?}: the approval was waiting: {events:#?}");
+        assert!(a_card_settled(before), "{agent:?}: the card settled before the loss: {events:#?}");
+        assert!(finished(before), "{agent:?}: the turn closed before the loss: {events:#?}");
         assert!(events[lost_at + 1..].is_empty() || !taps(&events[lost_at + 1..]).iter().any(|id| ids.contains(id)));
         // Nothing pending after the loss, and a late decision is refused.
-        match rig.provider.send(Command::ListPending { session_id: rig.session.clone() }) {
+        match rig.list_pending() {
             Ok(Ack::PendingWork { approvals, questions }) => {
                 assert!(approvals.is_empty() && questions.is_empty(), "{agent:?}: nothing pending after the loss")
             }
@@ -649,6 +728,7 @@ fn a_child_crash_settles_everything_and_the_session_revives() {
             let resumed = rig.frames_of_spawn(1).iter().any(|frame| frame["method"] == "thread/resume");
             assert!(resumed, "Codex revives with thread/resume on a fresh app-server");
         }
+        rig.keeps_the_invariants(agent, true);
     }
 }
 

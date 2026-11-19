@@ -803,6 +803,13 @@ impl CodexAdapter {
         let model_default = if picked.is_none() && sticky.is_some() { self.model_default(&model)? } else { None };
         let wire_effort = child::turn_effort(picked, sticky.as_deref(), model_default.as_deref());
         let mode = self.pending_turn_mode.lock().expect("mode mutex").take();
+        // The bubble's words are recorded before the request leaves (docs/81
+        // B PM-10): the server may echo the user message before this thread
+        // reads its answer, and the echo folds with what is recorded then.
+        // Keyed by the full text here; by the turn once the answer names it.
+        if let Some(display) = display_text {
+            self.fold.lock().expect("fold mutex").record_display_text(None, text, display);
+        }
         let turn = self
             .with_child(|running| {
                 running.send_frame(turn_start_request(
@@ -847,7 +854,7 @@ impl CodexAdapter {
         // The ack carries the submission handle; the turn's true identity is
         // the server-minted id, never derived locally. The full text goes
         // to the model; the bubble shows the display text when one rode
-        // the submit, keyed by the turn this submit creates.
+        // the submit, now also keyed by the turn this submit created.
         if let Some(display) = display_text {
             self.fold.lock().expect("fold mutex").record_display_text(Some(&turn_id), text, display);
         }
@@ -1405,6 +1412,12 @@ impl Drop for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The program an adapter that must never spawn is built with: a path
+    /// that cannot exist, so a regression that starts a child fails to
+    /// spawn instead of reaching the installed CLI (the no-real-CLI
+    /// ratchet, `provider/tests/no_real_cli.rs`).
+    const NO_CLI: &str = "/nonexistent/baaz-test/codex";
     use crate::frame::decode_line;
 
     fn rate_push() -> &'static str {
@@ -1415,7 +1428,7 @@ mod tests {
     fn read_account_is_false_until_a_push_is_seen() {
         // Fresh adapter: no push observed, so no login claimed. A hardcoded
         // `true` fails this test. No process is spawned.
-        let adapter = CodexAdapter::new("codex");
+        let adapter = CodexAdapter::new(NO_CLI);
         let ack = adapter.dispatch(Command::ReadAccount).expect("account reads");
         assert!(
             matches!(ack, Ack::Account { signed_in: false, label: None, .. }),
@@ -1564,7 +1577,7 @@ for line in sys.stdin:
     /// "Codex stopped before it could answer" (QA 2026-10-30).
     #[test]
     fn a_resume_with_no_rollout_is_refused_as_missing_history() {
-        let _guard = FAKE_SERVER_LOCK.lock().expect("fake mutex");
+        let _guard = FAKE_SERVER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::remove_var("FAKE_CODEX_MODELS_DELAY");
         let (script, log) = scripted_effort_server();
         std::env::set_var("FAKE_CODEX_LOG", &log);
@@ -1597,7 +1610,7 @@ for line in sys.stdin:
         resume_effort: &str,
         models_delay: Option<&str>,
     ) -> (Vec<serde_json::Value>, Vec<Option<String>>, Duration) {
-        let _guard = FAKE_SERVER_LOCK.lock().expect("fake mutex");
+        let _guard = FAKE_SERVER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Under the lock: the env is the process's, and every fake reads it.
         match models_delay {
             Some(delay) => std::env::set_var("FAKE_CODEX_MODELS_DELAY", delay),
@@ -1701,7 +1714,7 @@ for line in sys.stdin:
     /// 2026-10-18) and a reopened session painted nothing until it landed.
     #[test]
     fn a_resume_never_waits_for_the_account_read() {
-        let _guard = FAKE_SERVER_LOCK.lock().expect("fake mutex");
+        let _guard = FAKE_SERVER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (script, log) = scripted_effort_server();
         std::env::set_var("FAKE_CODEX_LOG", &log);
         std::env::set_var("FAKE_CODEX_MODEL", "gpt-test");
@@ -1725,12 +1738,22 @@ for line in sys.stdin:
         std::env::remove_var("FAKE_CODEX_RATE_DELAY");
         assert!(matches!(ack, Ok(Ack::Session { .. })), "resumed: {ack:?}");
         assert!(took < Duration::from_millis(2_000), "the ack waited {took:?} for a 3 s account read");
-        let frames: Vec<serde_json::Value> = std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-        assert_eq!(method_frames(&frames, "account/rateLimits/read").len(), 1, "the read was still sent");
+        // The read goes out after the ack, off the dispatch path: wait for
+        // its frame in the fake's log rather than racing it (under a loaded
+        // workspace run the assert used to land first).
+        let reads = || {
+            let frames: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect();
+            method_frames(&frames, "account/rateLimits/read").len()
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while reads() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(reads(), 1, "the read was still sent");
         drop(adapter);
     }
 
@@ -1853,7 +1876,7 @@ for line in sys.stdin:
         // card has a reading before the first push. Without the
         // connect-time read the method never appears in the log and the
         // report stays `None`.
-        let _guard = FAKE_SERVER_LOCK.lock().expect("fake mutex");
+        let _guard = FAKE_SERVER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (script, log) = scripted_server();
         std::env::set_var("FAKE_CODEX_LOG", &log);
         // The open below spawns for real (scripted RPC) and upkeeps the
@@ -1941,7 +1964,7 @@ for line in sys.stdin:
     /// `fixtures/codex/resume.jsonl` answers the stored cwd).
     #[test]
     fn an_imported_resume_spawns_under_the_owner_codex_home() {
-        let _guard = FAKE_SERVER_LOCK.lock().expect("fake mutex");
+        let _guard = FAKE_SERVER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::remove_var("FAKE_CODEX_MODELS_DELAY");
         std::env::remove_var("FAKE_CODEX_RESUME_ERROR");
         let (script, log) = scripted_effort_server();
@@ -2033,7 +2056,7 @@ for line in sys.stdin:
     fn read_account_is_true_after_a_push() {
         // A rate-limits push from the live child is authenticated traffic
         // observed first-hand: signed in, with the meter label.
-        let adapter = CodexAdapter::new("codex");
+        let adapter = CodexAdapter::new(NO_CLI);
         let frame = decode_line(rate_push()).expect("push decodes");
         adapter.fold.lock().expect("fold mutex").apply(&frame);
         let ack = adapter.dispatch(Command::ReadAccount).expect("account reads");
@@ -2049,7 +2072,7 @@ for line in sys.stdin:
     fn session_commands_without_a_child_are_unavailable_not_ok() {
         // No spawn: without a child every session command refuses, so no
         // test can accidentally spend the owner's money.
-        let adapter = CodexAdapter::new("codex");
+        let adapter = CodexAdapter::new(NO_CLI);
         let ack = adapter.dispatch(Command::SubmitInput {
             request_id: "r".into(),
             session_id: "s".into(),
@@ -2142,7 +2165,7 @@ for line in sys.stdin:
     fn no_test_spawns_a_child() {
         // Pin the hard rule structurally: every dispatch above refused before
         // any spawn, and this adapter holds no child after them.
-        let adapter = CodexAdapter::new("codex");
+        let adapter = CodexAdapter::new(NO_CLI);
         assert!(adapter.child.lock().expect("child mutex").is_none());
     }
 
@@ -2150,7 +2173,7 @@ for line in sys.stdin:
     /// `turn/start` as its override — never refused as unsupported.
     #[test]
     fn a_mode_pick_is_admitted_for_the_next_turn() {
-        let adapter = CodexAdapter::new("codex");
+        let adapter = CodexAdapter::new(NO_CLI);
         *adapter.session_id.lock().expect("session mutex") = Some("s".into());
         adapter
             .dispatch(Command::SelectApprovalMode {

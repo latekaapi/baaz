@@ -482,6 +482,7 @@ impl Core {
                     Some(code) => format!("the agent process exited ({code})"),
                     None => "the agent process exited".into(),
                 };
+                self.abandon_live_turns();
                 self.broadcast(ProviderEvent::ConnectionLost { reason });
                 false
             }
@@ -548,6 +549,44 @@ impl Core {
                 route(&mut routed, &self.connection.0, &session, out, true);
                 true
             }
+        }
+    }
+
+    /// The child is gone (docs/71 §2, the `ConnectionLost` contract): every
+    /// approval card it raised settles cancelled and every turn it was
+    /// running ends `interrupted` — folded exactly like a `turn/completed`
+    /// the server sent, so its open blocks settle, its footer lands and its
+    /// `TurnSettled` goes out — all before the loss is reported. Nothing is
+    /// left for a decision to reach, or for a view to show running.
+    fn abandon_live_turns(&self) {
+        let mut routed = self.routed.lock().expect("routed mutex");
+        let sessions: Vec<String> = routed.fold.session_ids().map(str::to_owned).collect();
+        for session in sessions {
+            let running = routed.fold.running_turns(&session);
+            let mut deltas = routed.fold.cancel_pending_approvals(&session);
+            let mut out = Vec::new();
+            let mut settled = Vec::new();
+            for turn in running {
+                let params = serde_json::json!({ "sessionId": session, "turnId": turn, "terminal": "interrupted" });
+                deltas.extend(routed.fold.apply(MuseEvent::Notification {
+                    method: "turn/completed".into(),
+                    params: params.clone(),
+                    cursor: None,
+                    session_id: Some(session.clone()),
+                }));
+                settled.push(params);
+            }
+            if deltas.is_empty() && settled.is_empty() {
+                continue;
+            }
+            if !deltas.is_empty() {
+                out.push(ProviderEvent::Deltas { session_id: Some(session.clone()), deltas });
+            }
+            let Routed { fold, tracker, .. } = &mut *routed;
+            for params in &settled {
+                out.extend(tracker.after(fold, &session, "turn/completed", params));
+            }
+            route(&mut routed, &self.connection.0, &session, out, true);
         }
     }
 

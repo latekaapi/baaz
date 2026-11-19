@@ -19,7 +19,8 @@ child is a session child from its spawn. A SPEC is
 
 * SEGMENT (default 0): codex — which `initialize` session of the fixture to
   play (a resume fixture records two); claude — which recorded turn the
-  first user message plays (later messages play the turns after it).
+  first user message plays (later messages play the turns after it; a
+  recorded turn ends with its `result`).
 * MODE: `play` (default); `crash-at-request` — exit 1 with stderr lines the
   moment the first server request (an approval) is on the wire, never
   answering it; `crash-at-start` — the same right after the turn starts;
@@ -302,26 +303,30 @@ class CodexReplay:
 # ----------------------------------------------------------------- claude
 
 def claude_turns(path):
+    """The CLI's frames, one list per recorded turn: a turn ends with its
+    `result` (a fixture records one per prompt, with or without the host's
+    own frames); anything after the last `result` rides the last turn."""
     turns, current = [], []
-    saw_host_user = False
     for line in open(path):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         frame = json.loads(line)
         if "_dir" in frame:
-            if frame["frame"].get("type") == "user":
-                if saw_host_user or current:
-                    turns.append(current)
-                    current = []
-                saw_host_user = True
             continue
         # The CLI's answers to the RECORDED host's control requests: this
         # fake answers the live adapter's own requests itself.
         if frame.get("type") == "control_response":
             continue
         current.append(frame)
-    turns.append(current)
+        if frame.get("type") == "result":
+            turns.append(current)
+            current = []
+    if current:
+        if turns:
+            turns[-1].extend(current)
+        else:
+            turns.append(current)
     return turns
 
 

@@ -8,6 +8,11 @@ use provider::{
 };
 use provider_claude_code::ClaudeCodeAdapter;
 
+/// The program every adapter here is built with: a path that cannot exist,
+/// so nothing these tests do can reach the installed `claude` (the
+/// no-real-CLI ratchet, `provider/tests/no_real_cli.rs`).
+const NO_CLI: &str = "/nonexistent/baaz-test/claude";
+
 fn answer_command() -> Command {
     Command::AnswerQuestion {
         request_id: "q-1".into(),
@@ -28,7 +33,7 @@ fn a_question_for_no_live_session_is_never_spelled_ok() {
     // Questions is Unverified (AskUserQuestion folds to cards): the gate
     // lets the answer through, and with no child the adapter refuses it —
     // an answer that reached nobody is never Ok.
-    let adapter = ClaudeCodeAdapter::new("claude");
+    let adapter = ClaudeCodeAdapter::new(NO_CLI);
     let provider = Provider::new(adapter);
     let error = provider.send(answer_command()).expect_err("no child, no answer");
     assert!(!error.is_unsupported(), "the gate lets questions through now: {error:?}");
@@ -36,7 +41,7 @@ fn a_question_for_no_live_session_is_never_spelled_ok() {
 
 #[test]
 fn unsupported_is_never_spelled_as_success() {
-    let adapter = ClaudeCodeAdapter::new("claude");
+    let adapter = ClaudeCodeAdapter::new(NO_CLI);
     // Login has no CLI surface: refused, not Ok.
     let error = adapter
         .dispatch(Command::BeginLogin { api_key: None })
@@ -106,7 +111,7 @@ fn stored_history_serves_read_and_page_but_never_guesses() {
     std::fs::write(other_dir.join("sess-decoy.jsonl"), &fixture).expect("plant decoy");
 
     let adapter =
-        ClaudeCodeAdapter::new("claude").with_home(home).with_workspace(cwd);
+        ClaudeCodeAdapter::new(NO_CLI).with_home(home).with_workspace(cwd);
     let ack = adapter
         .dispatch(Command::ReadSession { session_id: "sess-stored".into(), metadata_only: false })
         .expect("stored session reads");
@@ -191,7 +196,7 @@ fn resume_replays_stored_history_once_with_its_model() {
     std::fs::write(dir.join(format!("{session_id}.jsonl")), &fixture).expect("plant");
 
     let adapter =
-        ClaudeCodeAdapter::new("claude").with_home(home.clone()).with_workspace(cwd.clone());
+        ClaudeCodeAdapter::new(NO_CLI).with_home(home.clone()).with_workspace(cwd.clone());
 
     // The page a reopen shows: bubble, answer, finish — each exactly once.
     let ack = adapter
@@ -319,7 +324,7 @@ fn resume_replays_stored_history_once_with_its_model() {
 
 #[test]
 fn read_account_reports_the_live_meter_label() {
-    let adapter = ClaudeCodeAdapter::new("claude");
+    let adapter = ClaudeCodeAdapter::new(NO_CLI);
     let ack = adapter.dispatch(Command::ReadAccount).expect("account reads");
     match ack {
         Ack::Account { signed_in, label, .. } => {

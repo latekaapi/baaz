@@ -1,24 +1,37 @@
 //! The schema drift gate: the checked-in `schemas/codex/` bundle is pinned
 //! to one CLI version, and the protocol may move under us.
 //!
-//! The gate never spawns a live `codex app-server` session (that spends the
-//! owner's money). It runs only two local metadata commands — `codex
+//! Two halves, because tests never reach a real CLI (CLAUDE.md rule 4;
+//! docs/82 5.2 — this test used to run the installed `codex` on every
+//! `cargo test`, so its result depended on what the machine had installed):
+//!
+//! * [`the_committed_schema_bundle_matches_its_manifest`] runs on every
+//!   `cargo test`, offline: every committed schema file hashes to its
+//!   `schemas/codex/MANIFEST.sha256` entry and `VERSION` names the pin. A
+//!   one-byte edit to a committed schema fails here.
+//! * [`the_installed_codex_regenerates_the_pinned_bundle`] is the drift gate
+//!   proper, `#[ignore]`d and gated on `BAAZ_LIVE_CODEX_SCHEMA=1`, run by
+//!   hand when the CLI moves:
+//!
+//! ```text
+//! BAAZ_LIVE_CODEX_SCHEMA=1 cargo test -p provider-codex --test schema_drift -- --ignored --nocapture
+//! ```
+//!
+//! It never spawns a live `codex app-server` session (that spends the
+//! owner's money): it runs only two local metadata commands — `codex
 //! --version` and `codex app-server generate-json-schema --out <tempdir>` —
 //! and compares hashes. Nothing in this test writes into `schemas/codex/`.
+//! Its outcomes, in order:
 //!
-//! Outcomes, in order:
-//!
-//! 1. `codex` absent: visible skip, printing why. No `#[ignore]` — an
-//!    ignored test reads as green while checking nothing.
+//! 1. `codex` absent: visible skip, printing why.
 //! 2. Version mismatch against `schemas/codex/VERSION`: a loud skip, not a
 //!    failure. The gate is pinned to a version and a newer CLI is the
 //!    owner's business.
 //! 3. On a version match: regenerate into a temp dir, hash every `.json`,
-//!    and compare against `schemas/codex/MANIFEST.sha256`; the committed
-//!    files are compared against the same manifest. Any mismatch FAILS
-//!    with counts and the first few paths. One entry — the v2 aggregate
-//!    bundle, which the CLI serializes with unstable key order — is
-//!    compared by canonical content instead of bytes; everything else is
+//!    and compare against `schemas/codex/MANIFEST.sha256`. Any mismatch
+//!    FAILS with counts and the first few paths. One entry — the v2
+//!    aggregate bundle, which the CLI serializes with unstable key order —
+//!    is compared by canonical content instead of bytes; everything else is
 //!    byte-pinned.
 //!
 //! A drift is NOT a bug: it means the CLI moved, and this gate exists to
@@ -192,11 +205,59 @@ fn first_few(paths: &[String]) -> String {
     shown
 }
 
+/// The committed bundle agrees with its own manifest — offline, every run.
 #[test]
-fn codex_schema_bundle_matches_its_manifest() {
+fn the_committed_schema_bundle_matches_its_manifest() {
+    let schema_dir = schema_dir();
+    let pinned = std::fs::read_to_string(schema_dir.join("VERSION")).expect("schemas/codex/VERSION reads");
+    assert!(!pinned.trim().is_empty(), "schemas/codex/VERSION names the pinned CLI version");
+    let manifest = read_manifest(&schema_dir);
+    let (checked, drift) = committed_drift(&schema_dir, &manifest);
+    assert!(checked > 0, "no committed schema file is listed in MANIFEST.sha256");
+    assert!(
+        drift.is_empty(),
+        "drift gate: {} committed schema file(s) disagree with MANIFEST.sha256 \
+         ({checked} of {} manifest entries are committed here): {}. {}.",
+        drift.len(),
+        manifest.len(),
+        first_few(&drift),
+        explain_drift()
+    );
+}
+
+/// The committed files listed in `manifest` that do not hash to their
+/// entry, and how many were checked. Files the checkout does not carry
+/// (the `v2/` payload) are covered only by the live regeneration.
+fn committed_drift(schema_dir: &Path, manifest: &BTreeMap<String, String>) -> (usize, Vec<String>) {
+    let mut drift = Vec::new();
+    let mut checked = 0usize;
+    for (rel, expected) in manifest {
+        let path = schema_dir.join(rel);
+        if !path.is_file() {
+            continue;
+        }
+        checked += 1;
+        let actual = sha256_file(&path);
+        if &actual != expected {
+            drift.push(format!("{rel} (manifest {expected}, committed {actual})"));
+        }
+    }
+    drift.sort();
+    (checked, drift)
+}
+
+/// The drift gate proper: the installed `codex` regenerates the pinned
+/// bundle byte for byte. Runs the real CLI, so never under `cargo test`.
+#[test]
+#[ignore = "runs the installed codex; BAAZ_LIVE_CODEX_SCHEMA=1 to run"]
+fn the_installed_codex_regenerates_the_pinned_bundle() {
+    if std::env::var("BAAZ_LIVE_CODEX_SCHEMA").as_deref() != Ok("1") {
+        println!("drift gate: SKIP — BAAZ_LIVE_CODEX_SCHEMA is not 1; the installed codex was not run");
+        return;
+    }
     let schema_dir = schema_dir();
 
-    // 1. `codex` absent: skip visibly, printing why. Never `#[ignore]`d.
+    // 1. `codex` absent: skip visibly, printing why.
     let version_output = match Command::new("codex").arg("--version").output() {
         Ok(output) => output,
         Err(error) => {
@@ -233,24 +294,9 @@ fn codex_schema_bundle_matches_its_manifest() {
     }
 
     let manifest = read_manifest(&schema_dir);
-
-    // The committed subset, checked against the same manifest: a deliberate
-    // one-byte edit to a committed schema must FAIL here. Files the
-    // checkout does not carry (the `v2/` payload) are covered by the
-    // regenerated comparison below, not here.
-    let mut committed_drift = Vec::new();
-    let mut committed_checked = 0usize;
-    for (rel, expected) in &manifest {
-        let path = schema_dir.join(rel);
-        if !path.is_file() {
-            continue;
-        }
-        committed_checked += 1;
-        let actual = sha256_file(&path);
-        if &actual != expected {
-            committed_drift.push(format!("{rel} (manifest {expected}, committed {actual})"));
-        }
-    }
+    // The committed subset against the same manifest (the offline half
+    // checks it too): the regeneration below is compared against it.
+    let (committed_checked, committed_drift) = committed_drift(&schema_dir, &manifest);
 
     // 3. Regenerate into a temp dir (never into `schemas/codex/`) and hash
     // every `.json` against the manifest.
@@ -357,7 +403,6 @@ fn codex_schema_bundle_matches_its_manifest() {
     // 4. Mismatches fail with counts and the first few paths — "hashes
     // differ" alone wastes the next hour.
     if !committed_drift.is_empty() {
-        committed_drift.sort();
         panic!(
             "drift gate: {} committed schema file(s) disagree with MANIFEST.sha256 \
              ({} of {} manifest entries are committed here): {}. {}.",

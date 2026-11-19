@@ -99,6 +99,21 @@ pub trait ProviderAdapter: Send {
     /// session but not paging it) stays a typed refusal in the adapter.
     /// (`Emulated`, `Native`, and `Unverified` all proceed through the gate:
     /// honest ignorance is attempted, never refused.)
+    ///
+    /// **Ordering (docs/81 B PM-10).** An ack is admission, never outcome,
+    /// and it comes before or with its events: the events a command causes
+    /// may reach the stream while `dispatch` is still running (the child
+    /// answers and keeps talking), so whatever the adapter knows before the
+    /// write and must fold them with — the words a submission was sent
+    /// with, its display text — is recorded *before* the command is
+    /// written, never after the ack; what only the answer carries (a
+    /// server-minted turn id, a queued disposition) must still fold right
+    /// when the events beat it. A
+    /// [`crate::Ack::TurnAccepted`] names the turn it admits, never one the
+    /// stream already carried, and that turn streams under its id or under
+    /// the id one [`ProviderEvent::TurnIdentified`] gives it. The offline
+    /// conformance suite (`crates/baaz/tests/conformance/`) checks this, with
+    /// the rest of the seam's invariants, on every adapter's fixtures.
     fn dispatch(&self, command: Command) -> Result<Ack, ProviderError>;
 
     /// The event stream, in arrival order.
