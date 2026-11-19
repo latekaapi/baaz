@@ -1,0 +1,198 @@
+{
+  "final": {
+    "claude": {
+      "id": "claude",
+      "agent": "claude",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "322d68af-b620-452e-a8ae-7039cc85e52c",
+          "text": "Create the file /tmp/w4b/outside-claude.txt containing exactly the word APPROVED. Reply with just DONE.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "msg_011CfSANtPkpmdESpuqK94vQ",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "toolu_011sPkD6HB72cSe8Te57F4RV",
+              "tool_kind": {
+                "kind": "write"
+              },
+              "verb": "Wrote",
+              "target": "/tmp/w4b/outside-claude.txt",
+              "status": "success",
+              "duration_ms": "set",
+              "body": {
+                "kind": "edit",
+                "diff": {
+                  "path": "/tmp/w4b/outside-claude.txt",
+                  "hunks": [
+                    {
+                      "header": "@@ -0,0 +1,1 @@",
+                      "lines": [
+                        {
+                          "kind": "add",
+                          "old_no": null,
+                          "new_no": 1,
+                          "text": "APPROVED"
+                        }
+                      ]
+                    }
+                  ],
+                  "added": 1,
+                  "removed": 0
+                }
+              },
+              "diff_stat": {
+                "added": 1,
+                "removed": 0,
+                "files": 1
+              }
+            },
+            {
+              "kind": "approval",
+              "id": "f5fa3a50-8c80-4754-a1b5-3d977e150461",
+              "tool": "Write",
+              "command": "/tmp/w4b/outside-claude.txt",
+              "reason": "/tmp/w4b/outside-claude.txt\nAPPROVED\nPath is outside allowed working directories",
+              "cwd": "/private/tmp/w4b/work",
+              "capabilities": [],
+              "scope": "this_command",
+              "body_kind": "file_write",
+              "state": {
+                "kind": "allowed_once",
+                "exit_code": 0,
+                "duration_ms": "set"
+              },
+              "rule": null,
+              "choices": [
+                {
+                  "id": "allow",
+                  "label": "Allow",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "deny",
+                  "label": "Deny",
+                  "decision": "deny",
+                  "scope": "this_command",
+                  "accepts_feedback": true
+                }
+              ],
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              }
+            },
+            {
+              "kind": "text",
+              "text": "DONE",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "claude-haiku-4-5-20251001",
+            "duration_ms": "set",
+            "tokens_in": 62859,
+            "tokens_out": 446,
+            "reasoning_tokens": 353,
+            "cost_usd": 0.0192956,
+            "cache_read_tokens": 57176,
+            "cache_write_tokens": 5665,
+            "cached_tokens": 0
+          },
+          "timestamp": "set"
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:ffdc458af9e37b66",
+    "9:7f62b619203c3678",
+    "10:0a64a00b011ec078",
+    "11:b99134f4b32f78e4",
+    "12:085012e67c360e9c",
+    "17:01e29011dffd9de3",
+    "19:661541b038d64fc8",
+    "21:8b5eef6e85724d2f"
+  ],
+  "abandon": [
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "8:ffdc458af9e37b66",
+    "8:ffdc458af9e37b66",
+    "8:ffdc458af9e37b66",
+    "9:7f62b619203c3678",
+    "9:7f62b619203c3678",
+    "9:7f62b619203c3678",
+    "10:88c5389109ca52c5",
+    "10:ba9130f59e33307d",
+    "10:0a64a00b011ec078",
+    "11:d02b1bf550b38e39",
+    "11:0364956fb2c29be1",
+    "11:b99134f4b32f78e4",
+    "12:6cd3324cf8355853",
+    "12:4017e74fa0a8d3d4",
+    "12:aaea9d0ac21d6f6d",
+    "13:6cd3324cf8355853",
+    "13:4017e74fa0a8d3d4",
+    "13:aaea9d0ac21d6f6d",
+    "14:6cd3324cf8355853",
+    "14:4017e74fa0a8d3d4",
+    "14:aaea9d0ac21d6f6d",
+    "15:6cd3324cf8355853",
+    "15:4017e74fa0a8d3d4",
+    "15:aaea9d0ac21d6f6d",
+    "16:6cd3324cf8355853",
+    "16:4017e74fa0a8d3d4",
+    "16:aaea9d0ac21d6f6d",
+    "17:bd264a106eb4d10e",
+    "17:bf36df2de51c42be",
+    "17:01e29011dffd9de3",
+    "18:c26e25da39aa6d81",
+    "18:eccf80df38a660f1",
+    "18:01e29011dffd9de3",
+    "19:c12f2d25d3f4bf82",
+    "19:f2df9e3a3ab983d2",
+    "19:661541b038d64fc8",
+    "20:c12f2d25d3f4bf82",
+    "20:f2df9e3a3ab983d2",
+    "20:661541b038d64fc8",
+    "21:8b5eef6e85724d2f",
+    "21:8b5eef6e85724d2f",
+    "21:8b5eef6e85724d2f",
+    "21:8b5eef6e85724d2f"
+  ]
+}

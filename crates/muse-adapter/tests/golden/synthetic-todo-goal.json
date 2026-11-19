@@ -1,0 +1,164 @@
+{
+  "final": {
+    "synthetic-todo-goal": {
+      "id": "synthetic-todo-goal",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-syn-1",
+          "text": "Tighten address validation for CA and GB.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "goal:synthetic-todo-goal",
+          "blocks": [
+            {
+              "kind": "goal",
+              "objective": "Ship the checkout fix",
+              "status": "wrapping up",
+              "percent_complete": 120.0,
+              "current_work": "Re-running the focused tests",
+              "next_work": "Summarise the change"
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "todo:synthetic-todo-goal",
+          "blocks": [
+            {
+              "kind": "todo",
+              "items": [
+                {
+                  "label": "Read validators and the form",
+                  "state": "done",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Branch validation per country",
+                  "state": "done",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Add CA and GB tests",
+                  "state": "done",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Run the focused tests",
+                  "state": "running",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Summarise the change",
+                  "state": "pending",
+                  "elapsed_ms": null
+                }
+              ]
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn-1",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "Done: CA and GB now validate, and the tests cover both.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-echo",
+            "duration_ms": 41000,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "16:5aea4e6d291e89aa",
+    "18:1568172fbc481ddd",
+    "19:9617076bd2b45f76",
+    "20:90813f207b324482",
+    "21:6326fe51343d1b21",
+    "22:22771f87e238aa6e",
+    "23:f7efc6cd87262edf",
+    "24:636c52093e921956",
+    "25:28333d271aded338",
+    "26:42c904e2906db82f",
+    "27:99bc7a6c2ad03e36",
+    "28:d633f22a27068935"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:08f44b07b5901a25",
+    "4:08f44b07b5901a25",
+    "5:08f44b07b5901a25",
+    "6:08f44b07b5901a25",
+    "7:08f44b07b5901a25",
+    "8:08f44b07b5901a25",
+    "9:08f44b07b5901a25",
+    "10:08f44b07b5901a25",
+    "11:08f44b07b5901a25",
+    "12:08f44b07b5901a25",
+    "13:08f44b07b5901a25",
+    "14:08f44b07b5901a25",
+    "15:08f44b07b5901a25",
+    "16:5aea4e6d291e89aa",
+    "17:5aea4e6d291e89aa",
+    "18:1568172fbc481ddd",
+    "19:9617076bd2b45f76",
+    "20:90813f207b324482",
+    "21:6326fe51343d1b21",
+    "22:22771f87e238aa6e",
+    "23:f7efc6cd87262edf",
+    "24:636c52093e921956",
+    "25:28333d271aded338",
+    "26:42c904e2906db82f",
+    "27:3cb8b3f22980d556",
+    "28:d633f22a27068935"
+  ]
+}

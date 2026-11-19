@@ -1,0 +1,130 @@
+{
+  "final": {
+    "synthetic-terminal": {
+      "id": "synthetic-terminal",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-syn-user-1",
+          "text": "Run the tests in the terminal where I can watch.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn-1",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "i-syn-term-1",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran in terminal",
+              "target": "pnpm vitest run · t1",
+              "status": "success",
+              "duration_ms": 412,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  " ✓ validators.test.ts (18) 412ms",
+                  " Test Files  1 passed (1)"
+                ],
+                "exit_code": 0,
+                "live": false
+              }
+            },
+            {
+              "kind": "text",
+              "text": "Tests pass. Checking what else is open.",
+              "streaming": false
+            },
+            {
+              "kind": "tool_call",
+              "id": "i-syn-term-2",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran in terminal",
+              "target": "terminal_list",
+              "status": "success",
+              "duration_ms": 3,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "{",
+                  "  \"tabs\": [",
+                  "    {",
+                  "      \"tab\": \"t1\",",
+                  "      \"title\": \"pnpm vitest run\",",
+                  "      \"cwd\": \"/tmp/synthetic\",",
+                  "      \"owner\": \"muse\",",
+                  "      \"busy\": false,",
+                  "      \"alt_screen\": false,",
+                  "      \"last_block\": \"t1:0\"",
+                  "    }",
+                  "  ]",
+                  "}"
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-test",
+            "duration_ms": 415,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "15:9ee05c9800221ed2",
+    "17:79a33681a0acee20",
+    "18:8c6f14b9aaa2b7ab",
+    "19:4d3c0f54f7e2e651",
+    "20:33b9c8c1a8022ecb",
+    "21:0734be34406b828a"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:08f44b07b5901a25",
+    "4:08f44b07b5901a25",
+    "5:08f44b07b5901a25",
+    "6:08f44b07b5901a25",
+    "7:08f44b07b5901a25",
+    "8:08f44b07b5901a25",
+    "9:08f44b07b5901a25",
+    "10:08f44b07b5901a25",
+    "11:08f44b07b5901a25",
+    "12:08f44b07b5901a25",
+    "13:08f44b07b5901a25",
+    "14:08f44b07b5901a25",
+    "15:9ee05c9800221ed2",
+    "16:9ee05c9800221ed2",
+    "17:79a33681a0acee20",
+    "18:c3c61983237458e4",
+    "19:678d7bb77b7f7d9a",
+    "20:82d76519ed40a884",
+    "21:0734be34406b828a"
+  ]
+}

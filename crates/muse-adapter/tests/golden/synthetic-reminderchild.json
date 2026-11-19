@@ -1,0 +1,76 @@
+{
+  "final": {
+    "synthetic-reminderchild": {
+      "id": "synthetic-reminderchild",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-syn-user-1",
+          "text": "What did the reminder say?",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn-1",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "Nothing to show.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-test",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "14:025a2b16ca19cbea",
+    "16:93e768eea441e3b6",
+    "19:858265e690ce0369",
+    "20:e0bf89d9d30a4962"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:08f44b07b5901a25",
+    "4:08f44b07b5901a25",
+    "5:08f44b07b5901a25",
+    "6:08f44b07b5901a25",
+    "7:08f44b07b5901a25",
+    "8:08f44b07b5901a25",
+    "9:08f44b07b5901a25",
+    "10:08f44b07b5901a25",
+    "11:08f44b07b5901a25",
+    "12:08f44b07b5901a25",
+    "13:08f44b07b5901a25",
+    "14:025a2b16ca19cbea",
+    "15:025a2b16ca19cbea",
+    "16:93e768eea441e3b6",
+    "17:93e768eea441e3b6",
+    "18:93e768eea441e3b6",
+    "19:e0bf89d9d30a4962",
+    "20:e0bf89d9d30a4962"
+  ]
+}

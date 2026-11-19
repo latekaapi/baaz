@@ -1,0 +1,161 @@
+{
+  "final": {
+    "codex": {
+      "id": "codex",
+      "agent": "codex",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "01a0de81-0c22-7052-bf18-ea002b7c27ea",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "R1",
+              "streaming": false
+            },
+            {
+              "kind": "text",
+              "text": "R1",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "golden-model",
+            "duration_ms": 4480,
+            "tokens_in": 14907,
+            "tokens_out": 6,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 13824
+          }
+        },
+        {
+          "kind": "user",
+          "id": "01a0de81-1514-7e21-943d-98fa260421e6",
+          "text": "Say R1 and nothing else",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "user",
+          "id": "item-1",
+          "text": "Say R1 and nothing else",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "01a0de84-c02a-7c72-a808-ac8ebeb5a130",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "R2",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "golden-model",
+            "duration_ms": 3427,
+            "tokens_in": 14925,
+            "tokens_out": 6,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 10624
+          }
+        },
+        {
+          "kind": "user",
+          "id": "01a0de84-c751-77c1-82a6-1a0af73c9a8b",
+          "text": "Say R2 and nothing else",
+          "attachments": [],
+          "mentions": []
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "5:c11f324e035c08d3",
+    "17:21612bfdbe38f98e",
+    "21:befc12a71d67c921",
+    "25:71c1f609d0bf95d9",
+    "29:33dfd70b44d7d3d3",
+    "39:84a6fc64a86790b5",
+    "47:c752bbc61ab82872",
+    "50:8bf7be8eba8c0874",
+    "54:b2dfa1cfa28c512b",
+    "58:a609f863c82e47f4"
+  ],
+  "abandon": [
+    "1:c11f324e035c08d3",
+    "2:c11f324e035c08d3",
+    "3:c11f324e035c08d3",
+    "4:c11f324e035c08d3",
+    "5:c11f324e035c08d3",
+    "6:c11f324e035c08d3",
+    "7:c11f324e035c08d3",
+    "8:c11f324e035c08d3",
+    "9:c11f324e035c08d3",
+    "10:c11f324e035c08d3",
+    "11:c11f324e035c08d3",
+    "12:c11f324e035c08d3",
+    "13:c11f324e035c08d3",
+    "14:c11f324e035c08d3",
+    "15:c11f324e035c08d3",
+    "16:c11f324e035c08d3",
+    "17:80ea08d4e7e9755c",
+    "18:80ea08d4e7e9755c",
+    "19:80ea08d4e7e9755c",
+    "20:80ea08d4e7e9755c",
+    "21:5ac57a8f37d8da43",
+    "22:5ac57a8f37d8da43",
+    "23:010fb09caf8d6c52",
+    "24:d8b867a5f0e86567",
+    "25:2befbc9b61de92a3",
+    "26:efc9b0285d0c50f0",
+    "27:efc9b0285d0c50f0",
+    "28:efc9b0285d0c50f0",
+    "29:33dfd70b44d7d3d3",
+    "30:33dfd70b44d7d3d3",
+    "31:33dfd70b44d7d3d3",
+    "32:33dfd70b44d7d3d3",
+    "33:33dfd70b44d7d3d3",
+    "34:33dfd70b44d7d3d3",
+    "35:33dfd70b44d7d3d3",
+    "36:33dfd70b44d7d3d3",
+    "37:33dfd70b44d7d3d3",
+    "38:33dfd70b44d7d3d3",
+    "39:84a6fc64a86790b5",
+    "40:84a6fc64a86790b5",
+    "41:84a6fc64a86790b5",
+    "42:84a6fc64a86790b5",
+    "43:84a6fc64a86790b5",
+    "44:84a6fc64a86790b5",
+    "45:84a6fc64a86790b5",
+    "46:84a6fc64a86790b5",
+    "47:28c4ca1febd768a8",
+    "48:28c4ca1febd768a8",
+    "49:28c4ca1febd768a8",
+    "50:5542d4e428c7ff2a",
+    "51:5542d4e428c7ff2a",
+    "52:c3e8ac3ff1aa06bf",
+    "53:20907445b505cc79",
+    "54:480ff696392bbb9f",
+    "55:86fb1e8274ae24b7",
+    "56:86fb1e8274ae24b7",
+    "57:86fb1e8274ae24b7",
+    "58:a609f863c82e47f4"
+  ]
+}

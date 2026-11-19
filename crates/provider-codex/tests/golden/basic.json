@@ -1,0 +1,91 @@
+{
+  "final": {
+    "codex": {
+      "id": "codex",
+      "agent": "codex",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "01a0d344-5a47-7c80-91d9-0105775b5f40",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "READY",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "golden-model",
+            "duration_ms": 6048,
+            "tokens_in": 14918,
+            "tokens_out": 5,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 10624
+          }
+        },
+        {
+          "kind": "user",
+          "id": "01a0d344-60d4-7603-a374-2873750a5c51",
+          "text": "Reply with exactly the word READY. Do not use any tools.",
+          "attachments": [],
+          "mentions": []
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "3:c11f324e035c08d3",
+    "22:c0c17a60ad704604",
+    "27:fed35b13c712204b",
+    "30:65f3b5cd7419420f",
+    "34:eba909919c4870f1"
+  ],
+  "abandon": [
+    "1:c11f324e035c08d3",
+    "2:c11f324e035c08d3",
+    "3:c11f324e035c08d3",
+    "4:c11f324e035c08d3",
+    "5:c11f324e035c08d3",
+    "6:c11f324e035c08d3",
+    "7:c11f324e035c08d3",
+    "8:c11f324e035c08d3",
+    "9:c11f324e035c08d3",
+    "10:c11f324e035c08d3",
+    "11:c11f324e035c08d3",
+    "12:c11f324e035c08d3",
+    "13:c11f324e035c08d3",
+    "14:c11f324e035c08d3",
+    "15:c11f324e035c08d3",
+    "16:c11f324e035c08d3",
+    "17:c11f324e035c08d3",
+    "18:c11f324e035c08d3",
+    "19:c11f324e035c08d3",
+    "20:c11f324e035c08d3",
+    "21:c11f324e035c08d3",
+    "22:ce2e874ee348a40a",
+    "23:ce2e874ee348a40a",
+    "24:ce2e874ee348a40a",
+    "25:ce2e874ee348a40a",
+    "26:ce2e874ee348a40a",
+    "27:693ddc1a5a13433d",
+    "28:693ddc1a5a13433d",
+    "29:38b1f9be0228f113",
+    "30:13756954ed93f12d",
+    "31:80c5ceba0ab4d93e",
+    "32:80c5ceba0ab4d93e",
+    "33:80c5ceba0ab4d93e",
+    "34:eba909919c4870f1"
+  ]
+}

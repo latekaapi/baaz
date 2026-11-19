@@ -1,0 +1,193 @@
+{
+  "final": {
+    "claude": {
+      "id": "claude",
+      "agent": "claude",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "msg_011CfNMJAQJQ5HTqskQ7yAUG",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "toolu_01JR6NyiTsUY3KY8kizQWBza",
+              "tool_kind": {
+                "kind": "search"
+              },
+              "verb": "Searched",
+              "target": "select:mcp__baaz__ping · 1 tools",
+              "status": "success",
+              "duration_ms": "set",
+              "body": {
+                "kind": "none"
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "toolu_01XqHeZeKksDmhf4miPM8P5C",
+              "tool_kind": {
+                "kind": "mcp",
+                "server": "baaz",
+                "tool": "ping"
+              },
+              "verb": "Denied",
+              "target": "baaz · ping",
+              "status": "cancelled",
+              "duration_ms": null,
+              "body": {
+                "kind": "mcp",
+                "params": [],
+                "result_json": ""
+              }
+            },
+            {
+              "kind": "approval",
+              "id": "293d7b34-242f-4827-a3a5-c266cb20635a",
+              "tool": "mcp__baaz__ping",
+              "command": "baaz · Ping (mcp__baaz__ping)",
+              "reason": "Allow Ping (mcp__baaz__ping) via MCP server baaz",
+              "cwd": "/private/tmp/claude-501/-Users-owner-Projects-harness/3769f0a2-c600-44d6-9cfb-c2978bf13f4f/scratchpad",
+              "capabilities": [
+                "mcp__baaz__ping"
+              ],
+              "scope": "this_command",
+              "body_kind": "other",
+              "state": {
+                "kind": "denied"
+              },
+              "rule": "mcp__baaz__ping",
+              "choices": [
+                {
+                  "id": "allow",
+                  "label": "Allow",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "deny",
+                  "label": "Deny",
+                  "decision": "deny",
+                  "scope": "this_command",
+                  "accepts_feedback": true
+                }
+              ],
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              }
+            },
+            {
+              "kind": "text",
+              "text": "Denied by the owner for this probe.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "claude-haiku-4-5-20251001",
+            "duration_ms": "set",
+            "tokens_in": 92317,
+            "tokens_out": 312,
+            "reasoning_tokens": 171,
+            "cost_usd": 0.0696295,
+            "cache_read_tokens": 61335,
+            "cache_write_tokens": 30954,
+            "cached_tokens": 0
+          },
+          "timestamp": "set"
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:ffdc458af9e37b66",
+    "9:481f763c42e820fd",
+    "10:6434c3932e846c35",
+    "11:dd03f5f31978a4a6",
+    "14:c53d6fd5e5812fae",
+    "15:9e1347364ba59410",
+    "17:69340c8d990dddb4",
+    "21:1a7c11b50f3b91b0",
+    "23:f26dd73e8ccc4073"
+  ],
+  "abandon": [
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "8:ffdc458af9e37b66",
+    "8:ffdc458af9e37b66",
+    "8:ffdc458af9e37b66",
+    "9:3dd81651cfdf0b1e",
+    "9:4c446d34401d61ac",
+    "9:481f763c42e820fd",
+    "10:128a999077862cb0",
+    "10:e62341f3bd9c1434",
+    "10:6434c3932e846c35",
+    "11:1936450dd33e1c71",
+    "11:cae4d86034c2a20d",
+    "11:dd03f5f31978a4a6",
+    "12:1936450dd33e1c71",
+    "12:cae4d86034c2a20d",
+    "12:dd03f5f31978a4a6",
+    "13:e0d2db9d9aad7540",
+    "13:8177cf19407cab7c",
+    "13:dd03f5f31978a4a6",
+    "14:91242b02052f7528",
+    "14:042e01cfeebc7ae4",
+    "14:c53d6fd5e5812fae",
+    "15:756f0b3b7c88970a",
+    "15:56e457d727d57fa5",
+    "15:a9b999306a0012cd",
+    "16:756f0b3b7c88970a",
+    "16:56e457d727d57fa5",
+    "16:a9b999306a0012cd",
+    "17:812d10e8b82aa7af",
+    "17:2acbbfa8dae61e40",
+    "17:1257adbec626bb42",
+    "18:812d10e8b82aa7af",
+    "18:2acbbfa8dae61e40",
+    "18:1257adbec626bb42",
+    "19:812d10e8b82aa7af",
+    "19:2acbbfa8dae61e40",
+    "19:1257adbec626bb42",
+    "20:4471beaa95b1b40d",
+    "20:851893686b43fe66",
+    "20:1257adbec626bb42",
+    "21:263f828f8ca4d4c7",
+    "21:32fbe9c8a6195906",
+    "21:34b5407f67cec102",
+    "22:263f828f8ca4d4c7",
+    "22:32fbe9c8a6195906",
+    "22:34b5407f67cec102",
+    "23:f26dd73e8ccc4073",
+    "23:f26dd73e8ccc4073",
+    "23:f26dd73e8ccc4073",
+    "23:f26dd73e8ccc4073"
+  ]
+}

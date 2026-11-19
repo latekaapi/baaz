@@ -1,0 +1,131 @@
+{
+  "final": {
+    "codex": {
+      "id": "codex",
+      "agent": "codex",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "01a0de02-754b-7c30-b8df-8bccafd0ba3d",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "I’ll run that command now.",
+              "streaming": false
+            },
+            {
+              "kind": "tool_call",
+              "id": "exec-6b9b2b2a-c444-4413-902f-57c0424f6e46",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "ls /nonexistent-dir-xyz-123",
+              "status": "error",
+              "duration_ms": 0,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "ls: /nonexistent-dir-xyz-123: No such file or directory"
+                ],
+                "exit_code": 1,
+                "live": false
+              }
+            },
+            {
+              "kind": "text",
+              "text": "DONE",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "golden-model",
+            "duration_ms": 8865,
+            "tokens_in": 29954,
+            "tokens_out": 77,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 21248
+          }
+        },
+        {
+          "kind": "user",
+          "id": "01a0de02-7e39-7a93-a417-e3c36f262ebc",
+          "text": "Run the command 'ls /nonexistent-dir-xyz-123' in the shell, then reply with just DONE.",
+          "attachments": [],
+          "mentions": []
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "5:c11f324e035c08d3",
+    "22:2d63ca46621ff04c",
+    "27:d661775180cf187c",
+    "36:62fcc775b7d05ae2",
+    "37:d4aba27802dcacf2",
+    "38:abe0f3da9cb59e14",
+    "43:71dab6929de91b59",
+    "47:0268e4d39e875c83"
+  ],
+  "abandon": [
+    "1:c11f324e035c08d3",
+    "2:c11f324e035c08d3",
+    "3:c11f324e035c08d3",
+    "4:c11f324e035c08d3",
+    "5:c11f324e035c08d3",
+    "6:c11f324e035c08d3",
+    "7:c11f324e035c08d3",
+    "8:c11f324e035c08d3",
+    "9:c11f324e035c08d3",
+    "10:c11f324e035c08d3",
+    "11:c11f324e035c08d3",
+    "12:c11f324e035c08d3",
+    "13:c11f324e035c08d3",
+    "14:c11f324e035c08d3",
+    "15:c11f324e035c08d3",
+    "16:c11f324e035c08d3",
+    "17:c11f324e035c08d3",
+    "18:c11f324e035c08d3",
+    "19:c11f324e035c08d3",
+    "20:c11f324e035c08d3",
+    "21:c11f324e035c08d3",
+    "22:97fe3dd468eb1082",
+    "23:97fe3dd468eb1082",
+    "24:97fe3dd468eb1082",
+    "25:97fe3dd468eb1082",
+    "26:97fe3dd468eb1082",
+    "27:b454b0c352729f22",
+    "28:b454b0c352729f22",
+    "29:54277be8242b355c",
+    "30:93000e5901ef21cb",
+    "31:b8cc92902da14a02",
+    "32:3938044d85d2df99",
+    "33:a83aeb1e7781ee94",
+    "34:8a2e40642720ecb0",
+    "35:f36d97a556d66c5c",
+    "36:9314704b52ffb978",
+    "37:de58c031a608c839",
+    "38:b3b6f29891165a66",
+    "39:9d6e456136e3bac1",
+    "40:9d6e456136e3bac1",
+    "41:9d6e456136e3bac1",
+    "42:6b57a79c42ad9bfa",
+    "43:ab9b17444d48a6c8",
+    "44:c2fce7df358ce797",
+    "45:c2fce7df358ce797",
+    "46:c2fce7df358ce797",
+    "47:0268e4d39e875c83"
+  ]
+}

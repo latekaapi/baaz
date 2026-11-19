@@ -1,0 +1,157 @@
+{
+  "final": {
+    "01a081ef-2588-78b3-8dd9-9c5c14f4b118": {
+      "id": "01a081ef-2588-78b3-8dd9-9c5c14f4b118",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "01a081ef-25bf-7151-8a43-4ac9c1cc2ff4",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "caec247d-152b-46b9-a8d3-ec2788c4b70a",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "$",
+              "target": "echo hi && ls",
+              "status": "error",
+              "duration_ms": 35,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "tool failed: environment failure: managed shell sandbox is unavailable",
+                  "The execution environment is broken: the command was never started and every later command will fail the same way. Do not retry and do not fabricate command output; report this environment failure."
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            },
+            {
+              "kind": "approval",
+              "id": "66de002c-bd48-4071-9bdb-c6c28252ea8f",
+              "tool": "shell",
+              "command": "echo hi && ls",
+              "reason": "",
+              "cwd": "/Users/alex/Projects/acme-web",
+              "capabilities": [],
+              "scope": "this_worktree",
+              "body_kind": "command",
+              "state": {
+                "kind": "approving"
+              },
+              "rule": "Always allow in this workspace: ls ...",
+              "choices": [
+                {
+                  "id": "allow_once",
+                  "label": "Allow once",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "allow_local_prefix",
+                  "label": "Always allow in this workspace: ls ...",
+                  "decision": "policy_amendment",
+                  "scope": "this_worktree",
+                  "rule_preview": "Always allow in this workspace: ls ...",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "abort",
+                  "label": "Reject",
+                  "decision": "abort",
+                  "scope": "this_command",
+                  "accepts_feedback": true
+                }
+              ],
+              "stages": [
+                {
+                  "position": 1,
+                  "total": 2,
+                  "argv": [
+                    "echo",
+                    "hi"
+                  ],
+                  "argv_complete": true,
+                  "resolved": true,
+                  "suggested_rule": "Always allow in this workspace: echo ..."
+                },
+                {
+                  "position": 2,
+                  "total": 2,
+                  "argv": [
+                    "ls"
+                  ],
+                  "argv_complete": true,
+                  "resolved": true,
+                  "suggested_rule": "Always allow in this workspace: ls ..."
+                }
+              ],
+              "current_stage": 1,
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              },
+              "resolved_by": "user"
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "5:0f8548a97bee3d48",
+    "8:df3893aed28595f7",
+    "10:ff34e918f3b0d782",
+    "13:3d63f125975ec3d2",
+    "16:676a76d0d1188283",
+    "17:184aa33f78f39457",
+    "18:32ee81b0079e434a"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:08f44b07b5901a25",
+    "4:08f44b07b5901a25",
+    "5:0f8548a97bee3d48",
+    "6:0f8548a97bee3d48",
+    "7:0f8548a97bee3d48",
+    "8:df3893aed28595f7",
+    "9:df3893aed28595f7",
+    "10:814aaf9b61abef7e",
+    "11:814aaf9b61abef7e",
+    "12:814aaf9b61abef7e",
+    "13:6220da2c9d918b5e",
+    "14:6220da2c9d918b5e",
+    "15:6220da2c9d918b5e",
+    "16:e028edd3081e8907",
+    "17:184aa33f78f39457",
+    "18:32ee81b0079e434a",
+    "19:32ee81b0079e434a",
+    "20:32ee81b0079e434a",
+    "21:32ee81b0079e434a",
+    "22:32ee81b0079e434a"
+  ]
+}

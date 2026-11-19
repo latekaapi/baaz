@@ -1,0 +1,99 @@
+{
+  "final": {
+    "synthetic-diffstat": {
+      "id": "synthetic-diffstat",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-syn-user-1",
+          "text": "Rename the helper and update its callers.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn-1",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "i-syn-edit-1",
+              "tool_kind": {
+                "kind": "edit"
+              },
+              "verb": "Edited",
+              "target": "/tmp/synthetic/notes.txt",
+              "status": "success",
+              "duration_ms": 90,
+              "body": {
+                "kind": "shell",
+                "output_lines": [],
+                "exit_code": null,
+                "live": false
+              },
+              "diff_stat": {
+                "added": 10,
+                "removed": 3,
+                "files": 2
+              }
+            },
+            {
+              "kind": "text",
+              "text": "Renamed across two files.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-test",
+            "duration_ms": 2100,
+            "tokens_in": 1200,
+            "tokens_out": 115,
+            "reasoning_tokens": 12,
+            "cost_usd": 0.0,
+            "cache_read_tokens": 32,
+            "cache_write_tokens": 8,
+            "cached_tokens": 40
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "12:75352e85df43cd18",
+    "14:9209d71bdfb4e729",
+    "15:2d469d3ac75d7f7b",
+    "16:05132d027e3cc0c2",
+    "17:4b73e0a9af1dd853",
+    "19:2bae857d262cbb59"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:08f44b07b5901a25",
+    "4:08f44b07b5901a25",
+    "5:08f44b07b5901a25",
+    "6:08f44b07b5901a25",
+    "7:08f44b07b5901a25",
+    "8:08f44b07b5901a25",
+    "9:08f44b07b5901a25",
+    "10:08f44b07b5901a25",
+    "11:08f44b07b5901a25",
+    "12:75352e85df43cd18",
+    "13:75352e85df43cd18",
+    "14:9209d71bdfb4e729",
+    "15:2465b457bcab4665",
+    "16:7b84b7cb74754fe7",
+    "17:d68a95d14e36a91c",
+    "18:d1ee8633e7962ba8",
+    "19:2bae857d262cbb59"
+  ]
+}

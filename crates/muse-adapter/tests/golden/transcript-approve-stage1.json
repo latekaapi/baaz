@@ -1,0 +1,137 @@
+{
+  "final": {
+    "01a081ef-2588-78b3-8dd9-9c5c14f4b118": {
+      "id": "01a081ef-2588-78b3-8dd9-9c5c14f4b118",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "01a081ef-25bf-7151-8a43-4ac9c1cc2ff4",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "caec247d-152b-46b9-a8d3-ec2788c4b70a",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "$",
+              "target": "echo hi && ls",
+              "status": "running",
+              "duration_ms": null,
+              "body": {
+                "kind": "shell",
+                "output_lines": [],
+                "exit_code": null,
+                "live": true
+              }
+            },
+            {
+              "kind": "approval",
+              "id": "66de002c-bd48-4071-9bdb-c6c28252ea8f",
+              "tool": "shell",
+              "command": "echo hi && ls",
+              "reason": "",
+              "cwd": "/Users/alex/Projects/acme-web",
+              "capabilities": [],
+              "scope": "this_worktree",
+              "body_kind": "command",
+              "state": {
+                "kind": "pending"
+              },
+              "rule": "Always allow in this workspace: echo ...",
+              "choices": [
+                {
+                  "id": "allow_once",
+                  "label": "Allow once",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "allow_local_prefix",
+                  "label": "Always allow in this workspace: echo ...",
+                  "decision": "policy_amendment",
+                  "scope": "this_worktree",
+                  "rule_preview": "Always allow in this workspace: echo ...",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "abort",
+                  "label": "Reject",
+                  "decision": "abort",
+                  "scope": "this_command",
+                  "accepts_feedback": true
+                }
+              ],
+              "stages": [
+                {
+                  "position": 1,
+                  "total": 2,
+                  "argv": [
+                    "echo",
+                    "hi"
+                  ],
+                  "argv_complete": true,
+                  "resolved": false,
+                  "suggested_rule": "Always allow in this workspace: echo ..."
+                },
+                {
+                  "position": 2,
+                  "total": 2,
+                  "argv": [
+                    "ls"
+                  ],
+                  "argv_complete": true,
+                  "resolved": false,
+                  "suggested_rule": "Always allow in this workspace: ls ..."
+                }
+              ],
+              "current_stage": 0,
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              }
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "5:0f8548a97bee3d48",
+    "8:df3893aed28595f7",
+    "10:ff34e918f3b0d782"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:08f44b07b5901a25",
+    "4:08f44b07b5901a25",
+    "5:0f8548a97bee3d48",
+    "6:0f8548a97bee3d48",
+    "7:0f8548a97bee3d48",
+    "8:df3893aed28595f7",
+    "9:df3893aed28595f7",
+    "10:814aaf9b61abef7e"
+  ]
+}

@@ -3,6 +3,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
+use transcript_core::builder::{approval_key, Stream};
+use transcript_core::{wall_ms_since, TranscriptBuilder, Verbs};
+
 use aui_protocol::{
     ActivityState, ApprovalBadges, ApprovalBodyKind, ApprovalChoice, ApprovalScope, ApprovalStage,
     ApprovalState, Answer, Block, Delta, DiffStat, MarkerKind, PermissionMode, Provider,
@@ -15,7 +18,6 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::side::{QueuedTurn, SideState};
-use crate::slots::{Slot, Slots, TurnKey};
 
 /// The reason an approved card reads when its turn was stopped before the
 /// gated work finished: "Not run — turn stopped" (never "Denied").
@@ -25,6 +27,7 @@ const TURN_STOPPED: &str = "Turn stopped";
 const MUSE_WITHDREW: &str = "Muse withdrew it";
 
 /// B12: first sighting of a reasoning item, for its thinking elapsed.
+#[derive(Clone)]
 struct ReasoningStart {
     /// The wire's `recordedAt` on first sighting, when it carried one.
     at_ms: Option<u64>,
@@ -33,20 +36,16 @@ struct ReasoningStart {
 }
 
 /// One Muse session, folded.
+#[derive(Clone)]
 struct Folded {
-    session: Session,
-    /// The ids of the turns changed since the last [`MuseFold::take_dirty`],
-    /// or `None` when that is not known (a fresh session, a session folded
-    /// back after eviction): what lets a renderer reuse its copy of every
-    /// other turn without comparing it (perf P1, docs/51 #6). Every turn
-    /// write goes through [`Folded::apply_to_session`] or marks here itself.
-    dirty: Option<HashSet<String>>,
+    /// The session's transcript and header, and where every block sits:
+    /// items (`item:<id>`, several on one group card), approvals
+    /// (`approval:<id>`), questions (`question:<request>:<n>`), the todo
+    /// card (`todo`) and the goal card (`goal`). It also knows the turns
+    /// changed since the last [`MuseFold::take_dirty`] — what lets a
+    /// renderer reuse its copy of every other turn (perf P1, docs/51 #6).
+    builder: TranscriptBuilder,
     side: SideState,
-    /// Every cached block position — items, approvals, questions, the todo
-    /// card and the goal card — grouped by the turn that hosts it, so an
-    /// insert shifts one turn's slots and a removal drops exactly that turn's
-    /// (finding `client-adapter-8`, [`crate::slots`]).
-    slots: Slots,
     /// `itemId` → highest revision applied. The apply rule is **replace iff
     /// higher**; `item/delta` never bumps a revision.
     revisions: HashMap<String, u32>,
@@ -56,30 +55,16 @@ struct Folded {
     /// ephemeral one — and the turn keeps the earliest across its items
     /// ("when the turn started"). Live and backfill therefore converge no
     /// matter what order items arrive in (finding F3).
-    turn_stamps: HashMap<TurnKey, HashMap<String, u64>>,
+    turn_stamps: HashMap<String, HashMap<String, u64>>,
     /// B12: `itemId` → first sighting of a reasoning item, for its
     /// thinking elapsed: the wire's `recordedAt` when it carried one,
     /// else the arrival clock — the same two clocks Claude/Codex resolve
     /// between, kept side by side so a half-known pair never mixes them.
     reasoning_first: HashMap<String, ReasoningStart>,
-    /// The `itemId` of a `userMessage`'s `Turn::User` → its handle, so a
-    /// later revision of the same message re-stamps the turn it made.
-    user_keys: HashMap<String, TurnKey>,
     /// The `itemId` of a `userMessage` → the presentation text its turn was
     /// rendered with, so a later revision that brings `displayText` can tell
     /// the correction apart from a no-op re-emission.
     user_text: HashMap<String, String>,
-    /// Turn handles, parallel to `session.turns`: index → the key minted for
-    /// the turn that sits there.
-    turn_keys: Vec<TurnKey>,
-    /// The other direction: key → its index in `session.turns`. A removal
-    /// rewrites this and nothing else, because a [`Slot`] names a key.
-    turn_index: HashMap<TurnKey, usize>,
-    /// The next handle to mint. Monotonic: a handle is never reused, so a
-    /// stale slot resolves to nothing rather than to another turn.
-    next_turn_key: u32,
-    /// MSP `turnId` → the handle of the assistant turn that hosts its blocks.
-    assistant_turns: HashMap<String, TurnKey>,
     /// The id of a `userMessage`'s `Turn::User` → the MSP turn it belongs to, so
     /// a retraction can take the right turn out.
     user_turns: HashMap<String, String>,
@@ -96,17 +81,6 @@ struct Folded {
     /// observation is not a change; drawing "Approval mode · Auto" above the
     /// first user message would be a marker for something nobody did.
     mode_seen: bool,
-    /// The log sequence of the event being folded right now, if it named one.
-    ///
-    /// Set once per notification and read by [`Folded::push_block`], so that a
-    /// block lands where the **log** puts it rather than where the wire happened
-    /// to deliver it.
-    current_seq: Option<u64>,
-    /// Turn id → the log sequence of each of its blocks, in block order.
-    ///
-    /// Parallel to the turn's `blocks`, and the reason a backfilled transcript
-    /// reads the same as a live one (finding F3).
-    block_order: HashMap<String, Vec<u64>>,
     /// Policy-resolved approvals still waiting to be told **why**, keyed by the
     /// `commandId` of the item they gated (finding F11).
     ///
@@ -141,8 +115,9 @@ struct Folded {
     /// generation (presentation policy, `docs/01-transport.md`).
     group_gen: u64,
     /// Assistant turn id → the open end of its consecutive-tool-call run: a
-    /// lone groupable `ToolCall` or a `ToolGroup`. Valid only while its `gen`
-    /// matches `group_gen` and it is still the turn's last block.
+    /// lone groupable `ToolCall` or a `ToolGroup`, by the key of a call on
+    /// it. Valid only while its `gen` matches `group_gen` and it is still
+    /// the turn's last block.
     open_groups: HashMap<String, OpenGroup>,
     /// Turns `turn/started` opened and no `turn/completed` has closed yet,
     /// oldest first: what a child that dies leaves running
@@ -162,20 +137,20 @@ struct Folded {
 const COMMAND_TEXT_CAP: usize = 256;
 
 /// The open end of one assistant turn's consecutive-tool-call run.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct OpenGroup {
-    block: usize,
+    /// A key filed on the run's card.
+    key: String,
     gen: u64,
 }
 
 /// One policy-resolved approval whose card is still naming the mode rather than
 /// the reason.
 ///
-/// It holds the **approval id**, not the slot it was in. A block's slot moves:
-/// an item that arrives out of order is inserted by its log sequence and every
-/// slot past it shifts (finding F3), which is exactly what a backfill does to
-/// the tool card that sits above an approval. The slot is looked up again when
-/// the reason lands.
+/// It holds the **approval id**, not where the card was: a block moves when
+/// an item that arrives out of order is inserted by its log sequence (finding
+/// F3), which is exactly what a backfill does to the tool card that sits
+/// above an approval. The card is found by its id when the reason lands.
 #[derive(Clone, Debug)]
 struct AwaitingReason {
     approval_id: String,
@@ -214,7 +189,7 @@ fn merge_optional_counter(into: &mut Option<u64>, observed: Option<u64>) {
 ///
 /// The fold is pure: no I/O, no clock, no randomness. Replaying a capture always
 /// produces the same session, which is what the fixture tests assert.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct MuseFold {
     sessions: BTreeMap<String, Folded>,
     last_touched: Option<String>,
@@ -222,8 +197,9 @@ pub struct MuseFold {
     /// [`SESSION_CACHE_LIMIT`] evicts by.
     recent: Vec<String>,
     /// Sessions that must never be evicted: a hub keeps one fold for a whole
-    /// connection, and a session a view is following has to keep its slots
-    /// however many other sessions pass through.
+    /// connection, and a session a view is following has to keep its
+    /// transcript (and where every item sits in it) however many other
+    /// sessions pass through.
     pinned: std::collections::HashSet<String>,
 }
 
@@ -277,13 +253,12 @@ impl MuseFold {
     /// changed": the first call for a session, or one folded back after
     /// eviction. A turn not named was not written in between.
     pub fn take_dirty(&mut self, session_id: &str) -> Option<HashSet<String>> {
-        let folded = self.sessions.get_mut(session_id)?;
-        folded.dirty.replace(HashSet::new())
+        self.sessions.get_mut(session_id)?.builder.take_dirty()
     }
 
     /// The folded session for a Muse session id.
     pub fn session(&self, session_id: &str) -> Option<&Session> {
-        self.sessions.get(session_id).map(|s| &s.session)
+        self.sessions.get(session_id).map(|s| s.builder.session())
     }
 
     /// The side state for a Muse session id.
@@ -359,32 +334,13 @@ impl MuseFold {
             eprintln!("muse-adapter: apply_deltas refused: unknown session {session_id}");
             return Vec::new();
         };
-        let mut landed = Vec::with_capacity(deltas.len());
         for delta in deltas {
-            match &delta {
-                Delta::TurnStarted { turn } => {
-                    if folded.apply_to_session(delta.clone()) {
-                        folded.track_turn(turn);
-                        landed.push(delta);
-                    }
-                }
-                Delta::TurnRemoved { turn_id } => {
-                    let at = folded.session.turns.iter().position(|turn| turn.id() == turn_id);
-                    if folded.apply_to_session(delta.clone()) {
-                        if let Some(at) = at {
-                            folded.reindex(at, turn_id);
-                        }
-                        landed.push(delta);
-                    }
-                }
-                _ => {
-                    if folded.apply_to_session(delta.clone()) {
-                        landed.push(delta);
-                    }
-                }
+            if let Delta::TurnRemoved { turn_id } = &delta {
+                folded.forget_turn(turn_id);
             }
+            folded.builder.push(delta);
         }
-        landed
+        folded.builder.take()
     }
 
     /// Set a provider-lane session's approval mode: what its adapter
@@ -393,11 +349,7 @@ impl MuseFold {
     /// or a mode it already holds.
     pub fn set_session_mode(&mut self, session_id: &str, mode: PermissionMode) -> bool {
         let Some(folded) = self.sessions.get_mut(session_id) else { return false };
-        if folded.session.mode == mode {
-            return false;
-        }
-        folded.session.mode = mode;
-        true
+        std::mem::replace(&mut folded.builder.header_mut().mode, mode) != mode
     }
 
     /// The turns `session_id` is running — started, not yet completed —
@@ -460,22 +412,17 @@ impl MuseFold {
     pub fn append_client_block(&mut self, session_id: &str, id: &str, block: Block) -> Vec<Delta> {
         let folded = self.folded(session_id);
         folded.break_groups();
-        let mut deltas = Vec::new();
-        let turn = folded.standalone_turn(id, &mut deltas);
-        let (added, _) = folded.push_block(turn, block);
-        deltas.extend(added);
-        deltas
+        folded.builder.open_turn(id, None);
+        folded.builder.add(id, None, block);
+        folded.builder.take()
     }
 
     /// Replace the first block of a client-authored turn.
     pub fn replace_client_block(&mut self, session_id: &str, id: &str, block: Block) -> Vec<Delta> {
         let folded = self.folded(session_id);
         folded.break_groups();
-        let Some(at) = folded.session.turns.iter().position(|t| t.id() == id) else {
-            return Vec::new();
-        };
-        let Some(&turn) = folded.turn_keys.get(at) else { return Vec::new() };
-        folded.update_block(Slot { turn, block: 0 }, block)
+        folded.update_at(id, 0, block);
+        folded.builder.take()
     }
 
     /// Settle an approval card from a **losing** `approval/decide`.
@@ -494,7 +441,9 @@ impl MuseFold {
     ) -> Vec<Delta> {
         let folded = self.folded(session_id);
         let request = folded.side.pending_approvals.remove(approval_id);
-        let Some(slot) = folded.slots.approval(approval_id) else { return Vec::new() };
+        if folded.builder.block(&approval_key(approval_id)).is_none() {
+            return Vec::new();
+        }
         let Some(request) = request else { return Vec::new() };
         let (state, by) = match &resolution {
             Some(resolution) => {
@@ -514,8 +463,8 @@ impl MuseFold {
             // on it.
             None => (ApprovalState::Cancelled { reason: Some(MUSE_WITHDREW.to_owned()) }, None),
         };
-        let block = approval_block(&request, state, by, None);
-        folded.update_block(slot, block)
+        folded.builder.approval_resolved_as(approval_id, approval_block(&request, state, by, None));
+        folded.builder.take()
     }
 
     /// Keep `session_id` folded however many other sessions pass through,
@@ -587,24 +536,8 @@ impl MuseFold {
         if let Some(cursor) = cursor {
             folded.side.last_cursor = cursor;
         }
-        folded.notification(method, params)
-    }
-}
-
-/// The turn a delta writes to.
-fn delta_turn_id(delta: &Delta) -> Option<&str> {
-    match delta {
-        Delta::TurnStarted { turn } | Delta::TurnReplaced { turn } => Some(turn.id()),
-        Delta::TextDelta { turn_id, .. }
-        | Delta::BlockAdded { turn_id, .. }
-        | Delta::BlockUpdated { turn_id, .. }
-        | Delta::ThinkingDelta { turn_id, .. }
-        | Delta::ToolOutputDelta { turn_id, .. }
-        | Delta::TurnRemoved { turn_id }
-        | Delta::BlockRemoved { turn_id, .. }
-        | Delta::TurnFinished { turn_id, .. } => Some(turn_id),
-        #[allow(unreachable_patterns)]
-        _ => None,
+        folded.notification(method, params);
+        folded.builder.take()
     }
 }
 
@@ -613,47 +546,16 @@ impl Folded {
         Self::new_with_provider(session_id, Provider::Muse, String::new(), String::new())
     }
 
-    /// Apply one delta to the session and remember the turn it names as
-    /// changed. The one door every turn write takes but the item stamp,
-    /// which marks itself.
-    fn apply_to_session(&mut self, delta: Delta) -> bool {
-        let turn = delta_turn_id(&delta).map(str::to_owned);
-        let applied = self.session.apply(delta);
-        if applied {
-            self.mark_dirty(turn);
-        }
-        applied
-    }
-
-    /// Remember `turn` as changed; `None` (a change no turn names) makes
-    /// everything unknown.
-    fn mark_dirty(&mut self, turn: Option<String>) {
-        match (turn, self.dirty.as_mut()) {
-            (Some(turn), Some(dirty)) => {
-                dirty.insert(turn);
-            }
-            (None, _) => self.dirty = None,
-            (Some(_), None) => {}
-        }
-    }
-
     fn new_with_provider(session_id: &str, provider: Provider, model: String, cwd: String) -> Self {
         let mut session = Session::new(session_id, provider, model, cwd);
         session.mode = PermissionMode::OnRequest;
         Self {
-            session,
-            dirty: None,
+            builder: TranscriptBuilder::with_session(session).landed_only(),
             side: SideState::default(),
-            slots: Slots::default(),
             revisions: HashMap::new(),
             turn_stamps: HashMap::new(),
             reasoning_first: HashMap::new(),
-            user_keys: HashMap::new(),
             user_text: HashMap::new(),
-            turn_keys: Vec::new(),
-            turn_index: HashMap::new(),
-            next_turn_key: 0,
-            assistant_turns: HashMap::new(),
             command_order: Vec::new(),
             user_turns: HashMap::new(),
             usage: HashMap::new(),
@@ -667,46 +569,18 @@ impl Folded {
             running: Vec::new(),
             marker_seq: 0,
             mode_seen: false,
-            current_seq: None,
-            block_order: HashMap::new(),
         }
     }
 
-    /// Where a turn handle currently sits in `session.turns`, or `None` once
-    /// the turn has been removed.
-    fn turn_at(&self, turn: TurnKey) -> Option<usize> {
-        self.turn_index.get(&turn).copied()
+    /// The session header (id, model, cwd, mode, branch).
+    fn header(&self) -> &Session {
+        self.builder.session()
     }
 
-    /// The turn a slot points into, or `None` when its turn is gone.
-    fn turn_of(&self, slot: Slot) -> Option<&Turn> {
-        self.session.turns.get(self.turn_at(slot.turn)?)
-    }
-
-    /// Mint the handle for a turn just appended to `session.turns`.
-    fn mint_turn_key(&mut self) -> TurnKey {
-        let key = TurnKey(self.next_turn_key);
-        self.next_turn_key += 1;
-        self.turn_index.insert(key, self.turn_keys.len());
-        self.turn_keys.push(key);
-        key
-    }
-
-    /// Record a turn the provider lane appended straight to `session.turns`,
-    /// the way the muse lane's turn constructors mint theirs — so the handles
-    /// stay parallel to the transcript and a later [`Folded::push_block`]
-    /// files into the turn its handle names, not the provider's turn sitting
-    /// at the newborn handle's index (H2b).
-    fn track_turn(&mut self, turn: &Turn) {
-        let key = self.mint_turn_key();
-        match turn {
-            Turn::Assistant { id, .. } => {
-                self.assistant_turns.insert(id.clone(), key);
-            }
-            Turn::User { id, .. } => {
-                self.user_keys.insert(id.clone(), key);
-            }
-        }
+    /// A turn left the transcript: forget what was kept about it.
+    fn forget_turn(&mut self, turn_id: &str) {
+        self.turn_stamps.remove(turn_id);
+        self.open_groups.remove(turn_id);
     }
 
     /// Remember what a command was sent with, evicting past
@@ -738,15 +612,33 @@ impl Folded {
         }
     }
 
-    fn notification(&mut self, method: &str, params: &Value) -> Vec<Delta> {
+    fn notification(&mut self, method: &str, params: &Value) {
         // Where this event sits in the session's own log. It is what orders the
-        // blocks the event adds, rather than the order the events arrived in —
-        // see [`Folded::push_block`] and finding F3.
-        self.current_seq = params
-            .get("sourceRange")
-            .and_then(|range| range.get("first"))
-            .and_then(|first| first.get("sequence"))
-            .and_then(Value::as_u64);
+        // blocks the event adds, rather than the order the events arrived in
+        // (finding F3): the builder inserts by it. An event with no sequence
+        // (a synthesised marker, a `session/*` fact) belongs after everything
+        // already filed.
+        //
+        // # Why blocks are not plainly appended
+        //
+        // The same turn arrives two ways. Live, an item announces itself with
+        // `item/started` the moment it begins, so a shell tool call that then
+        // raises an approval is already in the transcript when the approval
+        // lands: tool card, then approval card. Backfilled, `view/page` serves
+        // no `item/started` at all — the tool call only appears at its
+        // `item/completed`, which the log records *after* the approval it was
+        // waiting on. Appending in arrival order therefore reverses the two,
+        // and a session read a second time no longer says what it said the
+        // first time. Both events carry the item's own
+        // `sourceRange.first.sequence`, so the log's order is knowable from
+        // either path, and it is the order used.
+        self.builder.set_order(
+            params
+                .get("sourceRange")
+                .and_then(|range| range.get("first"))
+                .and_then(|first| first.get("sequence"))
+                .and_then(Value::as_u64),
+        );
         match method {
             "session/started" => self.session_started(params),
             "session/branchChanged" => self.branch_changed(params),
@@ -779,71 +671,56 @@ impl Folded {
                 // decode failure: the fold produced nothing and nothing said
                 // so (finding `client-adapter-3`).
                 self.side.decode_failures += 1;
-                Vec::new()
             }
         }
     }
 
     // ------------------------------------------------------------ session facts
 
-    fn session_started(&mut self, params: &Value) -> Vec<Delta> {
-        let Some(session) = params.get("session") else {
+    fn session_started(&mut self, params: &Value) {
+        let Some(Ok(session)) = params.get("session").map(msp::Session::deserialize) else {
             self.side.decode_failures += 1;
-            return Vec::new();
+            return;
         };
-        let Ok(session) = msp::Session::deserialize(session) else {
-            self.side.decode_failures += 1;
-            return Vec::new();
-        };
-        self.session.model = session.model_id.clone().unwrap_or_default();
-        self.session.cwd = session.workspace_root.clone().unwrap_or_default();
+        let header = self.builder.header_mut();
+        header.model = session.model_id.clone().unwrap_or_default();
+        header.cwd = session.workspace_root.clone().unwrap_or_default();
         if let Some(mode) = &session.approval_mode {
+            header.mode = permission_mode(&mode.mode);
             self.side.approval_mode = mode.mode.clone();
-            self.session.mode = permission_mode(&mode.mode);
             self.mode_seen = true;
         }
-        let mut deltas = Vec::new();
         if let Some(fork) = &session.forked_from {
-            deltas.extend(self.marker_turn(
-                MarkerKind::ForkedFrom,
-                format!("Forked from {}", fork.session_id),
-            ));
+            self.marker_turn(MarkerKind::ForkedFrom, format!("Forked from {}", fork.session_id));
         }
-        deltas
     }
 
-    fn branch_changed(&mut self, params: &Value) -> Vec<Delta> {
+    fn branch_changed(&mut self, params: &Value) {
         // `branch: null` is a detached-HEAD observation — a fact, not "unchanged".
-        self.session.branch =
-            params.get("branch").and_then(Value::as_str).map(str::to_owned);
+        let header = self.builder.header_mut();
+        header.branch = params.get("branch").and_then(Value::as_str).map(str::to_owned);
         if let Some(root) = params.get("workspaceRoot").and_then(Value::as_str) {
-            if self.session.cwd.is_empty() {
-                self.session.cwd = root.to_owned();
+            if header.cwd.is_empty() {
+                header.cwd = root.to_owned();
             }
         }
-        Vec::new()
     }
 
-    fn approval_mode_changed(&mut self, params: &Value) -> Vec<Delta> {
-        let Some(mode) = params.get("mode") else {
+    fn approval_mode_changed(&mut self, params: &Value) {
+        let Some(Ok(mode)) = params.get("mode").map(ApprovalMode::deserialize) else {
             self.side.decode_failures += 1;
-            return Vec::new();
-        };
-        let Ok(mode) = ApprovalMode::deserialize(mode) else {
-            self.side.decode_failures += 1;
-            return Vec::new();
+            return;
         };
         self.side.approval_mode = mode.clone();
         let mode = permission_mode(&mode);
         let first = !std::mem::replace(&mut self.mode_seen, true);
-        let unchanged = mode == self.session.mode;
-        self.session.mode = mode;
+        let unchanged = std::mem::replace(&mut self.builder.header_mut().mode, mode) == mode;
         // A mode change that changed nothing is not a change; and the first
         // observation is the session announcing what it already is, which is
         // only worth a row when it is *not* the default — then it is a fact
         // about this session rather than about every session.
         if unchanged || (first && mode == PermissionMode::default()) {
-            return Vec::new();
+            return;
         }
         self.marker_turn(
             MarkerKind::PermissionModeChanged { mode },
@@ -851,12 +728,11 @@ impl Folded {
         )
     }
 
-    fn model_changed(&mut self, params: &Value) -> Vec<Delta> {
+    fn model_changed(&mut self, params: &Value) {
         if let Some(model_id) = params.get("modelId").and_then(Value::as_str) {
-            self.session.model = model_id.to_owned();
+            self.builder.header_mut().model = model_id.to_owned();
         }
         self.side.model = msp::EffectiveModel::deserialize(params).ok();
-        Vec::new()
     }
 
     /// Disclosure only (finding `client-adapter-12`): an accepted
@@ -864,26 +740,22 @@ impl Folded {
     /// session's standing model route. No `Delta` exists for it — the
     /// standing selection does not change — so it is folded into side state
     /// as a marker instead of falling through the untyped-method catch-all.
-    fn model_route_unserved(&mut self, params: &Value) -> Vec<Delta> {
+    fn model_route_unserved(&mut self, params: &Value) {
         self.side.model_route_unserved =
             msp::SessionModelRouteUnservedParams::deserialize(params).ok();
-        Vec::new()
     }
 
-    fn context_usage(&mut self, params: &Value) -> Vec<Delta> {
+    fn context_usage(&mut self, params: &Value) {
         self.side.context = msp::ContextUsage::deserialize(params).ok();
-        Vec::new()
     }
 
-    fn token_usage(&mut self, params: &Value) -> Vec<Delta> {
+    fn token_usage(&mut self, params: &Value) {
         if let Some(cumulative) = params.get("cumulative") {
             if let Ok(cumulative) = msp::CumulativeTokenUsage::deserialize(cumulative) {
                 self.side.cumulative = cumulative;
             }
         }
-        let Some(turn_id) = params.get("turnId").and_then(Value::as_str) else {
-            return Vec::new();
-        };
+        let Some(turn_id) = params.get("turnId").and_then(Value::as_str) else { return };
         let entry = self.usage.entry(turn_id.to_owned()).or_default();
         entry.prompt += params.get("promptTokens").and_then(Value::as_u64).unwrap_or(0);
         let usage = params.get("usage");
@@ -906,14 +778,14 @@ impl Folded {
         entry.cached_tokens +=
             usage.and_then(|u| u.get("cachedTokens")).and_then(Value::as_u64).unwrap_or(0);
         if let Some(model_id) = params.get("modelId").and_then(Value::as_str) {
-            if self.session.model.is_empty() {
-                self.session.model = model_id.to_owned();
+            let header = self.builder.header_mut();
+            if header.model.is_empty() {
+                header.model = model_id.to_owned();
             }
         }
-        Vec::new()
     }
 
-    fn todo_changed(&mut self, params: &Value) -> Vec<Delta> {
+    fn todo_changed(&mut self, params: &Value) {
         // Replace the whole list every event; an empty `items` is a cleared
         // list, not a no-op.
         self.break_groups();
@@ -933,20 +805,15 @@ impl Folded {
         )
     }
 
-    fn goal_changed(&mut self, params: &Value) -> Vec<Delta> {
+    fn goal_changed(&mut self, params: &Value) {
         self.break_groups();
         let goal: Option<msp::Goal> =
             params.get("goal").and_then(|v| msp::Goal::deserialize(v).ok());
         self.side.goal = goal.clone();
         let Some(goal) = goal else {
             // An explicit `null` clears the goal; `null` never means unchanged.
-            return match self.slots.goal() {
-                Some(slot) => {
-                    self.slots.set_goal(None);
-                    self.remove_block(slot)
-                }
-                None => Vec::new(),
-            };
+            self.builder.remove(GOAL_KEY);
+            return;
         };
         let block = Block::Goal {
             objective: goal.objective.clone(),
@@ -955,23 +822,16 @@ impl Folded {
             current_work: goal.current_work.clone(),
             next_work: goal.next_work.clone(),
         };
-        match self.slots.goal() {
-            Some(slot) => self.update_block(slot, block),
-            None => {
-                let mut deltas = Vec::new();
-                let id = format!("goal:{}", self.session.id);
-                let turn = self.standalone_turn(&id, &mut deltas);
-                let (added, slot) = self.push_block(turn, block);
-                deltas.extend(added);
-                self.slots.set_goal(slot);
-                deltas
-            }
+        if !self.update_key(GOAL_KEY, block.clone()) {
+            let id = format!("goal:{}", self.header().id);
+            self.builder.open_turn(&id, None);
+            self.builder.add(&id, Some(GOAL_KEY), block);
         }
     }
 
     // -------------------------------------------------------------------- turns
 
-    fn turn_started(&mut self, params: &Value) -> Vec<Delta> {
+    fn turn_started(&mut self, params: &Value) {
         // A queued turn leaves the strip at its launch boundary, and this is
         // that boundary. `turn/started` never fires for a steer.
         if let Some(turn_id) = params.get("turnId").and_then(Value::as_str) {
@@ -983,16 +843,12 @@ impl Folded {
         // The assistant turn itself is created lazily by its first block: the
         // `userMessage` item — which is its own turn in `aui_protocol` — arrives
         // *after* `turn/started`, and the transcript must read in that order.
-        Vec::new()
     }
 
-    fn turn_completed(&mut self, params: &Value) -> Vec<Delta> {
-        let Some(turn_id) = params.get("turnId").and_then(Value::as_str).map(str::to_owned) else {
-            return Vec::new();
-        };
+    fn turn_completed(&mut self, params: &Value) {
+        let Some(turn_id) = params.get("turnId").and_then(Value::as_str).map(str::to_owned) else { return };
         self.running.retain(|running| *running != turn_id);
         let terminal = params.get("terminal").and_then(Value::as_str).unwrap_or("completed");
-        let mut deltas = Vec::new();
 
         if terminal == "failed" {
             let error = params.get("error");
@@ -1008,32 +864,25 @@ impl Folded {
                 crate::failure::humanize(kind, message, reason);
             let retryable =
                 error.and_then(|e| e.get("retryable")).and_then(Value::as_bool).unwrap_or(false);
-            let turn = self.ensure_assistant_turn(&turn_id, &mut deltas);
-            let (added, _) = self.push_block(turn, Block::Error { title, detail, retryable });
-            deltas.extend(added);
+            self.builder.open_turn(&turn_id, None);
+            self.builder.add(&turn_id, None, Block::Error { title, detail, retryable });
         } else if terminal == "cancelled" {
             let reason = params.get("reason").and_then(Value::as_str).unwrap_or("Turn cancelled");
-            let turn = self.ensure_assistant_turn(&turn_id, &mut deltas);
-            let (added, _) = self.push_block(
-                turn,
-                Block::Marker { kind: MarkerKind::TurnCancelled, text: cancellation_text(reason) },
-            );
-            deltas.extend(added);
+            self.builder.open_turn(&turn_id, None);
+            let marker = Block::Marker { kind: MarkerKind::TurnCancelled, text: cancellation_text(reason) };
+            self.builder.add(&turn_id, None, marker);
         }
 
         // The retry schedule, if any, is over once the turn reaches a terminal.
         self.side.retry = None;
 
-        let Some(key) = self.assistant_turns.get(&turn_id).copied() else {
-            return deltas;
-        };
-        deltas.extend(self.settle_open_blocks(key, terminal));
-        let Some(turn) = self.turn_at(key) else {
-            return deltas;
-        };
+        if !self.builder.has_turn(&turn_id) {
+            return;
+        }
+        self.settle_open_blocks(&turn_id, terminal);
         let usage = self.usage.get(&turn_id).copied().unwrap_or_default();
         let meta = TurnMeta {
-            model: self.session.model.clone(),
+            model: self.header().model.clone(),
             duration_ms: params.get("durationMs").and_then(Value::as_u64).unwrap_or(0),
             tokens_in: usage.prompt,
             tokens_out: usage.output,
@@ -1048,10 +897,7 @@ impl Folded {
         // The running total existed to be read here, once: nothing after a
         // turn's terminal asks what it cost (finding `client-adapter-6`).
         self.usage.remove(&turn_id);
-        let delta = Delta::TurnFinished { turn_id: self.session.turns[turn].id().to_owned(), meta };
-        self.apply_to_session(delta.clone());
-        deltas.push(delta);
-        deltas
+        self.builder.finish_turn(&turn_id, meta);
     }
 
     /// A turn's terminal settles the cards it left open.
@@ -1067,28 +913,26 @@ impl Folded {
     /// "approving" settles allowed on a completed turn and failed-marked
     /// (nonzero exit) on any other terminal — never `Approving` forever
     /// when the turn fails or is cancelled.
-    fn settle_open_blocks(&mut self, key: TurnKey, terminal: &str) -> Vec<Delta> {
-        let Some(at_turn) = self.turn_at(key) else { return Vec::new() };
+    fn settle_open_blocks(&mut self, turn_id: &str, terminal: &str) {
         let settled_status = if terminal == "completed" { ToolStatus::Success } else { ToolStatus::Cancelled };
-        let blocks: Vec<Block> = match &self.session.turns[at_turn] {
-            Turn::Assistant { blocks, .. } => blocks.clone(),
-            Turn::User { .. } => return Vec::new(),
+        let blocks: Vec<Block> = match self.header().turn(turn_id) {
+            Some(Turn::Assistant { blocks, .. }) => blocks.clone(),
+            _ => return,
         };
-        let mut deltas = Vec::new();
         let open = |status: &ToolStatus| matches!(status, ToolStatus::Pending | ToolStatus::Running);
         for (index, mut block) in blocks.into_iter().enumerate() {
             let changed = match &mut block {
-                Block::ToolCall { status, .. } if open(status) => {
+                Block::ToolCall { status, verb, kind, .. } if open(status) => {
                     *status = settled_status;
+                    *verb = Verbs::retense(kind, verb, settled_status);
                     true
                 }
                 Block::ToolGroup { calls, state, .. }
                     if *state == ActivityState::Working || calls.iter().any(|call| open(&call.status)) =>
                 {
-                    for call in calls.iter_mut() {
-                        if open(&call.status) {
-                            call.status = settled_status;
-                        }
+                    for call in calls.iter_mut().filter(|call| open(&call.status)) {
+                        call.status = settled_status;
+                        call.verb = Verbs::retense(&call.kind, &call.verb, settled_status);
                     }
                     *state = if terminal == "completed" { ActivityState::Done } else { ActivityState::Failed };
                     true
@@ -1112,42 +956,26 @@ impl Folded {
                 _ => false,
             };
             if changed {
-                deltas.extend(self.update_block(Slot { turn: key, block: index }, block));
+                self.update_at(turn_id, index, block);
             }
         }
-        deltas
     }
 
     /// See [`MuseFold::cancel_pending_approvals`].
     fn cancel_pending_approvals(&mut self) -> Vec<Delta> {
-        let mut pending = Vec::new();
-        for (at, turn) in self.session.turns.iter().enumerate() {
-            for (index, block) in turn.blocks().iter().enumerate() {
-                if let Block::Approval { state: ApprovalState::Pending, .. } = block {
-                    pending.push((self.turn_keys[at], index, block.clone()));
-                }
-            }
-        }
-        let mut deltas = Vec::new();
-        for (turn, index, mut block) in pending {
-            if let Block::Approval { state, .. } = &mut block {
-                *state = ApprovalState::Cancelled { reason: Some(TURN_STOPPED.to_owned()) };
-            }
-            deltas.extend(self.update_block(Slot { turn, block: index }, block));
-        }
-        deltas
+        self.builder.abandon(None, "", "", |_| ApprovalState::Cancelled { reason: Some(TURN_STOPPED.to_owned()) });
+        self.builder.take()
     }
 
-    fn turn_retracted(&mut self, params: &Value) -> Vec<Delta> {
+    fn turn_retracted(&mut self, params: &Value) {
         if let Some(turn_id) = params.get("turnId").and_then(Value::as_str) {
             self.running.retain(|running| running != turn_id);
         }
-        let mut deltas = self.restore_and_remove(params);
-        deltas.extend(self.marker_turn(MarkerKind::TurnRetracted, "Prompt retracted".to_owned()));
-        deltas
+        self.restore_and_remove(params);
+        self.marker_turn(MarkerKind::TurnRetracted, "Prompt retracted".to_owned());
     }
 
-    fn turn_unqueued(&mut self, params: &Value) -> Vec<Delta> {
+    fn turn_unqueued(&mut self, params: &Value) {
         if let Some(turn_id) = params.get("turnId").and_then(Value::as_str) {
             self.side.queued.retain(|q| q.turn_id != turn_id);
             self.running.retain(|running| running != turn_id);
@@ -1158,7 +986,7 @@ impl Folded {
     /// Both `turn/retracted` and `turn/unqueued` identify the submission by its
     /// `commandId`, hand the prompt back, and take the turn out of the
     /// transcript.
-    fn restore_and_remove(&mut self, params: &Value) -> Vec<Delta> {
+    fn restore_and_remove(&mut self, params: &Value) {
         if let Some(command_id) = params.get("commandId").and_then(Value::as_str).map(str::to_owned)
         {
             if let Some(text) = self.side.command_text.get(&command_id) {
@@ -1169,10 +997,7 @@ impl Folded {
             // again (finding `client-adapter-6`).
             self.forget_command(&command_id);
         }
-        let Some(turn_id) = params.get("turnId").and_then(Value::as_str).map(str::to_owned) else {
-            return Vec::new();
-        };
-        let mut deltas = Vec::new();
+        let Some(turn_id) = params.get("turnId").and_then(Value::as_str).map(str::to_owned) else { return };
         // The user turn is keyed on the `userMessage` item id, so it is found
         // through the MSP turn it belongs to.
         let user_turns: Vec<String> = self
@@ -1183,15 +1008,12 @@ impl Folded {
             .collect();
         for id in user_turns {
             self.user_turns.remove(&id);
-            deltas.extend(self.remove_turn(&id));
+            self.remove_turn(&id);
         }
-        if self.assistant_turns.contains_key(&turn_id) {
-            deltas.extend(self.remove_turn(&turn_id));
-        }
-        deltas
+        self.remove_turn(&turn_id);
     }
 
-    fn turn_retry_scheduled(&mut self, params: &Value) -> Vec<Delta> {
+    fn turn_retry_scheduled(&mut self, params: &Value) {
         let retry: Option<msp::TurnRetryScheduledParams> =
             msp::TurnRetryScheduledParams::deserialize(params).ok();
         self.side.retry = retry;
@@ -1199,10 +1021,9 @@ impl Folded {
         // countdown above the composer, and the turn's own terminal replaces it.
         // Drawing a marker as well would leave a permanent "retrying in 4s" in
         // the history for something that finished a minute ago.
-        Vec::new()
     }
 
-    fn view_gap(&mut self, params: &Value) -> Vec<Delta> {
+    fn view_gap(&mut self, params: &Value) {
         let next = params.get("next").and_then(Value::as_str).unwrap_or_default();
         self.marker_turn(
             MarkerKind::ViewGap,
@@ -1215,7 +1036,7 @@ impl Folded {
     /// The gap row above already said events were missed and named the cursor
     /// it was filling to; this is the row that withdraws the promise, so the
     /// reader is not left believing a hole was closed when it was not.
-    fn gap_aborted(&mut self, params: &Value) -> Vec<Delta> {
+    fn gap_aborted(&mut self, params: &Value) {
         let reason = params.get("reason").and_then(Value::as_str).unwrap_or("the backfill stopped");
         self.marker_turn(MarkerKind::ViewGap, format!("{GAP_ABORT_PREFIX}{reason}"))
     }
@@ -1229,44 +1050,29 @@ impl Folded {
     /// about the connection rather than about a turn, so they land as an
     /// error card in a turn of their own rather than inside whatever reply
     /// happened to be last.
-    fn protocol_error(&mut self, params: &Value) -> Vec<Delta> {
+    fn protocol_error(&mut self, params: &Value) {
         let message = params
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("the server sent something this client could not read");
-        let mut deltas = Vec::new();
         self.marker_seq += 1;
-        let id = format!("protocol-error:{}:{}", self.session.id, self.marker_seq);
-        let turn = self.standalone_turn(&id, &mut deltas);
-        let (added, _) = self.push_block(
-            turn,
-            Block::Error {
-                title: "Protocol error".to_owned(),
-                detail: message.to_owned(),
-                retryable: false,
-            },
-        );
-        deltas.extend(added);
-        deltas
+        let id = format!("protocol-error:{}:{}", self.header().id, self.marker_seq);
+        self.builder.open_turn(&id, None);
+        let card = Block::Error { title: "Protocol error".to_owned(), detail: message.to_owned(), retryable: false };
+        self.builder.add(&id, None, card);
     }
 
     // -------------------------------------------------------------------- items
 
-    fn item(&mut self, params: &Value, terminal: bool) -> Vec<Delta> {
-        let Some(item) = params.get("item") else {
+    fn item(&mut self, params: &Value, terminal: bool) {
+        let Some(Ok(item)) = params.get("item").map(msp::Item::deserialize) else {
             self.side.decode_failures += 1;
-            return Vec::new();
-        };
-        let Ok(item) = msp::Item::deserialize(item) else {
-            self.side.decode_failures += 1;
-            return Vec::new();
+            return;
         };
         // Apply rule: replace iff the revision is higher.
         let previous = self.revisions.get(&item.item_id).copied();
-        if let Some(previous) = previous {
-            if item.revision <= previous {
-                return Vec::new();
-            }
+        if previous.is_some_and(|previous| item.revision <= previous) {
+            return;
         }
         self.revisions.insert(item.item_id.clone(), item.revision);
 
@@ -1274,13 +1080,12 @@ impl Folded {
         // stream resolves *later* can read it, and correct the card afterwards
         // for the stream that resolved it earlier.
         self.note_denial_reason(&item);
-        let mut deltas = match item.kind {
+        match item.kind {
             msp::ItemKind::UserMessage => self.user_message(&item, previous.is_some()),
             _ => self.assistant_item(&item, terminal),
-        };
-        deltas.extend(self.fill_policy_reason(&item));
-        deltas.extend(self.settle_approved_item(&item, terminal));
-        deltas
+        }
+        self.fill_policy_reason(&item);
+        self.settle_approved_item(&item, terminal);
     }
 
     /// Settle the approval that gated one item, per tool rather than per
@@ -1292,40 +1097,32 @@ impl Folded {
     /// `Approving`. Only `Approving` cards move (plus
     /// refreshing an already-settled card when the terminal revision proves
     /// the run failed): denied, auto-resolved and pending cards are untouched.
-    fn settle_approved_item(&mut self, item: &msp::Item, terminal: bool) -> Vec<Delta> {
-        let Some(approval_id) = item.approval_id.as_deref() else { return Vec::new() };
-        let Some(slot) = self.slots.approval(approval_id) else { return Vec::new() };
-        let Some(mut block) =
-            self.turn_of(slot).and_then(|turn| turn.blocks().get(slot.block)).cloned()
-        else {
-            return Vec::new();
-        };
-        let Block::Approval { state, .. } = &mut block else { return Vec::new() };
+    fn settle_approved_item(&mut self, item: &msp::Item, terminal: bool) {
+        let Some(approval_id) = item.approval_id.as_deref() else { return };
+        let key = approval_key(approval_id);
+        let Some(Block::Approval { state, .. }) = self.builder.block(&key) else { return };
         let cancelled = terminal && item.status == msp::ItemStatus::Cancelled;
         let failed = terminal && !cancelled && item.status != msp::ItemStatus::Completed;
-        match state {
-            ApprovalState::Approving if cancelled => {
-                *state = ApprovalState::Cancelled { reason: Some(TURN_STOPPED.to_owned()) };
-                self.update_block(slot, block)
-            }
+        let settled = match state {
+            ApprovalState::Approving if cancelled => ApprovalState::Cancelled { reason: Some(TURN_STOPPED.to_owned()) },
+            // B12: the gated item's own duration when the wire timed the
+            // run, so the settled card reads real elapsed.
             ApprovalState::Approving => {
-                // B12: the gated item's own duration when the wire timed
-                // the run, so the settled card reads real elapsed.
-                *state = ApprovalState::AllowedOnce {
-                    exit_code: i32::from(failed),
-                    duration_ms: item.duration_ms.unwrap_or(0),
-                };
-                self.update_block(slot, block)
+                ApprovalState::AllowedOnce { exit_code: i32::from(failed), duration_ms: item.duration_ms.unwrap_or(0) }
             }
-            ApprovalState::AllowedOnce { exit_code, .. } if failed && *exit_code == 0 => {
-                *state = ApprovalState::AllowedOnce { exit_code: 1, duration_ms: 0 };
-                self.update_block(slot, block)
+            ApprovalState::AllowedOnce { exit_code: 0, .. } if failed => {
+                ApprovalState::AllowedOnce { exit_code: 1, duration_ms: 0 }
             }
-            _ => Vec::new(),
-        }
+            _ => return,
+        };
+        self.builder.modify(&key, |card| {
+            if let Block::Approval { state, .. } = card {
+                *state = settled;
+            }
+        });
     }
 
-    fn user_message(&mut self, item: &msp::Item, seen: bool) -> Vec<Delta> {
+    fn user_message(&mut self, item: &msp::Item, seen: bool) {
         // The presentation text: what the transcript must show.
         let presentation = item
             .display_text
@@ -1358,10 +1155,8 @@ impl Folded {
             let changed =
                 self.user_text.get(&item.item_id).is_some_and(|rendered| *rendered != presentation);
             if !changed {
-                if let Some(&key) = self.user_keys.get(&item.item_id) {
-                    self.stamp_item(key, item);
-                }
-                return Vec::new();
+                self.stamp_item(&item.item_id, item);
+                return;
             }
             if let Some(command_id) = item.command_id.as_ref() {
                 self.remember_command(command_id, &presentation);
@@ -1369,15 +1164,7 @@ impl Folded {
             if let Some(turn_id) = &item.turn_id {
                 self.user_turns.insert(item.item_id.clone(), turn_id.clone());
             }
-            let Some(&key) = self.user_keys.get(&item.item_id) else {
-                return Vec::new();
-            };
-            let timestamp = self
-                .session
-                .turns
-                .iter()
-                .find(|turn| turn.id() == item.item_id.as_str())
-                .and_then(Turn::timestamp);
+            let Some(timestamp) = self.header().turn(&item.item_id).map(Turn::timestamp) else { return };
             let turn = Turn::User {
                 id: item.item_id.clone(),
                 text: presentation.clone(),
@@ -1385,11 +1172,10 @@ impl Folded {
                 mentions: Vec::new(),
                 timestamp,
             };
-            let delta = Delta::TurnReplaced { turn };
-            self.apply_to_session(delta.clone());
+            self.builder.push(Delta::TurnReplaced { turn });
             self.user_text.insert(item.item_id.clone(), presentation);
-            self.stamp_item(key, item);
-            return vec![delta];
+            self.stamp_item(&item.item_id, item);
+            return;
         }
         if let Some(command_id) = item.command_id.as_ref() {
             self.remember_command(command_id, &presentation);
@@ -1401,28 +1187,23 @@ impl Folded {
             mentions: Vec::new(),
             timestamp: None,
         };
-        let delta = Delta::TurnStarted { turn };
-        self.apply_to_session(delta.clone());
-        // A user message is a whole turn of its own, appended here rather
-        // than through `ensure_assistant_turn`, so it mints its handle here.
-        let key = self.mint_turn_key();
-        self.user_keys.insert(item.item_id.clone(), key);
+        // A user message is a whole turn of its own, keyed on its item id.
+        self.builder.push(Delta::TurnStarted { turn });
         self.user_text.insert(item.item_id.clone(), presentation);
-        self.stamp_item(key, item);
+        self.stamp_item(&item.item_id, item);
         if let Some(turn_id) = &item.turn_id {
             self.user_turns.insert(item.item_id.clone(), turn_id.clone());
         }
-        vec![delta]
     }
 
-    fn assistant_item(&mut self, item: &msp::Item, terminal: bool) -> Vec<Delta> {
+    fn assistant_item(&mut self, item: &msp::Item, terminal: bool) {
         // A `request_user_input` tool call renders as its question card, not as
         // a tool card; the question arrives on `userInput/requested` under the
         // same id.
         if matches!(item.kind, msp::ItemKind::ToolCall)
             && item.tool.as_deref() == Some("request_user_input")
         {
-            return Vec::new();
+            return;
         }
         // A truncated tool or user-shell output keeps its fetch handle here.
         // `item()` only reaches this far when the revision is newer, so a
@@ -1454,40 +1235,36 @@ impl Folded {
         if matches!(item.kind, msp::ItemKind::Reasoning) {
             self.note_reasoning_first(item);
         }
-        let Some(block) = self.block_for(item, terminal) else { return Vec::new() };
+        let Some(block) = self.block_for(item, terminal) else { return };
         // Decision points and failures end the open run: they never join a
         // group, and nothing after them joins the run from before (D10/D11).
         let groupable = is_groupable(&block) && item.approval_id.is_none();
         if !groupable {
             self.break_groups();
         }
-        match self.slots.item(&item.item_id) {
-            Some(slot) => {
+        match self.builder.turn_of(&item_key(&item.item_id)).map(str::to_owned) {
+            Some(turn) => {
                 // A newer revision of a known item re-stamps its turn, like
                 // a first sighting does — the durable stamp wins on both
                 // paths.
-                self.stamp_item(slot.turn, item);
-                self.update_call(slot, item, block, groupable)
+                self.stamp_item(&turn, item);
+                self.update_call(item, block, groupable);
             }
-            None => {
-                let mut deltas = Vec::new();
-                let turn = self.item_host_turn(item, &mut deltas);
-                if groupable {
-                    if let Some(joined) = self.try_join(turn, item, &block) {
-                        deltas.extend(joined);
-                        return deltas;
-                    }
-                }
-                let (added, slot) = self.push_block(turn, block);
-                deltas.extend(added);
-                if let Some(slot) = slot {
-                    if groupable {
-                        self.note_open(turn, slot);
-                    }
-                    self.slots.set_item(&item.item_id, slot);
-                }
-                deltas
-            }
+            None => self.add_call(item, block, groupable),
+        }
+    }
+
+    /// File a call the transcript does not show yet: joined to its turn's
+    /// open run when it may, else a card of its own (opening a run when it
+    /// is groupable).
+    fn add_call(&mut self, item: &msp::Item, block: Block, groupable: bool) {
+        let turn = self.item_host_turn(item);
+        if groupable && self.try_join(&turn, item, &block) {
+            return;
+        }
+        let key = item_key(&item.item_id);
+        if self.builder.add(&turn, Some(&key), block) && groupable {
+            self.open_groups.insert(turn, OpenGroup { key, gen: self.group_gen });
         }
     }
 
@@ -1499,71 +1276,49 @@ impl Folded {
         self.group_gen += 1;
     }
 
-    /// Record a freshly pushed groupable call as its turn's open run.
-    fn note_open(&mut self, turn: TurnKey, slot: Slot) {
-        if slot.turn != turn {
-            return;
-        }
-        let Some(index) = self.turn_at(turn) else { return };
-        let turn_id = self.session.turns[index].id().to_owned();
-        self.open_groups.insert(turn_id, OpenGroup { block: slot.block, gen: self.group_gen });
-    }
-
     /// Fold a new groupable call into its turn's open run, if there is one.
     ///
     /// Returns `None` when the call stands alone: no open run, the run is no
     /// longer the turn's last block, or the call arrived out of log order
     /// (D6) and belongs where its sequence says rather than at the tail.
-    fn try_join(&mut self, turn: TurnKey, item: &msp::Item, block: &Block) -> Option<Vec<Delta>> {
-        let index = self.turn_at(turn)?;
-        let turn_id = self.session.turns.get(index)?.id().to_owned();
-        let cursor =
-            self.open_groups.get(&turn_id).copied().filter(|cursor| cursor.gen == self.group_gen)?;
-        let blocks = self.session.turns[index].blocks();
-        if cursor.block + 1 != blocks.len() {
-            self.open_groups.remove(&turn_id);
-            return None;
+    fn try_join(&mut self, turn_id: &str, item: &msp::Item, block: &Block) -> bool {
+        let Some(cursor) = self.open_groups.get(turn_id).filter(|cursor| cursor.gen == self.group_gen).cloned()
+        else {
+            return false;
+        };
+        if !self.builder.is_last(&cursor.key) {
+            self.open_groups.remove(turn_id);
+            return false;
         }
-        if !self.seq_allows_join(&turn_id) {
-            return None;
+        if !self.seq_allows_join(turn_id) {
+            return false;
         }
-        let call = block.as_tool_call()?;
-        let slot = Slot { turn, block: cursor.block };
-        match blocks[cursor.block].clone() {
-            Block::ToolGroup { mut calls, .. } => {
+        let Some(call) = block.as_tool_call() else { return false };
+        let calls = match self.builder.block(&cursor.key).cloned() {
+            Some(Block::ToolGroup { mut calls, .. }) => {
                 calls.push(call);
-                let summary = group_summary(&calls);
-                let state = group_state(&calls);
-                let deltas = self.update_block(slot, Block::ToolGroup { calls, summary, state });
-                self.slots.set_item(&item.item_id, slot);
-                Some(deltas)
+                calls
             }
-            previous if is_groupable(&previous) => {
-                let previous = previous.as_tool_call()?;
-                let calls = vec![previous, call];
-                let summary = group_summary(&calls);
-                let state = group_state(&calls);
-                let deltas = self.update_block(slot, Block::ToolGroup { calls, summary, state });
-                self.slots.set_item(&item.item_id, slot);
-                Some(deltas)
+            Some(previous) if is_groupable(&previous) => {
+                let Some(previous) = previous.as_tool_call() else { return false };
+                vec![previous, call]
             }
             _ => {
-                self.open_groups.remove(&turn_id);
-                None
+                self.open_groups.remove(turn_id);
+                return false;
             }
-        }
+        };
+        self.update_key(&cursor.key, group_block(calls));
+        self.builder.file_with(&item_key(&item.item_id), &cursor.key);
+        true
     }
 
     /// Whether a call carried by the event being folded now may join its
     /// turn's open run: only in log order (D6), never ahead of what the log
     /// already filed there.
     fn seq_allows_join(&self, turn_id: &str) -> bool {
-        let Some(seq) = self.current_seq else { return true };
-        self.block_order
-            .get(turn_id)
-            .and_then(|keys| keys.last())
-            .map(|&last| seq >= last)
-            .unwrap_or(true)
+        let Some(seq) = self.builder.order() else { return true };
+        self.builder.last_order(turn_id).is_none_or(|last| seq >= last)
     }
 
     /// Re-fold an item the fold has already drawn, usually at its terminal
@@ -1572,180 +1327,109 @@ impl Folded {
     /// approval) leaves the group for a card of its own — errors and gated
     /// calls break the run, and a backfill, which only ever sees the terminal
     /// revision, must fold the same (F3).
-    fn update_call(
-        &mut self,
-        slot: Slot,
-        item: &msp::Item,
-        block: Block,
-        groupable: bool,
-    ) -> Vec<Delta> {
-        let current =
-            self.turn_of(slot).and_then(|turn| turn.blocks().get(slot.block)).cloned();
-        match current {
-            Some(Block::ToolCall { id, .. }) if id == item.item_id => self.update_block(slot, block),
+    fn update_call(&mut self, item: &msp::Item, block: Block, groupable: bool) {
+        let key = item_key(&item.item_id);
+        match self.builder.block(&key).cloned() {
             Some(Block::ToolGroup { .. }) if !matches!(block, Block::ToolCall { .. }) => {
-                self.update_block(slot, block)
+                self.update_key(&key, block);
             }
             Some(Block::ToolGroup { mut calls, .. }) => {
                 let Some(index) = calls.iter().position(|call| call.id == item.item_id) else {
                     return self.relocate_call(item, block, groupable);
                 };
                 let Some(call) = block.as_tool_call() else {
-                    return self.update_block(slot, block);
+                    self.update_key(&key, block);
+                    return;
                 };
                 if groupable {
                     calls[index] = call;
-                    let summary = group_summary(&calls);
-                    let state = group_state(&calls);
-                    self.update_block(slot, Block::ToolGroup { calls, summary, state })
-                } else {
-                    // The card leaving the group is a fresh slot, so
-                    // `update_block`'s retain never sees it: carry the chip
-                    // the group member drew when the revision omits it.
-                    let removed = calls.remove(index);
-                    let block = with_diff_stat(block, removed.diff_stat);
-                    let mut deltas = Vec::new();
-                    if calls.len() == 1 {
-                        let lone = calls.pop().expect("one call left");
-                        deltas.extend(self.update_block(slot, Block::tool_call(lone)));
-                    } else {
-                        let summary = group_summary(&calls);
-                        let state = group_state(&calls);
-                        deltas.extend(
-                            self.update_block(slot, Block::ToolGroup { calls, summary, state })
-                        );
-                    }
-                    let mut fresh = Vec::new();
-                    let turn = self.item_host_turn(item, &mut fresh);
-                    deltas.extend(fresh);
-                    let (added, fresh_slot) = self.push_block(turn, block);
-                    deltas.extend(added);
-                    if let Some(fresh_slot) = fresh_slot {
-                        self.slots.set_item(&item.item_id, fresh_slot);
-                    }
-                    deltas
+                    self.update_key(&key, group_block(calls));
+                    return;
                 }
-            }
-            // Text, thinking and every other non-tool block re-folds in
-            // place; only a tool card ever moves between slots.
-            Some(_) => self.update_block(slot, block),
-            None => {
-                if matches!(block, Block::ToolCall { .. }) {
-                    self.relocate_call(item, block, groupable)
+                // The card leaving the group is a fresh block, so
+                // `update_key`'s retain never sees it: carry the chip the
+                // group member drew when the revision omits it.
+                let removed = calls.remove(index);
+                let block = with_diff_stat(block, removed.diff_stat);
+                let rest = if calls.len() == 1 {
+                    Block::tool_call(calls.pop().expect("one call left"))
                 } else {
-                    self.update_block(slot, block)
-                }
+                    group_block(calls)
+                };
+                self.update_key(&key, rest);
+                let turn = self.item_host_turn(item);
+                self.builder.add(&turn, Some(&key), block);
             }
+            // Text, thinking and every other block — a lone card included —
+            // re-folds in place; only a grouped call ever moves.
+            Some(_) => {
+                self.update_key(&key, block);
+            }
+            None if matches!(block, Block::ToolCall { .. }) => self.relocate_call(item, block, groupable),
+            None => {}
         }
     }
 
-    /// The cached slot no longer names this call's card: find the card again
-    /// by id, or file the call as new. Slots are maintained on every
-    /// mutation, so this path should stay cold.
+    /// The item's key names no card any more: find the card again by id, or
+    /// file the call as new. The builder keeps every key it files, so this
+    /// path should stay cold.
     ///
     /// The item's own host turn is searched first and the whole transcript
     /// only if that misses (finding `client-adapter-8`). Block ids are unique
     /// across the session, so the narrow search finds the same card the wide
     /// one would; the wide pass remains for a card that somehow sits outside
     /// the turn the item names.
-    fn relocate_call(&mut self, item: &msp::Item, block: Block, groupable: bool) -> Vec<Delta> {
-        let host = self.assistant_turns.get(&host_turn_id(item)).copied();
-        let hit = host
-            .and_then(|key| self.turn_at(key).map(|index| (key, index)))
-            .and_then(|(key, index)| {
-                find_call(self.session.turns[index].blocks(), &item.item_id)
-                    .map(|(block, site)| (key, index, block, site))
-            })
-            .or_else(|| {
-                self.session.turns.iter().enumerate().rev().find_map(|(index, turn)| {
-                    let key = *self.turn_keys.get(index)?;
-                    find_call(turn.blocks(), &item.item_id)
-                        .map(|(block, site)| (key, index, block, site))
-                })
-            });
-        match hit {
-            Some((turn, _, index, Site::Lone)) => {
-                let slot = Slot { turn, block: index };
-                self.slots.set_item(&item.item_id, slot);
-                self.update_block(slot, block)
+    fn relocate_call(&mut self, item: &msp::Item, block: Block, groupable: bool) {
+        let host = host_turn_id(item);
+        let turns = &self.header().turns;
+        let hit = turns
+            .iter()
+            .filter(|turn| turn.id() == host)
+            .chain(turns.iter().rev())
+            .find_map(|turn| find_call(turn.blocks(), &item.item_id).map(|(index, site)| (turn.id().to_owned(), index, site)));
+        let Some((turn, index, site)) = hit else { return self.add_call(item, block, groupable) };
+        let key = item_key(&item.item_id);
+        self.builder.file_at(&key, &turn, index);
+        if matches!(site, Site::Grouped) && !groupable {
+            self.break_groups();
+        }
+        match (self.builder.block(&key).cloned(), block.as_tool_call()) {
+            (Some(Block::ToolGroup { mut calls, .. }), Some(call)) if matches!(site, Site::Grouped) => {
+                if let Some(member) = calls.iter_mut().find(|member| member.id == item.item_id) {
+                    *member = call;
+                }
+                self.update_key(&key, group_block(calls));
             }
-            Some((turn, at_turn, index, Site::Grouped)) => {
-                let slot = Slot { turn, block: index };
-                self.slots.set_item(&item.item_id, slot);
-                if !groupable {
-                    self.break_groups();
-                }
-                match (self.session.turns[at_turn].blocks()[index].clone(), block.as_tool_call()) {
-                    (Block::ToolGroup { mut calls, .. }, Some(call)) => {
-                        if let Some(member) = calls.iter_mut().find(|call| call.id == item.item_id)
-                        {
-                            *member = call;
-                        }
-                        let summary = group_summary(&calls);
-                        let state = group_state(&calls);
-                        self.update_block(slot, Block::ToolGroup { calls, summary, state })
-                    }
-                    _ => self.update_block(slot, block),
-                }
-            }
-            None => {
-                let mut deltas = Vec::new();
-                let turn = self.item_host_turn(item, &mut deltas);
-                if groupable {
-                    if let Some(joined) = self.try_join(turn, item, &block) {
-                        deltas.extend(joined);
-                        return deltas;
-                    }
-                }
-                let (added, slot) = self.push_block(turn, block);
-                deltas.extend(added);
-                if let Some(slot) = slot {
-                    if groupable {
-                        self.note_open(turn, slot);
-                    }
-                    self.slots.set_item(&item.item_id, slot);
-                }
-                deltas
+            _ => {
+                self.update_key(&key, block);
             }
         }
     }
 
     /// A todo tool call's list becomes the session's todo card (or clears it).
-    fn tool_todo(&mut self, item: &msp::Item) -> Vec<Delta> {
+    fn tool_todo(&mut self, item: &msp::Item) {
         let entries = todo_entries(item.args.as_deref()).unwrap_or_default();
         self.set_todo(
             entries
                 .into_iter()
                 .map(|entry| TodoItem { label: entry.label, state: entry.state, elapsed_ms: None })
                 .collect(),
-        )
+        );
     }
 
     /// Replace the session's todo card, creating it the first time and
     /// removing it when the list empties: a todo card with nothing in it is
     /// not a todo card.
-    fn set_todo(&mut self, items: Vec<TodoItem>) -> Vec<Delta> {
+    fn set_todo(&mut self, items: Vec<TodoItem>) {
         if items.is_empty() {
-            return match self.slots.todo() {
-                Some(slot) => {
-                    self.slots.set_todo(None);
-                    self.remove_block(slot)
-                }
-                None => Vec::new(),
-            };
+            self.builder.remove(TODO_KEY);
+            return;
         }
         let block = Block::Todo { items };
-        match self.slots.todo() {
-            Some(slot) => self.update_block(slot, block),
-            None => {
-                let mut deltas = Vec::new();
-                let id = format!("todo:{}", self.session.id);
-                let turn = self.standalone_turn(&id, &mut deltas);
-                let (added, slot) = self.push_block(turn, block);
-                deltas.extend(added);
-                self.slots.set_todo(slot);
-                deltas
-            }
+        if !self.update_key(TODO_KEY, block.clone()) {
+            let id = format!("todo:{}", self.header().id);
+            self.builder.open_turn(&id, None);
+            self.builder.add(&id, Some(TODO_KEY), block);
         }
     }
 
@@ -1753,20 +1437,14 @@ impl Folded {
     /// `ToolOutputDelta` only addresses a lone `ToolCall`, so a grouped call
     /// re-folds its whole group card. Returns the `BlockUpdated`, or nothing
     /// when the member has no shell body to append to.
-    fn append_group_output(&mut self, slot: Slot, item_id: &str, text: &str) -> Vec<Delta> {
-        let Some(Block::ToolGroup { mut calls, summary, state }) =
-            self.turn_of(slot).and_then(|turn| turn.blocks().get(slot.block)).cloned()
-        else {
-            return Vec::new();
-        };
-        let Some(call) = calls.iter_mut().find(|call| call.id == item_id) else {
-            return Vec::new();
-        };
-        let ToolBody::Shell { output_lines, .. } = &mut call.body else { return Vec::new() };
-        if !append_output_lines(output_lines, text) {
-            return Vec::new();
+    fn append_group_output(&mut self, item_id: &str, text: &str) {
+        let key = item_key(item_id);
+        let Some(Block::ToolGroup { mut calls, summary, state }) = self.builder.block(&key).cloned() else { return };
+        let Some(call) = calls.iter_mut().find(|call| call.id == item_id) else { return };
+        let ToolBody::Shell { output_lines, .. } = &mut call.body else { return };
+        if append_output_lines(output_lines, text) {
+            self.update_key(&key, Block::ToolGroup { calls, summary, state });
         }
-        self.update_block(slot, Block::ToolGroup { calls, summary, state })
     }
 
     fn block_for(&self, item: &msp::Item, terminal: bool) -> Option<Block> {
@@ -1798,9 +1476,9 @@ impl Folded {
             }
             msp::ItemKind::ToolCall => {
                 let tool = item.tool.clone().unwrap_or_default();
-                let (kind, verb, target) = tool_shape(&tool, item.args.as_deref());
+                let (kind, verbs, target) = tool_shape(&tool, item.args.as_deref());
                 let (verb, target, status, body) =
-                    tool_presentation(&kind, verb, target, item, terminal);
+                    tool_presentation(&kind, verbs, target, item, terminal);
                 // The header chip comes from the summary already on the wire,
                 // beside `patchRef`. Never a body fetch: `fold.rs` never draws
                 // a body the wire did not send.
@@ -1825,7 +1503,7 @@ impl Folded {
             msp::ItemKind::Subagent => Block::ToolCall {
                 id: item.item_id.clone(),
                 kind: ToolKind::SubAgent,
-                verb: "Delegated".to_owned(),
+                verb: Verbs::of(&ToolKind::SubAgent).verb(tool_status(&item.status)).to_owned(),
                 target: item
                     .objective
                     .clone()
@@ -1864,90 +1542,56 @@ impl Folded {
         Some(block)
     }
 
-    fn item_delta(&mut self, params: &Value) -> Vec<Delta> {
-        let Some(item_id) = params.get("itemId").and_then(Value::as_str) else {
-            return Vec::new();
+    fn item_delta(&mut self, params: &Value) {
+        let (Some(item_id), Some(text)) =
+            (params.get("itemId").and_then(Value::as_str), params.get("delta").and_then(Value::as_str))
+        else {
+            return;
         };
-        // Borrowed, not copied: a chunk that turns out to belong to a grouped
-        // call, or to no live slot at all, used to pay for a `String` it then
-        // threw away (finding `client-adapter-8`).
-        let Some(text) = params.get("delta").and_then(Value::as_str) else {
-            return Vec::new();
-        };
-        let Some(slot) = self.slots.item(item_id) else { return Vec::new() };
-        let Some(turn) = self.turn_of(slot) else { return Vec::new() };
+        let key = item_key(item_id);
+        let Some(target) = self.builder.block(&key) else { return };
         // `field` is a dotted path and **absent means `"text"`**.
         let field = params.get("field").and_then(Value::as_str).unwrap_or("text");
-        let target = turn.blocks().get(slot.block);
-        // A grouped call's output re-folds its group card: the library's
-        // `ToolOutputDelta` only addresses a lone `ToolCall`.
-        let grouped = matches!(target, Some(Block::ToolGroup { .. }));
-        if field == "output" && grouped {
-            return self.append_group_output(slot, item_id, text);
-        }
-        let turn_id = turn.id();
-        let delta = match (field, target) {
-            ("output", _) | (_, Some(Block::ToolCall { .. })) => Delta::ToolOutputDelta {
-                turn_id: turn_id.to_owned(),
-                block_index: slot.block,
-                text: text.to_owned(),
-            },
-            (_, Some(Block::Thinking { .. })) => Delta::ThinkingDelta {
-                turn_id: turn_id.to_owned(),
-                block_index: slot.block,
-                text: text.to_owned(),
-            },
-            _ => Delta::TextDelta {
-                turn_id: turn_id.to_owned(),
-                block_index: slot.block,
-                text: text.to_owned(),
-            },
+        let stream = match (field, target) {
+            // A grouped call's output re-folds its group card: the library's
+            // `ToolOutputDelta` only addresses a lone `ToolCall`.
+            ("output", Block::ToolGroup { .. }) => return self.append_group_output(item_id, text),
+            ("output", _) | (_, Block::ToolCall { .. }) => Stream::Output,
+            (_, Block::Thinking { .. }) => Stream::Thinking,
+            _ => Stream::Text,
         };
-        if self.apply_to_session(delta.clone()) {
-            vec![delta]
-        } else {
-            Vec::new()
-        }
+        self.builder.append(&key, stream, text);
     }
 
     // ---------------------------------------------------------------- approvals
 
-    fn approval_requested(&mut self, params: &Value) -> Vec<Delta> {
-        let Ok(request) = msp::ApprovalRequestParams::deserialize(params)
-        else {
+    fn approval_requested(&mut self, params: &Value) {
+        let Ok(request) = msp::ApprovalRequestParams::deserialize(params) else {
             self.side.decode_failures += 1;
-            return Vec::new();
+            return;
         };
         if self.seen_requests.insert(request.approval_id.clone(), ()).is_some() {
-            return Vec::new();
+            return;
         }
         self.break_groups();
         self.side.pending_approvals.insert(request.approval_id.clone(), request.clone());
-        let block = approval_block(&request, ApprovalState::Pending, None, None);
-        let mut deltas = Vec::new();
         // The approval's `turnId` is the gated command's turn — for a
         // `session/userShell` that is the shell item's `commandId`, which is
         // exactly the synthetic turn the shell item was filed under.
-        let turn = self.ensure_assistant_turn(&request.turn_id, &mut deltas);
-        let (added, slot) = self.push_block(turn, block);
-        deltas.extend(added);
-        if let Some(slot) = slot {
-            self.slots.set_approval(&request.approval_id, slot);
-        }
-        deltas
+        self.builder.open_turn(&request.turn_id, None);
+        self.builder.approval_raised(&request.turn_id, approval_block(&request, ApprovalState::Pending, None, None));
     }
 
-    fn approval_updated(&mut self, params: &Value) -> Vec<Delta> {
+    fn approval_updated(&mut self, params: &Value) {
         self.break_groups();
-        let Some(approval_id) = params.get("approvalId").and_then(Value::as_str) else {
-            return Vec::new();
-        };
-        let Some(slot) = self.slots.approval(approval_id) else { return Vec::new() };
+        let Some(approval_id) = params.get("approvalId").and_then(Value::as_str) else { return };
+        let key = approval_key(approval_id);
+        if self.builder.block(&key).is_none() {
+            return;
+        }
         // The choices change between stages — re-render from the update, never
         // from a cached copy.
-        let Some(request) = self.side.pending_approvals.get_mut(approval_id) else {
-            return Vec::new();
-        };
+        let Some(request) = self.side.pending_approvals.get_mut(approval_id) else { return };
         if let Some(subject) = params.get("subject") {
             if let Ok(subject) = msp::ApprovalSubject::deserialize(subject) {
                 request.subject = subject;
@@ -1963,22 +1607,20 @@ impl Folded {
                 request.current_requirement_id = current;
             }
         }
-        let request = request.clone();
-        let block = approval_block(&request, ApprovalState::Pending, None, None);
-        self.update_block(slot, block)
+        let block = approval_block(request, ApprovalState::Pending, None, None);
+        self.builder.update(&key, block);
     }
 
-    fn approval_resolved(&mut self, params: &Value) -> Vec<Delta> {
-        let Ok(resolved) = msp::ApprovalResolvedParams::deserialize(params)
-        else {
+    fn approval_resolved(&mut self, params: &Value) {
+        let Ok(resolved) = msp::ApprovalResolvedParams::deserialize(params) else {
             self.side.decode_failures += 1;
-            return Vec::new();
+            return;
         };
         self.break_groups();
         let request = self.side.pending_approvals.remove(&resolved.approval_id);
-        let Some(slot) = self.slots.approval(&resolved.approval_id) else {
-            return Vec::new();
-        };
+        if self.builder.block(&approval_key(&resolved.approval_id)).is_none() {
+            return;
+        }
         // The dedupe entry guarded the `approval/request` / `approval/requested`
         // twins, which are long past by the time one resolves.
         self.seen_requests.remove(&resolved.approval_id);
@@ -2006,7 +1648,7 @@ impl Folded {
         // all — the card opened and closed in the same breath and was never
         // actionable.
         let state = approval_state(by, allowed, rule);
-        let Some(request) = request else { return Vec::new() };
+        let Some(request) = request else { return };
         // Nothing better than the mode's name yet: the reason is still in
         // flight on the gated item, so remember where to put it. Only for a
         // resolution nobody was asked for — a person who pressed Allow decided
@@ -2026,8 +1668,7 @@ impl Folded {
                 );
             }
         }
-        let block = approval_block(&request, state, by, None);
-        self.update_block(slot, block)
+        self.builder.approval_resolved_as(&resolved.approval_id, approval_block(&request, state, by, None));
     }
 
     /// F11. Remember why a gated item was refused, for an approval that has not
@@ -2040,106 +1681,67 @@ impl Folded {
 
     /// F11. A gated item finally said why it was refused: correct the card that
     /// is still naming the approval mode.
-    fn fill_policy_reason(&mut self, item: &msp::Item) -> Vec<Delta> {
-        let Some(command_id) = item.command_id.as_deref() else { return Vec::new() };
-        let Some(reason) = refusal(item) else { return Vec::new() };
-        let Some(waiting) = self.awaiting_reason.remove(command_id) else { return Vec::new() };
-        let Some(slot) = self.slots.approval(&waiting.approval_id) else { return Vec::new() };
+    fn fill_policy_reason(&mut self, item: &msp::Item) {
+        let Some(command_id) = item.command_id.as_deref() else { return };
+        let Some(reason) = refusal(item) else { return };
+        let Some(waiting) = self.awaiting_reason.remove(command_id) else { return };
         let state = if waiting.allowed {
             ApprovalState::AutoAllowed { rule: reason }
         } else {
             ApprovalState::AutoDenied { rule: reason }
         };
         let block = approval_block(&waiting.request, state, waiting.by, None);
-        self.update_block(slot, block)
+        self.builder.update(&approval_key(&waiting.approval_id), block);
     }
 
     // --------------------------------------------------------------- user input
 
-    fn user_input_requested(&mut self, params: &Value) -> Vec<Delta> {
-        let Ok(request) = msp::UserInputRequestParams::deserialize(params)
-        else {
+    fn user_input_requested(&mut self, params: &Value) {
+        let Ok(request) = msp::UserInputRequestParams::deserialize(params) else {
             self.side.decode_failures += 1;
-            return Vec::new();
+            return;
         };
         if self.seen_requests.insert(request.user_input_id.clone(), ()).is_some() {
-            return Vec::new();
+            return;
         }
         self.break_groups();
         self.side.pending_inputs.insert(request.user_input_id.clone(), request.clone());
-        let mut deltas = Vec::new();
-        let turn = self.ensure_assistant_turn(&request.turn_id, &mut deltas);
-        let mut slots = Vec::new();
+        self.builder.open_turn(&request.turn_id, None);
         // One MSP request may carry N questions; each becomes its own card and
         // they are answered together.
-        for question in &request.questions {
-            let block = question_block(&request, question, None);
-            let (added, slot) = self.push_block(turn, block);
-            deltas.extend(added);
-            if let Some(slot) = slot {
-                slots.push(slot);
-            }
+        for (index, question) in request.questions.iter().enumerate() {
+            let id = input_id(&request.user_input_id, index);
+            self.builder.question_raised(&request.turn_id, &id, question_block(&request, question, None));
         }
-        self.slots.set_inputs(&request.user_input_id, slots);
-        deltas
     }
 
-    fn user_input_settled(&mut self, params: &Value) -> Vec<Delta> {
-        let Ok(settled) = msp::UserInputSettledParams::deserialize(params)
-        else {
+    fn user_input_settled(&mut self, params: &Value) {
+        let Ok(settled) = msp::UserInputSettledParams::deserialize(params) else {
             self.side.decode_failures += 1;
-            return Vec::new();
+            return;
         };
         self.break_groups();
         self.seen_requests.remove(&settled.user_input_id);
-        let Some(request) = self.side.pending_inputs.remove(&settled.user_input_id) else {
-            return Vec::new();
-        };
-        let Some(slots) = self.slots.inputs(&settled.user_input_id).map(<[Slot]>::to_vec) else {
-            return Vec::new();
-        };
-        let mut deltas = Vec::new();
-        for (question, slot) in request.questions.iter().zip(slots) {
-            let answer = answer_for(question, &settled);
-            let block = question_block(&request, question, Some(answer));
-            deltas.extend(self.update_block(slot, block));
+        let Some(request) = self.side.pending_inputs.remove(&settled.user_input_id) else { return };
+        for (index, question) in request.questions.iter().enumerate() {
+            let block = question_block(&request, question, Some(answer_for(question, &settled)));
+            self.builder.question_answered(&input_id(&settled.user_input_id, index), block);
         }
-        deltas
     }
 
     // ------------------------------------------------------------------ plumbing
 
-    /// The assistant turn that hosts `turn_id`'s blocks, appending it if it does
-    /// not exist yet.
-    fn ensure_assistant_turn(&mut self, turn_id: &str, deltas: &mut Vec<Delta>) -> TurnKey {
-        if let Some(&key) = self.assistant_turns.get(turn_id) {
-            return key;
-        }
-        let delta = Delta::TurnStarted {
-            turn: Turn::Assistant {
-                id: turn_id.to_owned(),
-                blocks: Vec::new(),
-                meta: TurnMeta::default(),
-                timestamp: None,
-            },
-        };
-        self.apply_to_session(delta.clone());
-        deltas.push(delta);
-        let key = self.mint_turn_key();
-        self.assistant_turns.insert(turn_id.to_owned(), key);
-        key
-    }
-
-    /// Where an item's block goes.
+    /// Where an item's block goes, opened if it is not there yet, and the
+    /// item's clock stamped on it.
     ///
     /// A `userShell` item is the one kind outside a turn (`turnId: null`); it is
     /// filed under its own `commandId`, which is also what the approval it
     /// raises reports as its `turnId`.
-    fn item_host_turn(&mut self, item: &msp::Item, deltas: &mut Vec<Delta>) -> TurnKey {
+    fn item_host_turn(&mut self, item: &msp::Item) -> String {
         let turn_id = host_turn_id(item);
-        let key = self.ensure_assistant_turn(&turn_id, deltas);
-        self.stamp_item(key, item);
-        key
+        self.builder.open_turn(&turn_id, None);
+        self.stamp_item(&turn_id, item);
+        turn_id
     }
 
     /// B12: remember a reasoning trace's first sighting, for its thinking
@@ -2152,11 +1754,6 @@ impl Folded {
         });
     }
 
-    /// B12fix: wall-clock milliseconds since `start`, saturating at `u64`.
-    fn wall_ms_since(start: Instant) -> u64 {
-        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
-    }
-
     /// B12: a reasoning trace's thinking elapsed: the `recordedAt` span
     /// from first sighting to this revision, or the arrival clock when
     /// the wire carried no clock at all. B12fix: a half-known pair (one
@@ -2167,8 +1764,7 @@ impl Folded {
         let Some(first) = self.reasoning_first.get(&item.item_id) else { return 0 };
         match (first.at_ms, recorded_at_ms(item)) {
             (Some(start), Some(end)) => end.saturating_sub(start),
-            (None, None) => Self::wall_ms_since(first.instant),
-            (Some(_), None) | (None, Some(_)) => Self::wall_ms_since(first.instant),
+            _ => wall_ms_since(first.instant),
         }
     }
 
@@ -2178,226 +1774,87 @@ impl Folded {
     /// stamp, never the ephemeral one — and the turn keeps the earliest
     /// across its items ("when the turn started"). A turn the app built by
     /// hand (a marker, a todo card) has no items and keeps `None`.
-    fn stamp_item(&mut self, key: TurnKey, item: &msp::Item) {
-        let Some(ms) = recorded_at_ms(item) else { return };
-        let stamps = self.turn_stamps.entry(key).or_default();
+    fn stamp_item(&mut self, turn_id: &str, item: &msp::Item) {
+        let Some(ms) = recorded_at_ms(item).filter(|_| self.builder.has_turn(turn_id)) else { return };
+        let stamps = self.turn_stamps.entry(turn_id.to_owned()).or_default();
         stamps.insert(item.item_id.clone(), ms);
-        let earliest = stamps.values().copied().min();
-        let Some(at) = self.turn_at(key) else { return };
-        if let Some(earliest) = earliest {
-            let slot = match &mut self.session.turns[at] {
-                Turn::User { timestamp, .. } | Turn::Assistant { timestamp, .. } => timestamp,
-            };
-            if *slot != Some(earliest) {
-                *slot = Some(earliest);
-                let id = self.session.turns[at].id().to_owned();
-                self.mark_dirty(Some(id));
-            }
+        if let Some(earliest) = stamps.values().copied().min() {
+            self.builder.set_timestamp(turn_id, earliest);
         }
     }
 
-    /// A turn of its own for a session-level card.
+    /// A marker row, in a turn of its own, keyed on the cursor of the event
+    /// that caused it — cursors are unique per event, so no two markers
+    /// collide.
     ///
-    /// A [`Block::Marker`], a [`Block::Todo`] and a [`Block::Goal`] are blocks,
-    /// not turns, so a fact that belongs to the session rather than to a reply
-    /// still needs a host turn. Giving each one its own turn keeps the
-    /// transcript in wire order: a marker lands where it happened instead of
-    /// being appended to whatever reply happened to be last, which for a reply
-    /// that already finished would put it after that turn's footer.
-    fn standalone_turn(&mut self, id: &str, deltas: &mut Vec<Delta>) -> TurnKey {
-        self.ensure_assistant_turn(id, deltas)
-    }
-
-    /// A marker row, in its own turn, keyed on the cursor of the event that
-    /// caused it — cursors are unique per event, so no two markers collide.
-    fn marker_turn(&mut self, kind: MarkerKind, text: String) -> Vec<Delta> {
-        let mut deltas = Vec::new();
+    /// A [`Block::Marker`], a [`Block::Todo`] and a [`Block::Goal`] are
+    /// blocks, not turns, so a fact that belongs to the session rather than
+    /// to a reply still needs a host turn. Giving each one its own turn
+    /// keeps the transcript in wire order: a marker lands where it happened
+    /// instead of being appended to whatever reply happened to be last,
+    /// which for a reply that already finished would put it after that
+    /// turn's footer.
+    fn marker_turn(&mut self, kind: MarkerKind, text: String) {
         self.marker_seq += 1;
         let id = if self.side.last_cursor.is_empty() {
-            format!("marker:{}:{}", self.session.id, self.marker_seq)
+            format!("marker:{}:{}", self.header().id, self.marker_seq)
         } else {
             format!("marker:{}", self.side.last_cursor)
         };
-        let turn = self.standalone_turn(&id, &mut deltas);
-        let (added, _) = self.push_block(turn, Block::Marker { kind, text });
-        deltas.extend(added);
-        deltas
+        self.builder.open_turn(&id, None);
+        self.builder.add(&id, None, Block::Marker { kind, text });
     }
 
-    /// Add a block to a turn, in **log** order.
-    ///
-    /// # Why this is not a plain append (finding F3)
-    ///
-    /// The same turn arrives two ways. Live, an item announces itself with
-    /// `item/started` the moment it begins, so a shell tool call that then
-    /// raises an approval is already in the transcript when the approval lands:
-    /// tool card, then approval card. Backfilled, `view/page` serves no
-    /// `item/started` at all — the tool call only appears at its
-    /// `item/completed`, which the log records *after* the approval it was
-    /// waiting on. Appending in arrival order therefore reverses the two, and a
-    /// session read a second time no longer says what it said the first time.
-    ///
-    /// Both events carry the item's own `sourceRange.first.sequence` — the same
-    /// number on `item/started` and on `item/completed` — so the log's order is
-    /// knowable from either path, and it is the order used here.
-    ///
-    /// gpui's transcript is an append-only list of [`Delta`]s with no insert, so
-    /// an out-of-order arrival is expressed as an append plus the
-    /// [`Delta::BlockUpdated`]s that rotate the tail. Every cached [`Slot`] past
-    /// the insertion point shifts with it.
-    /// A block that never lands files nothing and returns no slot — never a
-    /// panic. `Session::apply` refuses a block its turn cannot hold (a
-    /// `Turn::User` holds none) and reports it unlanded; the callers below
-    /// then skip caching the slot they never got (H2b).
-    fn push_block(&mut self, turn: TurnKey, block: Block) -> (Vec<Delta>, Option<Slot>) {
-        let Some(at_turn) = self.turn_at(turn) else {
-            return (Vec::new(), None);
-        };
-        let turn_id = self.session.turns[at_turn].id().to_owned();
-        // An event with no sequence (a synthesised marker, a `session/*` fact)
-        // belongs after everything already filed, which is what `u64::MAX` says.
-        let order = self.current_seq.unwrap_or(u64::MAX);
-        // `<=` so that two blocks from the same log record keep the order they
-        // were folded in, which is the order the fold created them.
-        let at = self
-            .block_order
-            .entry(turn_id.clone())
-            .or_default()
-            .partition_point(|&key| key <= order);
-
-        let mut deltas = vec![Delta::BlockAdded { turn_id: turn_id.clone(), block: block.clone() }];
-        if !self.apply_to_session(deltas[0].clone()) {
-            return (Vec::new(), None);
-        }
-        self.block_order.entry(turn_id.clone()).or_default().insert(at, order);
-        let Some(last) = self.session.turns[at_turn].blocks().len().checked_sub(1) else {
-            return (Vec::new(), None);
-        };
-        // `at` counts filed sequence keys, which never outrun the blocks now
-        // that every landed block files exactly one; clamp regardless so the
-        // rotation below cannot slice out of bounds.
-        let at = at.min(last);
-        if at == last {
-            return (deltas, Some(Slot { turn, block: at }));
-        }
-
-        // Rotate `[at, last]` right by one: each old occupant moves down a slot
-        // and the new block takes `at`.
-        let mut moved: Vec<Block> = self.session.turns[at_turn].blocks()[at..last].to_vec();
-        moved.insert(0, block);
-        for (offset, block) in moved.into_iter().enumerate() {
-            let delta = Delta::BlockUpdated {
-                turn_id: turn_id.clone(),
-                block_index: at + offset,
-                block,
-            };
-            if self.apply_to_session(delta.clone()) {
-                deltas.push(delta);
-            }
-        }
-        self.shift_slots(turn, at);
-        (deltas, Some(Slot { turn, block: at }))
-    }
-
-    /// Every cached slot at or past `at` in `turn` moved down one.
-    ///
-    /// One turn's slots, not the transcript's: [`Slots`] keeps the per-turn
-    /// index that makes that possible (finding `client-adapter-8`).
-    fn shift_slots(&mut self, turn: TurnKey, at: usize) {
-        self.slots.shift(turn, at, 1);
-        let Some(index) = self.turn_at(turn) else { return };
-        if let Some(turn_id) = self.session.turns.get(index).map(|turn| turn.id().to_owned()) {
-            if let Some(cursor) = self.open_groups.get_mut(&turn_id) {
-                if cursor.block >= at {
-                    cursor.block += 1;
-                }
-            }
-        }
-    }
-
-    fn update_block(&mut self, slot: Slot, block: Block) -> Vec<Delta> {
-        let Some(turn) = self.turn_of(slot) else { return Vec::new() };
-        let turn_id = turn.id().to_owned();
-        // A revision that omits the patch summary carries no news, not a
-        // zero: the chip an earlier revision drew stays until a revision
-        // that carries a summary replaces it.
-        let block = match turn.blocks().get(slot.block) {
+    /// Replace the block filed under `key`. A revision that omits the
+    /// patch summary carries no news, not a zero: the chip an earlier
+    /// revision drew stays until a revision that carries a summary
+    /// replaces it.
+    fn update_key(&mut self, key: &str, block: Block) -> bool {
+        let block = match self.builder.block(key) {
             Some(current) => retain_diff_stat(block, current),
             None => block,
         };
-        let delta = Delta::BlockUpdated { turn_id, block_index: slot.block, block };
-        if self.apply_to_session(delta.clone()) {
-            vec![delta]
-        } else {
-            Vec::new()
-        }
+        self.builder.update(key, block)
     }
 
-    fn remove_block(&mut self, slot: Slot) -> Vec<Delta> {
-        let Some(turn) = self.turn_of(slot) else { return Vec::new() };
-        let turn_id = turn.id().to_owned();
-        let delta = Delta::BlockRemoved { turn_id: turn_id.clone(), block_index: slot.block };
-        if !self.apply_to_session(delta.clone()) {
-            return Vec::new();
-        }
-        // The order keys are parallel to the blocks, and every slot past the
-        // hole moved up one.
-        if let Some(keys) = self.block_order.get_mut(&turn_id) {
-            if slot.block < keys.len() {
-                keys.remove(slot.block);
-            }
-        }
-        self.slots.shift(slot.turn, slot.block, -1);
-        if self
-            .open_groups
-            .get(&turn_id)
-            .is_some_and(|cursor| cursor.block == slot.block)
-        {
-            self.open_groups.remove(&turn_id);
-        } else if let Some(cursor) = self.open_groups.get_mut(&turn_id) {
-            if cursor.block > slot.block {
-                cursor.block -= 1;
-            }
-        }
-        vec![delta]
-    }
-
-    fn remove_turn(&mut self, turn_id: &str) -> Vec<Delta> {
-        // Read before `apply` takes the turn out: afterwards there is no way
-        // to tell which handle the removed turn held.
-        let Some(at) = self.session.turns.iter().position(|turn| turn.id() == turn_id) else {
-            return Vec::new();
+    /// [`Folded::update_key`] for block `index` of `turn_id`, found by
+    /// reading the transcript.
+    fn update_at(&mut self, turn_id: &str, index: usize, block: Block) {
+        let block = match self.header().turn(turn_id).and_then(|turn| turn.blocks().get(index)) {
+            Some(current) => retain_diff_stat(block, current),
+            None => block,
         };
-        let delta = Delta::TurnRemoved { turn_id: turn_id.to_owned() };
-        if !self.apply_to_session(delta.clone()) {
-            return Vec::new();
-        }
-        self.reindex(at, turn_id);
-        vec![delta]
+        self.builder.update_at(turn_id, index, block);
     }
 
-    /// A turn was removed at `at`: every later turn slid down one index.
-    ///
-    /// Only the turns move. A [`Slot`] names its turn by a [`TurnKey`], which
-    /// an index shift does not change, so this is one pass over the turns and
-    /// none over the cached slots (findings `client-adapter-1`,
-    /// `client-adapter-8`). The removed turn's own slots are dropped rather
-    /// than left behind under a handle that resolves to nothing
-    /// (`client-adapter-6`).
-    fn reindex(&mut self, at: usize, turn_id: &str) {
-        let gone = self.turn_keys.remove(at);
-        self.turn_index.remove(&gone);
-        for (index, key) in self.turn_keys.iter().enumerate().skip(at) {
-            self.turn_index.insert(*key, index);
+    /// Take a turn out of the transcript, with everything kept about it: a
+    /// turn id reused after a retraction starts clean.
+    fn remove_turn(&mut self, turn_id: &str) {
+        if self.builder.remove_turn(turn_id) {
+            self.forget_turn(turn_id);
         }
-        self.slots.drop_turn(gone);
-        self.assistant_turns.retain(|_, key| *key != gone);
-        self.turn_stamps.remove(&gone);
-        self.open_groups.remove(turn_id);
-        // A turn that is gone takes its block ordering with it, or a turn id
-        // reused after a retraction would inherit the old turn's keys.
-        self.block_order.remove(turn_id);
     }
+}
+
+/// The key an item's block is filed under (several on one group card).
+fn item_key(item_id: &str) -> String {
+    format!("item:{item_id}")
+}
+
+/// The key the session's todo card is filed under.
+const TODO_KEY: &str = "todo";
+
+/// The key the session's goal card is filed under.
+const GOAL_KEY: &str = "goal";
+
+/// The id one question of a `userInput/requested` is filed under.
+fn input_id(user_input_id: &str, index: usize) -> String {
+    format!("{user_input_id}:{index}")
+}
+
+/// A run of consecutive calls as one group card.
+fn group_block(calls: Vec<ToolCall>) -> Block {
+    Block::ToolGroup { summary: group_summary(&calls), state: group_state(&calls), calls }
 }
 
 /// What a `ViewGap` marker's text starts with when the row is the **abort**
@@ -2576,7 +2033,7 @@ fn diff_stat_for(item: &msp::Item) -> Option<DiffStat> {
 }
 
 /// Fill an incoming `None` chip on a lone card from a known one. Used where
-/// the card is pushed to a fresh slot rather than updated in place, so
+/// the card is pushed as a fresh block rather than updated in place, so
 /// [`retain_diff_stat`] never sees it.
 fn with_diff_stat(block: Block, kept: Option<DiffStat>) -> Block {
     match (block, kept) {
@@ -2793,6 +2250,13 @@ fn todo_entry_state(status: &str) -> TodoState {
     }
 }
 
+/// The baaz terminal tools (`docs/14-terminal.md` §4) are served on the
+/// muse lane as session-MCP tools under their bare names. The lane carries
+/// no server field on the item, and the session's only MCP server is baaz's
+/// own bridge — so a bare `terminal_*` name is baaz's tool, never a guess
+/// about someone else's. The list and the verbs are the one shared set.
+use transcript_core::is_terminal_tool;
+
 /// `args` is model-authored JSON **as a verbatim string**, so it is parsed
 /// per-tool and falls back to raw display when it is not valid JSON.
 ///
@@ -2801,33 +2265,11 @@ fn todo_entry_state(status: &str) -> TodoState {
 /// families are the ones Muse actually ships (`read_file`, `read_skill`,
 /// `bash`, the write/edit family, the search family and the web family); a name
 /// this table has never seen is still presented honestly as a Muse-provided
-/// tool rather than guessed at.
-/// Whether `tool` is one of the baaz terminal tools (`docs/14-terminal.md`
-/// §4), served on the muse lane as session-MCP tools under these bare
-/// names. The lane carries no server field on the item, and the session's
-/// only MCP server is baaz's own bridge — so a bare `terminal_*` name is
-/// baaz's tool, never a guess about someone else's.
-pub fn is_terminal_tool(tool: &str) -> bool {
-    matches!(
-        tool,
-        "terminal_list"
-            | "terminal_open"
-            | "terminal_run"
-            | "terminal_read"
-            | "terminal_screen"
-            | "terminal_send"
-            | "terminal_close"
-    )
-}
-
-/// The opening verb every terminal card folds with; the presentation maps
-/// it to past tense once the item is terminal.
-pub const TERMINAL_RUNNING_VERB: &str = "Running in terminal";
-
-/// The settled verb of a terminal card.
-pub const TERMINAL_RAN_VERB: &str = "Ran in terminal";
-
-fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, String, String) {
+/// tool rather than guessed at. The verbs are a pair from the one shared
+/// table (docs/81 B F-2): present while the call runs, past once it
+/// finished, "Denied" when it never ran — the same words every provider's
+/// cards read.
+fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, Verbs, String) {
     let parsed: Option<Value> = args.and_then(|args| serde_json::from_str(args).ok());
     let field = |name: &str| {
         parsed.as_ref().and_then(|v| v.get(name)).and_then(Value::as_str).map(str::to_owned)
@@ -2841,34 +2283,34 @@ fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, String, String) {
     if is_terminal_tool(tool) {
         let target =
             field("command").or_else(|| field("tab")).filter(|text| !text.trim().is_empty()).unwrap_or_else(|| tool.to_owned());
-        return (ToolKind::Shell, TERMINAL_RUNNING_VERB.to_owned(), target);
+        return (ToolKind::Shell, Verbs::TERMINAL, target);
     }
     match tool {
-        "bash" | "shell" => (ToolKind::Shell, "Ran".to_owned(), field("command").unwrap_or_else(raw)),
-        "read" | "read_file" | "view" | "cat" => (ToolKind::Read, "Read".to_owned(), path().unwrap_or_else(raw)),
+        "bash" | "shell" => (ToolKind::Shell, Verbs::of(&ToolKind::Shell), field("command").unwrap_or_else(raw)),
+        "read" | "read_file" | "view" | "cat" => (ToolKind::Read, Verbs::of(&ToolKind::Read), path().unwrap_or_else(raw)),
         // A skill load folds to the transcript's quiet row: "Loaded skill
         // `name`", with the scope joined at render time (D63). The verb is
         // what marks the card for that row — see `skill_load_name` on the
         // Baaz side — so it reads loaded, never reading.
         "read_skill" => (
             ToolKind::Read,
-            "Loaded skill".to_owned(),
+            Verbs::fixed("Loaded skill"),
             field("name").or_else(path).unwrap_or_else(raw),
         ),
         "write" | "write_file" | "create" | "create_file" => {
-            (ToolKind::Write, "Wrote".to_owned(), path().unwrap_or_else(raw))
+            (ToolKind::Write, Verbs::of(&ToolKind::Write), path().unwrap_or_else(raw))
         }
         "edit" | "edit_file" | "str_replace" | "apply_patch" => {
-            (ToolKind::Edit, "Edited".to_owned(), path().unwrap_or_else(raw))
+            (ToolKind::Edit, Verbs::of(&ToolKind::Edit), path().unwrap_or_else(raw))
         }
         "grep" | "glob" | "search" | "search_files" | "ripgrep" => (
             ToolKind::Search,
-            "Searched".to_owned(),
+            Verbs::of(&ToolKind::Search),
             field("pattern").or_else(|| field("query")).or_else(path).unwrap_or_else(raw),
         ),
         "fetch" | "web_fetch" | "web_search" | "web_read" => (
             ToolKind::Web,
-            if tool == "web_search" { "Searched the web".to_owned() } else { "Fetched".to_owned() },
+            if tool == "web_search" { Verbs::WEB_SEARCH } else { Verbs::of(&ToolKind::Web) },
             field("url").or_else(|| field("query")).unwrap_or_else(raw),
         ),
         // Interactive-exec tools poll a live process instead of running one
@@ -2878,17 +2320,17 @@ fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, String, String) {
         // target, never the raw tool name alone.
         "bash_input" | "exec_command" => (
             ToolKind::Shell,
-            "Ran".to_owned(),
+            Verbs::of(&ToolKind::Shell),
             field("command").or_else(|| input_snippet(&parsed)).unwrap_or_else(|| "shell".to_owned()),
         ),
         "write_stdin" => (
             ToolKind::Shell,
-            "Sent input".to_owned(),
+            Verbs::SEND_INPUT,
             field("command").or_else(|| input_snippet(&parsed)).unwrap_or_else(|| "shell".to_owned()),
         ),
         tool if tool.ends_with("_input") => (
             ToolKind::Shell,
-            "Sent input".to_owned(),
+            Verbs::SEND_INPUT,
             field("command").or_else(|| input_snippet(&parsed)).unwrap_or_else(|| "shell".to_owned()),
         ),
         _ => (
@@ -2903,7 +2345,7 @@ fn tool_shape(tool: &str, args: Option<&str>) -> (ToolKind, String, String) {
             // already in the card's body as parameter pairs, so the title is
             // free to say which tool ran (audit 2026-09-13, P1).
             ToolKind::Mcp { server: "muse".to_owned(), tool: tool.to_owned() },
-            "Ran".to_owned(),
+            Verbs::of(&ToolKind::Shell),
             field("command").or_else(path).unwrap_or_else(|| tool.to_owned()),
         ),
     }
@@ -2933,8 +2375,6 @@ fn terminal_presentation(
         Some(tab) if target.trim() != tab => format!("{target} · {tab}"),
         _ => target,
     };
-    let verb =
-        if terminal { TERMINAL_RAN_VERB.to_owned() } else { TERMINAL_RUNNING_VERB.to_owned() };
     let output_lines = match result
         .as_ref()
         .and_then(|result| result.get("output"))
@@ -2961,7 +2401,7 @@ fn terminal_presentation(
         }
     };
     let body = ToolBody::Shell { output_lines, exit_code, live: !terminal };
-    (verb, target, status, body)
+    (Verbs::TERMINAL.verb(status).to_owned(), target, status, body)
 }
 
 /// What a tool call's card shows: the structured shapes a raw
@@ -2986,12 +2426,12 @@ fn terminal_presentation(
 ///   hide what the tool actually said.
 fn tool_presentation(
     kind: &ToolKind,
-    verb: String,
+    verbs: Verbs,
     target: String,
     item: &msp::Item,
     terminal: bool,
 ) -> (String, String, ToolStatus, ToolBody) {
-    if verb == TERMINAL_RUNNING_VERB {
+    if verbs == Verbs::TERMINAL {
         return terminal_presentation(target, item, terminal);
     }
     let visible = item.visible_output.as_deref().unwrap_or("");
@@ -3013,7 +2453,7 @@ fn tool_presentation(
                 exit_code,
                 live: !terminal || is_running_state(envelope.execution_state.as_deref()),
             };
-            return (verb, target, status, body);
+            return (verbs.verb(status).to_owned(), target, status, body);
         }
     }
     let status = tool_status(&item.status);
@@ -3035,7 +2475,7 @@ fn tool_presentation(
             },
         },
     };
-    (verb, target, status, body)
+    (verbs.verb(status).to_owned(), target, status, body)
 }
 
 /// A shell result carried as one JSON object rather than as plain text: the
@@ -3468,6 +2908,7 @@ mod tests {
     }
 
     use super::*;
+    use transcript_core::{TERMINAL_RAN_VERB, TERMINAL_RUNNING_VERB};
 
     fn started(fold: &mut MuseFold, session_id: &str) {
         fold.apply(MuseEvent::Notification {
@@ -3552,14 +2993,14 @@ mod tests {
             cursor: None,
             session_id: Some(session.to_owned()),
         });
-        assert_eq!(fold.sessions["s"].slots.len(), 1, "the tool card is cached");
+        assert!(fold.sessions["s"].builder.turn_of(&item_key("i-1")).is_some(), "the tool card is filed");
         fold.apply(MuseEvent::Notification {
             method: "turn/retracted".to_owned(),
             params: serde_json::json!({ "turnId": "t-1", "commandId": "c-1" }),
             cursor: None,
             session_id: Some(session.to_owned()),
         });
-        assert_eq!(fold.sessions["s"].slots.len(), 0, "and goes with the turn");
+        assert!(fold.sessions["s"].builder.turn_of(&item_key("i-1")).is_none(), "and goes with the turn");
     }
 
     fn complete_item(item_id: &str, turn_id: &str, kind: &str, status: &str, revision: u32, recorded_at: Option<&str>) -> Value {
@@ -3586,7 +3027,7 @@ mod tests {
             cursor: None,
             session_id: Some("s".to_owned()),
         });
-        let session = &fold.sessions["s"].session;
+        let session = fold.sessions["s"].builder.session();
         let turn = session.turns.iter().find(|turn| turn.id() == "m-1").expect("user turn");
         assert_eq!(turn.timestamp(), Some(1_788_938_599_200));
     }
@@ -3601,7 +3042,7 @@ mod tests {
             cursor: None,
             session_id: Some("s".to_owned()),
         });
-        let session = &fold.sessions["s"].session;
+        let session = fold.sessions["s"].builder.session();
         let turn = session.turns.iter().find(|turn| turn.id() == "m-1").expect("user turn");
         assert_eq!(turn.timestamp(), None);
     }
@@ -3632,7 +3073,7 @@ mod tests {
                 session_id: Some("s".to_owned()),
             });
         }
-        let session = &fold.sessions["s"].session;
+        let session = fold.sessions["s"].builder.session();
         let turn = session.turns.iter().find(|turn| turn.id() == "t-1").expect("assistant turn");
         assert_eq!(turn.timestamp(), Some(1_788_938_599_200));
     }
@@ -3665,7 +3106,7 @@ mod tests {
                 session_id: Some("s".to_owned()),
             });
         }
-        let session = &fold.sessions["s"].session;
+        let session = fold.sessions["s"].builder.session();
         let mut elapsed = Vec::new();
         for turn in &session.turns {
             if let Turn::Assistant { blocks, .. } = turn {
@@ -3792,7 +3233,7 @@ mod tests {
     }
 
     fn finished_meta(fold: &MuseFold, turn_id: &str) -> TurnMeta {
-        let session = &fold.sessions["s"].session;
+        let session = fold.sessions["s"].builder.session();
         let turn = session.turns.iter().find(|turn| turn.id() == turn_id).expect("assistant turn");
         match turn {
             Turn::Assistant { meta, .. } => meta.clone(),
@@ -3911,7 +3352,7 @@ mod tests {
     }
 
     fn tool_call_block(fold: &MuseFold, item_id: &str) -> Block {
-        let session = &fold.sessions["s"].session;
+        let session = fold.sessions["s"].builder.session();
         session
             .turns
             .iter()
@@ -4109,7 +3550,7 @@ mod tests {
         // never minted turn handles — so the next client-authored block (the
         // handoff card, the destination's origin marker) read the provider's
         // user turn at the newborn key's index, `BlockAdded` was refused, and
-        // `push_block` underflowed `len() - 1` and panicked.
+        // the old `push_block` underflowed `len() - 1` and panicked.
         let mut fold = MuseFold::new();
         fold.ensure_session("s-1", Provider::Codex, String::new(), String::new());
         fold.apply_deltas("s-1", scripted_deltas("hello"));
@@ -4161,7 +3602,7 @@ mod tests {
             cursor: None,
             session_id: Some("s".to_owned()),
         });
-        let session = &fold.sessions["s"].session;
+        let session = fold.sessions["s"].builder.session();
         let card = session.turns.iter().flat_map(|turn| turn.blocks()).find_map(|block| match block {
             Block::ToolCall { id, kind, verb, target, status, duration_ms, body, .. } if id == "i-term-1" => {
                 Some((kind.clone(), verb.clone(), target.clone(), *status, *duration_ms, body.clone()))
@@ -4263,7 +3704,7 @@ mod tests {
             cursor: None,
             session_id: Some("s".to_owned()),
         });
-        let session = &fold.sessions["s"].session;
+        let session = fold.sessions["s"].builder.session();
         let verb = session.turns.iter().flat_map(|turn| turn.blocks()).find_map(|block| match block {
             Block::ToolCall { id, verb, .. } if id == "i-term-2" => Some(verb.clone()),
             _ => None,

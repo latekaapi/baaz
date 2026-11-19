@@ -1,0 +1,293 @@
+{
+  "final": {
+    "claude": {
+      "id": "claude",
+      "agent": "claude",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "9ccce17c-9cfa-434d-a989-8b3a5cac3492",
+          "text": "Use TodoWrite to create a 3-item plan (list files, read notes.txt, summarize contents), then do each item, updating each status as you go. Reply with just DONE.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "msg_011CfSACQBqzuKfjQKwjMLp5",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "toolu_014sYXNwXMHHhsUxK9pBxeem",
+              "tool_kind": {
+                "kind": "search"
+              },
+              "verb": "Searched",
+              "target": "select:TaskCreate,TaskUpdate · 2 tools",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "none"
+              }
+            },
+            {
+              "kind": "todo",
+              "items": [
+                {
+                  "label": "List files",
+                  "state": "done",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Read notes.txt",
+                  "state": "done",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Summarize contents",
+                  "state": "done",
+                  "elapsed_ms": null
+                }
+              ]
+            },
+            {
+              "kind": "tool_call",
+              "id": "toolu_01Qsek1TS6ffp1wv8tWxSf9r",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "ls -la /private/tmp/w4b/work",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "total 32",
+                  "drwxr-xr-x@  7 owner  wheel  224 Sep 26 19:19 .",
+                  "drwxr-xr-x@ 13 owner  wheel  416 Sep 26 19:20 ..",
+                  "drwxr-xr-x@  9 owner  wheel  288 Sep 26 19:14 .git",
+                  "-rw-r--r--@  1 owner  wheel   17 Sep 26 19:14 data.txt",
+                  "-rw-r--r--@  1 owner  wheel   15 Sep 26 19:19 greet.txt",
+                  "-rw-r--r--@  1 owner  wheel   12 Sep 26 19:14 notes.txt",
+                  "-rw-r--r--@  1 owner  wheel  111 Sep 26 19:14 tiny.png"
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "toolu_0173h16ceyo497Jx74d4Cqp8",
+              "tool_kind": {
+                "kind": "read"
+              },
+              "verb": "Read",
+              "target": "/private/tmp/w4b/work/notes.txt",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "read",
+                "lines": 3,
+                "output_lines": [
+                  "1\thello",
+                  "2\tworld",
+                  "3\t"
+                ]
+              }
+            },
+            {
+              "kind": "text",
+              "text": "DONE",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "claude-haiku-4-5-20251001",
+            "duration_ms": 16842,
+            "tokens_in": 239523,
+            "tokens_out": 1365,
+            "reasoning_tokens": 510,
+            "cost_usd": 0.048166900000000006,
+            "cache_read_tokens": 230339,
+            "cache_write_tokens": 9124,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:ffdc458af9e37b66",
+    "8:e25efbf2c29b526f",
+    "9:6abe85c4d2324524",
+    "10:33ff6bc866cf493f",
+    "11:ef1ebe8133694b50",
+    "16:c5ffecdfb43002e1",
+    "18:e4533b043e6c19f0",
+    "20:fbb2d783563fbf11",
+    "25:05c8a91f1ff3f611",
+    "27:7e1d6efa7146c5b1",
+    "28:a0c295e8e3ad5c56",
+    "30:5346d5d0f4f9cef7",
+    "32:dce04cae7d1b0df7",
+    "34:35fed40f7070585a",
+    "35:e0a3f85d282ff8fb",
+    "37:0ceed158cf27de38",
+    "39:e60894b2be65d688",
+    "42:4ac57c3defaa7ba5",
+    "45:e3a9b80f3bce2342",
+    "47:cb8252f361e6401c"
+  ],
+  "abandon": [
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "8:e25efbf2c29b526f",
+    "8:e25efbf2c29b526f",
+    "8:e25efbf2c29b526f",
+    "9:5fe81a75ae681341",
+    "9:b18616d4b103f121",
+    "9:6abe85c4d2324524",
+    "10:a252ea0f2b5c689a",
+    "10:e37095ca8eefb1de",
+    "10:33ff6bc866cf493f",
+    "11:a61e645f9bf07ca9",
+    "11:8975628d47f3d0a5",
+    "11:ef1ebe8133694b50",
+    "12:a61e645f9bf07ca9",
+    "12:8975628d47f3d0a5",
+    "12:ef1ebe8133694b50",
+    "13:a61e645f9bf07ca9",
+    "13:8975628d47f3d0a5",
+    "13:ef1ebe8133694b50",
+    "14:a61e645f9bf07ca9",
+    "14:8975628d47f3d0a5",
+    "14:ef1ebe8133694b50",
+    "15:6b856540f2a5ccaf",
+    "15:f26a3da0e7012cdb",
+    "15:ef1ebe8133694b50",
+    "16:a6636e726af0caf2",
+    "16:2e0d31aff3ad127a",
+    "16:c5ffecdfb43002e1",
+    "17:a6636e726af0caf2",
+    "17:2e0d31aff3ad127a",
+    "17:c5ffecdfb43002e1",
+    "18:5074c744e0c3818f",
+    "18:321111446df7b67b",
+    "18:e4533b043e6c19f0",
+    "19:5074c744e0c3818f",
+    "19:321111446df7b67b",
+    "19:e4533b043e6c19f0",
+    "20:35ba629ab150ba02",
+    "20:dbadfb7dd9a7bd8a",
+    "20:fbb2d783563fbf11",
+    "21:35ba629ab150ba02",
+    "21:dbadfb7dd9a7bd8a",
+    "21:fbb2d783563fbf11",
+    "22:35ba629ab150ba02",
+    "22:dbadfb7dd9a7bd8a",
+    "22:fbb2d783563fbf11",
+    "23:35ba629ab150ba02",
+    "23:dbadfb7dd9a7bd8a",
+    "23:fbb2d783563fbf11",
+    "24:ea541f514426e606",
+    "24:4f79f0be69e8405e",
+    "24:fbb2d783563fbf11",
+    "25:ab57d08168c2cb06",
+    "25:82f4528c812b655e",
+    "25:05c8a91f1ff3f611",
+    "26:ab57d08168c2cb06",
+    "26:82f4528c812b655e",
+    "26:05c8a91f1ff3f611",
+    "27:5fc8d7b5d9607b66",
+    "27:e43e1845b4aa3ffe",
+    "27:7e1d6efa7146c5b1",
+    "28:1dad3f637d4ff77f",
+    "28:16c180ef5cc12b77",
+    "28:a0c295e8e3ad5c56",
+    "29:e2e33faaa084830d",
+    "29:1843f840bdbfa1f5",
+    "29:a0c295e8e3ad5c56",
+    "30:7c4a8fd54e5d16a6",
+    "30:a817c8b418259b92",
+    "30:5346d5d0f4f9cef7",
+    "31:7c4a8fd54e5d16a6",
+    "31:a817c8b418259b92",
+    "31:5346d5d0f4f9cef7",
+    "32:a09eeab6ecd613a6",
+    "32:7f96ec33709bd892",
+    "32:dce04cae7d1b0df7",
+    "33:a09eeab6ecd613a6",
+    "33:7f96ec33709bd892",
+    "33:dce04cae7d1b0df7",
+    "34:ee399b08227880b9",
+    "34:e3c4c5a42b221429",
+    "34:35fed40f7070585a",
+    "35:72c46788baadfc22",
+    "35:efd260de6903e406",
+    "35:e0a3f85d282ff8fb",
+    "36:5a7b053dede41a9b",
+    "36:c785134427cf1327",
+    "36:e0a3f85d282ff8fb",
+    "37:3460bdca42b6754a",
+    "37:12cef8fdf4ff3fd6",
+    "37:0ceed158cf27de38",
+    "38:3460bdca42b6754a",
+    "38:12cef8fdf4ff3fd6",
+    "38:0ceed158cf27de38",
+    "39:9a70007c084983ba",
+    "39:3408f9897e73d9c6",
+    "39:e60894b2be65d688",
+    "40:9a70007c084983ba",
+    "40:3408f9897e73d9c6",
+    "40:e60894b2be65d688",
+    "41:c8bfe2aaec01f3f2",
+    "41:f024a85ecdb06e06",
+    "41:e60894b2be65d688",
+    "42:64dfb44c0df32f11",
+    "42:4ea3586a51b62141",
+    "42:4ac57c3defaa7ba5",
+    "43:64dfb44c0df32f11",
+    "43:4ea3586a51b62141",
+    "43:4ac57c3defaa7ba5",
+    "44:f9f1e3564fdea608",
+    "44:8321a68a6c6c1238",
+    "44:4ac57c3defaa7ba5",
+    "45:6959f033dfd45725",
+    "45:162b8b3d41201d35",
+    "45:e3a9b80f3bce2342",
+    "46:6959f033dfd45725",
+    "46:162b8b3d41201d35",
+    "46:e3a9b80f3bce2342",
+    "47:cb8252f361e6401c",
+    "47:cb8252f361e6401c",
+    "47:cb8252f361e6401c",
+    "47:cb8252f361e6401c"
+  ]
+}

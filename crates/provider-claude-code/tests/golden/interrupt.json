@@ -1,0 +1,73 @@
+{
+  "final": {
+    "claude": {
+      "id": "claude",
+      "agent": "claude",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "msg_011CfLVhLCyjfyqnKyfUGHpa",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "PROBE_OK",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "claude-haiku-4-5-20251001",
+            "duration_ms": 1200,
+            "tokens_in": 29623,
+            "tokens_out": 57,
+            "reasoning_tokens": 47,
+            "cost_usd": 0.0187698,
+            "cache_read_tokens": 21448,
+            "cache_write_tokens": 8165,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:ffdc458af9e37b66",
+    "4:3c17194bb0c591fe",
+    "5:8c21b95ea1a01576",
+    "8:34c299498c7b12e0"
+  ],
+  "abandon": [
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "4:4817b8705c857235",
+    "4:a64cf1409f082d35",
+    "4:3c17194bb0c591fe",
+    "5:977bae5c2d707de5",
+    "5:392263085b7dbb3d",
+    "5:8c21b95ea1a01576",
+    "6:977bae5c2d707de5",
+    "6:392263085b7dbb3d",
+    "6:8c21b95ea1a01576",
+    "7:977bae5c2d707de5",
+    "7:392263085b7dbb3d",
+    "7:8c21b95ea1a01576",
+    "8:34c299498c7b12e0",
+    "8:34c299498c7b12e0",
+    "8:34c299498c7b12e0",
+    "8:34c299498c7b12e0"
+  ]
+}

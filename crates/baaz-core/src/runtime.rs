@@ -184,6 +184,13 @@ impl StateDir {
         // dir.
         if cfg!(any(test, feature = "test-support")) {
             let path = std::env::temp_dir().join(format!("baaz-test-state-{}", std::process::id()));
+            // Made as it is named: a missing dir canonicalizes to its raw
+            // `/var/…` spelling, and `projects::resolved` memoizes that for a
+            // while, so whichever test looked first decided whether this run's
+            // own workspace (`/private/var/…` once made) read as its own —
+            // `sidebar::a_session_another_client_made_is_not_listed` failed
+            // under a loaded workspace run.
+            let _ = std::fs::create_dir_all(&path);
             return Self { path, isolated: capture, throwaway: false };
         }
         // The same rule for a capture (the visual probe): an entry that

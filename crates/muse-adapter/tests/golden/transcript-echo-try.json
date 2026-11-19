@@ -1,0 +1,77 @@
+{
+  "final": {
+    "01a081e5-dbbf-7201-9320-1a3448bf5caa": {
+      "id": "01a081e5-dbbf-7201-9320-1a3448bf5caa",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "7c42696d-2971-443a-bad9-0febe8c0b192",
+          "text": "say hi",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "01a081e5-dbfb-744c-820f-82e3a51f5353",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "Hi.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 4592,
+            "tokens_in": 19208,
+            "tokens_out": 95,
+            "reasoning_tokens": 83,
+            "cost_usd": 0.0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "5:554cc09890c5276a",
+    "13:f4fb0498330a780b",
+    "14:fca22a5438514259",
+    "15:f6869351698e56f2",
+    "16:36b8d9c1f13842e7",
+    "19:08bf556edb9568ae"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:08f44b07b5901a25",
+    "4:08f44b07b5901a25",
+    "5:554cc09890c5276a",
+    "6:554cc09890c5276a",
+    "7:554cc09890c5276a",
+    "8:554cc09890c5276a",
+    "9:554cc09890c5276a",
+    "10:554cc09890c5276a",
+    "11:554cc09890c5276a",
+    "12:554cc09890c5276a",
+    "13:f4fb0498330a780b",
+    "14:03a7a4bebccddc42",
+    "15:36b8d9c1f13842e7",
+    "16:36b8d9c1f13842e7",
+    "17:215581739f422e92",
+    "18:215581739f422e92",
+    "19:08bf556edb9568ae"
+  ]
+}

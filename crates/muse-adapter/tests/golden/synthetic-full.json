@@ -1,0 +1,897 @@
+{
+  "final": {
+    "synthetic-full": {
+      "id": "synthetic-full",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "md-i-md-user-1",
+          "text": "Show me the validation summary with code and links.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "md-t-md-1",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "## Validation summary\n\nCA and GB now branch per country, with focused tests over both.\n\n- CA outward codes accept the space form\n- GB outward codes still fail on the space (next)\n- Full suite stays green: `cargo test --workspace`\n\n```rust\nfn validate(code: &str, country: Country) -> bool {\n    match country {\n        Country::Ca => CA_RE.is_match(code),\n        Country::Gb => GB_RE.is_match(code),\n    }\n}\n```\n\n| country | cases | result |\n| --- | --- | --- |\n| CA | 14 | pass |\n| GB | 11 | 1 failing |\n\nNotes live in [the plan](https://example.com/plan) and the harness doc at docs/02-app.md.\n",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-1.3",
+            "duration_ms": 2300,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "user",
+          "id": "ts-i-syn-user-1",
+          "text": "Check the workspace, tidy the todos, then estimate the tidy.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "ts-t-syn-1",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "ts-i-syn-bash-1",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "ls -la",
+              "status": "success",
+              "duration_ms": 120,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "README.md",
+                  "notes.txt"
+                ],
+                "exit_code": 0,
+                "live": false
+              }
+            },
+            {
+              "kind": "text",
+              "text": "Workspace listed. Tidying now.",
+              "streaming": false
+            },
+            {
+              "kind": "text",
+              "text": "Todos captured.",
+              "streaming": false
+            },
+            {
+              "kind": "tool_call",
+              "id": "ts-i-syn-read-1",
+              "tool_kind": {
+                "kind": "read"
+              },
+              "verb": "Read",
+              "target": "/tmp/synthetic/notes.txt",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "read",
+                "lines": 3,
+                "output_lines": [
+                  "line one",
+                  "line two",
+                  "line three"
+                ]
+              }
+            },
+            {
+              "kind": "text",
+              "text": "Notes read. Estimating.",
+              "streaming": false
+            },
+            {
+              "kind": "tool_call",
+              "id": "ts-i-syn-est-1",
+              "tool_kind": {
+                "kind": "mcp",
+                "server": "muse",
+                "tool": "estimate"
+              },
+              "verb": "Ran",
+              "target": "estimate",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "mcp",
+                "params": [
+                  [
+                    "task",
+                    "tidy"
+                  ],
+                  [
+                    "depth",
+                    "2"
+                  ]
+                ],
+                "result_json": "{\n  \"estimate_minutes\": 12,\n  \"steps\": [\n    \"sweep\",\n    \"sort\"\n  ]\n}"
+              }
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-1.3",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "todo:synthetic-full",
+          "blocks": [
+            {
+              "kind": "todo",
+              "items": [
+                {
+                  "label": "Read validators and the form",
+                  "state": "done",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Branch validation per country",
+                  "state": "done",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Add CA and GB tests",
+                  "state": "done",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Run the focused tests",
+                  "state": "running",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Summarise the change",
+                  "state": "pending",
+                  "elapsed_ms": null
+                }
+              ]
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "user",
+          "id": "tg-i-syn-user-1",
+          "text": "Build it and check the configs.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "tg-t-syn-1",
+          "blocks": [
+            {
+              "kind": "tool_group",
+              "calls": [
+                {
+                  "id": "tg-i-tg-1",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo build --workspace",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "[build] compiling harness",
+                      "[build] linking harness"
+                    ],
+                    "exit_code": null,
+                    "live": false
+                  }
+                },
+                {
+                  "id": "tg-i-tg-2",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo test --workspace",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "ok"
+                    ],
+                    "exit_code": null,
+                    "live": false
+                  }
+                },
+                {
+                  "id": "tg-i-tg-3",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo clippy --workspace",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "done"
+                    ],
+                    "exit_code": null,
+                    "live": false
+                  }
+                }
+              ],
+              "summary": "Ran 3 commands",
+              "state": "done"
+            },
+            {
+              "kind": "thinking",
+              "text": "Checking the plan",
+              "elapsed_ms": 0,
+              "summary": "Checking the plan",
+              "state": "done"
+            },
+            {
+              "kind": "tool_group",
+              "calls": [
+                {
+                  "id": "tg-i-tg-4",
+                  "tool_kind": {
+                    "kind": "read"
+                  },
+                  "verb": "Read",
+                  "target": "/tmp/synthetic/harness/notes.txt",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "read",
+                    "lines": 2,
+                    "output_lines": [
+                      "alpha",
+                      "beta"
+                    ]
+                  }
+                },
+                {
+                  "id": "tg-i-tg-5",
+                  "tool_kind": {
+                    "kind": "read"
+                  },
+                  "verb": "Read",
+                  "target": "/tmp/synthetic/harness/todo.txt",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "read",
+                    "lines": 1,
+                    "output_lines": [
+                      "gamma"
+                    ]
+                  }
+                }
+              ],
+              "summary": "Read 2 files",
+              "state": "done"
+            },
+            {
+              "kind": "approval",
+              "id": "tg-ap-tg-1",
+              "tool": "bash",
+              "command": "cargo run -- --no-connect",
+              "reason": "",
+              "cwd": "/tmp/synthetic",
+              "capabilities": [],
+              "scope": "this_command",
+              "body_kind": "command",
+              "state": {
+                "kind": "allowed_once",
+                "exit_code": 0,
+                "duration_ms": 0
+              },
+              "rule": null,
+              "choices": [
+                {
+                  "id": "allow_once",
+                  "label": "Allow once",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                }
+              ],
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              },
+              "resolved_by": "user"
+            },
+            {
+              "kind": "tool_call",
+              "id": "tg-i-tg-6",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "cargo clippy -- --deny warnings",
+              "status": "error",
+              "duration_ms": null,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "error: warnings denied"
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "tg-i-tg-7",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "cargo clippy -- --allow warnings",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "recovered"
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-1.3",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "user",
+          "id": "tg-i-tg2-user-1",
+          "text": "Run the checks.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "tg-t-syn-2",
+          "blocks": [
+            {
+              "kind": "tool_group",
+              "calls": [
+                {
+                  "id": "tg-i-tg2-bash-1",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo test --workspace",
+                  "status": "success",
+                  "duration_ms": 8100,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "[test] running 42 tests",
+                      "[test] .... ok"
+                    ],
+                    "exit_code": 0,
+                    "live": false
+                  }
+                },
+                {
+                  "id": "tg-i-tg2-bash-2",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo clippy --workspace --all-targets",
+                  "status": "success",
+                  "duration_ms": 3200,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "[lint] clippy clean"
+                    ],
+                    "exit_code": 0,
+                    "live": false
+                  }
+                },
+                {
+                  "id": "tg-i-tg2-bash-3",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo build --workspace",
+                  "status": "success",
+                  "duration_ms": 12400,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "[build] linking harness",
+                      "[build] finished in 12.4 s"
+                    ],
+                    "exit_code": 0,
+                    "live": false
+                  }
+                }
+              ],
+              "summary": "Ran 3 commands",
+              "state": "done"
+            },
+            {
+              "kind": "text",
+              "text": "All three checks pass: tests, lint and build.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-1.3",
+            "duration_ms": 24000,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "user",
+          "id": "df-i-syn-user-1",
+          "text": "Rename the helper and update its callers.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "df-t-syn-1",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "df-i-syn-edit-1",
+              "tool_kind": {
+                "kind": "edit"
+              },
+              "verb": "Edited",
+              "target": "/tmp/synthetic/notes.txt",
+              "status": "success",
+              "duration_ms": 90,
+              "body": {
+                "kind": "shell",
+                "output_lines": [],
+                "exit_code": null,
+                "live": false
+              },
+              "diff_stat": {
+                "added": 10,
+                "removed": 3,
+                "files": 2
+              }
+            },
+            {
+              "kind": "text",
+              "text": "Renamed across two files.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-1.3",
+            "duration_ms": 2100,
+            "tokens_in": 1200,
+            "tokens_out": 115,
+            "reasoning_tokens": 12,
+            "cost_usd": 0.0,
+            "cache_read_tokens": 32,
+            "cache_write_tokens": 8,
+            "cached_tokens": 40
+          }
+        },
+        {
+          "kind": "user",
+          "id": "pl-i-syn-1",
+          "text": "Tighten address validation for CA and GB.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "goal:synthetic-full",
+          "blocks": [
+            {
+              "kind": "goal",
+              "objective": "Ship the checkout fix",
+              "status": "wrapping up",
+              "percent_complete": 120.0,
+              "current_work": "Re-running the focused tests",
+              "next_work": "Summarise the change"
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "pl-t-syn-1",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "Done: CA and GB now validate, and the tests cover both.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-1.3",
+            "duration_ms": 41000,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "01a081ef-25bf-7151-8a43-4ac9c1cc2ff4",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "ap-caec247d-152b-46b9-a8d3-ec2788c4b70a",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "$",
+              "target": "echo hi && ls",
+              "status": "running",
+              "duration_ms": null,
+              "body": {
+                "kind": "shell",
+                "output_lines": [],
+                "exit_code": null,
+                "live": true
+              }
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "ap-01a081ef-25bf-7151-8a43-4ac9c1cc2ff4",
+          "blocks": [
+            {
+              "kind": "approval",
+              "id": "ap-66de002c-bd48-4071-9bdb-c6c28252ea8f",
+              "tool": "shell",
+              "command": "echo hi && ls",
+              "reason": "",
+              "cwd": "/Users/alex/Projects/acme-web",
+              "capabilities": [],
+              "scope": "this_worktree",
+              "body_kind": "command",
+              "state": {
+                "kind": "pending"
+              },
+              "rule": "Always allow in this workspace: echo ...",
+              "choices": [
+                {
+                  "id": "allow_once",
+                  "label": "Allow once",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "allow_local_prefix",
+                  "label": "Always allow in this workspace: echo ...",
+                  "decision": "policy_amendment",
+                  "scope": "this_worktree",
+                  "rule_preview": "Always allow in this workspace: echo ...",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "abort",
+                  "label": "Reject",
+                  "decision": "abort",
+                  "scope": "this_command",
+                  "accepts_feedback": true
+                }
+              ],
+              "stages": [
+                {
+                  "position": 1,
+                  "total": 2,
+                  "argv": [
+                    "echo",
+                    "hi"
+                  ],
+                  "argv_complete": true,
+                  "resolved": false,
+                  "suggested_rule": "Always allow in this workspace: echo ..."
+                },
+                {
+                  "position": 2,
+                  "total": 2,
+                  "argv": [
+                    "ls"
+                  ],
+                  "argv_complete": true,
+                  "resolved": false,
+                  "suggested_rule": "Always allow in this workspace: ls ..."
+                }
+              ],
+              "current_stage": 0,
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              }
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "user",
+          "id": "q-31f43df4-4d4f-4cc5-93a4-23e554a563f9",
+          "text": "Ask me which of README.md or notes.txt to describe, using your request_user_input tool, then describe it.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "q-01a08501-5fb4-7860-a4bc-406e96c03a7f",
+          "blocks": [
+            {
+              "kind": "question",
+              "id": "0c4aea9b-59de-4aee-b119-f1bd1e7ac904:file_choice",
+              "header": "File",
+              "prompt": "Which file should I describe?",
+              "subtitle": "",
+              "options": [
+                {
+                  "label": "README.md",
+                  "description": "",
+                  "key": "1"
+                },
+                {
+                  "label": "notes.txt",
+                  "description": "",
+                  "key": "2"
+                }
+              ],
+              "multi": false,
+              "allow_other": false,
+              "answer": null
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "3:0ec34e0ea3196d54",
+    "5:1fcb23ffaa8ff279",
+    "6:fdbb8a2f79c2ac12",
+    "7:5abdb79fc9c650ec",
+    "9:2590a4450632aeae",
+    "10:d8dd5f6ef9573906",
+    "11:1ace6d3b8acfa7ce",
+    "12:5298250de9e89c1b",
+    "13:9610ba11aa9871a5",
+    "15:b4c67ae3205a6259",
+    "16:8d7a3d8451e574a7",
+    "17:cfa7e11d83f91d0e",
+    "18:c5cf3f7fd7347d05",
+    "19:8564c197bd38c83e",
+    "21:b6578850df2179c2",
+    "22:45257abbfee5b0b0",
+    "23:11c24b1e6bf2c0fe",
+    "24:91f88b70837715e4",
+    "25:cbb3b9e4c54e4ba7",
+    "26:66e96deab8761a63",
+    "27:a898f8f602086dd6",
+    "28:7cb2f04f34b2d826",
+    "29:845e04ce264f9ca3",
+    "30:25e5d0697c962da2",
+    "31:88d4f54042c1b9a0",
+    "32:13a377d7b164207f",
+    "33:b0bd993c6f5a6cef",
+    "34:7bd373920c7dc16e",
+    "35:7dd13adec150bcdf",
+    "36:36a54226622ce639",
+    "38:cd40853e03d43fdd",
+    "39:fd9fe4b00142dd7b",
+    "40:785ca149ef2a73ab",
+    "41:cd11f634cf0542fa",
+    "42:e6d3fa9d7fc6feed",
+    "43:ef18c197f8b8d5b0",
+    "45:18653ddb733f7a3c",
+    "46:a6746fdf34a34e26",
+    "47:16b7f9335e52e91b",
+    "48:3ec3ff4bd5d7beec",
+    "50:6a9e39b7041e3e7c",
+    "52:9fab40fa2d14891a",
+    "53:bc8b25c66790d85c",
+    "54:5dafe6baffbe8a15",
+    "55:e9858a6b722c80a0",
+    "56:4c051ceeef3e7a61",
+    "57:bf3f1d19a2f05170",
+    "58:bf9529913a32bfd9",
+    "59:525dc81d64bc132b",
+    "60:e9db088397f1ef4a",
+    "61:3870ed79bcb615d6",
+    "62:a09ddec34441c8f2",
+    "63:e050060f6e215add",
+    "64:e65739b28ee880c4",
+    "66:92a1a4f6fc73efeb",
+    "70:bbb0de47b0da8f60"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:0ec34e0ea3196d54",
+    "4:0ec34e0ea3196d54",
+    "5:1fcb23ffaa8ff279",
+    "6:28a15c2681f98185",
+    "7:5abdb79fc9c650ec",
+    "8:5abdb79fc9c650ec",
+    "9:2590a4450632aeae",
+    "10:03fb18f087cb85f1",
+    "11:96249fee50798b31",
+    "12:440632b6d08ce014",
+    "13:4a868d2b0edc5e5e",
+    "14:4a868d2b0edc5e5e",
+    "15:500eeab5121064c2",
+    "16:873c7d923ebede60",
+    "17:1a68cef8b5a38861",
+    "18:8564c197bd38c83e",
+    "19:8564c197bd38c83e",
+    "20:8564c197bd38c83e",
+    "21:b6578850df2179c2",
+    "22:3b8b75e64e7c0d03",
+    "23:3d56c64a1c8f9dad",
+    "24:4d4445d8cf6fb95b",
+    "25:df0121fd8bfffc74",
+    "26:b6d0bd6eb03bf1ec",
+    "27:dfdc689812a675a9",
+    "28:6e55c818c65c1e79",
+    "29:3ff91cf1846574ac",
+    "30:e16eab2ab6d412f5",
+    "31:8f44fb18cf7796fb",
+    "32:4a7f82d2daa0c688",
+    "33:f247de684ac044d2",
+    "34:6aaa66ca7f1c1b13",
+    "35:5f14e03f0c4101f6",
+    "36:36a54226622ce639",
+    "37:36a54226622ce639",
+    "38:cd40853e03d43fdd",
+    "39:f524c59a3df0df74",
+    "40:398b35960d320d44",
+    "41:99c5f0d19352b4fd",
+    "42:cf7bb4fd95df32e6",
+    "43:ef18c197f8b8d5b0",
+    "44:ef18c197f8b8d5b0",
+    "45:18653ddb733f7a3c",
+    "46:1c96ea4f36178cda",
+    "47:63070e23879ca514",
+    "48:5498a4f843543697",
+    "49:1b5678285084946f",
+    "50:6a9e39b7041e3e7c",
+    "51:6a9e39b7041e3e7c",
+    "52:9fab40fa2d14891a",
+    "53:bc8b25c66790d85c",
+    "54:5dafe6baffbe8a15",
+    "55:e9858a6b722c80a0",
+    "56:4c051ceeef3e7a61",
+    "57:bf3f1d19a2f05170",
+    "58:bf9529913a32bfd9",
+    "59:525dc81d64bc132b",
+    "60:e9db088397f1ef4a",
+    "61:657e913b57727389",
+    "62:a09ddec34441c8f2",
+    "63:e050060f6e215add",
+    "64:78044aa89c3a7ffc",
+    "65:78044aa89c3a7ffc",
+    "66:ffac1879a2886b63",
+    "67:ffac1879a2886b63",
+    "68:ffac1879a2886b63",
+    "69:ffac1879a2886b63",
+    "70:dab02490336e11ce",
+    "71:dab02490336e11ce"
+  ]
+}

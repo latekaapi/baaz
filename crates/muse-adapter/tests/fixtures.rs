@@ -205,14 +205,13 @@ fn a_retraction_removes_the_turn_and_hands_the_prompt_back() {
 /// **client-adapter-1 / A-MECH-1.** `turn/retracted` removes a *middle*
 /// turn (a user turn plus its assistant turn — two entries in the
 /// transcript), which shifts every later turn's raw index down by two. The
-/// last turn's agent-message item already has a cached `Slot` in the fold's
-/// `items` map from its first revision; the revision-2 update after the
-/// retraction must land on that same turn's text block, in place, not get
-/// dropped (leaving a stale duplicate on the next push) or land on the wrong
-/// turn. Before the `reindex` fix this failed: the cached slot's `turn`
-/// stayed at its pre-removal raw index instead of being remapped through the
-/// rebuilt id → position map, so the retained-by-raw-index check in the old
-/// code either evicted the slot or matched the wrong turn.
+/// last turn's agent-message item is already filed (by its item id) from its
+/// first revision; the revision-2 update after the retraction must land on
+/// that same turn's text block, in place, not get dropped (leaving a stale
+/// duplicate on the next push) or land on the wrong turn. Before the
+/// `reindex` fix this failed: the cached slot's `turn` stayed at its
+/// pre-removal raw index. Since docs/82 5.3 the transcript builder finds
+/// every block by its key, so there is no index left to remap.
 #[test]
 fn a_retraction_of_a_middle_turn_remaps_the_last_turns_cached_slot() {
     use aui_protocol::{Block, Turn};

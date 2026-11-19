@@ -1,0 +1,249 @@
+{
+  "final": {
+    "codex": {
+      "id": "codex",
+      "agent": "codex",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "01a0ddfe-b5d6-7a63-b006-f40c1c988951",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "I’ll create the file and apply the requested edit.",
+              "streaming": false
+            },
+            {
+              "kind": "approval",
+              "id": "exec-7f092120-662b-4927-bbbb-66afc78942a0",
+              "tool": "Edit",
+              "command": "/tmp/w4b/work/greet-codex.txt",
+              "reason": "/tmp/w4b/work/greet-codex.txt (+2/−0)\n+ hello there\n+ bye",
+              "cwd": "",
+              "capabilities": [],
+              "scope": "this_command",
+              "body_kind": "file_write",
+              "state": {
+                "kind": "allowed_once",
+                "exit_code": 0,
+                "duration_ms": 0
+              },
+              "rule": null,
+              "choices": [
+                {
+                  "id": "accept",
+                  "label": "Allow once",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "accept-for-session",
+                  "label": "Allow for this session",
+                  "decision": "approved_for_session",
+                  "scope": "this_session",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "decline",
+                  "label": "Deny",
+                  "decision": "deny",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "cancel",
+                  "label": "Deny and stop",
+                  "decision": "abort",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                }
+              ],
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "exec-7f092120-662b-4927-bbbb-66afc78942a0",
+              "tool_kind": {
+                "kind": "write"
+              },
+              "verb": "Wrote",
+              "target": "/tmp/w4b/work/greet-codex.txt",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "edit",
+                "diff": {
+                  "path": "/tmp/w4b/work/greet-codex.txt",
+                  "hunks": [
+                    {
+                      "header": "@@ /tmp/w4b/work/greet-codex.txt @@",
+                      "lines": [
+                        {
+                          "kind": "add",
+                          "old_no": null,
+                          "new_no": 1,
+                          "text": "hello there"
+                        },
+                        {
+                          "kind": "add",
+                          "old_no": null,
+                          "new_no": 2,
+                          "text": "bye"
+                        }
+                      ]
+                    }
+                  ],
+                  "added": 2,
+                  "removed": 0
+                }
+              },
+              "diff_stat": {
+                "added": 2,
+                "removed": 0,
+                "files": 1
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "exec-f4cd1002-cc9c-409e-b721-a24e70bcfabf",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "sed -n 'l' greet-codex.txt",
+              "status": "success",
+              "duration_ms": 0,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "hello there$",
+                  "bye$"
+                ],
+                "exit_code": 0,
+                "live": false
+              }
+            },
+            {
+              "kind": "text",
+              "text": "DONE",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "golden-model",
+            "duration_ms": 14422,
+            "tokens_in": 45194,
+            "tokens_out": 187,
+            "reasoning_tokens": 49,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 40192
+          }
+        },
+        {
+          "kind": "user",
+          "id": "01a0ddfe-c4a1-7a61-80bb-8ff808befee0",
+          "text": "Create the file greet-codex.txt with exactly one line 'hi there'. Then edit greet-codex.txt so the first line reads 'hello there' and append a second line 'bye'. Reply with just DONE.",
+          "attachments": [],
+          "mentions": []
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "5:c11f324e035c08d3",
+    "22:bbf255efe49547cd",
+    "27:214e059825bb9eb0",
+    "42:81ca3c0aae274ed8",
+    "45:befa470dec8171dc",
+    "49:39f81156d881f0cc",
+    "56:677232682bce5dba",
+    "57:f791922a13fc8377",
+    "63:32c9ce7a40685688",
+    "68:cace3bc132bc7ec4"
+  ],
+  "abandon": [
+    "1:c11f324e035c08d3",
+    "2:c11f324e035c08d3",
+    "3:c11f324e035c08d3",
+    "4:c11f324e035c08d3",
+    "5:c11f324e035c08d3",
+    "6:c11f324e035c08d3",
+    "7:c11f324e035c08d3",
+    "8:c11f324e035c08d3",
+    "9:c11f324e035c08d3",
+    "10:c11f324e035c08d3",
+    "11:c11f324e035c08d3",
+    "12:c11f324e035c08d3",
+    "13:c11f324e035c08d3",
+    "14:c11f324e035c08d3",
+    "15:c11f324e035c08d3",
+    "16:c11f324e035c08d3",
+    "17:c11f324e035c08d3",
+    "18:c11f324e035c08d3",
+    "19:c11f324e035c08d3",
+    "20:c11f324e035c08d3",
+    "21:c11f324e035c08d3",
+    "22:b8d71304e02e70e3",
+    "23:b8d71304e02e70e3",
+    "24:b8d71304e02e70e3",
+    "25:b8d71304e02e70e3",
+    "26:b8d71304e02e70e3",
+    "27:36bd7f70e9a833be",
+    "28:36bd7f70e9a833be",
+    "29:36bd7f70e9a833be",
+    "30:36bd7f70e9a833be",
+    "31:7f2e140829a355ce",
+    "32:5dcf83e7e429a0fd",
+    "33:d98dd1df5f94a943",
+    "34:1f63c6ffb49f04e6",
+    "35:bae91bbc46751a70",
+    "36:ed779d487a7c67eb",
+    "37:8f44610f2812f29f",
+    "38:d1408f37c34cf9c2",
+    "39:b505e54fbfdcd22a",
+    "40:f54ca61b4e2e0276",
+    "41:f0314f9c2937dd3c",
+    "42:ef8288ebdaefcafc",
+    "43:ef8288ebdaefcafc",
+    "44:ef8288ebdaefcafc",
+    "45:0118eab31d0854f4",
+    "46:0118eab31d0854f4",
+    "47:0118eab31d0854f4",
+    "48:0118eab31d0854f4",
+    "49:50c5e57fc03cdcf8",
+    "50:50c5e57fc03cdcf8",
+    "51:05886cf575a450d9",
+    "52:05886cf575a450d9",
+    "53:05886cf575a450d9",
+    "54:05886cf575a450d9",
+    "55:05886cf575a450d9",
+    "56:c6e267c644a17d8c",
+    "57:30aade9fabf93182",
+    "58:81354c552d1eb54f",
+    "59:81354c552d1eb54f",
+    "60:81354c552d1eb54f",
+    "61:81354c552d1eb54f",
+    "62:a352e0b2f45c37ce",
+    "63:638d6335b7e0ddf8",
+    "64:8c29f394bf19e488",
+    "65:8c29f394bf19e488",
+    "66:8c29f394bf19e488",
+    "67:8c29f394bf19e488",
+    "68:cace3bc132bc7ec4"
+  ]
+}

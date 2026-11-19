@@ -1,0 +1,189 @@
+{
+  "final": {
+    "claude": {
+      "id": "claude",
+      "agent": "claude",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "801c9fa9-0f6a-4f80-a488-d755b043bcc5",
+          "text": "Say R1",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "msg_011CfSG7enjE6UvCvTugvR1S",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "R1",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "claude-opus-5",
+            "duration_ms": "set",
+            "tokens_in": 32907,
+            "tokens_out": 4,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.32915999999999995,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 32905,
+            "cached_tokens": 0
+          },
+          "timestamp": "set"
+        },
+        {
+          "kind": "user",
+          "id": "c5937dea-fe68-4a4b-a2ca-c35c5492184c",
+          "text": "Say R2",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "msg_011CfSG7rUSniX8CRJ1ByCNw",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "R2",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "claude-opus-5",
+            "duration_ms": "set",
+            "tokens_in": 34918,
+            "tokens_out": 4,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.03667249999999994,
+            "cache_read_tokens": 32905,
+            "cache_write_tokens": 2011,
+            "cached_tokens": 0
+          },
+          "timestamp": "set"
+        },
+        {
+          "kind": "user",
+          "id": "41a5b11f-8471-4a7b-aca0-aac59b3d0a6d",
+          "text": "Say R3",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "msg_011CfSG8JeZATp2n3PY4JkkY",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "R3",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "claude-opus-5",
+            "duration_ms": "set",
+            "tokens_in": 35604,
+            "tokens_out": 4,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.024428,
+            "cache_read_tokens": 34916,
+            "cache_write_tokens": 686,
+            "cached_tokens": 0
+          },
+          "timestamp": "set"
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:ffdc458af9e37b66",
+    "4:9dca4fa35aad88e8",
+    "5:2451015e7ba5faea",
+    "8:6ea93a42c81ec93c",
+    "10:39917d5b601fbe77",
+    "11:58dd557b3aea060c",
+    "14:98f2d4538815a523",
+    "18:9b65c55e34a70ee4",
+    "19:637dc849780af3f6",
+    "22:1b153ef0b4e942d9"
+  ],
+  "abandon": [
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "4:9dca4fa35aad88e8",
+    "4:9dca4fa35aad88e8",
+    "4:9dca4fa35aad88e8",
+    "5:1ee49a3d6147d97e",
+    "5:1f7584445a118052",
+    "5:2451015e7ba5faea",
+    "6:1ee49a3d6147d97e",
+    "6:1f7584445a118052",
+    "6:2451015e7ba5faea",
+    "7:1ee49a3d6147d97e",
+    "7:1f7584445a118052",
+    "7:2451015e7ba5faea",
+    "8:6ea93a42c81ec93c",
+    "8:6ea93a42c81ec93c",
+    "8:6ea93a42c81ec93c",
+    "9:6ea93a42c81ec93c",
+    "9:6ea93a42c81ec93c",
+    "9:6ea93a42c81ec93c",
+    "10:39917d5b601fbe77",
+    "10:39917d5b601fbe77",
+    "10:39917d5b601fbe77",
+    "11:95aec233b015929c",
+    "11:bc2ed8fbbe12e7e4",
+    "11:58dd557b3aea060c",
+    "12:95aec233b015929c",
+    "12:bc2ed8fbbe12e7e4",
+    "12:58dd557b3aea060c",
+    "13:95aec233b015929c",
+    "13:bc2ed8fbbe12e7e4",
+    "13:58dd557b3aea060c",
+    "14:98f2d4538815a523",
+    "14:98f2d4538815a523",
+    "14:98f2d4538815a523",
+    "15:98f2d4538815a523",
+    "15:98f2d4538815a523",
+    "15:98f2d4538815a523",
+    "16:98f2d4538815a523",
+    "16:98f2d4538815a523",
+    "16:98f2d4538815a523",
+    "17:98f2d4538815a523",
+    "17:98f2d4538815a523",
+    "17:98f2d4538815a523",
+    "18:9b65c55e34a70ee4",
+    "18:9b65c55e34a70ee4",
+    "18:9b65c55e34a70ee4",
+    "19:c29558fe36a8506f",
+    "19:3b050064f4503ac3",
+    "19:637dc849780af3f6",
+    "20:c29558fe36a8506f",
+    "20:3b050064f4503ac3",
+    "20:637dc849780af3f6",
+    "21:c29558fe36a8506f",
+    "21:3b050064f4503ac3",
+    "21:637dc849780af3f6",
+    "22:1b153ef0b4e942d9",
+    "22:1b153ef0b4e942d9",
+    "22:1b153ef0b4e942d9",
+    "22:1b153ef0b4e942d9"
+  ]
+}

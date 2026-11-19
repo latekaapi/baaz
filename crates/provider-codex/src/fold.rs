@@ -32,7 +32,9 @@
 //!   yields deltas identical to folding it whole, and a dedicated test proves
 //!   the interrupted turn's streamed text still survives.
 //!
-//! What the fold emits, per frame:
+//! What the fold emits, per frame (every block through the shared
+//! [`TranscriptBuilder`], which owns positions: a card is addressed by the
+//! wire's item id, never by an index this fold keeps):
 //!
 //! * `item/completed` with an `agentMessage` (non-empty text): one
 //!   [`Delta::TurnStarted`] per unseen turn id, then one [`Delta::BlockAdded`]
@@ -49,63 +51,41 @@
 //!   wire kind, status, and text — carried, never dropped.
 //! * `turn/plan/updated`: the turn's plan as one [`Block::Todo`] — the same
 //!   plan/todo block Claude Code's TodoWrite produces. The first update
-//!   adds the card; every later update rewrites it wholesale at the same
-//!   block index (replace, never append), so four updates still render
-//!   one card showing the latest statuses.
+//!   adds the card; every later update rewrites it wholesale in place
+//!   (replace, never append), so four updates still render one card
+//!   showing the latest statuses.
 //! * `turn/completed`: one [`Delta::TurnFinished`] per started turn, keyed on
-//!   the wire turn id, with per-turn tokens from the `last` bucket (never the
-//!   cumulative `total`) and `cost_usd: 0.0` — the neutral unknown default,
-//!   never a measurement: the protocol reports tokens, never money, and there
-//!   is deliberately no cost field on [`crate::frame::TokenUsage`].
+//!   the wire turn id, with the turn's own tokens (the thread total's
+//!   difference across the turn, never one request's `last`) and
+//!   `cost_usd: 0.0` — the neutral unknown default, never a measurement:
+//!   the protocol reports tokens, never money, and there is deliberately no
+//!   cost field on [`crate::frame::TokenUsage`].
 //! * `thread/tokenUsage/updated`: recorded against `(thread_id, turn_id)`;
 //!   no deltas. `account/rateLimits/updated`: the account snapshot; no
 //!   deltas. Everything else: no deltas.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Instant;
 
 use aui_protocol::{
-    ApprovalBadges, ApprovalBodyKind, ApprovalChoice, ApprovalDecision, ApprovalScope,
-    ApprovalState, Attachment, AttachmentKind, Block, Delta, Diff, DiffKind, DiffLine, DiffStat,
-    Hunk, PermissionMode, ThinkingState, TodoItem, TodoState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta,
-    UploadState,
+    ApprovalBodyKind, ApprovalDecision, ApprovalScope, ApprovalState, Attachment, AttachmentKind,
+    Block, Delta, Diff, DiffKind, DiffStat, Hunk, PermissionMode, Provider, ThinkingState, TodoItem,
+    ToolBody, ToolKind, ToolStatus, Turn, TurnMeta, UploadState,
 };
 use provider::ProviderEvent;
 use serde_json::Value;
+use transcript_core::approval::{self, choice};
+use transcript_core::builder::tool_key;
+use transcript_core::tool::{split_lines, terminal_event, terminal_target, TerminalAnswer};
+use transcript_core::{diff, is_terminal_tool, wall_ms_since, ToolEvent, TranscriptBuilder, Verbs};
 
+pub use crate::account::AccountSnapshot;
 use crate::child::{
     ApprovalKind, FileChangeApprovalParams, MCP_ELICITATION_ID_PREFIX,
     PermissionsApprovalParams, elicitation_is_tool_approval, permission_mode_from_codex,
 };
 use crate::frame::{decode_thread_item, FileChangeEntry, Frame, Item, Notification, TokenCounts};
-
-/// The settled verb of a terminal tool card (D51).
-pub const TERMINAL_RAN_VERB: &str = "Ran in terminal";
-
-/// The running verb of a terminal tool card: an `mcpToolCall` that
-/// completes still `inProgress` reads open, never done.
-pub const TERMINAL_RUNNING_VERB: &str = "Running in terminal";
-
-/// The header target of a terminal card whose call names no command:
-/// what the card names when there is no command to name.
-pub const TERMINAL_TOOL_TARGET: &str = "terminal";
-
-/// Whether `tool` is one of the baaz terminal tools (`docs/14-terminal.md`
-/// §4). An `mcpToolCall` from the baaz server for one of these folds to a
-/// shell card with terminal verbs (D51) — the command from the call's
-/// arguments, the run's output as the body — never the raw item JSON.
-fn is_terminal_tool(tool: &str) -> bool {
-    matches!(
-        tool,
-        "terminal_list"
-            | "terminal_open"
-            | "terminal_run"
-            | "terminal_read"
-            | "terminal_screen"
-            | "terminal_send"
-            | "terminal_close"
-    )
-}
+pub use transcript_core::{TERMINAL_RAN_VERB, TERMINAL_RUNNING_VERB};
 
 /// The model's command out of an `mcpToolCall`'s arguments: the `command`
 /// string of the observed object shape. `None` when the call names none
@@ -159,43 +139,12 @@ fn mcp_result_text(result: &Value) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// One terminal tool's JSON answer (`docs/14-terminal.md` §4), read off
-/// an `mcpToolCall` result's text: `{tab, block, status, exit_code?,
-/// duration_ms, output, …}`. `None` when the text is not that shape —
-/// the card then bodies the text itself, never a forged parse.
-struct TerminalMcpResult {
-    output_lines: Option<Vec<String>>,
-    exit_code: Option<i32>,
-    tab: Option<String>,
-    duration_ms: Option<u64>,
-}
-
-fn parse_terminal_mcp_result(text: &str) -> Option<TerminalMcpResult> {
-    let object = serde_json::from_str::<Value>(text.trim()).ok()?;
-    let object = object.as_object()?;
-    let output_lines = object
-        .get("output")
-        .and_then(Value::as_str)
-        .map(|output| output.lines().map(str::to_owned).collect());
-    let exit_code = object
-        .get("exit_code")
-        .and_then(Value::as_i64)
-        .and_then(|code| i32::try_from(code).ok());
-    let tab = object
-        .get("tab")
-        .and_then(Value::as_str)
-        .filter(|tab| !tab.trim().is_empty())
-        .map(str::to_owned);
-    let duration_ms = object.get("duration_ms").and_then(Value::as_u64);
-    Some(TerminalMcpResult { output_lines, exit_code, tab, duration_ms })
-}
-
 /// The exit code an `mcpToolCall` item reports, when it reports one: a
 /// terminal tool's answer parsed for `exit_code`. `None` for anything
 /// else — never 0 by assumption.
 fn mcp_exit_code(item: &Item) -> Option<i32> {
     let text = item.mcp_result().and_then(mcp_result_text)?;
-    parse_terminal_mcp_result(&text)?.exit_code
+    TerminalAnswer::parse(&text)?.exit_code
 }
 
 /// One baaz terminal `mcpToolCall` as its shell card (D51): the header
@@ -205,17 +154,15 @@ fn mcp_exit_code(item: &Item) -> Option<i32> {
 /// clean `completed` reads success, and a nonzero exit code fails it
 /// closed to error.
 fn terminal_mcp_card(item: &Item) -> (ToolStatus, Block) {
-    let tool = item.mcp_tool();
-    let command =
-        mcp_command(item.mcp_arguments()).unwrap_or_else(|| tool.to_owned());
+    let command = mcp_command(item.mcp_arguments()).unwrap_or_else(|| item.mcp_tool().to_owned());
     let text = item.mcp_result().and_then(mcp_result_text);
-    let parsed = text.as_deref().and_then(parse_terminal_mcp_result);
+    let answer = text.as_deref().and_then(TerminalAnswer::parse).unwrap_or_default();
     let rejected = item.mcp_error().is_some_and(is_mcp_rejection);
     let status = match (item.status(), item.mcp_error()) {
         ("inProgress", _) => ToolStatus::Running,
         (_, Some(_)) if rejected => ToolStatus::Cancelled,
         (_, Some(_)) => ToolStatus::Error,
-        ("completed", None) => match parsed.as_ref().and_then(|parsed| parsed.exit_code) {
+        ("completed", None) => match answer.exit_code {
             Some(0) | None => ToolStatus::Success,
             Some(_) => ToolStatus::Error,
         },
@@ -223,44 +170,16 @@ fn terminal_mcp_card(item: &Item) -> (ToolStatus, Block) {
         // status: failed closed to error, never back to a spinner.
         _ => ToolStatus::Error,
     };
-    let verb = match status {
-        ToolStatus::Running => TERMINAL_RUNNING_VERB,
-        ToolStatus::Cancelled => "Denied",
-        _ => TERMINAL_RAN_VERB,
-    };
-    let tab = parsed.as_ref().and_then(|parsed| parsed.tab.clone());
-    let target = match tab {
-        Some(tab) if tab.trim() != command.trim() => format!("{command} · {tab}"),
-        _ => command,
-    };
-    let error_lines: Vec<String> = item
-        .mcp_error()
-        .map(|error| error.lines().map(str::to_owned).collect())
-        .unwrap_or_default();
-    let output_lines = match (&status, parsed.as_ref().and_then(|parsed| parsed.output_lines.clone())) {
+    let output_lines = match (&status, answer.output_lines) {
         (_, Some(lines)) => lines,
         (ToolStatus::Running, None) => Vec::new(),
-        (_, None) => text
-            .map(|text| text.lines().map(str::to_owned).collect())
-            .unwrap_or(error_lines),
+        (_, None) => text.as_deref().or(item.mcp_error()).map(split_lines).unwrap_or_default(),
     };
-    let exit_code = parsed.as_ref().and_then(|parsed| parsed.exit_code);
-    let duration_ms =
-        item.mcp_duration_ms().or_else(|| parsed.as_ref().and_then(|parsed| parsed.duration_ms));
-    let card = Block::ToolCall {
-        id: item.id().to_owned(),
-        kind: ToolKind::Shell,
-        verb: verb.into(),
-        target,
-        status,
-        duration_ms,
-        body: ToolBody::Shell { output_lines, exit_code, live: false },
-        diff_stat: None,
-    };
-    (status, card)
+    let duration_ms = item.mcp_duration_ms().or(answer.duration_ms);
+    let target = terminal_target(command, answer.tab.as_deref());
+    let card = terminal_event(item.id(), target, status, output_lines, answer.exit_code, duration_ms);
+    (status, card.block())
 }
-
-
 
 /// The `(server, tool)` an MCP tool-call elicitation gates, parsed out
 /// of Codex's own gate message: `Allow the <server> MCP server to run
@@ -282,17 +201,12 @@ fn parse_tool_gate(server_name: &str, message: &str) -> Option<(String, String)>
     Some((server.to_owned(), tool.to_owned()))
 }
 
-/// The model's command with the runner unwrapped: the server wraps what
-/// the model asked for in `<shell> -c '<inner>'` (single- or
-/// double-quoted), and the card titles the inner command — the wrapper
-/// is how it ran, not what was asked. Unwraps one layer only; anything
-/// else renders verbatim, and the full wrapper stays in the fixture.
 /// One `commandExecution` item as its shell card, shared by the running
 /// card `item/started` opens and the update its completion lands in
 /// place: the same status, verb, exit and body either way, so a command
 /// never renders as two different cards. `live` reads running — the pill
 /// and the elapsed belong to the open execution, never the finished one.
-fn command_execution_block(item: &Item) -> (Block, ToolStatus, Option<i32>) {
+fn command_execution_block(item: &Item) -> (ToolEvent, ToolStatus, Option<i32>) {
     // Every `CommandExecutionStatus` in the schema, named: the wire status
     // is a plain string, so a future CLI version can send a fifth value
     // no arm names — that unknown fails closed to `Error`, never back to
@@ -305,13 +219,6 @@ fn command_execution_block(item: &Item) -> (Block, ToolStatus, Option<i32>) {
         ("declined", _) => ToolStatus::Cancelled,
         (_unknown, _) => ToolStatus::Error,
     };
-    // A still-open execution reads pending; only a finished one reads
-    // done, and a declined one reads denied.
-    let verb = match status {
-        ToolStatus::Running => "Run",
-        ToolStatus::Cancelled => "Denied",
-        _ => "Ran",
-    };
     let exit_code = item.exit_code().and_then(|code| i32::try_from(code).ok());
     // B12: the wire's own duration when reported, so the pill reads real
     // elapsed instead of a missing clock.
@@ -320,32 +227,14 @@ fn command_execution_block(item: &Item) -> (Block, ToolStatus, Option<i32>) {
     // `commandActions` — "Read notes.txt", "Searched for gamma" — never
     // a shell card for work that never shelled. Mixed commands stay
     // shell: one card per command.
-    if let Some(block) = read_search_block(item, status, duration_ms) {
-        return (block, status, exit_code);
+    if let Some(event) = read_search_block(item, status, duration_ms) {
+        return (event, status, exit_code);
     }
-    let block = Block::ToolCall {
-        id: item.id().to_owned(),
-        kind: ToolKind::Shell,
-        verb: verb.into(),
-        target: display_command(item.command()),
-        status,
-        duration_ms,
-        body: ToolBody::Shell {
-            output_lines: item
-                .aggregated_output()
-                .map(|output| output.lines().map(str::to_owned).collect::<Vec<_>>())
-                .unwrap_or_default(),
-            exit_code,
-            live: matches!(status, ToolStatus::Running),
-        },
-        diff_stat: None,
-    };
-    (block, status, exit_code)
-}
-
-/// B12: wall-clock milliseconds since `start`, saturating at `u64`.
-fn wall_ms_since(start: Instant) -> u64 {
-    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+    let output_lines = item.aggregated_output().map(split_lines).unwrap_or_default();
+    let event = ToolEvent::new(item.id(), ToolKind::Shell, display_command(item.command()), status)
+        .duration(duration_ms)
+        .body(ToolBody::Shell { output_lines, exit_code, live: matches!(status, ToolStatus::Running) });
+    (event, status, exit_code)
 }
 
 /// B12: a read-only `commandExecution` as a read/search card, from its
@@ -353,7 +242,7 @@ fn wall_ms_since(start: Instant) -> u64 {
 /// Anything else — mixed, unknown, action-less, or a failed or denied
 /// run — stays shell (`None`): a failure keeps its error card with the
 /// run's output, never a quiet label over lost stderr.
-fn read_search_block(item: &Item, status: ToolStatus, duration_ms: Option<u64>) -> Option<Block> {
+fn read_search_block(item: &Item, status: ToolStatus, duration_ms: Option<u64>) -> Option<ToolEvent> {
     if !matches!(status, ToolStatus::Success | ToolStatus::Running) {
         return None;
     }
@@ -370,16 +259,10 @@ fn read_search_block(item: &Item, status: ToolStatus, duration_ms: Option<u64>) 
             _ => return None,
         }
     }
-    let (kind, verb) = if searches == 0 && reads > 0 {
-        (ToolKind::Read, "Read")
-    } else if reads == 0 && searches > 0 {
-        let verb = match status {
-            ToolStatus::Running => "Search",
-            _ => "Searched",
-        };
-        (ToolKind::Search, verb)
-    } else {
-        return None;
+    let kind = match (reads, searches) {
+        (1.., 0) => ToolKind::Read,
+        (0, 1..) => ToolKind::Search,
+        _ => return None,
     };
     let non_empty = |field: &str| (!field.trim().is_empty()).then(|| field.to_owned());
     let target = if matches!(kind, ToolKind::Read) {
@@ -394,18 +277,14 @@ fn read_search_block(item: &Item, status: ToolStatus, duration_ms: Option<u64>) 
             .or_else(|| actions.iter().find_map(|action| non_empty(&action.path)))
     }
     .unwrap_or_else(|| display_command(item.command()));
-    Some(Block::ToolCall {
-        id: item.id().to_owned(),
-        kind,
-        verb: verb.into(),
-        target,
-        status,
-        duration_ms,
-        body: ToolBody::None,
-        diff_stat: None,
-    })
+    Some(ToolEvent::new(item.id(), kind, target, status).duration(duration_ms))
 }
 
+/// The model's command with the runner unwrapped: the server wraps what
+/// the model asked for in `<shell> -c '<inner>'` (single- or
+/// double-quoted), and the card titles the inner command — the wrapper
+/// is how it ran, not what was asked. Unwraps one layer only; anything
+/// else renders verbatim, and the full wrapper stays in the fixture.
 fn display_command(command: &str) -> String {
     let Some(arg) = shell_wrapper_arg(command) else { return command.to_owned() };
     // The wrapper takes exactly one argument: anything that is not one
@@ -508,100 +387,35 @@ fn parse_shell_word(input: &str) -> Option<(String, &str)> {
     Some((word, rest))
 }
 
-/// The `+N/−N` chip counts over one `fileChange` item's own change
-/// entries: `add` entries count their new-content lines; anything else
-/// counts unified-diff `+`/`-` lines (`+++`/`---` headers skipped).
-/// `files` is the entry count, never a line count.
-fn file_change_stat(changes: &[FileChangeEntry]) -> DiffStat {
-    let mut added: u64 = 0;
-    let mut removed: u64 = 0;
-    for change in changes {
-        if change.kind == "add" {
-            added += change.diff.lines().count() as u64;
-            continue;
-        }
-        for line in change.diff.lines() {
-            if let Some(rest) = line.strip_prefix('+') {
-                if !rest.starts_with('+') {
-                    added += 1;
-                }
-            } else if let Some(rest) = line.strip_prefix('-') {
-                if !rest.starts_with('-') {
-                    removed += 1;
-                }
-            }
-        }
-    }
-    DiffStat { added, removed, files: changes.len() as u64 }
+/// One display hunk per `fileChange` entry: `add` content as all-addition
+/// rows, unified diffs parsed into add/del/context rows (line numbers run
+/// from 1 within the entry — display order, not file offsets).
+fn file_change_hunks(changes: &[FileChangeEntry]) -> Vec<Hunk> {
+    changes
+        .iter()
+        .map(|change| Hunk {
+            header: format!("@@ {} @@", change.path),
+            lines: if change.kind == "add" {
+                diff::addition_lines(&change.diff)
+            } else {
+                diff::hunk_lines(change.diff.lines(), 1, 1, false)
+            },
+        })
+        .collect()
 }
 
-/// One display hunk per change entry: `add` content as all-addition
-/// rows, unified diffs parsed into add/del/context rows (line numbers
-/// run from 1 within the entry — display order, not file offsets).
+/// The `+N/−N` chip over one `fileChange` item's own change entries.
+/// `files` is the entry count, never a line count.
+fn file_change_stat(changes: &[FileChangeEntry]) -> DiffStat {
+    let hunks = file_change_hunks(changes);
+    diff::stat(hunks.iter().map(|hunk| hunk.lines.as_slice()), changes.len() as u64)
+}
+
+/// The `fileChange` item as one display diff (see [`file_change_hunks`]).
 fn file_change_diff(path: &str, changes: &[FileChangeEntry]) -> Diff {
-    let mut hunks = Vec::new();
-    let mut total_added: u32 = 0;
-    let mut total_removed: u32 = 0;
-    for change in changes {
-        let mut lines = Vec::new();
-        let mut new_no: u32 = 1;
-        let mut old_no: u32 = 1;
-        if change.kind == "add" {
-            for line in change.diff.lines() {
-                lines.push(DiffLine {
-                    kind: DiffKind::Add,
-                    old_no: None,
-                    new_no: Some(new_no),
-                    text: line.to_owned(),
-                });
-                new_no += 1;
-                total_added += 1;
-            }
-        } else {
-            for line in change.diff.lines() {
-                if let Some(rest) = line.strip_prefix('+') {
-                    if rest.starts_with('+') {
-                        continue;
-                    }
-                    lines.push(DiffLine {
-                        kind: DiffKind::Add,
-                        old_no: None,
-                        new_no: Some(new_no),
-                        text: rest.to_owned(),
-                    });
-                    new_no += 1;
-                    total_added += 1;
-                } else if let Some(rest) = line.strip_prefix('-') {
-                    if rest.starts_with('-') {
-                        continue;
-                    }
-                    lines.push(DiffLine {
-                        kind: DiffKind::Del,
-                        old_no: Some(old_no),
-                        new_no: None,
-                        text: rest.to_owned(),
-                    });
-                    old_no += 1;
-                    total_removed += 1;
-                } else {
-                    let text = line.strip_prefix(' ').unwrap_or(line);
-                    lines.push(DiffLine {
-                        kind: DiffKind::Context,
-                        old_no: Some(old_no),
-                        new_no: Some(new_no),
-                        text: text.to_owned(),
-                    });
-                    old_no += 1;
-                    new_no += 1;
-                }
-            }
-        }
-        hunks.push(Hunk {
-            header: format!("@@ {} @@", change.path),
-            lines,
-        });
-    }
-    Diff { path: path.to_owned(), hunks, added: total_added, removed: total_removed }
+    let hunks = file_change_hunks(changes);
+    let stat = diff::stat(hunks.iter().map(|hunk| hunk.lines.as_slice()), 0);
+    Diff { path: path.to_owned(), hunks, added: stat.added as u32, removed: stat.removed as u32 }
 }
 
 /// The most preview lines a `fileChange` approval card carries: one
@@ -610,21 +424,19 @@ fn file_change_diff(path: &str, changes: &[FileChangeEntry]) -> Diff {
 const FILE_CHANGE_APPROVAL_PREVIEW_LINES: usize = 40;
 
 /// The text preview of remembered `fileChange` changes for an approval
-/// card: first one `<path> (+A/−R)` stat line per file (via
-/// [`file_change_stat`]) — every path always listed, no matter how long
-/// the diff — then the diff rows as `+`/`-`/context text (via
-/// [`file_change_diff`]): the same numbers and rows the completing
+/// card: first one `<path> (+A/−R)` stat line per file — every path always
+/// listed, no matter how long the diff — then the diff rows as
+/// `+`/`-`/context text: the same numbers and rows the completing
 /// `ToolCall` card renders, flattened because [`Block::Approval`] has no
 /// structured diff field. The cap ([`FILE_CHANGE_APPROVAL_PREVIEW_LINES`]
 /// total lines) cuts diff rows only, folding the hidden ones into a
 /// "… N more lines" tail after the last kept row.
 fn file_change_approval_preview(changes: &[FileChangeEntry]) -> String {
-    let diff = file_change_diff("", changes);
     let mut lines = Vec::new();
     let mut body = Vec::new();
-    for (change, hunk) in changes.iter().zip(diff.hunks.iter()) {
-        let stat = file_change_stat(std::slice::from_ref(change));
-        lines.push(format!("{} (+{}/−{})", change.path, stat.added, stat.removed));
+    for (change, hunk) in changes.iter().zip(file_change_hunks(changes)) {
+        let (added, removed) = diff::counts(&hunk.lines);
+        lines.push(format!("{} (+{added}/−{removed})", change.path));
         for line in &hunk.lines {
             body.push(match line.kind {
                 DiffKind::Add => format!("+ {}", line.text),
@@ -641,194 +453,6 @@ fn file_change_approval_preview(changes: &[FileChangeEntry]) -> String {
     }
     lines.extend(body);
     lines.join("\n")
-}
-
-/// The money guard's feed: the latest `account/rateLimits/updated` push, kept
-/// beside the seam's account shape. The window lengths ride along with the
-/// percents so the usage card can label each window from its length.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct AccountSnapshot {
-    /// Primary window usage percent, when reported.
-    pub used_percent: Option<u64>,
-    /// Primary window length in minutes, when reported.
-    pub primary_minutes: Option<u64>,
-    /// Plan name (`prolite`, …), when reported.
-    pub plan: Option<String>,
-    /// Unix time the window resets, when reported.
-    pub resets_at: Option<u64>,
-    /// Secondary window usage percent, when reported.
-    pub secondary_used_percent: Option<u64>,
-    /// Secondary window length in minutes, when reported.
-    pub secondary_minutes: Option<u64>,
-    /// Unix time the secondary window resets, when reported.
-    pub secondary_resets_at: Option<u64>,
-    /// Unix time the latest push or read arrived on the wire. Stamped when
-    /// the fold observes it, so the store persists the reading with its
-    /// true age instead of the next turn's time.
-    pub observed_at: Option<i64>,
-}
-
-/// Unix seconds now. Best-effort: zero when the clock is unavailable.
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-impl AccountSnapshot {
-    /// Record a push. Unknown fields are ignored; a push that names no
-    /// window at all still counts as "a reading was seen". Accepts either
-    /// the push params (`{rateLimits: …}`) or the bare limits object the
-    /// `account/rateLimits/read` answer carries — same object, either
-    /// wrapping. Stamps when the reading arrived on the wire.
-    pub fn observe(&mut self, params: &Value) {
-        let limits = params.get("rateLimits").unwrap_or(params);
-        let primary = limits.get("primary");
-        if let Some(used) =
-            primary.and_then(|primary| primary.get("usedPercent")).and_then(Value::as_u64)
-        {
-            self.used_percent = Some(used);
-        }
-        if let Some(minutes) = primary
-            .and_then(|primary| primary.get("windowDurationMins"))
-            .and_then(Value::as_u64)
-        {
-            self.primary_minutes = Some(minutes);
-        }
-        if let Some(plan) = limits.get("planType").and_then(Value::as_str) {
-            self.plan = Some(plan.to_owned());
-        }
-        if let Some(resets) = primary
-            .and_then(|primary| primary.get("resetsAt"))
-            .and_then(Value::as_u64)
-        {
-            self.resets_at = Some(resets);
-        }
-        let secondary = limits.get("secondary");
-        if let Some(used) =
-            secondary.and_then(|secondary| secondary.get("usedPercent")).and_then(Value::as_u64)
-        {
-            self.secondary_used_percent = Some(used);
-        }
-        if let Some(minutes) = secondary
-            .and_then(|secondary| secondary.get("windowDurationMins"))
-            .and_then(Value::as_u64)
-        {
-            self.secondary_minutes = Some(minutes);
-        }
-        if let Some(resets) = secondary
-            .and_then(|secondary| secondary.get("resetsAt"))
-            .and_then(Value::as_u64)
-        {
-            self.secondary_resets_at = Some(resets);
-        }
-        self.observed_at = Some(now_secs());
-    }
-
-    /// Pin the wire-arrival stamp (tests drive the clock through this).
-    #[cfg(test)]
-    pub fn set_observed_at(&mut self, at: i64) {
-        self.observed_at = Some(at);
-    }
-
-    /// The structured usage reading for the seam: the plan plus one window
-    /// per reported percent, labelled from each window's length. `None`
-    /// until a push or a rate-limits read has been seen.
-    pub fn usage_report(&self) -> Option<provider::UsageReport> {
-        if !self.has_reading() {
-            return None;
-        }
-        let mut windows = Vec::new();
-        if let Some(used) = self.used_percent {
-            windows.push(provider::UsageWindow {
-                label: self
-                    .primary_minutes
-                    .map(provider::window_label)
-                    .unwrap_or_else(|| "Primary".into()),
-                used_fraction: (used as f64 / 100.0).clamp(0.0, 1.0),
-                resets_at: self.resets_at.map(|resets| resets as i64),
-                window_minutes: self.primary_minutes,
-            });
-        }
-        if let Some(used) = self.secondary_used_percent {
-            windows.push(provider::UsageWindow {
-                label: self
-                    .secondary_minutes
-                    .map(provider::window_label)
-                    .unwrap_or_else(|| "Secondary".into()),
-                used_fraction: (used as f64 / 100.0).clamp(0.0, 1.0),
-                resets_at: self.secondary_resets_at.map(|resets| resets as i64),
-                window_minutes: self.secondary_minutes,
-            });
-        }
-        Some(provider::UsageReport {
-            plan: self.plan.clone(),
-            windows,
-            observed_at: self.observed_at,
-        })
-    }
-
-    /// Whether any push has been seen at all.
-    pub fn has_reading(&self) -> bool {
-        self.used_percent.is_some() || self.plan.is_some() || self.resets_at.is_some()
-    }
-
-    /// The display label for [`provider::Ack::Account`]. `None` until the
-    /// first push arrives.
-    pub fn label(&self) -> Option<String> {
-        if !self.has_reading() {
-            return None;
-        }
-        let plan = self.plan.as_deref().unwrap_or("codex");
-        let mut label = match self.used_percent {
-            Some(used) => format!("Codex {plan} {used}%"),
-            None => format!("Codex {plan}"),
-        };
-        if let Some(resets) = self.resets_at {
-            label.push_str(&format!(" (resets {resets})"));
-        }
-        Some(label)
-    }
-}
-
-/// The wire's plan step status vocabulary onto the transcript's: the
-/// same mapping Claude Code's TodoWrite uses, so both providers render
-/// one plan/todo block shape.
-fn map_plan_state(status: &str) -> TodoState {
-    match status {
-        "inProgress" => TodoState::Running,
-        "completed" => TodoState::Done,
-        _ => TodoState::Pending,
-    }
-}
-
-/// Where a pending approval card lives, carrying its own pending face so
-/// the item's completion can settle it without rebuilding anything.
-#[derive(Clone, Debug)]
-struct CodexApprovalSite {
-    /// The turn hosting the card.
-    turn_id: String,
-    /// The card's block index in that turn, for wholesale updates.
-    block_index: usize,
-    /// The pending card itself: the completion only flips its state.
-    card: Block,
-}
-
-/// Where a live `commandExecution` card lives: `item/started` cards it as
-/// running, and the completion updates that same card in place — one card
-/// per command, running in between. The card itself rides along so a
-/// `turn/completed` that never got the item's completion can still settle
-/// it in place instead of leaving it spinning.
-#[derive(Clone, Debug)]
-struct CommandSite {
-    /// The turn hosting the card.
-    turn_id: String,
-    /// The card's block index in that turn, for the in-place update.
-    block_index: usize,
-    /// The running card as `item/started` opened it: the turn-end settle
-    /// flips this to its terminal face.
-    card: Block,
 }
 
 /// A pending MCP tool-call elicitation's card, keyed by the gated call's
@@ -863,80 +487,25 @@ impl PersonDecision {
     }
 }
 
-/// The three answers an MCP tool-call elicitation takes — allow once,
-/// deny, deny and stop. The ids ride `DecideApproval` verbatim: the
-/// adapter answers exactly these three on the elicitation lane, so the
-/// card declares exactly these three. There is deliberately no
-/// allow-for-session: the elicitation response schema admits no scope,
-/// and a card must never offer what the wire cannot carry.
-fn elicitation_choices() -> Vec<ApprovalChoice> {
-    vec![
-        ApprovalChoice {
-            id: "accept".into(),
-            label: "Allow once".into(),
-            decision: ApprovalDecision::Once,
-            scope: ApprovalScope::ThisCommand,
-            rule_preview: None,
-            accepts_feedback: false,
-        },
-        ApprovalChoice {
-            id: "decline".into(),
-            label: "Deny".into(),
-            decision: ApprovalDecision::Deny,
-            scope: ApprovalScope::ThisCommand,
-            rule_preview: None,
-            accepts_feedback: false,
-        },
-        ApprovalChoice {
-            id: "cancel".into(),
-            label: "Deny and stop".into(),
-            decision: ApprovalDecision::Abort,
-            scope: ApprovalScope::ThisCommand,
-            rule_preview: None,
-            accepts_feedback: false,
-        },
-    ]
-}
-
-/// The four plain decision tokens the command and file-change lanes
-/// answer — allow once, allow for this session, deny, deny and stop.
-/// The ids ride `DecideApproval` verbatim: the adapter answers exactly
-/// these four on both lanes, so the card declares exactly these four.
-fn codex_choices() -> Vec<ApprovalChoice> {
-    vec![
-        ApprovalChoice {
-            id: "accept".into(),
-            label: "Allow once".into(),
-            decision: ApprovalDecision::Once,
-            scope: ApprovalScope::ThisCommand,
-            rule_preview: None,
-            accepts_feedback: false,
-        },
-        ApprovalChoice {
-            id: "accept-for-session".into(),
-            label: "Allow for this session".into(),
-            decision: ApprovalDecision::ApprovedForSession,
-            scope: ApprovalScope::ThisSession,
-            rule_preview: None,
-            accepts_feedback: false,
-        },
-        ApprovalChoice {
-            id: "decline".into(),
-            label: "Deny".into(),
-            decision: ApprovalDecision::Deny,
-            scope: ApprovalScope::ThisCommand,
-            rule_preview: None,
-            accepts_feedback: false,
-        },
-        ApprovalChoice {
-            id: "cancel".into(),
-            label: "Deny and stop".into(),
-            decision: ApprovalDecision::Abort,
-            scope: ApprovalScope::ThisCommand,
-            rule_preview: None,
-            accepts_feedback: false,
-        },
-    ]
+/// The answers an MCP tool-call elicitation takes — allow once, deny, deny
+/// and stop — and, with `for_session`, the command and file-change lanes'
+/// fourth: allow for this session. The ids ride `DecideApproval` verbatim:
+/// the adapter answers exactly these on each lane, so the card declares
+/// exactly these. The elicitation response schema admits no scope, and a
+/// card must never offer what the wire cannot carry.
+fn codex_choices(for_session: bool) -> Vec<aui_protocol::ApprovalChoice> {
+    let mut choices = vec![choice("accept", "Allow once", ApprovalDecision::Once, ApprovalScope::ThisCommand)];
+    if for_session {
+        choices.push(choice(
+            "accept-for-session",
+            "Allow for this session",
+            ApprovalDecision::ApprovedForSession,
+            ApprovalScope::ThisSession,
+        ));
+    }
+    choices.push(choice("decline", "Deny", ApprovalDecision::Deny, ApprovalScope::ThisCommand));
+    choices.push(choice("cancel", "Deny and stop", ApprovalDecision::Abort, ApprovalScope::ThisCommand));
+    choices
 }
 
 /// The card kind that closes a turn whose `codex app-server` died under it
@@ -951,12 +520,27 @@ const CODEX_WITHDREW: &str = "Codex withdrew it";
 /// Why an unanswered card of a stopped turn reads "Not run — …".
 const TURN_STOPPED: &str = "Turn stopped";
 
+/// The key the turn's plan card is filed under.
+fn plan_key(turn_id: &str) -> String {
+    format!("plan:{turn_id}")
+}
+
+/// How a card nobody can answer any more settles: `Denied` only when
+/// the person pressed decline (or deny-and-stop) on it; otherwise
+/// `Cancelled` with `reason` — the ask was abandoned, not refused.
+fn abandoned_state(pressed: &HashMap<String, PersonDecision>, approval_id: &str, reason: &str) -> ApprovalState {
+    let refused = matches!(pressed.get(approval_id), Some(PersonDecision::Decline | PersonDecision::Cancel));
+    approval::abandoned(refused, reason)
+}
+
 /// The fold: decoded frames in, [`Delta`]s out.
 ///
-/// Stateful only where the wire is relational: turn id → started turn (many
-/// items share one turn), `(thread_id, turn_id)` → per-turn tokens (usage
-/// arrives on its own notification, after the text), and the server-minted
-/// session mapping.
+/// Stateful only where the wire is relational: `(thread_id, turn_id)` →
+/// per-turn tokens (usage arrives on its own notification, after the
+/// text), the joins approvals settle through, the server-minted session
+/// mapping. Where a card sits is the [`TranscriptBuilder`]'s business: the
+/// fold names cards by item id (`tool:<item>`, `approval:<item>`,
+/// `plan:<turn>`).
 #[derive(Clone, Debug, Default)]
 pub struct CodexFold {
     session_id: Option<String>,
@@ -965,21 +549,14 @@ pub struct CodexFold {
     /// The approval mode last reported or picked, when known: what a new
     /// report is compared against, so only a move is announced.
     permission_mode: Option<PermissionMode>,
-    assistant_started: HashSet<String>,
-    /// Blocks added per turn, in order: the index a later `turn/plan/updated`
-    /// rewrites wholesale (replace, never append).
-    turn_blocks: HashMap<String, usize>,
-    /// Turn id → the block index its plan card was added at, while the
-    /// turn is open. One card per turn no matter how many updates refine
-    /// it — the same shape Claude Code's TodoWrite produces.
-    plan_cards: HashMap<String, usize>,
+    /// The transcript: positions, open cards, open approvals.
+    builder: TranscriptBuilder,
     /// The fallback lane: streamed `item/agentMessage/delta` text per
     /// `(turn_id, item_id)`, in first-seen order. Dropped when an
     /// `item/completed` closes the item; flushed at `turn/completed` when
     /// the turn was interrupted before any completed frame arrived.
     delta_text: HashMap<(String, String), String>,
     delta_order: Vec<(String, String)>,
-    user_started: HashSet<String>,
     /// Full submitted text → the bubble text (`SubmitInput.display_text`):
     /// the provider echoes the whole input, so the user turn shows the
     /// short text instead. Recorded before `turn/start` is written, so an
@@ -1004,24 +581,13 @@ pub struct CodexFold {
     /// History turn ids already folded from a `thread/resume` response, so
     /// a second resume folds nothing twice. Live turns never land here —
     /// a resumed turn is completed, and the server never re-emits it.
-    resumed_turns: HashSet<String>,
-    /// Wire item id → where its pending approval card lives, so the
-    /// item's own completion can settle the card: allowed when the item
-    /// ran, denied when it completed declined. Deciding queues the
-    /// answer through `DecideApproval`; only the completing item moves
-    /// the card — never the press.
-    approval_sites: HashMap<String, CodexApprovalSite>,
+    resumed_turns: std::collections::HashSet<String>,
     /// Wire item id → the `fileChange` item's `changes` as its
     /// `item/started` reported them. The `item/fileChange/requestApproval`
     /// names no path and no diff — both ride the item — so the approval
     /// reads this back to face its card with the paths and a bounded
-    /// diff preview. Dropped when the item completes.
+    /// diff preview. Dropped when the item completes; bounded at 64.
     file_changes: HashMap<String, Vec<FileChangeEntry>>,
-    /// Wire item id → the live `commandExecution` card `item/started`
-    /// opened, so the completion updates it in place instead of adding a
-    /// second card. Dropped when the item completes; bounded like
-    /// `file_changes`, and past the bound completions push as before.
-    running_commands: HashMap<String, CommandSite>,
     /// `(turn, server, tool)` → the pending MCP tool-call elicitation
     /// gating that call (its card's approval id). The elicitation names
     /// no item id, so this is the join its `mcpToolCall` item settles
@@ -1045,15 +611,15 @@ pub struct CodexFold {
     /// there and the request itself names none.
     workspace: Option<String>,
     /// B12: reasoning item id → when its `item/started` arrived: the
-    /// arrival clock for traces the wire never times. Bounded like
-    /// `running_commands`; dropped when the item completes.
+    /// arrival clock for traces the wire never times. Bounded at 64;
+    /// dropped when the item completes.
     reasoning_started: HashMap<String, Instant>,
 }
 
 impl CodexFold {
     /// An empty fold.
     pub fn new() -> Self {
-        Self::default()
+        Self { builder: TranscriptBuilder::new(Provider::Codex), ..Self::default() }
     }
 
     /// The server-minted session id, once `thread/started` has been seen.
@@ -1078,32 +644,31 @@ impl CodexFold {
 
     /// The child died (docs/71 §2): settle every approval card it raised as
     /// cancelled ("Not run — Codex stopped"; `Denied` only where the person
-    /// pressed decline) — nothing will ever answer them — and close the turn it was
-    /// running with a [`CHILD_EXITED_CARD`] naming `reason`, the way an
-    /// interrupted `turn/completed` would. Nothing open folds to nothing.
+    /// pressed decline) — nothing will ever answer them — and close the turn
+    /// it was running with a [`CHILD_EXITED_CARD`] naming `reason`, the way
+    /// an interrupted `turn/completed` would. Nothing open folds to nothing.
     pub fn abandon_live_turn(&mut self, reason: &str) -> Vec<Delta> {
-        let mut deltas = Vec::new();
-        let carded: Vec<String> = self.approval_sites.keys().cloned().collect();
-        for item_id in carded {
-            let state = self.abandoned_state(&item_id, CODEX_STOPPED);
-            self.resolve_approval(&item_id, state, &mut deltas);
+        let turn_id = self.live_turn.take();
+        if let Some(turn_id) = &turn_id {
+            self.builder.open_turn(turn_id, None);
         }
+        let settled = self.builder.open_approvals().to_vec();
+        let pressed = &self.pressed;
+        self.builder.abandon(turn_id.as_deref(), CHILD_EXITED_CARD, reason, |id| {
+            abandoned_state(pressed, id, CODEX_STOPPED)
+        });
+        self.pressed.retain(|id, _| !settled.contains(id));
         self.elicitation_sites.clear();
-        let Some(turn_id) = self.live_turn.take() else { return deltas };
-        self.ensure_assistant(&turn_id, &mut deltas);
-        self.push_block(
-            &turn_id,
-            Block::Generic { kind: CHILD_EXITED_CARD.into(), status: "error".into(), text: reason.to_owned() },
-            &mut deltas,
-        );
-        let thread_id = self.thread_id.clone().unwrap_or_default();
-        deltas.extend(self.finish_turn(&Notification::TurnCompleted {
-            thread_id,
-            turn_id,
-            status: "interrupted".into(),
-            duration_ms: 0,
-        }));
-        deltas
+        if let Some(turn_id) = turn_id {
+            let thread_id = self.thread_id.clone().unwrap_or_default();
+            self.finish_turn(&Notification::TurnCompleted {
+                thread_id,
+                turn_id,
+                status: "interrupted".into(),
+                duration_ms: 0,
+            });
+        }
+        self.builder.take()
     }
 
     /// Remember the effective model (from `model/list` or the turn params):
@@ -1153,16 +718,6 @@ impl CodexFold {
         self.decisions.remove(approval_id);
     }
 
-    /// How a card nobody can answer any more settles: `Denied` only when
-    /// the person pressed decline (or deny-and-stop) on it; otherwise
-    /// `Cancelled` with `reason` — the ask was abandoned, not refused.
-    fn abandoned_state(&self, approval_id: &str, reason: &str) -> ApprovalState {
-        match self.pressed.get(approval_id) {
-            Some(PersonDecision::Decline) | Some(PersonDecision::Cancel) => ApprovalState::Denied,
-            _ => ApprovalState::Cancelled { reason: Some(reason.to_owned()) },
-        }
-    }
-
     /// Remember the bubble text for a submit carrying `display_text`.
     /// `turn_id` is the submit ack's turn — the join the submit creates;
     /// `full_text` is the model-visible input the echo carries back. An
@@ -1183,19 +738,6 @@ impl CodexFold {
         if self.display_by_text.len() < 64 {
             self.display_by_text.insert(full_text.to_owned(), display.to_owned());
         }
-    }
-
-    /// The bubble text for an echoed user turn, if a submit recorded one:
-    /// the turn join first, then the full input text.
-    fn display_text_for<'a>(
-        &'a self,
-        turn_id: Option<&'a str>,
-        full_text: &'a str,
-    ) -> Option<&'a str> {
-        turn_id
-            .and_then(|id| self.display_by_turn.get(id))
-            .or_else(|| self.display_by_text.get(full_text))
-            .map(String::as_str)
     }
 
     /// The turn's own figure for `(thread_id, turn_id)`: the thread total
@@ -1232,34 +774,26 @@ impl CodexFold {
     /// Call with the adapter's model already set ([`Self::set_model`]):
     /// the finish footer reads it.
     pub fn apply_resume_turns(&mut self, thread_id: &str, turns: &[Value]) -> Vec<Delta> {
-        let mut deltas = Vec::new();
         for turn in turns {
-            let turn_id =
-                turn.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+            let turn_id = turn.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
             if turn_id.is_empty() || !self.resumed_turns.insert(turn_id.clone()) {
                 continue;
             }
-            let items = turn.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
-            for item in &items {
-                let item = decode_thread_item(item);
-                deltas.extend(self.apply(&Frame::Notification(Notification::ItemCompleted {
+            for item in turn.get("items").and_then(Value::as_array).into_iter().flatten() {
+                self.apply_notification(&Notification::ItemCompleted {
                     thread_id: thread_id.to_owned(),
                     turn_id: turn_id.clone(),
-                    item,
-                })));
+                    item: decode_thread_item(item),
+                });
             }
-            deltas.extend(self.apply(&Frame::Notification(Notification::TurnCompleted {
+            self.apply_notification(&Notification::TurnCompleted {
                 thread_id: thread_id.to_owned(),
                 turn_id: turn_id.clone(),
-                status: turn
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("completed")
-                    .to_owned(),
+                status: turn.get("status").and_then(Value::as_str).unwrap_or("completed").to_owned(),
                 duration_ms: turn.get("durationMs").and_then(Value::as_u64).unwrap_or(0),
-            })));
+            });
         }
-        deltas
+        self.builder.take()
     }
 
     /// Fold one decoded frame into render-ready deltas. Notifications
@@ -1270,9 +804,16 @@ impl CodexFold {
     pub fn apply(&mut self, frame: &Frame) -> Vec<Delta> {
         match frame {
             Frame::Notification(notification) => self.apply_notification(notification),
-            Frame::Request { id, method, params } => self.apply_request(method, params, id),
-            Frame::Response { .. } | Frame::ResponseError { .. } => Vec::new(),
+            Frame::Request { id, method, params } => self.request(method, params, id),
+            Frame::Response { .. } | Frame::ResponseError { .. } => {}
         }
+        self.builder.take()
+    }
+
+    /// Fold one server request (see [`Self::request`]) into its deltas.
+    pub fn apply_request(&mut self, method: &str, params: &Value, id: &Value) -> Vec<Delta> {
+        self.request(method, params, id);
+        self.builder.take()
     }
 
     /// Fold one server approval request into its pending approval card.
@@ -1281,12 +822,12 @@ impl CodexFold {
     /// `mcp_tool_call` elicitation cards the same inline approval every
     /// other gate gets; any other elicitation cards nothing — it stays a
     /// question on the answerable surface, never a forged approval.
-    pub fn apply_request(&mut self, method: &str, params: &Value, id: &Value) -> Vec<Delta> {
+    fn request(&mut self, method: &str, params: &Value, id: &Value) {
         if method == "mcpServer/elicitation/request" {
             if elicitation_is_tool_approval(params) {
-                return self.apply_mcp_elicitation(params, id);
+                self.apply_mcp_elicitation(params, id);
             }
-            return Vec::new();
+            return;
         }
         match ApprovalKind::from_method(method) {
             Some(ApprovalKind::Command) => self.apply_command_approval(params),
@@ -1295,42 +836,28 @@ impl CodexFold {
             Some(ApprovalKind::McpElicitation) | Some(ApprovalKind::Unknown) => {
                 self.apply_unknown_approval(method, params)
             }
-            None => Vec::new(),
+            None => {}
         }
     }
 
-    /// Card one approval request: ensure its turn, push the pending card,
-    /// and record the site its completing item settles. A repeat request
-    /// for an already-carded item cards nothing twice — the card moves
-    /// only on the item's completion, never on a re-request.
-    fn card_approval(&mut self, item_id: &str, turn_id: &str, card: Block, deltas: &mut Vec<Delta>) {
-        if item_id.is_empty() || self.approval_sites.contains_key(item_id) {
+    /// Card one approval request on its turn. A repeat request for an
+    /// already-carded item cards nothing twice — the card moves only on
+    /// the item's completion, never on a re-request.
+    fn card_approval(&mut self, turn_id: &str, card: Block) {
+        let Block::Approval { id, .. } = &card else { return };
+        if id.is_empty() || self.builder.approval_open(id) {
             return;
         }
-        self.ensure_assistant(turn_id, deltas);
-        let block_index = self.turn_blocks.get(turn_id).copied().unwrap_or(0);
-        self.push_block(turn_id, card.clone(), deltas);
-        self.approval_sites.insert(
-            item_id.to_owned(),
-            CodexApprovalSite { turn_id: turn_id.to_owned(), block_index, card },
-        );
+        self.builder.open_turn(turn_id, None);
+        self.builder.approval_raised(turn_id, card);
     }
 
     /// Settle one carded approval to its decided state: the only thing that
     /// ever moves the card after the press. A repeat resolution for an
     /// already-settled item is a no-op.
-    fn resolve_approval(&mut self, item_id: &str, state: ApprovalState, deltas: &mut Vec<Delta>) {
+    fn resolve_approval(&mut self, item_id: &str, state: ApprovalState) {
         self.pressed.remove(item_id);
-        let Some(site) = self.approval_sites.remove(item_id) else { return };
-        let mut card = site.card;
-        if let Block::Approval { state: slot, .. } = &mut card {
-            *slot = state;
-        }
-        deltas.push(Delta::BlockUpdated {
-            turn_id: site.turn_id,
-            block_index: site.block_index,
-            block: card,
-        });
+        self.builder.approval_resolved(item_id, state);
     }
 
     /// The owning turn of an approval request: the request's own turn, else
@@ -1346,41 +873,23 @@ impl CodexFold {
 
     /// `item/commandExecution/requestApproval`: the command with its cwd
     /// and the model's reason — the command card's face, never raw JSON.
-    fn apply_command_approval(&mut self, params: &Value) -> Vec<Delta> {
-        let mut deltas = Vec::new();
-        let item_id = params.get("itemId").and_then(Value::as_str).unwrap_or_default();
-        let Some(turn_id) = self.approval_turn(params) else { return deltas };
-        let command = params.get("command").and_then(Value::as_str).unwrap_or_default();
-        let target =
-            if command.trim().is_empty() { "a command".to_owned() } else { display_command(command) };
-        let cwd = params.get("cwd").and_then(Value::as_str).unwrap_or_default().to_owned();
-        let reason = params.get("reason").and_then(Value::as_str).unwrap_or_default();
-        let reason =
-            if reason.trim().is_empty() { "The model did not say why.".to_owned() } else { reason.to_owned() };
-        self.card_approval(
-            item_id,
-            &turn_id,
-            Block::Approval {
-                id: item_id.to_owned(),
-                tool: "Bash".to_owned(),
-                command: target,
-                reason,
-                cwd,
-                capabilities: Vec::new(),
-                scope: ApprovalScope::ThisCommand,
-                body_kind: ApprovalBodyKind::Command,
-                state: ApprovalState::Pending,
-                rule: None,
-                choices: codex_choices(),
-                stages: Vec::new(),
-                current_stage: None,
-                badges: ApprovalBadges::default(),
-                feedback: None,
-                resolved_by: None,
-            },
-            &mut deltas,
+    fn apply_command_approval(&mut self, params: &Value) {
+        let field = |key: &str| params.get(key).and_then(Value::as_str).unwrap_or_default();
+        let Some(turn_id) = self.approval_turn(params) else { return };
+        let command = field("command");
+        let target = if command.trim().is_empty() { "a command".to_owned() } else { display_command(command) };
+        let reason = field("reason");
+        let reason = if reason.trim().is_empty() { "The model did not say why." } else { reason };
+        let card = approval::card(
+            field("itemId"),
+            "Bash",
+            target,
+            reason,
+            field("cwd"),
+            ApprovalBodyKind::Command,
+            codex_choices(true),
         );
-        deltas
+        self.card_approval(&turn_id, card);
     }
 
     /// `item/fileChange/requestApproval`: the request itself names no path
@@ -1390,86 +899,43 @@ impl CodexFold {
     /// reason when it gave one, then the per-file stat and a bounded
     /// diff preview. An ask for an item never seen keeps the honest
     /// text: the reason, or that the model said nothing.
-    fn apply_file_change_approval(&mut self, params: &Value) -> Vec<Delta> {
-        let mut deltas = Vec::new();
+    fn apply_file_change_approval(&mut self, params: &Value) {
         let decoded = FileChangeApprovalParams::decode(params);
-        let Some(turn_id) = self.approval_turn(params) else { return deltas };
+        let Some(turn_id) = self.approval_turn(params) else { return };
+        let field = |key: &str| params.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
         let (item_id, reason) = match &decoded {
-            Some(decoded) => (
-                decoded.item_id.clone(),
-                decoded.reason.clone().unwrap_or_default(),
-            ),
-            None => (
-                params.get("itemId").and_then(Value::as_str).unwrap_or_default().to_owned(),
-                params.get("reason").and_then(Value::as_str).unwrap_or_default().to_owned(),
-            ),
+            Some(decoded) => (decoded.item_id.clone(), decoded.reason.clone().unwrap_or_default()),
+            None => (field("itemId"), field("reason")),
         };
-        let grant = decoded
-            .as_ref()
-            .and_then(|decoded| decoded.grant_root.clone())
-            .unwrap_or_default();
-        let remembered =
-            self.file_changes.get(&item_id).filter(|changes| !changes.is_empty()).cloned();
+        let grant = decoded.as_ref().and_then(|decoded| decoded.grant_root.clone()).unwrap_or_default();
+        let grant = grant.trim();
+        let remembered = self.file_changes.get(&item_id).filter(|changes| !changes.is_empty()).cloned();
         let (command, reason) = match remembered {
             Some(changes) => {
-                let command = if changes.len() == 1 {
-                    changes[0].path.clone()
-                } else {
-                    format!("{} files", changes.len())
-                };
+                let command =
+                    if changes.len() == 1 { changes[0].path.clone() } else { format!("{} files", changes.len()) };
                 let mut parts = Vec::new();
-                if reason.trim().is_empty() {
-                    if !grant.trim().is_empty() {
-                        parts.push(format!("Write access under {}", grant.trim()));
-                    }
-                } else {
+                if !reason.trim().is_empty() {
                     parts.push(reason);
+                } else if !grant.is_empty() {
+                    parts.push(format!("Write access under {grant}"));
                 }
                 parts.push(file_change_approval_preview(&changes));
                 (command, parts.join("\n"))
             }
             None => {
-                let command = if grant.trim().is_empty() {
-                    "File change".to_owned()
-                } else {
-                    grant.trim().to_owned()
-                };
-                let reason = if reason.trim().is_empty() {
-                    if grant.trim().is_empty() {
-                        "The model did not say why.".to_owned()
-                    } else {
-                        format!("Write access under {}", grant.trim())
-                    }
-                } else {
-                    reason
+                let command = if grant.is_empty() { "File change".to_owned() } else { grant.to_owned() };
+                let reason = match (reason.trim().is_empty(), grant.is_empty()) {
+                    (false, _) => reason,
+                    (true, true) => "The model did not say why.".to_owned(),
+                    (true, false) => format!("Write access under {grant}"),
                 };
                 (command, reason)
             }
         };
-        self.card_approval(
-            &item_id,
-            &turn_id,
-            Block::Approval {
-                id: item_id.clone(),
-                tool: "Edit".to_owned(),
-                command,
-                reason,
-                cwd: String::new(),
-                capabilities: Vec::new(),
-                scope: ApprovalScope::ThisCommand,
-                body_kind: ApprovalBodyKind::FileWrite,
-                state: ApprovalState::Pending,
-                rule: None,
-                choices: codex_choices(),
-                stages: Vec::new(),
-                current_stage: None,
-                badges: ApprovalBadges::default(),
-                feedback: None,
-                resolved_by: None,
-            },
-            &mut deltas,
-        );
-        deltas
+        let card =
+            approval::card(&item_id, "Edit", command, reason, "", ApprovalBodyKind::FileWrite, codex_choices(true));
+        self.card_approval(&turn_id, card);
     }
 
     /// `item/permissions/requestApproval`: the lane takes no `decision`
@@ -1477,18 +943,16 @@ impl CodexFold {
     /// grants the adapter can answer: what was requested, scoped to this
     /// turn or this session. The choice id IS the answer shape, riding
     /// `DecideApproval` verbatim.
-    fn apply_permissions_approval(&mut self, params: &Value) -> Vec<Delta> {
-        let mut deltas = Vec::new();
-        let Some(decoded) = PermissionsApprovalParams::decode(params) else { return deltas };
-        let Some(turn_id) = self.approval_turn(params) else { return deltas };
+    fn apply_permissions_approval(&mut self, params: &Value) {
+        let Some(decoded) = PermissionsApprovalParams::decode(params) else { return };
+        let Some(turn_id) = self.approval_turn(params) else { return };
         let mut lines = Vec::new();
         if let Some(reason) = decoded.reason.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             lines.push(reason.to_owned());
         }
         lines.push(format!("Applies to {}", decoded.cwd));
         if let Some(object) = decoded.permissions.as_object() {
-            let mut keys: Vec<&str> =
-                object.keys().take(5).map(String::as_str).collect();
+            let mut keys: Vec<&str> = object.keys().take(5).map(String::as_str).collect();
             if object.len() > keys.len() {
                 keys.push("…");
             }
@@ -1497,53 +961,27 @@ impl CodexFold {
             }
         }
         let grant = |scope: &str| {
-            serde_json::json!({
-                "permissions": decoded.permissions,
-                "scope": scope,
-            })
-            .to_string()
+            serde_json::json!({ "permissions": decoded.permissions, "scope": scope }).to_string()
         };
-        self.card_approval(
+        let choices = vec![
+            choice(grant("turn"), "Allow for this turn", ApprovalDecision::Once, ApprovalScope::ThisCommand),
+            choice(
+                grant("session"),
+                "Allow for this session",
+                ApprovalDecision::ApprovedForSession,
+                ApprovalScope::ThisSession,
+            ),
+        ];
+        let card = approval::card(
             &decoded.item_id,
-            &turn_id,
-            Block::Approval {
-                id: decoded.item_id.clone(),
-                tool: "Permissions".to_owned(),
-                command: "Permissions grant".to_owned(),
-                reason: lines.join("\n"),
-                cwd: decoded.cwd.clone(),
-                capabilities: Vec::new(),
-                scope: ApprovalScope::ThisCommand,
-                body_kind: ApprovalBodyKind::Other,
-                state: ApprovalState::Pending,
-                rule: None,
-                choices: vec![
-                    ApprovalChoice {
-                        id: grant("turn"),
-                        label: "Allow for this turn".into(),
-                        decision: ApprovalDecision::Once,
-                        scope: ApprovalScope::ThisCommand,
-                        rule_preview: None,
-                        accepts_feedback: false,
-                    },
-                    ApprovalChoice {
-                        id: grant("session"),
-                        label: "Allow for this session".into(),
-                        decision: ApprovalDecision::ApprovedForSession,
-                        scope: ApprovalScope::ThisSession,
-                        rule_preview: None,
-                        accepts_feedback: false,
-                    },
-                ],
-                stages: Vec::new(),
-                current_stage: None,
-                badges: ApprovalBadges::default(),
-                feedback: None,
-                resolved_by: None,
-            },
-            &mut deltas,
+            "Permissions",
+            "Permissions grant",
+            lines.join("\n"),
+            decoded.cwd.clone(),
+            ApprovalBodyKind::Other,
+            choices,
         );
-        deltas
+        self.card_approval(&turn_id, card);
     }
 
     /// An `mcp_tool_call` elicitation: the gate Codex puts in front of the
@@ -1554,32 +992,21 @@ impl CodexFold {
     /// ran, denied when the call reports it rejected. The approval id is
     /// the pump's prefixed elicitation id, so the press routes back
     /// through the adapter to this exact server request.
-    fn apply_mcp_elicitation(&mut self, params: &Value, id: &Value) -> Vec<Delta> {
-        let mut deltas = Vec::new();
-        let Some(turn_id) = self.approval_turn(params) else { return deltas };
+    fn apply_mcp_elicitation(&mut self, params: &Value, id: &Value) {
+        let Some(turn_id) = self.approval_turn(params) else { return };
         let approval_id = format!("{MCP_ELICITATION_ID_PREFIX}{id}");
         let server = params.get("serverName").and_then(Value::as_str).unwrap_or_default();
         let message = params.get("message").and_then(Value::as_str).unwrap_or_default();
         let meta = params.get("_meta");
-        let tool_params =
-            meta.and_then(|meta| meta.get("tool_params")).filter(|params| params.is_object());
+        let tool_params = meta.and_then(|meta| meta.get("tool_params")).filter(|params| params.is_object());
         let (gated_server, gated_tool) =
             parse_tool_gate(server, message).unwrap_or((server.to_owned(), String::new()));
         // The terminal face needs the bare tool name: it is what the
         // approval title reads for its verb. Anything else rides
         // server-qualified, so the card never invents a tool it was not
         // told.
-        let terminal =
-            gated_server == crate::terminal::SERVER_NAME && is_terminal_tool(&gated_tool);
-        let tool = if terminal {
-            gated_tool.clone()
-        } else if gated_tool.is_empty() {
-            if server.is_empty() { "MCP tool".to_owned() } else { server.to_owned() }
-        } else if server.is_empty() {
-            gated_tool.clone()
-        } else {
-            format!("{server}/{gated_tool}")
-        };
+        let terminal = gated_server == crate::terminal::SERVER_NAME && is_terminal_tool(&gated_tool);
+        let tool = if terminal { gated_tool.clone() } else { mcp_card_kind(server, &gated_tool) };
         let command = tool_params
             .and_then(|params| params.get("command"))
             .and_then(Value::as_str)
@@ -1595,43 +1022,20 @@ impl CodexFold {
             .and_then(|meta| meta.get("tool_description"))
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|description| !description.is_empty())
-            .filter(|description| *description != message);
+            .filter(|description| !description.is_empty() && *description != message);
         if let Some(description) = description {
             reason.push('\n');
             reason.push_str(description);
         }
-        self.card_approval(
-            &approval_id,
-            &turn_id,
-            Block::Approval {
-                id: approval_id.clone(),
-                tool,
-                command,
-                reason,
-                cwd: self.workspace.clone().unwrap_or_default(),
-                capabilities: Vec::new(),
-                scope: ApprovalScope::ThisCommand,
-                body_kind: ApprovalBodyKind::Other,
-                state: ApprovalState::Pending,
-                rule: None,
-                choices: elicitation_choices(),
-                stages: Vec::new(),
-                current_stage: None,
-                badges: ApprovalBadges::default(),
-                feedback: None,
-                resolved_by: None,
-            },
-            &mut deltas,
-        );
+        let cwd = self.workspace.clone().unwrap_or_default();
+        let card =
+            approval::card(&approval_id, &tool, command, reason, cwd, ApprovalBodyKind::Other, codex_choices(false));
+        self.card_approval(&turn_id, card);
         // The join its item settles through: first pending elicitation
         // for the triple wins, and a repeat request for an already-carded
         // id keeps the first — the card moves only on the item's
         // completion, never on a re-request.
-        self.elicitation_sites
-            .entry((turn_id, gated_server, gated_tool))
-            .or_insert(approval_id);
-        deltas
+        self.elicitation_sites.entry((turn_id, gated_server, gated_tool)).or_insert(approval_id);
     }
 
     /// Settle one pending MCP tool-call elicitation from the person's
@@ -1644,29 +1048,17 @@ impl CodexFold {
     /// elicitation indexed; a call whose triple names nothing pending
     /// settles the turn's oldest instead, so a gate the message parse
     /// could not name still clears.
-    fn settle_mcp_elicitation(
-        &mut self,
-        turn_id: &str,
-        server: &str,
-        tool: &str,
-        item: &Item,
-        deltas: &mut Vec<Delta>,
-    ) {
+    fn settle_mcp_elicitation(&mut self, turn_id: &str, server: &str, tool: &str, item: &Item) {
         let key = (turn_id.to_owned(), server.to_owned(), tool.to_owned());
-        let approval_id = if let Some(approval_id) = self.elicitation_sites.remove(&key) {
-            approval_id
+        let key = if self.elicitation_sites.contains_key(&key) {
+            key
         } else {
-            let fallback = self.elicitation_sites.iter().find_map(|(key, approval_id)| {
-                (key.0 == turn_id).then(|| (key.clone(), approval_id.clone()))
-            });
-            match fallback {
-                Some((key, approval_id)) => {
-                    self.elicitation_sites.remove(&key);
-                    approval_id
-                }
+            match self.elicitation_sites.keys().find(|key| key.0 == turn_id).cloned() {
+                Some(key) => key,
                 None => return,
             }
         };
+        let Some(approval_id) = self.elicitation_sites.remove(&key) else { return };
         let allowed_once = || ApprovalState::AllowedOnce {
             exit_code: mcp_exit_code(item).unwrap_or(0),
             duration_ms: item.mcp_duration_ms().unwrap_or(0),
@@ -1674,43 +1066,30 @@ impl CodexFold {
         let state = match self.decisions.remove(&approval_id) {
             Some(PersonDecision::Accept) | Some(PersonDecision::AcceptForSession) => allowed_once(),
             Some(PersonDecision::Decline) | Some(PersonDecision::Cancel) => ApprovalState::Denied,
-            Some(PersonDecision::Unknown) | None
-                if item.mcp_error().is_some_and(is_mcp_rejection) =>
-            {
+            Some(PersonDecision::Unknown) | None if item.mcp_error().is_some_and(is_mcp_rejection) => {
                 ApprovalState::Denied
             }
             Some(PersonDecision::Unknown) | None => allowed_once(),
         };
-        self.resolve_approval(&approval_id, state, deltas);
+        self.resolve_approval(&approval_id, state);
     }
 
     /// A future `*requestApproval` kind: surfaced as a pending marker, never
     /// a forged approval — no choice shape exists for it, and inventing one
     /// would answer blind. The pump's tap still records it answerable-side.
-    fn apply_unknown_approval(&mut self, method: &str, params: &Value) -> Vec<Delta> {
-        let mut deltas = Vec::new();
-        let Some(turn_id) = self.approval_turn(params) else { return deltas };
-        self.ensure_assistant(&turn_id, &mut deltas);
-        self.push_block(
-            &turn_id,
-            Block::Generic {
-                kind: "codex-approval".into(),
-                status: "error".into(),
-                text: format!(
-                    "Codex asked for an approval Baaz does not know how to answer ({method}), so it was declined."
-                ),
-            },
-            &mut deltas,
-        );
-        deltas
+    fn apply_unknown_approval(&mut self, method: &str, params: &Value) {
+        let Some(turn_id) = self.approval_turn(params) else { return };
+        self.builder.open_turn(&turn_id, None);
+        let text =
+            format!("Codex asked for an approval Baaz does not know how to answer ({method}), so it was declined.");
+        self.builder.add(&turn_id, None, Block::Generic { kind: "codex-approval".into(), status: "error".into(), text });
     }
 
-    fn apply_notification(&mut self, notification: &Notification) -> Vec<Delta> {
+    fn apply_notification(&mut self, notification: &Notification) {
         match notification {
             Notification::ThreadStarted { .. } => {
                 self.thread_id = notification.thread_id().map(str::to_owned);
                 self.session_id = notification.session_id().map(str::to_owned);
-                Vec::new()
             }
             Notification::TurnStarted { .. } => {
                 self.current_turn = notification.turn_id().map(str::to_owned);
@@ -1718,21 +1097,17 @@ impl CodexFold {
                 // Open the assistant turn the moment Codex starts (X1),
                 // not at its first completed item: the view goes running
                 // on this start, so a long-silent turn reads as working,
-                // never hung. Idempotent — the first item's
-                // `ensure_assistant` is then a no-op — so the final
-                // transcript keeps one assistant turn per user turn.
-                let mut deltas = Vec::new();
+                // never hung. Idempotent — the first item's open is then a
+                // no-op — so the final transcript keeps one assistant turn
+                // per user turn.
                 if let Some(turn_id) = notification.turn_id() {
-                    self.ensure_assistant(turn_id, &mut deltas);
+                    self.builder.open_turn(turn_id, None);
                 }
-                deltas
             }
             Notification::TokenUsage { .. } => {
-                if let (Some(thread), Some(turn), Some(usage)) = (
-                    notification.thread_id(),
-                    notification.turn_id(),
-                    notification.usage(),
-                ) {
+                if let (Some(thread), Some(turn), Some(usage)) =
+                    (notification.thread_id(), notification.turn_id(), notification.usage())
+                {
                     // The first update of a turn fixes where it started;
                     // each later one moves its end. Summing `last` would
                     // also work but double-counts a repeated update.
@@ -1742,80 +1117,44 @@ impl CodexFold {
                         .or_insert_with(|| (usage.total_before(), usage.total.clone()));
                     entry.1 = usage.total.clone();
                 }
-                Vec::new()
             }
             Notification::RateLimitsUpdated { .. } => {
                 if let Some(params) = notification.rate_limit_params() {
                     self.account.observe(params);
                 }
-                Vec::new()
             }
             Notification::ItemStarted { .. } => self.remember_item(notification),
             Notification::ItemCompleted { .. } => self.apply_item(notification),
             Notification::PlanUpdated { .. } => self.apply_plan(notification),
             Notification::AgentMessageDelta { turn_id, item_id, delta, .. } => {
                 self.push_delta(turn_id, item_id, delta);
-                Vec::new()
             }
             Notification::TurnCompleted { .. } => self.finish_turn(notification),
             // Status, MCP, error, warning, resolved, and unknown kinds move
             // no transcript.
-            _ => Vec::new(),
+            _ => {}
         }
-    }
-
-    fn ensure_assistant(&mut self, turn_id: &str, deltas: &mut Vec<Delta>) {
-        if self.assistant_started.insert(turn_id.to_owned()) {
-            deltas.push(Delta::TurnStarted {
-                turn: Turn::Assistant {
-                    id: turn_id.to_owned(),
-                    blocks: Vec::new(),
-                    meta: TurnMeta::default(),
-                    timestamp: None,
-                },
-            });
-        }
-    }
-
-    /// Push one block onto `turn_id` and count it: the count is the block
-    /// index a later `turn/plan/updated` addresses for its wholesale
-    /// rewrite. Only additions consume indices — updates address them.
-    fn push_block(&mut self, turn_id: &str, block: Block, deltas: &mut Vec<Delta>) {
-        deltas.push(Delta::BlockAdded { turn_id: turn_id.to_owned(), block });
-        *self.turn_blocks.entry(turn_id.to_owned()).or_default() += 1;
     }
 
     /// Refine the turn's plan card from one `turn/plan/updated`: the first
     /// update opens the card, every later update rewrites it wholesale —
     /// replace, never append — so four updates still render one card. An
     /// empty plan opens nothing (but still clears a card already open).
-    fn apply_plan(&mut self, notification: &Notification) -> Vec<Delta> {
-        let mut deltas = Vec::new();
-        let (Some(turn_id), Some(plan)) =
-            (notification.turn_id(), notification.plan()) else { return deltas };
-        let block = Block::Todo {
-            items: plan
-                .iter()
-                .map(|step| TodoItem {
-                    label: step.step.clone(),
-                    state: map_plan_state(&step.status),
-                    elapsed_ms: None,
-                })
-                .collect(),
-        };
-        if let Some(block_index) = self.plan_cards.get(turn_id).copied() {
-            deltas.push(Delta::BlockUpdated {
-                turn_id: turn_id.to_owned(),
-                block_index,
-                block,
-            });
-        } else if !plan.is_empty() {
-            self.ensure_assistant(turn_id, &mut deltas);
-            let block_index = self.turn_blocks.get(turn_id).copied().unwrap_or(0);
-            self.push_block(turn_id, block, &mut deltas);
-            self.plan_cards.insert(turn_id.to_owned(), block_index);
+    fn apply_plan(&mut self, notification: &Notification) {
+        let (Some(turn_id), Some(plan)) = (notification.turn_id(), notification.plan()) else { return };
+        let items = plan
+            .iter()
+            .map(|step| TodoItem {
+                label: step.step.clone(),
+                state: transcript_core::todo::todo_state(&step.status),
+                elapsed_ms: None,
+            })
+            .collect();
+        let (key, card) = (plan_key(turn_id), Block::Todo { items });
+        if !self.builder.update(&key, card.clone()) && !plan.is_empty() {
+            self.builder.open_turn(turn_id, None);
+            self.builder.add(turn_id, Some(&key), card);
         }
-        deltas
     }
 
     /// Accumulate one streamed chunk on the fallback lane. Nothing renders
@@ -1835,29 +1174,22 @@ impl CodexFold {
     /// the completed text renders whole and the fallback must not repeat it.
     fn drop_delta(&mut self, turn_id: &str, item_id: &str) {
         self.delta_text.remove(&(turn_id.to_owned(), item_id.to_owned()));
-        self.delta_order
-            .retain(|key| !(key.0 == turn_id && key.1 == item_id));
+        self.delta_order.retain(|key| !(key.0 == turn_id && key.1 == item_id));
     }
 
     /// Drain every still-open buffer for `turn_id`, oldest item first. Items
     /// a completed frame already closed were dropped, so this is exactly the
     /// text no completed frame ever carried.
     fn take_pending_delta_text(&mut self, turn_id: &str) -> Vec<String> {
-        let mut pending = Vec::new();
-        let mut kept = Vec::new();
-        for key in std::mem::take(&mut self.delta_order) {
-            if key.0 == turn_id {
-                if let Some(text) = self.delta_text.remove(&key) {
-                    if !text.is_empty() {
-                        pending.push(text);
-                    }
-                }
-            } else {
-                kept.push(key);
-            }
-        }
+        let (mine, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.delta_order).into_iter().partition(|key| key.0 == turn_id);
         self.delta_order = kept;
-        pending
+        mine.iter().filter_map(|key| self.delta_text.remove(key)).filter(|text| !text.is_empty()).collect()
+    }
+
+    /// Whether `item_id`'s command card is open and running.
+    fn command_running(&self, item_id: &str) -> bool {
+        matches!(self.builder.block(&tool_key(item_id)), Some(Block::ToolCall { status: ToolStatus::Running, .. }))
     }
 
     /// Carry one started item's `fileChange` changes by item id, so the
@@ -1866,28 +1198,16 @@ impl CodexFold {
     /// A started `commandExecution` is more than memory: it opens the
     /// command's running shell card (live pill, elapsed) right away, and
     /// the completion updates that same card in place — one card per
-    /// command, running in between. A start for an already-carded item
+    /// command, running in between. A start for a command already running
     /// (a re-delivered start) cards nothing twice.
-    fn remember_item(&mut self, notification: &Notification) -> Vec<Delta> {
-        let (Some(turn_id), Some(item)) = (notification.turn_id(), notification.item()) else {
-            return Vec::new();
-        };
+    fn remember_item(&mut self, notification: &Notification) {
+        let (Some(turn_id), Some(item)) = (notification.turn_id(), notification.item()) else { return };
         if item.kind() == "commandExecution" {
-            if self.running_commands.contains_key(item.id()) {
-                return Vec::new();
+            if !self.command_running(item.id()) {
+                self.builder.open_turn(turn_id, None);
+                self.builder.tool_started(turn_id, command_execution_block(item).0);
             }
-            let mut deltas = Vec::new();
-            self.ensure_assistant(turn_id, &mut deltas);
-            let (block, _, _) = command_execution_block(item);
-            if self.running_commands.len() < 64 {
-                let block_index = self.turn_blocks.get(turn_id).copied().unwrap_or(0);
-                self.running_commands.insert(
-                    item.id().to_owned(),
-                    CommandSite { turn_id: turn_id.to_owned(), block_index, card: block.clone() },
-                );
-            }
-            self.push_block(turn_id, block, &mut deltas);
-            return deltas;
+            return;
         }
         let changes = item.changes();
         if item.kind() == "fileChange" && !changes.is_empty() && self.file_changes.len() < 64 {
@@ -1898,139 +1218,113 @@ impl CodexFold {
         if item.kind() == "reasoning" && self.reasoning_started.len() < 64 {
             self.reasoning_started.insert(item.id().to_owned(), Instant::now());
         }
-        Vec::new()
     }
 
-    fn apply_item(&mut self, notification: &Notification) -> Vec<Delta> {
-        let mut deltas = Vec::new();
-        let (Some(turn_id), Some(item)) = (notification.turn_id(), notification.item()) else {
-            return deltas;
-        };
+    fn apply_item(&mut self, notification: &Notification) {
+        let (Some(turn_id), Some(item)) = (notification.turn_id(), notification.item()) else { return };
         match item.kind() {
             "agentMessage" => {
                 self.drop_delta(turn_id, item.id());
                 if item.text().is_empty() {
-                    return deltas;
+                    return;
                 }
-                self.ensure_assistant(turn_id, &mut deltas);
-                self.push_block(
-                    turn_id,
-                    Block::Text { text: item.text().to_owned(), streaming: false },
-                    &mut deltas,
-                );
+                self.builder.open_turn(turn_id, None);
+                self.builder.add(turn_id, None, Block::Text { text: item.text().to_owned(), streaming: false });
             }
             "userMessage" => {
                 // The echo carries the whole submitted input; a submit
                 // that recorded `display_text` shows the short text
                 // instead, while the model still received the full text.
-                let full = item.text().to_owned();
-                let text =
-                    self.display_text_for(notification.turn_id(), &full).unwrap_or(&full).to_owned();
-                if self.user_started.insert(item.id().to_owned()) {
-                    deltas.push(Delta::TurnStarted {
-                        turn: Turn::User {
-                            id: item.id().to_owned(),
-                            text,
-                            attachments: item
-                                .attachments()
-                                .iter()
-                                .map(|attachment| Attachment {
-                                    name: attachment.name.clone(),
-                                    kind: AttachmentKind::Image,
-                                    size_bytes: None,
-                                    meta: None,
-                                    state: UploadState::Ready,
-                                    // The image the person sent, for the
-                                    // turn's 64 px tile (D4).
-                                    path: Some(attachment.path.clone()),
-                                    quote_of: None,
-                                })
-                                .collect(),
-                            mentions: Vec::new(),
-                            timestamp: None,
-                        },
-                    });
+                if self.builder.has_turn(item.id()) {
+                    return;
                 }
+                let full = item.text();
+                let text = self
+                    .display_by_turn
+                    .get(turn_id)
+                    .or_else(|| self.display_by_text.get(full))
+                    .map_or(full, String::as_str)
+                    .to_owned();
+                let attachments = item
+                    .attachments()
+                    .iter()
+                    .map(|attachment| Attachment {
+                        name: attachment.name.clone(),
+                        kind: AttachmentKind::Image,
+                        size_bytes: None,
+                        meta: None,
+                        state: UploadState::Ready,
+                        // The image the person sent, for the turn's 64 px
+                        // tile (D4).
+                        path: Some(attachment.path.clone()),
+                        quote_of: None,
+                    })
+                    .collect();
+                self.builder.push(Delta::TurnStarted {
+                    turn: Turn::User {
+                        id: item.id().to_owned(),
+                        text,
+                        attachments,
+                        mentions: Vec::new(),
+                        timestamp: None,
+                    },
+                });
             }
             "reasoning" => {
                 if item.text().is_empty() {
-                    return deltas;
+                    return;
                 }
                 // B12: the wire's own elapsed when it timed both ends;
                 // else the arrival clock from `item/started`; else
                 // unknown — never a frozen zero claimed as measured.
-                let elapsed_ms = item.reasoning_elapsed_ms().unwrap_or_else(|| {
-                    self.reasoning_started
-                        .get(item.id())
-                        .map(|start| wall_ms_since(*start))
-                        .unwrap_or(0)
-                });
-                self.reasoning_started.remove(item.id());
-                self.ensure_assistant(turn_id, &mut deltas);
-                self.push_block(
+                let started = self.reasoning_started.remove(item.id());
+                let elapsed_ms = item
+                    .reasoning_elapsed_ms()
+                    .unwrap_or_else(|| started.map(wall_ms_since).unwrap_or(0));
+                self.builder.open_turn(turn_id, None);
+                self.builder.add(
                     turn_id,
+                    None,
                     Block::Thinking {
                         text: item.text().to_owned(),
                         elapsed_ms,
                         summary: None,
                         state: ThinkingState::Done,
                     },
-                    &mut deltas,
                 );
             }
             "commandExecution" => {
-                self.ensure_assistant(turn_id, &mut deltas);
-                let (block, status, exit_code) = command_execution_block(item);
+                self.builder.open_turn(turn_id, None);
+                let (event, status, exit_code) = command_execution_block(item);
                 // A completion for a card `item/started` already opened
                 // updates it in place — one card per command, running in
                 // between — while a completion with no start behind it
-                // (history, a missed start) pushes as before and opens the
-                // site for any later frame of the same item.
-                if let Some(site) = self.running_commands.remove(item.id()) {
-                    deltas.push(Delta::BlockUpdated {
-                        turn_id: site.turn_id,
-                        block_index: site.block_index,
-                        block,
-                    });
-                } else {
-                    if self.running_commands.len() < 64 {
-                        let block_index = self.turn_blocks.get(turn_id).copied().unwrap_or(0);
-                        self.running_commands.insert(
-                            item.id().to_owned(),
-                            CommandSite {
-                                turn_id: turn_id.to_owned(),
-                                block_index,
-                                card: block.clone(),
-                            },
-                        );
-                    }
-                    self.push_block(turn_id, block, &mut deltas);
-                }
+                // (history, a missed start) appends and files the card for
+                // any later frame of the same item.
+                self.builder.tool_finished(turn_id, event);
                 // A terminal completion settles the approval that gated this
                 // item: allowed when it ran (even when it then failed), and
                 // denied when it completed declined without running. A
                 // failed run with no exit code still reads failed: the
                 // approval never reports a clean zero it never saw.
                 if !matches!(status, ToolStatus::Running) {
-                    self.running_commands.remove(item.id());
                     let state = match status {
                         // Declined on the wire: the person's decline when
                         // they pressed one, else an ask Codex dropped.
-                        ToolStatus::Cancelled => self.abandoned_state(item.id(), CODEX_WITHDREW),
+                        ToolStatus::Cancelled => abandoned_state(&self.pressed, item.id(), CODEX_WITHDREW),
                         // B12: the approved run's own duration when the
                         // wire reported one — the card reads what the
                         // command took, never a frozen zero beside it.
                         _ => ApprovalState::AllowedOnce {
-                            exit_code: exit_code
-                                .unwrap_or(i32::from(matches!(status, ToolStatus::Error))),
+                            exit_code: exit_code.unwrap_or(i32::from(matches!(status, ToolStatus::Error))),
                             duration_ms: item.command_duration_ms().unwrap_or(0),
                         },
                     };
-                    self.resolve_approval(item.id(), state, &mut deltas);
+                    self.resolve_approval(item.id(), state);
                 }
             }
             "fileChange" => {
-                self.ensure_assistant(turn_id, &mut deltas);
+                self.builder.open_turn(turn_id, None);
                 // Same fail-closed status rule as shell: only a clean
                 // `completed` reads as success.
                 let status = match item.status() {
@@ -2040,62 +1334,30 @@ impl CodexFold {
                     _unknown => ToolStatus::Error,
                 };
                 let changes = item.changes();
-                let is_write = !changes.is_empty()
-                    && changes.iter().all(|change| change.kind == "add");
+                let is_write = !changes.is_empty() && changes.iter().all(|change| change.kind == "add");
                 let kind = if is_write { ToolKind::Write } else { ToolKind::Edit };
+                let path = changes.first().map(|change| change.path.clone()).unwrap_or_default();
                 // Pending while open, done once finished, denied when the
-                // approval refused it — the same pending-until-ran rule as
+                // approval refused it — the verb table's rule, the same as
                 // shell cards.
-                let verb = match status {
-                    ToolStatus::Running => {
-                        if is_write {
-                            "Write"
-                        } else {
-                            "Edit"
-                        }
-                    }
-                    ToolStatus::Cancelled => "Denied",
-                    _ => {
-                        if is_write {
-                            "Wrote"
-                        } else {
-                            "Edited"
-                        }
-                    }
-                };
-                let path = changes
-                    .first()
-                    .map(|change| change.path.clone())
-                    .unwrap_or_default();
-                let stat = file_change_stat(changes);
-                self.push_block(
-                    turn_id,
-                    Block::ToolCall {
-                        id: item.id().to_owned(),
-                        kind,
-                        verb: verb.into(),
-                        target: path.clone(),
-                        status,
-                        duration_ms: None,
-                        body: ToolBody::Edit { diff: file_change_diff(&path, changes) },
-                        diff_stat: Some(stat),
-                    },
-                    &mut deltas,
-                );
+                let card = ToolEvent::new(item.id(), kind, path.clone(), status)
+                    .body(ToolBody::Edit { diff: file_change_diff(&path, changes) })
+                    .diff_stat(Some(file_change_stat(changes)));
+                self.builder.add(turn_id, None, card.block());
                 // A terminal completion settles the approval that gated this
                 // change, the way executions settle theirs, and drops the
                 // remembered `item/started` changes — the ask is answered.
                 if !matches!(status, ToolStatus::Running) {
                     self.file_changes.remove(item.id());
                     let state = match status {
-                        ToolStatus::Cancelled => self.abandoned_state(item.id(), CODEX_WITHDREW),
+                        ToolStatus::Cancelled => abandoned_state(&self.pressed, item.id(), CODEX_WITHDREW),
                         _ => ApprovalState::AllowedOnce { exit_code: 0, duration_ms: 0 },
                     };
-                    self.resolve_approval(item.id(), state, &mut deltas);
+                    self.resolve_approval(item.id(), state);
                 }
             }
             "subAgentActivity" => {
-                self.ensure_assistant(turn_id, &mut deltas);
+                self.builder.open_turn(turn_id, None);
                 // One marker, one card: markers carry distinct item ids
                 // even for one delegation (`subagent.jsonl` shows a
                 // `started` and an `interacted` under different ids), so
@@ -2103,45 +1365,23 @@ impl CodexFold {
                 // apart. The nested transcript itself is never delivered
                 // on this turn's items, so the card carries the
                 // delegation — never a forged transcript.
-                let status = if item.activity_kind() == "started" {
-                    ToolStatus::Running
-                } else {
-                    ToolStatus::Success
-                };
-                let verb = match status {
-                    ToolStatus::Running => "Delegate",
-                    _ => "Delegated",
-                };
-                self.push_block(
-                    turn_id,
-                    Block::ToolCall {
-                        id: item.id().to_owned(),
-                        kind: ToolKind::SubAgent,
-                        verb: verb.into(),
-                        target: item.agent_path().to_owned(),
-                        status,
-                        duration_ms: None,
-                        body: ToolBody::SubAgent { turns: Vec::new() },
-                        diff_stat: None,
-                    },
-                    &mut deltas,
-                );
+                let status =
+                    if item.activity_kind() == "started" { ToolStatus::Running } else { ToolStatus::Success };
+                let card = ToolEvent::new(item.id(), ToolKind::SubAgent, item.agent_path(), status)
+                    .body(ToolBody::SubAgent { turns: Vec::new() });
+                self.builder.add(turn_id, None, card.block());
             }
-            "mcpToolCall" => self.apply_mcp_tool_call(turn_id, item, &mut deltas),
+            "mcpToolCall" => self.apply_mcp_tool_call(turn_id, item),
             _ => {
-                self.ensure_assistant(turn_id, &mut deltas);
-                self.push_block(
-                    turn_id,
-                    Block::Generic {
-                        kind: item.kind().to_owned(),
-                        status: item.status().to_owned(),
-                        text: item.text().to_owned(),
-                    },
-                    &mut deltas,
-                );
+                self.builder.open_turn(turn_id, None);
+                let card = Block::Generic {
+                    kind: item.kind().to_owned(),
+                    status: item.status().to_owned(),
+                    text: item.text().to_owned(),
+                };
+                self.builder.add(turn_id, None, card);
             }
         }
-        deltas
     }
 
     /// One completed `mcpToolCall`: a terminal shell card for a baaz
@@ -2151,135 +1391,95 @@ impl CodexFold {
     /// success tick for a call that never ran. A settled (non-running)
     /// call settles the elicitation that gated it, allowed when the
     /// call ran and denied when it reports it rejected.
-    fn apply_mcp_tool_call(&mut self, turn_id: &str, item: &Item, deltas: &mut Vec<Delta>) {
-        self.ensure_assistant(turn_id, deltas);
-        let server = item.mcp_server();
-        let tool = item.mcp_tool();
-        if server == crate::terminal::SERVER_NAME && is_terminal_tool(tool) {
-            let (status, card) = terminal_mcp_card(item);
-            self.push_block(turn_id, card, deltas);
-            if !matches!(status, ToolStatus::Running) {
-                self.settle_mcp_elicitation(turn_id, server, tool, item, deltas);
-            }
-            return;
-        }
-        // Not a baaz terminal call (no other server reaches a strict
-        // session, but the fold must not forge one): carried with its
-        // wire status and its refusal or failure message — never the
-        // raw result JSON, never a success the wire did not report.
-        let status = match item.status() {
-            "inProgress" => ToolStatus::Running,
-            "completed" if item.mcp_error().is_none() => ToolStatus::Success,
-            _unknown => ToolStatus::Error,
+    fn apply_mcp_tool_call(&mut self, turn_id: &str, item: &Item) {
+        self.builder.open_turn(turn_id, None);
+        let (server, tool) = (item.mcp_server(), item.mcp_tool());
+        let (status, card) = if server == crate::terminal::SERVER_NAME && is_terminal_tool(tool) {
+            terminal_mcp_card(item)
+        } else {
+            // Not a baaz terminal call (no other server reaches a strict
+            // session, but the fold must not forge one): carried with its
+            // wire status and its refusal or failure message — never the
+            // raw result JSON, never a success the wire did not report.
+            let (status, wire) = match item.status() {
+                "inProgress" => (ToolStatus::Running, "inProgress"),
+                "completed" if item.mcp_error().is_none() => (ToolStatus::Success, "completed"),
+                _unknown => (ToolStatus::Error, "failed"),
+            };
+            let text = item.mcp_error().unwrap_or_default().to_owned();
+            (status, Block::Generic { kind: mcp_card_kind(server, tool), status: wire.into(), text })
         };
-        self.push_block(
-            turn_id,
-            Block::Generic {
-                kind: mcp_card_kind(server, tool),
-                status: match status {
-                    ToolStatus::Running => "inProgress".into(),
-                    ToolStatus::Success => "completed".into(),
-                    _ => "failed".into(),
-                },
-                text: item.mcp_error().unwrap_or_default().to_owned(),
-            },
-            deltas,
-        );
+        self.builder.add(turn_id, None, card);
         if !matches!(status, ToolStatus::Running) {
-            self.settle_mcp_elicitation(turn_id, server, tool, item, deltas);
+            self.settle_mcp_elicitation(turn_id, server, tool, item);
         }
     }
 
     /// Settle every command card of `turn_id` that never completed: an
     /// interrupted, cancelled, or crashed turn sends no `item/completed`
-    /// for its open executions, and without this the cards spin forever
-    /// while their map entries leak (past 64 the fold then stops recording
-    /// and a later completion cards twice). Interrupted/cancelled reads
-    /// cancelled; anything else fails closed to error — success is only
-    /// ever read off the item's own completion, never assumed from the
-    /// turn ending.
-    fn settle_running_commands(&mut self, turn_id: &str, turn_status: &str, deltas: &mut Vec<Delta>) {
-        let end = {
-            let normalized = turn_status.to_ascii_lowercase();
-            if normalized.contains("interrupt") || normalized.contains("cancel") {
-                ToolStatus::Cancelled
-            } else {
-                ToolStatus::Error
-            }
+    /// for its open executions, and without this the cards spin forever.
+    /// Interrupted/cancelled reads cancelled; anything else fails closed
+    /// to error — success is only ever read off the item's own
+    /// completion, never assumed from the turn ending.
+    fn settle_running_commands(&mut self, turn_id: &str, turn_status: &str) {
+        let normalized = turn_status.to_ascii_lowercase();
+        let end = if normalized.contains("interrupt") || normalized.contains("cancel") {
+            ToolStatus::Cancelled
+        } else {
+            ToolStatus::Error
         };
-        let stale: Vec<String> = self
-            .running_commands
-            .iter()
-            .filter(|(_, site)| site.turn_id == turn_id)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for item_id in stale {
-            let Some(site) = self.running_commands.remove(&item_id) else { continue };
-            let mut card = site.card;
-            if let Block::ToolCall { status, verb, body, .. } = &mut card {
-                *status = end;
-                *verb = (if end == ToolStatus::Cancelled { "Denied" } else { "Ran" }).into();
-                if let ToolBody::Shell { live, .. } = body {
-                    *live = false;
+        for item_id in self.builder.running_tools(turn_id) {
+            self.builder.modify(&tool_key(&item_id), |card| {
+                if let Block::ToolCall { status, verb, body, kind, .. } = card {
+                    *status = end;
+                    *verb = Verbs::retense(kind, verb, end);
+                    if let ToolBody::Shell { live, .. } = body {
+                        *live = false;
+                    }
                 }
-            }
-            deltas.push(Delta::BlockUpdated {
-                turn_id: site.turn_id,
-                block_index: site.block_index,
-                block: card,
             });
             // The gate settles with the run: a stopped turn leaves an
             // approved run stopped (failed-marked), a declined one denied and
             // an unanswered one cancelled ("Not run — turn stopped");
             // failed-marked (never a clean zero) otherwise.
-            let state = match (end, self.pressed.get(&item_id)) {
-                (ToolStatus::Cancelled, Some(PersonDecision::Accept | PersonDecision::AcceptForSession)) => {
-                    ApprovalState::AllowedOnce { exit_code: 1, duration_ms: 0 }
-                }
-                (ToolStatus::Cancelled, _) => self.abandoned_state(&item_id, TURN_STOPPED),
-                _ => ApprovalState::AllowedOnce { exit_code: 1, duration_ms: 0 },
+            let approved = matches!(
+                self.pressed.get(&item_id),
+                Some(PersonDecision::Accept | PersonDecision::AcceptForSession)
+            );
+            let state = if end == ToolStatus::Cancelled && !approved {
+                abandoned_state(&self.pressed, &item_id, TURN_STOPPED)
+            } else {
+                ApprovalState::AllowedOnce { exit_code: 1, duration_ms: 0 }
             };
-            self.resolve_approval(&item_id, state, deltas);
+            self.resolve_approval(&item_id, state);
         }
     }
 
-    fn finish_turn(&mut self, notification: &Notification) -> Vec<Delta> {
-        let Some(turn_id) = notification.turn_id() else { return Vec::new() };
+    fn finish_turn(&mut self, notification: &Notification) {
+        let Some(turn_id) = notification.turn_id() else { return };
         if self.live_turn.as_deref() == Some(turn_id) {
             self.live_turn = None;
         }
-        let mut deltas = Vec::new();
         // Close the turn's still-open executions first: their cards must
         // stop spinning even on a turn that carried no other content.
-        self.settle_running_commands(
-            turn_id,
-            notification.completed_status().unwrap_or("completed"),
-            &mut deltas,
-        );
+        self.settle_running_commands(turn_id, notification.completed_status().unwrap_or("completed"));
         // The interrupted path never sends `item/completed` for the streamed
         // message, so flush whatever the delta lane still holds: without this
         // the whole turn folds to zero deltas — not even a `TurnFinished`.
         // Items a completed frame already closed were dropped from the
         // buffer, so this cannot double-render the normal path.
         for text in self.take_pending_delta_text(turn_id) {
-            self.ensure_assistant(turn_id, &mut deltas);
-            self.push_block(
-                turn_id,
-                Block::Text { text, streaming: false },
-                &mut deltas,
-            );
+            self.builder.open_turn(turn_id, None);
+            self.builder.add(turn_id, None, Block::Text { text, streaming: false });
         }
-        if !self.assistant_started.contains(turn_id) {
+        if !self.builder.has_turn(turn_id) {
             // No content lane ever opened this turn and no deltas survived
             // it: finishing it would mint an empty turn the transcript never
             // had.
-            return deltas;
+            return;
         }
         let thread_id = notification.thread_id().unwrap_or_default();
-        let last = notification
-            .turn_id()
-            .and_then(|turn| self.usage_for(thread_id, turn))
-            .unwrap_or_default();
+        let last = self.usage_for(thread_id, turn_id).unwrap_or_default();
         let meta = TurnMeta {
             model: self.model.clone().unwrap_or_default(),
             duration_ms: notification.duration_ms().unwrap_or(0),
@@ -2293,8 +1493,7 @@ impl CodexFold {
             cache_write_tokens: None,
             cached_tokens: last.cached_input_tokens,
         };
-        deltas.push(Delta::TurnFinished { turn_id: turn_id.to_owned(), meta });
-        deltas
+        self.builder.finish_turn(turn_id, meta);
     }
 }
 
@@ -2473,6 +1672,7 @@ mod tests {
     }
 
     use super::*;
+    use aui_protocol::TodoState;
     use crate::frame::decode_envelope;
 
     fn fixture_lines(name: &str) -> Vec<String> {
@@ -3937,10 +3137,10 @@ mod tests {
         }
         let mut fold = CodexFold::new();
         let mut deltas = fold.apply(&started("t-1", "exec-1"));
-        assert_eq!(fold.running_commands.len(), 1, "the start records the live card");
+        assert_eq!(fold.builder.running_tools("t-1").len(), 1, "the start records the live card");
         deltas.extend(fold.apply(&finished("t-1", "interrupted")));
         assert!(
-            fold.running_commands.is_empty(),
+            fold.builder.running_tools("t-1").is_empty(),
             "the interrupted turn drops the live entry"
         );
         let added = deltas
@@ -3981,7 +3181,7 @@ mod tests {
         let mut deltas = fold.apply(&started("t-2", "exec-2"));
         deltas.extend(fold.apply(&finished("t-2", "failed")));
         assert!(
-            fold.running_commands.is_empty(),
+            fold.builder.running_tools("t-2").is_empty(),
             "the failed turn drops the live entry too"
         );
         assert!(
@@ -4028,7 +3228,7 @@ mod tests {
             }
         }
         assert!(
-            fold.running_commands.is_empty(),
+            (0..70).all(|i| fold.builder.running_tools(&format!("t-{i}")).is_empty()),
             "every interrupted turn drops its entries"
         );
         let mut cards: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -4667,9 +3867,9 @@ mod tests {
             }
         }
         fn face(item: &Item) -> (ToolKind, String, String) {
-            match command_execution_block(item) {
-                (Block::ToolCall { kind, verb, target, .. }, _, _) => (kind, verb, target),
-                (block, _, _) => panic!("a command folds to a tool card: {block:?}"),
+            match command_execution_block(item).0.block() {
+                Block::ToolCall { kind, verb, target, .. } => (kind, verb, target),
+                block => panic!("a command folds to a tool card: {block:?}"),
             }
         }
         let (kind, verb, target) = face(&execution(vec![

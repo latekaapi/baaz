@@ -114,6 +114,7 @@ The adapter crates:
 | `provider-muse` | the Muse adapter. `MuseHub` owns the one `muse serve` child; each session is a `MuseLane` adapter on it. The only seam crate allowed to depend on `muse-client`. `replay.rs` turns a capture into the same `ProviderEvent`s for `--replay` and `--bench` |
 | `provider-claude-code` | one `claude` child per session over stream-json stdio, with its own fold, controls channel and `CLAUDE_CONFIG_DIR=<state>/claude-home` |
 | `provider-codex` | one `codex app-server` child per session over JSON-RPC (it sends requests back, notably approvals), with `CODEX_HOME=<state>/codex-home` |
+| `transcript-core` | `TranscriptBuilder`, the one transcript builder under all three folds (docs/82 5.3): a fold names blocks by stable id (`tool:<id>`, `approval:<id>`, …) and the builder owns their positions and emits the positional `Delta`s; it also owns the tool-verb table, the baaz terminal-tool cards, diffs and their stats, the todo states, approval cards and child-loss settlement. Depends on `aui-protocol` (and `serde_json`) only |
 | `session-store` | `SessionStore`: one session's transcript folded from neutral deltas, plus its side facts. Pure; every `SessionRuntime` holds one |
 | `mcp-bridge` | a stdio MCP server exposing Baaz's terminal and browser tools to an agent, forwarding to the app's socket |
 

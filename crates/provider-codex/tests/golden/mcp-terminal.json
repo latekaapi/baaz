@@ -1,0 +1,201 @@
+{
+  "final": {
+    "codex": {
+      "id": "codex",
+      "agent": "codex",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "01a0e2c8-f830-7060-be9a-016b15f106e5",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "I’ll run the exact command through the baaz MCP terminal and return its output.",
+              "streaming": false
+            },
+            {
+              "kind": "approval",
+              "id": "mcp-elicitation-0",
+              "tool": "terminal_run",
+              "command": "echo hi-from-codex",
+              "reason": "Allow the baaz MCP server to run tool \"terminal_run\"?\nRun a command in the terminal the person can watch. Use this when the user says terminal, for long-running or interactive commands, or anything the user should watch; use the shell tool for quick captured checks. `tab` is auto (the idle active tab, else a new agent tab), new, or a tab id. `wait: exit` waits for the command (a timeout leaves it running; follow with terminal_read); `wait: none` returns at once.",
+              "cwd": "/golden/workspace",
+              "capabilities": [],
+              "scope": "this_command",
+              "body_kind": "other",
+              "state": {
+                "kind": "denied"
+              },
+              "rule": null,
+              "choices": [
+                {
+                  "id": "accept",
+                  "label": "Allow once",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "decline",
+                  "label": "Deny",
+                  "decision": "deny",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "cancel",
+                  "label": "Deny and stop",
+                  "decision": "abort",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                }
+              ],
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "exec-706edd70-19d1-4f76-a298-8470ac2adfc5",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Denied",
+              "target": "echo hi-from-codex",
+              "status": "cancelled",
+              "duration_ms": 0,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "user rejected MCP tool call"
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            },
+            {
+              "kind": "text",
+              "text": "The Baaz terminal tool call was rejected, so no command output was produced.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "golden-model",
+            "duration_ms": 12958,
+            "tokens_in": 47760,
+            "tokens_out": 204,
+            "reasoning_tokens": 42,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 44544
+          }
+        },
+        {
+          "kind": "user",
+          "id": "01a0e2c8-fdfa-7931-9553-6576feeb2a4a",
+          "text": "Use the terminal_run tool from the baaz MCP server to run the command `echo hi-from-codex` in the terminal, then reply with its output.",
+          "attachments": [],
+          "mentions": []
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "5:c11f324e035c08d3",
+    "17:706b845137892774",
+    "19:18385a50747ca150",
+    "40:4a7ef0f22adb7283",
+    "45:fef0a8e5737770a5",
+    "49:faab1ba667146fa3",
+    "71:b7da906fac37f062",
+    "75:fdb48c2e1b51d505"
+  ],
+  "abandon": [
+    "1:c11f324e035c08d3",
+    "2:c11f324e035c08d3",
+    "3:c11f324e035c08d3",
+    "4:c11f324e035c08d3",
+    "5:c11f324e035c08d3",
+    "6:c11f324e035c08d3",
+    "7:c11f324e035c08d3",
+    "8:c11f324e035c08d3",
+    "9:c11f324e035c08d3",
+    "10:c11f324e035c08d3",
+    "11:c11f324e035c08d3",
+    "12:c11f324e035c08d3",
+    "13:c11f324e035c08d3",
+    "14:c11f324e035c08d3",
+    "15:c11f324e035c08d3",
+    "16:c11f324e035c08d3",
+    "17:3ff40b1f17726c7a",
+    "18:3ff40b1f17726c7a",
+    "19:fa46ab781aa1ebde",
+    "20:fa46ab781aa1ebde",
+    "21:fa46ab781aa1ebde",
+    "22:fa46ab781aa1ebde",
+    "23:a8e3af266ed6ad10",
+    "24:67c213be1e6ac72d",
+    "25:e886a7a0342f26de",
+    "26:014f36c9fe37973b",
+    "27:b34df0faa8f9152e",
+    "28:585806e1e5914b6d",
+    "29:688478b457102686",
+    "30:8331cb4f770e4b93",
+    "31:56978dd9855ed3dc",
+    "32:970a65d26c853fb1",
+    "33:84c041361b93bcd1",
+    "34:7cbcd1770d88f1cd",
+    "35:6dda2e346945d93e",
+    "36:e2967e99f3f5363e",
+    "37:53bccab60f7949a4",
+    "38:00903f6bb7ff8619",
+    "39:2a7afcc6d6be8d67",
+    "40:e25dc073589f5f5b",
+    "41:4cf67eadeec7f9a2",
+    "42:4cf67eadeec7f9a2",
+    "43:4cf67eadeec7f9a2",
+    "44:4cf67eadeec7f9a2",
+    "45:f6dce5d31ca653c2",
+    "46:f6dce5d31ca653c2",
+    "47:f6dce5d31ca653c2",
+    "48:f6dce5d31ca653c2",
+    "49:aaeb364dd19b6382",
+    "50:e883dae903f714c8",
+    "51:e883dae903f714c8",
+    "52:e883dae903f714c8",
+    "53:e883dae903f714c8",
+    "54:e883dae903f714c8",
+    "55:c60da060b5919d30",
+    "56:af2bc947b792aa91",
+    "57:4249e07b3005c902",
+    "58:83d007183bf74fbe",
+    "59:76180b67050b9d64",
+    "60:4844dfeb14d0375c",
+    "61:7227d55ee4c7c06d",
+    "62:4dab5c58c6780f45",
+    "63:a4b57bab61462eeb",
+    "64:dd640defbcc4bbbb",
+    "65:ac023f6e99a840ba",
+    "66:be6f2da9ae7bbed3",
+    "67:a9fd2fdc901ac044",
+    "68:08e258c8725422b5",
+    "69:3a7dc4b39562a027",
+    "70:6a30b8c871d3b153",
+    "71:bf81599574b49d65",
+    "72:be9e398e9a0a62a3",
+    "73:be9e398e9a0a62a3",
+    "74:be9e398e9a0a62a3",
+    "75:fdb48c2e1b51d505"
+  ]
+}

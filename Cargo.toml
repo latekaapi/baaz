@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/muse-client", "crates/muse-adapter", "crates/baaz", "crates/provider", "crates/provider-runtime", "crates/session-store", "crates/provider-muse", "crates/provider-claude-code", "crates/provider-codex", "crates/mcp-bridge", "crates/baaz-core", "crates/baaz-browser-core"]
+members = ["crates/muse-client", "crates/muse-adapter", "crates/baaz", "crates/provider", "crates/provider-runtime", "crates/transcript-core", "crates/session-store", "crates/provider-muse", "crates/provider-claude-code", "crates/provider-codex", "crates/mcp-bridge", "crates/baaz-core", "crates/baaz-browser-core"]
 
 [workspace.package]
 version = "0.1.0"
@@ -63,6 +63,7 @@ muse-client = { path = "crates/muse-client" }
 muse-adapter = { path = "crates/muse-adapter" }
 provider = { path = "crates/provider" }
 provider-runtime = { path = "crates/provider-runtime" }
+transcript-core = { path = "crates/transcript-core" }
 session-store = { path = "crates/session-store" }
 provider-muse = { path = "crates/provider-muse" }
 # No default features: `baaz` forwards its own `probe` (docs/82 4.10, 4.11).

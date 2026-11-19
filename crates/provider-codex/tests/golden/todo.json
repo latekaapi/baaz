@@ -1,0 +1,264 @@
+{
+  "final": {
+    "codex": {
+      "id": "codex",
+      "agent": "codex",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "01a0de01-a925-78e3-b4f1-9684acc4980f",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "I’ll work through the three-item todo list in order and update it after each item.",
+              "streaming": false
+            },
+            {
+              "kind": "todo",
+              "items": [
+                {
+                  "label": "List files",
+                  "state": "done",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Read notes.txt",
+                  "state": "done",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Summarize contents",
+                  "state": "done",
+                  "elapsed_ms": null
+                }
+              ]
+            },
+            {
+              "kind": "tool_call",
+              "id": "exec-f944b94d-fcc4-460c-847a-983dadcf8727",
+              "tool_kind": {
+                "kind": "read"
+              },
+              "verb": "Read",
+              "target": "rg --files -g '*'",
+              "status": "success",
+              "duration_ms": 0,
+              "body": {
+                "kind": "none"
+              }
+            },
+            {
+              "kind": "text",
+              "text": "Todo update: “List files” is complete; “Read notes.txt” is now in progress.",
+              "streaming": false
+            },
+            {
+              "kind": "tool_call",
+              "id": "exec-0265fd9c-bade-4cf7-b299-eda9450c8d01",
+              "tool_kind": {
+                "kind": "read"
+              },
+              "verb": "Read",
+              "target": "/tmp/w4b/work/notes.txt",
+              "status": "success",
+              "duration_ms": 0,
+              "body": {
+                "kind": "none"
+              }
+            },
+            {
+              "kind": "text",
+              "text": "Todo update: “Read notes.txt” is complete; “Summarize contents” is now in progress.",
+              "streaming": false
+            },
+            {
+              "kind": "text",
+              "text": "Todo update: all three items are complete.",
+              "streaming": false
+            },
+            {
+              "kind": "text",
+              "text": "DONE",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "golden-model",
+            "duration_ms": 21238,
+            "tokens_in": 76744,
+            "tokens_out": 455,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 71040
+          }
+        },
+        {
+          "kind": "user",
+          "id": "01a0de01-b123-7481-9763-75149bf7c534",
+          "text": "Keep a todo list with three items: list files, read notes.txt, summarize contents. Work through each item one at a time, updating the list as you go. Then reply with just DONE.",
+          "attachments": [],
+          "mentions": []
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "5:c11f324e035c08d3",
+    "22:1c345ef935475939",
+    "27:746e99fc468e92c7",
+    "47:a5b239c82d6a18d9",
+    "48:32fc2deb35f30528",
+    "49:f7ddb4f3969a9b09",
+    "50:a7c9a7b9c175142a",
+    "74:3378d3082c1de88e",
+    "75:f4809013ac511591",
+    "76:74380982f8d00288",
+    "77:a5eae07254c5f321",
+    "103:658cdeaff5e68139",
+    "104:af4721ccdf7ff698",
+    "117:329a9880632760ce",
+    "118:f17bc5eeefc7ff2d",
+    "123:5ba0f9fe479b2554",
+    "127:02593b882d675855"
+  ],
+  "abandon": [
+    "1:c11f324e035c08d3",
+    "2:c11f324e035c08d3",
+    "3:c11f324e035c08d3",
+    "4:c11f324e035c08d3",
+    "5:c11f324e035c08d3",
+    "6:c11f324e035c08d3",
+    "7:c11f324e035c08d3",
+    "8:c11f324e035c08d3",
+    "9:c11f324e035c08d3",
+    "10:c11f324e035c08d3",
+    "11:c11f324e035c08d3",
+    "12:c11f324e035c08d3",
+    "13:c11f324e035c08d3",
+    "14:c11f324e035c08d3",
+    "15:c11f324e035c08d3",
+    "16:c11f324e035c08d3",
+    "17:c11f324e035c08d3",
+    "18:c11f324e035c08d3",
+    "19:c11f324e035c08d3",
+    "20:c11f324e035c08d3",
+    "21:c11f324e035c08d3",
+    "22:459cb769b824fbd7",
+    "23:459cb769b824fbd7",
+    "24:459cb769b824fbd7",
+    "25:459cb769b824fbd7",
+    "26:459cb769b824fbd7",
+    "27:07fbb7e5acc76085",
+    "28:07fbb7e5acc76085",
+    "29:3da20d6cab31ce3d",
+    "30:d900c485f038b5b8",
+    "31:fb9af903498f3637",
+    "32:e0fd9321b5ce2736",
+    "33:008188cb30a59fd5",
+    "34:d913ddd9702f88c5",
+    "35:ed6e7409cfb841ad",
+    "36:d9531caa27c5669d",
+    "37:efedcd20447192ad",
+    "38:05275193e1cad3c2",
+    "39:b427dd652c466b4a",
+    "40:9cd7f7a9ea711def",
+    "41:b08207db28f2ffd6",
+    "42:a368d0903a3c71f9",
+    "43:a7010ccc7e6849af",
+    "44:3b1b2062b6cad172",
+    "45:9686359ca57ff9b7",
+    "46:5b9e91343eae0a6d",
+    "47:59ce33dafb0ec531",
+    "48:8de9a2047a877452",
+    "49:a5398367b8d3a6dc",
+    "50:b40fdb6a94428f60",
+    "51:5e48387361be0333",
+    "52:5e48387361be0333",
+    "53:5e48387361be0333",
+    "54:e0a8d5c38da213ca",
+    "55:544a2459e3486a53",
+    "56:88ae7507e4c9b09b",
+    "57:2a0607bde00f9949",
+    "58:06c38a2746908e71",
+    "59:0356a2910e55df7a",
+    "60:591e90ddbd5d7cf7",
+    "61:46ac4877a020d355",
+    "62:5c70494c8f48eaa8",
+    "63:6da7cfd16a37c819",
+    "64:ad4d6de743af754b",
+    "65:638b07fdf5aefb8b",
+    "66:f90484c0ac3e2dea",
+    "67:04d861f83f2cb298",
+    "68:2488029e1a86bd05",
+    "69:e0b00f7eda4404bb",
+    "70:dbcdef5c3b5b5e1f",
+    "71:c4f27a8da835d16e",
+    "72:fd8db13f54d78a89",
+    "73:a7b9179c4dfbf64d",
+    "74:fe8ab7861d80113f",
+    "75:74f7e62a097d416e",
+    "76:f83ce8f288e5ae54",
+    "77:f96d25036261675e",
+    "78:1ee54d73b2b8056a",
+    "79:1ee54d73b2b8056a",
+    "80:1ee54d73b2b8056a",
+    "81:19a8c9047ec5f0cb",
+    "82:9f98f6adbdebff80",
+    "83:7ebc71b8b59187c2",
+    "84:3fc71762466b7840",
+    "85:8505f15e8b2e61d8",
+    "86:a5672371a53ee1f1",
+    "87:21afa345b0735647",
+    "88:bc52e94b771a668c",
+    "89:91d9ba3e931aa3dc",
+    "90:3dcf4196a282486b",
+    "91:aafcce5bd15d24dc",
+    "92:42198592e2e9b976",
+    "93:ef513591c5007da4",
+    "94:10c09c26457dea0f",
+    "95:781476f8322d5047",
+    "96:18483161166a3893",
+    "97:c50ea03502a578e8",
+    "98:0cfc82c361866a00",
+    "99:7a3cf69af9c76594",
+    "100:361ff95025897df7",
+    "101:8989c420bbe13312",
+    "102:ee66fc2435c04c80",
+    "103:0318764004385f22",
+    "104:c67314e48c8cea69",
+    "105:a94e2fd9e7b440dc",
+    "106:a94e2fd9e7b440dc",
+    "107:a94e2fd9e7b440dc",
+    "108:8598ed4ee381e801",
+    "109:ac3bd54959daee68",
+    "110:8990baa65c1949e8",
+    "111:da847cfbfac8ac4b",
+    "112:8afb9dedb281c6fb",
+    "113:81adc1a30f1a1d67",
+    "114:b8e64e051bf7f379",
+    "115:918e5afa469ddd8e",
+    "116:f6d049793431fc9a",
+    "117:d8bbc03611a6d50a",
+    "118:9aed8e4717e28013",
+    "119:5ae6f0ad49106d68",
+    "120:5ae6f0ad49106d68",
+    "121:5ae6f0ad49106d68",
+    "122:68ca2feef72c50b1",
+    "123:f101b878ad22a95f",
+    "124:2d545fdba0d5a042",
+    "125:2d545fdba0d5a042",
+    "126:2d545fdba0d5a042",
+    "127:02593b882d675855"
+  ]
+}

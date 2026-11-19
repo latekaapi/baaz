@@ -1,0 +1,104 @@
+{
+  "final": {
+    "claude": {
+      "id": "claude",
+      "agent": "claude",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "c127a781-6b0d-40c1-b454-fe2c9aa63dbf",
+          "text": "Describe this tiny image in three words, then reply DONE.",
+          "attachments": [
+            {
+              "name": "image-1",
+              "kind": "image",
+              "size_bytes": 148,
+              "meta": "image/png",
+              "state": {
+                "kind": "ready"
+              }
+            }
+          ],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "msg_011CfSARZ7UV3NMpRVsEdFi3",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "Bright green square.\n\nDONE",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "claude-haiku-4-5-20251001",
+            "duration_ms": "set",
+            "tokens_in": 30793,
+            "tokens_out": 156,
+            "reasoning_tokens": 142,
+            "cost_usd": 0.0121181,
+            "cache_read_tokens": 26441,
+            "cache_write_tokens": 4342,
+            "cached_tokens": 0
+          },
+          "timestamp": "set"
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:ffdc458af9e37b66",
+    "7:0495d80da8690b7d",
+    "8:b3dbf12628e1f4c2",
+    "9:3dc5056ee0bb4c79",
+    "12:84aefc57212d01e8"
+  ],
+  "abandon": [
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "7:0495d80da8690b7d",
+    "7:0495d80da8690b7d",
+    "7:0495d80da8690b7d",
+    "8:de05e61504d589c6",
+    "8:97b6bd222b62efe6",
+    "8:b3dbf12628e1f4c2",
+    "9:8cdea25135712f45",
+    "9:494cb3e6f3f3d911",
+    "9:3dc5056ee0bb4c79",
+    "10:8cdea25135712f45",
+    "10:494cb3e6f3f3d911",
+    "10:3dc5056ee0bb4c79",
+    "11:8cdea25135712f45",
+    "11:494cb3e6f3f3d911",
+    "11:3dc5056ee0bb4c79",
+    "12:84aefc57212d01e8",
+    "12:84aefc57212d01e8",
+    "12:84aefc57212d01e8",
+    "12:84aefc57212d01e8"
+  ]
+}

@@ -16,6 +16,7 @@
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod account;
 pub mod caps;
 pub mod child;
 pub mod fold;

@@ -1,0 +1,105 @@
+{
+  "final": {
+    "codex": {
+      "id": "codex",
+      "agent": "codex",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "01a0de02-b190-7692-bc6c-ca47883eb8a9",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "Green peach stripes\n\nDONE",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "golden-model",
+            "duration_ms": 3401,
+            "tokens_in": 14937,
+            "tokens_out": 9,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 10624
+          }
+        },
+        {
+          "kind": "user",
+          "id": "01a0de02-b775-7532-89bf-4e02d8f7fa0d",
+          "text": "Describe the attached tiny image in three words, then reply DONE on its own line.",
+          "attachments": [
+            {
+              "name": "tiny.png",
+              "kind": "image",
+              "size_bytes": null,
+              "state": {
+                "kind": "ready"
+              },
+              "path": "/tmp/w4b/work/tiny.png"
+            }
+          ],
+          "mentions": []
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "5:c11f324e035c08d3",
+    "22:81cca7982fda48f7",
+    "26:b2fca842116048ff",
+    "34:c62b472afbbaf798",
+    "38:2998672700640417"
+  ],
+  "abandon": [
+    "1:c11f324e035c08d3",
+    "2:c11f324e035c08d3",
+    "3:c11f324e035c08d3",
+    "4:c11f324e035c08d3",
+    "5:c11f324e035c08d3",
+    "6:c11f324e035c08d3",
+    "7:c11f324e035c08d3",
+    "8:c11f324e035c08d3",
+    "9:c11f324e035c08d3",
+    "10:c11f324e035c08d3",
+    "11:c11f324e035c08d3",
+    "12:c11f324e035c08d3",
+    "13:c11f324e035c08d3",
+    "14:c11f324e035c08d3",
+    "15:c11f324e035c08d3",
+    "16:c11f324e035c08d3",
+    "17:c11f324e035c08d3",
+    "18:c11f324e035c08d3",
+    "19:c11f324e035c08d3",
+    "20:c11f324e035c08d3",
+    "21:c11f324e035c08d3",
+    "22:85aeaa7c074a7235",
+    "23:85aeaa7c074a7235",
+    "24:85aeaa7c074a7235",
+    "25:85aeaa7c074a7235",
+    "26:313e6e7afb554545",
+    "27:313e6e7afb554545",
+    "28:313e6e7afb554545",
+    "29:caf6e51ed8a0d6f5",
+    "30:53f30f3cde2a19d0",
+    "31:6ddaf1f38be82a62",
+    "32:74e97bc91bb34782",
+    "33:15d7169da4ff5bee",
+    "34:e08a8a229163e5fe",
+    "35:38c7979cc3208a0e",
+    "36:38c7979cc3208a0e",
+    "37:38c7979cc3208a0e",
+    "38:2998672700640417"
+  ]
+}

@@ -21,7 +21,9 @@
 //!   `partial.jsonl` with its `stream_event` lines stripped yields deltas
 //!   identical to folding it whole.
 //!
-//! What the fold emits, per frame:
+//! What the fold emits, per frame (every block through the shared
+//! [`TranscriptBuilder`], which owns positions: a card is addressed by its
+//! tool-use, request or question id, never by an index this fold keeps):
 //!
 //! * `assistant`: blocks join the turn's ONE assistant turn — opened on the
 //!   turn's first message (turn id IS that message's id, so the live fold
@@ -62,36 +64,27 @@ use std::io::BufRead;
 use std::time::Instant;
 
 use aui_protocol::{
-    ApprovalBadges, ApprovalBodyKind, ApprovalChoice, ApprovalDecision, ApprovalScope,
-    ApprovalState, Attachment, AttachmentKind, Block, Delta, Diff, DiffKind, DiffLine, Hunk,
-    PermissionMode, ThinkingState, TodoItem, TodoState, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta,
-    UploadState,
+    ApprovalBodyKind, ApprovalDecision, ApprovalScope, ApprovalState, Attachment, AttachmentKind, Block,
+    Delta, Diff, Hunk, PermissionMode, Provider, ThinkingState, TodoItem, TodoState, ToolBody, ToolKind,
+    ToolStatus, Turn, TurnMeta, UploadState,
 };
 use provider::{ProviderError, ProviderEvent};
+use transcript_core::approval::{self, choice};
+use transcript_core::builder::tool_key;
+use transcript_core::tool::{split_lines, terminal_event, terminal_target, TerminalAnswer};
+use transcript_core::todo::todo_state;
+use transcript_core::{diff, is_terminal_tool, wall_ms_since, ToolEvent, TranscriptBuilder, Verbs};
 
 use crate::account::AccountSnapshot;
 use crate::frame::{approval_headline, ApprovalRequest, ContentBlock, Frame, ToolResult};
+pub use transcript_core::{TERMINAL_RAN_VERB, TERMINAL_RUNNING_VERB};
 
-/// Where a pending approval card lives, so its tool's result or the turn's
-/// denials can settle it to its decided state.
-#[derive(Clone, Debug)]
-struct ApprovalSite {
-    /// The turn hosting the card.
-    turn_id: String,
-    /// The card's block index in that turn, for wholesale updates.
-    block_index: usize,
-    /// The wire tool-use id the request gates (empty when the request
-    /// names none — the card still settles, through denials alone).
-    tool_use_id: String,
-}
-
-/// Where a tool call lives, and what it was, so its result can complete it.
+/// What a tool call was, so its result can complete its card (which the
+/// builder finds by the call's id).
 #[derive(Clone, Debug)]
 struct ToolSite {
-    turn_id: String,
-    block_index: usize,
     kind: ToolKind,
-    verb: String,
+    verbs: Verbs,
     target: String,
     name: String,
     params: Vec<(String, String)>,
@@ -106,10 +99,11 @@ struct ToolSite {
 /// buffer, and what it was, so the nested result can complete it there.
 #[derive(Clone, Debug)]
 struct NestedSite {
-    /// Index in the agent card's buffered blocks.
+    /// Index in the agent card's buffered blocks: the card's own body,
+    /// never a transcript position.
     index: usize,
     kind: ToolKind,
-    verb: String,
+    verbs: Verbs,
     target: String,
     name: String,
     params: Vec<(String, String)>,
@@ -122,31 +116,6 @@ fn is_todo_tool(name: &str) -> bool {
     matches!(name, "TaskCreate" | "TaskUpdate" | "TodoWrite")
 }
 
-/// Whether `tool` is one of the baaz terminal tools (`docs/14-terminal.md`
-/// §4), served on this lane as `mcp__baaz__terminal_*`. A terminal call
-/// folds to a shell card with terminal verbs (D51) — the existing
-/// tool-card rendering carries the command, the exit pill, the duration
-/// and the output — never the raw request/response JSON.
-fn is_terminal_tool(tool: &str) -> bool {
-    matches!(
-        tool,
-        "terminal_list"
-            | "terminal_open"
-            | "terminal_run"
-            | "terminal_read"
-            | "terminal_screen"
-            | "terminal_send"
-            | "terminal_close"
-    )
-}
-
-/// The opening verb every terminal card folds with; the result maps it to
-/// past tense, the same present-until-ran rule shell cards follow.
-pub const TERMINAL_RUNNING_VERB: &str = "Running in terminal";
-
-/// The settled verb of a terminal card.
-pub const TERMINAL_RAN_VERB: &str = "Ran in terminal";
-
 /// The [`Block::Generic`] kind carrying "the child's stream ended
 /// mid-turn": the turn it lands on is finished right after it, so the
 /// transcript says why the turn stopped and the session can send again
@@ -158,15 +127,6 @@ pub const CHILD_EXITED_CARD: &str = "claude-child-exited";
 fn terminal_tool_name(name: &str) -> Option<String> {
     let (server, tool) = mcp_split(name)?;
     (server == "baaz" && is_terminal_tool(&tool)).then_some(tool)
-}
-
-/// The provider's task status vocabulary onto the transcript's.
-fn map_todo_state(status: &str) -> TodoState {
-    match status {
-        "in_progress" => TodoState::Running,
-        "completed" => TodoState::Done,
-        _ => TodoState::Pending,
-    }
 }
 
 /// The task number out of a creation/update confirmation
@@ -183,29 +143,20 @@ fn task_number_from(text: &str) -> Option<&str> {
 /// pending row, TaskUpdate moves a row's state, legacy TodoWrite replaces
 /// the whole list. Unknown shapes leave the list alone — a call the fold
 /// does not understand must not rewrite the transcript.
-fn apply_todo_input(
-    items: &mut Vec<TodoEntry>,
-    tool_id: &str,
-    name: &str,
-    input: &serde_json::Value,
-) {
+fn apply_todo_input(items: &mut Vec<TodoEntry>, tool_id: &str, name: &str, input: &serde_json::Value) {
     let str_field = |key: &str| input.get(key).and_then(serde_json::Value::as_str).unwrap_or("");
     match name {
         "TaskCreate" => {
             let label = str_field("subject");
             let label = if label.is_empty() { str_field("description") } else { label };
             if !items.iter().any(|entry| entry.key == tool_id) {
-                items.push(TodoEntry {
-                    key: tool_id.to_owned(),
-                    label: label.to_owned(),
-                    state: TodoState::Pending,
-                });
+                items.push(TodoEntry { key: tool_id.to_owned(), label: label.to_owned(), state: TodoState::Pending });
             }
         }
         "TaskUpdate" => {
             let id = str_field("taskId");
             if let Some(entry) = items.iter_mut().find(|entry| entry.key == id) {
-                entry.state = map_todo_state(str_field("status"));
+                entry.state = todo_state(str_field("status"));
             }
         }
         _ => {
@@ -213,23 +164,25 @@ fn apply_todo_input(
             if let Some(todos) = input.get("todos").and_then(serde_json::Value::as_array) {
                 items.clear();
                 for (index, todo) in todos.iter().enumerate() {
-                    let label = todo
-                        .get("content")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("");
-                    let state = todo
-                        .get("status")
-                        .and_then(serde_json::Value::as_str)
-                        .map(map_todo_state)
-                        .unwrap_or(TodoState::Pending);
+                    let field = |key: &str| todo.get(key).and_then(serde_json::Value::as_str);
                     items.push(TodoEntry {
                         key: format!("legacy-{index}"),
-                        label: label.to_owned(),
-                        state,
+                        label: field("content").unwrap_or("").to_owned(),
+                        state: field("status").map(todo_state).unwrap_or(TodoState::Pending),
                     });
                 }
             }
         }
+    }
+}
+
+/// The todo card's face: one row per task.
+fn todo_block(items: &[TodoEntry]) -> Block {
+    Block::Todo {
+        items: items
+            .iter()
+            .map(|entry| TodoItem { label: entry.label.clone(), state: entry.state, elapsed_ms: None })
+            .collect(),
     }
 }
 
@@ -238,27 +191,16 @@ fn apply_todo_input(
 fn agent_block(id: &str, site: &ToolSite, status: ToolStatus, blocks: &[Block]) -> Block {
     // A still-running delegation keeps its pending verb; only a finished
     // one reads done — the same pending-until-ran rule as every tool card.
-    let verb = match status {
-        ToolStatus::Pending | ToolStatus::Running => site.verb.clone(),
-        _ => past_verb(&site.kind, &site.verb),
+    let nested = Turn::Assistant {
+        id: format!("{id}/subagent"),
+        blocks: blocks.to_vec(),
+        meta: TurnMeta::default(),
+        timestamp: None,
     };
-    Block::ToolCall {
-        id: id.to_owned(),
-        kind: ToolKind::SubAgent,
-        verb,
-        target: site.target.clone(),
-        status,
-        duration_ms: None,
-        body: ToolBody::SubAgent {
-            turns: vec![Turn::Assistant {
-                id: format!("{id}/subagent"),
-                blocks: blocks.to_vec(),
-                meta: TurnMeta::default(),
-                timestamp: None,
-            }],
-        },
-        diff_stat: None,
-    }
+    ToolEvent::new(id, ToolKind::SubAgent, site.target.clone(), status)
+        .verbs(site.verbs)
+        .body(ToolBody::SubAgent { turns: vec![nested] })
+        .block()
 }
 
 /// The CLI's `Exit code N` result prefix onto the card's exit code. The
@@ -271,47 +213,24 @@ fn parse_exit_code(text: &str) -> Option<i32> {
     rest[..end].parse().ok()
 }
 
-/// The opening present-tense verb onto its completed past tense: a card
-/// opens as "Write" (it has not run) and only reads "Wrote" once the
-/// result lands. `Read` reads the same either way; anything unrecognised
-/// passes through rather than inventing a tense.
-fn past_verb(kind: &ToolKind, open: &str) -> String {
-    match (kind, open) {
-        (ToolKind::Shell, "Run") => "Ran",
-        (ToolKind::Write, "Write") => "Wrote",
-        (ToolKind::Edit, "Edit") => "Edited",
-        (ToolKind::Search, "Search") => "Searched",
-        (ToolKind::Web, "Fetch") => "Fetched",
-        (ToolKind::Web, "Search") => "Searched",
-        (ToolKind::Mcp { .. }, "Run") => "Ran",
-        (ToolKind::SubAgent, "Delegate") => "Delegated",
-        _ => open,
-    }
-    .to_owned()
-}
-
 /// Fill an unset tool-call duration with the measured wall gap: the
 /// live path's reading, applied after [`finish_tool_block`] so a
 /// result-carried duration (terminal runs) is never overwritten and
 /// non-call blocks pass through untouched.
-fn with_tool_duration(block: Block, duration_ms: u64) -> Block {
-    let mut call = match block.as_tool_call() {
-        Some(call) => call,
-        None => return block,
-    };
-    if call.duration_ms.is_none() {
-        call.duration_ms = Some(duration_ms);
+fn with_tool_duration(mut block: Block, measured: u64) -> Block {
+    if let Block::ToolCall { duration_ms, .. } = &mut block {
+        duration_ms.get_or_insert(measured);
     }
-    Block::tool_call(call)
+    block
 }
 
 /// Complete any tool card from its result: the one place shell output,
 /// MCP payloads, file diffs, read counts and the generic fallback are
 /// decided, shared by the main transcript and nested sub-agent buffers
-/// so the two cannot disagree.
+/// so the two cannot disagree. The verb is the table's past tense.
 fn finish_tool_block(
     kind: &ToolKind,
-    verb: &str,
+    verbs: Verbs,
     target: &str,
     name: &str,
     params: &[(String, String)],
@@ -321,106 +240,48 @@ fn finish_tool_block(
     // A terminal call completes from its result JSON, never as raw text:
     // the tab joins the command in the header, the run's output is the
     // body, and the exit code is the status (D51).
-    if verb == TERMINAL_RUNNING_VERB {
+    if verbs == Verbs::TERMINAL {
         return finish_terminal_block(target, params, tool_use_id, result);
     }
+    let generic = |text: String| Block::Generic {
+        kind: name.to_owned(),
+        status: if result.is_error { "error".into() } else { "completed".into() },
+        text,
+    };
     // B12fix: the Artifact tool completes to its one-line summary card
     // regardless of the stand-in kind the opening carried — the body
     // never inlines.
     if name == "Artifact" {
-        return Block::Generic {
-            kind: name.to_owned(),
-            status: if result.is_error { "error".into() } else { "completed".into() },
-            text: artifact_detail(params, &result.text),
-        };
+        return generic(artifact_detail(params, &result.text));
     }
     let status = if result.is_error { ToolStatus::Error } else { ToolStatus::Success };
-    let done = past_verb(kind, verb);
+    let card = ToolEvent::new(tool_use_id, kind.clone(), target, status).verbs(verbs);
     match kind {
-        ToolKind::Shell => Block::ToolCall {
-            id: tool_use_id.to_owned(),
-            kind: kind.clone(),
-            verb: done,
-            target: target.to_owned(),
-            status,
-            duration_ms: None,
-            body: ToolBody::Shell {
-                output_lines: result.text.lines().map(str::to_owned).collect(),
-                exit_code: parse_exit_code(&result.text),
-                live: false,
-            },
-            diff_stat: None,
-        },
-        ToolKind::Mcp { .. } => Block::ToolCall {
-            id: tool_use_id.to_owned(),
-            kind: kind.clone(),
-            verb: done,
-            target: target.to_owned(),
-            status,
-            duration_ms: None,
-            body: ToolBody::Mcp { params: params.to_vec(), result_json: result.text.clone() },
-            diff_stat: None,
-        },
+        ToolKind::Shell => card.body(ToolBody::Shell {
+            output_lines: split_lines(&result.text),
+            exit_code: parse_exit_code(&result.text),
+            live: false,
+        }),
+        ToolKind::Mcp { .. } => {
+            card.body(ToolBody::Mcp { params: params.to_vec(), result_json: result.text.clone() })
+        }
         ToolKind::Edit | ToolKind::Write => {
             let (body, diff_stat) = edit_body(target, result);
-            Block::ToolCall {
-                id: tool_use_id.to_owned(),
-                kind: kind.clone(),
-                verb: done,
-                target: target.to_owned(),
-                status,
-                duration_ms: None,
-                body,
-                diff_stat,
-            }
+            card.body(body).diff_stat(diff_stat)
         }
-        ToolKind::Read => Block::ToolCall {
-            id: tool_use_id.to_owned(),
-            kind: kind.clone(),
-            verb: done,
-            target: target.to_owned(),
-            status,
-            duration_ms: None,
-            body: ToolBody::Read {
-                lines: read_line_count(result),
-                // What the read returned, opened on the card's Well (D4).
-                output_lines: result.text.lines().map(str::to_owned).collect(),
-            },
-            diff_stat: None,
-        },
-        ToolKind::Search => {
-            // The header stays the one line it opened as; a ToolSearch
-            // names how many tools it loaded when the detail counts them.
-            let target = tool_search_target(name, target, result);
-            Block::ToolCall {
-                id: tool_use_id.to_owned(),
-                kind: kind.clone(),
-                verb: done,
-                target,
-                status,
-                duration_ms: None,
-                body: ToolBody::None,
-                diff_stat: None,
-            }
+        // What the read returned, opened on the card's Well (D4).
+        ToolKind::Read => {
+            card.body(ToolBody::Read { lines: read_line_count(result), output_lines: split_lines(&result.text) })
         }
-        ToolKind::Web => Block::ToolCall {
-            id: tool_use_id.to_owned(),
-            kind: kind.clone(),
-            verb: done,
-            target: target.to_owned(),
-            status,
-            duration_ms: None,
-            body: ToolBody::None,
-            diff_stat: None,
-        },
-        _ => Block::Generic {
-            kind: name.to_owned(),
-            status: if result.is_error { "error".into() } else { "completed".into() },
-            // B12: the generic dump becomes one line — the full text opens
-            // in the pane on demand, never inline.
-            text: one_line(&result.text),
-        },
+        // The header stays the one line it opened as; a ToolSearch names
+        // how many tools it loaded when the detail counts them.
+        ToolKind::Search => ToolEvent { target: tool_search_target(name, target, result), ..card },
+        ToolKind::Web => card,
+        // B12: the generic dump becomes one line — the full text opens in
+        // the pane on demand, never inline.
+        _ => return generic(one_line(&result.text)),
     }
+    .block()
 }
 
 /// B12: a ToolSearch header with its count ("query · 3 tools") when the
@@ -441,11 +302,7 @@ fn tool_search_target(name: &str, target: &str, result: &ToolResult) -> String {
                 .next()
         })
         .unwrap_or(0);
-    if count == 0 {
-        target.to_owned()
-    } else {
-        format!("{target} · {count} tools")
-    }
+    if count == 0 { target.to_owned() } else { format!("{target} · {count} tools") }
 }
 
 /// B12: the generic card's text: the result's first line, capped — the
@@ -463,68 +320,30 @@ fn one_line(text: &str) -> String {
 }
 
 /// Complete a terminal tool card from its result JSON (`docs/14-terminal.md`
-/// §4): `{tab, block, status, exit_code?, duration_ms, output, …}`. The
-/// header names the command plus the tab, the body is the run's output —
-/// a result without an `output` field (list, open, send, close) bodies
-/// the result text itself — and the exit code is the status and the pill.
+/// §4). The header names the command plus the tab, the body is the run's
+/// output — a result without an `output` field (list, open, send, close)
+/// bodies the result text itself — and the exit code is the status and
+/// the pill.
 fn finish_terminal_block(
     target: &str,
     params: &[(String, String)],
     tool_use_id: &str,
     result: &ToolResult,
 ) -> Block {
-    let object: Option<serde_json::Map<String, serde_json::Value>> =
-        serde_json::from_str(result.text.trim())
-            .ok()
-            .filter(|value: &serde_json::Value| value.is_object())
-            .map(|value: serde_json::Value| value.as_object().cloned().unwrap_or_default());
-    let param = |key: &str| params.iter().find(|(name, _)| name == key).map(|(_, value)| value.clone());
-    let command =
-        param("command").filter(|command| !command.trim().is_empty()).unwrap_or_else(|| target.to_owned());
-    let tab = object
-        .as_ref()
-        .and_then(|object| object.get("tab"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|tab| !tab.trim().is_empty());
-    let target = match tab {
-        Some(tab) if command.trim() != tab => format!("{command} · {tab}"),
-        _ => command,
+    let answer = TerminalAnswer::parse(&result.text).unwrap_or_default();
+    let command = params
+        .iter()
+        .find(|(name, _)| name == "command")
+        .map(|(_, value)| value.clone())
+        .filter(|command| !command.trim().is_empty())
+        .unwrap_or_else(|| target.to_owned());
+    let status = match (result.is_error, answer.exit_code) {
+        (false, Some(0) | None) => ToolStatus::Success,
+        _ => ToolStatus::Error,
     };
-    let output_lines = match object
-        .as_ref()
-        .and_then(|object| object.get("output"))
-        .and_then(serde_json::Value::as_str)
-    {
-        Some(output) => output.lines().map(str::to_owned).collect(),
-        None => result.text.lines().map(str::to_owned).collect(),
-    };
-    let exit_code = object
-        .as_ref()
-        .and_then(|object| object.get("exit_code"))
-        .and_then(serde_json::Value::as_i64)
-        .and_then(|code| i32::try_from(code).ok());
-    let duration_ms = object
-        .as_ref()
-        .and_then(|object| object.get("duration_ms"))
-        .and_then(serde_json::Value::as_u64);
-    let status = if result.is_error {
-        ToolStatus::Error
-    } else {
-        match exit_code {
-            Some(0) | None => ToolStatus::Success,
-            Some(_) => ToolStatus::Error,
-        }
-    };
-    Block::ToolCall {
-        id: tool_use_id.to_owned(),
-        kind: ToolKind::Shell,
-        verb: TERMINAL_RAN_VERB.into(),
-        target,
-        status,
-        duration_ms,
-        body: ToolBody::Shell { output_lines, exit_code, live: false },
-        diff_stat: None,
-    }
+    let output_lines = answer.output_lines.unwrap_or_else(|| split_lines(&result.text));
+    let target = terminal_target(command, answer.tab.as_deref());
+    terminal_event(tool_use_id, target, status, output_lines, answer.exit_code, answer.duration_ms).block()
 }
 
 /// The Read card's line count: the wire's own `numLines` when the detail
@@ -546,15 +365,8 @@ fn read_line_count(result: &ToolResult) -> usize {
 /// all-addition diff for a write. `None` detail (or an unrecognised one)
 /// leaves the card header-only rather than forging a diff.
 fn edit_body(target: &str, result: &ToolResult) -> (ToolBody, Option<aui_protocol::DiffStat>) {
-    let detail = match result.detail.as_ref() {
-        Some(detail) => detail,
-        None => return (ToolBody::None, None),
-    };
-    let path = detail
-        .get("filePath")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(target)
-        .to_owned();
+    let Some(detail) = result.detail.as_ref() else { return (ToolBody::None, None) };
+    let path = detail.get("filePath").and_then(serde_json::Value::as_str).unwrap_or(target).to_owned();
     if let Some(patch) = detail.get("structuredPatch").and_then(serde_json::Value::as_array) {
         if !patch.is_empty() {
             let (diff, stat) = diff_from_structured_patch(&path, patch);
@@ -562,29 +374,11 @@ fn edit_body(target: &str, result: &ToolResult) -> (ToolBody, Option<aui_protoco
         }
     }
     if let Some(content) = detail.get("content").and_then(serde_json::Value::as_str) {
-        let lines: Vec<&str> = content.lines().collect();
+        let lines = diff::addition_lines(content);
         let added = lines.len();
-        let diff = Diff {
-            path,
-            hunks: vec![Hunk {
-                header: format!("@@ -0,0 +1,{added} @@"),
-                lines: lines
-                    .iter()
-                    .enumerate()
-                    .map(|(index, line)| DiffLine {
-                        kind: DiffKind::Add,
-                        old_no: None,
-                        new_no: Some(index as u32 + 1),
-                        text: (*line).to_owned(),
-                    })
-                    .collect(),
-            }],
-            added: added as u32,
-            removed: 0,
-        };
-        let stat =
-            aui_protocol::DiffStat { added: added as u64, removed: 0, files: 1 };
-        return (ToolBody::Edit { diff }, Some(stat));
+        let hunks = vec![Hunk { header: format!("@@ -0,0 +1,{added} @@"), lines }];
+        let diff = Diff { path, hunks, added: added as u32, removed: 0 };
+        return (ToolBody::Edit { diff }, Some(aui_protocol::DiffStat { added: added as u64, removed: 0, files: 1 }));
     }
     (ToolBody::None, None)
 }
@@ -592,70 +386,28 @@ fn edit_body(target: &str, result: &ToolResult) -> (ToolBody, Option<aui_protoco
 /// The wire's `structuredPatch` entries onto one [`Diff`] plus its chip
 /// counts: `+`/`-` lines counted, `\ No newline` markers and `+++`/`---`
 /// headers skipped, anything unprefixed read as context.
-fn diff_from_structured_patch(
-    path: &str,
-    patch: &[serde_json::Value],
-) -> (Diff, aui_protocol::DiffStat) {
-    let mut hunks = Vec::new();
-    let mut added: u64 = 0;
-    let mut removed: u64 = 0;
-    for entry in patch {
-        let old_start = entry.get("oldStart").and_then(serde_json::Value::as_u64).unwrap_or(1);
-        let old_lines = entry.get("oldLines").and_then(serde_json::Value::as_u64).unwrap_or(0);
-        let new_start = entry.get("newStart").and_then(serde_json::Value::as_u64).unwrap_or(1);
-        let new_lines = entry.get("newLines").and_then(serde_json::Value::as_u64).unwrap_or(0);
-        let mut old_no = old_start as u32;
-        let mut new_no = new_start as u32;
-        let mut lines = Vec::new();
-        for line in entry
-            .get("lines")
-            .and_then(serde_json::Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-        {
-            let text = line.as_str().unwrap_or("");
-            if text.starts_with('\\') {
-                continue;
+fn diff_from_structured_patch(path: &str, patch: &[serde_json::Value]) -> (Diff, aui_protocol::DiffStat) {
+    let hunks: Vec<Hunk> = patch
+        .iter()
+        .map(|entry| {
+            let number = |key: &str, default: u64| entry.get(key).and_then(serde_json::Value::as_u64).unwrap_or(default);
+            let (old_start, old_lines) = (number("oldStart", 1), number("oldLines", 0));
+            let (new_start, new_lines) = (number("newStart", 1), number("newLines", 0));
+            let rows = entry.get("lines").and_then(serde_json::Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+            Hunk {
+                header: format!("@@ -{old_start},{old_lines} +{new_start},{new_lines} @@"),
+                lines: diff::hunk_lines(
+                    rows.iter().map(|line| line.as_str().unwrap_or("")),
+                    old_start as u32,
+                    new_start as u32,
+                    true,
+                ),
             }
-            if let Some(stripped) = text.strip_prefix('+') {
-                if stripped.starts_with('+') {
-                    continue;
-                }
-                added += 1;
-                lines.push(DiffLine { kind: DiffKind::Add, old_no: None, new_no: Some(new_no), text: stripped.to_owned() });
-                new_no += 1;
-            } else if let Some(stripped) = text.strip_prefix('-') {
-                if stripped.starts_with('-') {
-                    continue;
-                }
-                removed += 1;
-                lines.push(DiffLine { kind: DiffKind::Del, old_no: Some(old_no), new_no: None, text: stripped.to_owned() });
-                old_no += 1;
-            } else {
-                let text = text.strip_prefix(' ').unwrap_or(text);
-                lines.push(DiffLine {
-                    kind: DiffKind::Context,
-                    old_no: Some(old_no),
-                    new_no: Some(new_no),
-                    text: text.to_owned(),
-                });
-                old_no += 1;
-                new_no += 1;
-            }
-        }
-        hunks.push(Hunk {
-            header: format!("@@ -{old_start},{old_lines} +{new_start},{new_lines} @@"),
-            lines,
-        });
-    }
-    let files = u64::from(!patch.is_empty());
-    let diff = Diff {
-        path: path.to_owned(),
-        hunks,
-        added: added as u32,
-        removed: removed as u32,
-    };
-    (diff, aui_protocol::DiffStat { added, removed, files })
+        })
+        .collect();
+    let stat = diff::stat(hunks.iter().map(|hunk| hunk.lines.as_slice()), u64::from(!patch.is_empty()));
+    let diff = Diff { path: path.to_owned(), hunks, added: stat.added as u32, removed: stat.removed as u32 };
+    (diff, stat)
 }
 
 /// A `control_request` whose subtype this adapter does not know, held for
@@ -684,29 +436,21 @@ struct TodoEntry {
     state: TodoState,
 }
 
-/// The per-turn todo card: one card per turn no matter how many
-/// TaskCreate/TaskUpdate/TodoWrite calls refine it, so the transcript
-/// shows a list, not a call log.
-#[derive(Clone, Debug)]
-struct TodoCard {
-    /// The turn hosting the card.
-    turn_id: String,
-    /// The card's block index in that turn, for wholesale updates.
-    block_index: usize,
-    /// The list as last rendered.
-    items: Vec<TodoEntry>,
+/// The key a turn's todo card is filed under.
+fn todo_key(turn_id: &str) -> String {
+    format!("todo:{turn_id}")
 }
 
-/// One sub-agent invocation: the `Agent` card plus the blocks its own
-/// messages (`parent_tool_use_id` set) accumulate, flushed into the card
+/// The key the thinking block waiting on its duration is filed under:
+/// one at a time.
+const THINKING_KEY: &str = "thinking:pending";
+
+/// One sub-agent invocation: the blocks its own messages
+/// (`parent_tool_use_id` set) accumulate, flushed into the `Agent` card
 /// when the agent's result lands — or at turn end, when the agent is still
 /// running async and the turn finished first.
 #[derive(Clone, Debug)]
 struct AgentCard {
-    /// The turn hosting the card.
-    turn_id: String,
-    /// The card's block index in that turn, for wholesale updates.
-    block_index: usize,
     /// The card's current status (Running until the agent answers).
     status: ToolStatus,
     /// The nested blocks, in arrival order.
@@ -719,32 +463,28 @@ struct AgentCard {
     flushed: bool,
 }
 
-/// B12: one thinking block waiting on its duration: whose turn, which
-/// block, what it said, and when it started — the line's `timestamp` on
-/// replay, the arrival clock live. The next frame resolves it, so the
-/// header reads real elapsed instead of a frozen zero.
+/// B12: the thinking block waiting on its duration (filed under
+/// [`THINKING_KEY`]): whose turn, and when it started — the line's
+/// `timestamp` on replay, the arrival clock live. The next frame resolves
+/// it, so the header reads real elapsed instead of a frozen zero.
 #[derive(Clone, Debug)]
 struct ThinkingSite {
     turn_id: String,
-    block_index: usize,
-    text: String,
     start_ms: Option<u64>,
     start_instant: Instant,
 }
-
-/// B12: wall-clock milliseconds since `start`, saturating at `u64`.
-fn wall_ms_since(start: Instant) -> u64 {
-    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
 /// The fold: decoded frames in, [`Delta`]s out.
 ///
 /// Stateful only where the wire is relational: one assistant turn per CLI
 /// turn (many `assistant` messages share it; the `result` frame closes
-/// it), tool-use id → card (results arrive on later `user` frames).
+/// it), tool-use id → what the call was (results arrive on later `user`
+/// frames). Where a card sits is the [`TranscriptBuilder`]'s business: the
+/// fold names cards by id (`tool:<tool-use>`, `approval:<request>`,
+/// `question:<block>`, `todo:<turn>`).
 #[derive(Clone, Debug, Default)]
 pub struct ClaudeFold {
-    started: HashMap<String, ()>,
+    /// The transcript: positions, open cards, open approvals.
+    builder: TranscriptBuilder,
     /// The child process's running `total_cost_usd` at its last `result`:
     /// the CLI reports cost cumulatively per process, so a turn's own cost
     /// is the difference (docs/81 B D-1). Back to zero when a process
@@ -781,19 +521,15 @@ pub struct ClaudeFold {
     ask_tool_uses: HashMap<String, (String, serde_json::Value)>,
     /// Tool-use ids whose questions got live cards.
     carded_asks: HashSet<String>,
-    /// Turn id → its todo card, while the turn is open. Ordered, so two
-    /// concurrent todo cards resolve deterministically: a `HashMap` here
-    /// made the fallback lookup (and the result fan-out below) pick
-    /// whichever card hashed first.
-    todos: BTreeMap<String, TodoCard>,
-    /// `Agent` tool-use id → its nesting card, while the turn is open.
+    /// Turn id → its todo card's rows (the card is filed under
+    /// `todo:<turn>`). Ordered, so two concurrent todo cards resolve
+    /// deterministically: a `HashMap` here made the fallback lookup (and
+    /// the result fan-out below) pick whichever card hashed first.
+    todos: BTreeMap<String, Vec<TodoEntry>>,
+    /// `Agent` tool-use id → its nested buffer, while the turn is open.
     /// Ordered, so the turn-end flush renders concurrent subagents in
     /// id order rather than hash order.
     agents: BTreeMap<String, AgentCard>,
-    /// Blocks already emitted per turn, so a second `assistant` frame with
-    /// the same message id continues the index sequence (and a later
-    /// `BlockUpdated` for a tool result addresses the right card).
-    emitted: HashMap<String, usize>,
     /// Footer facts per turn from `assistant` lines (`message.model`,
     /// `message.usage`): what closes a replayed turn, since the stored
     /// transcript carries no `result` frame. Every line carries them, so
@@ -826,28 +562,20 @@ pub struct ClaudeFold {
     /// Allow/Deny approval (Claude Code hands every one to the host, in every
     /// permission mode).
     asks: Vec<AskPrompt>,
-    /// Requests already answered through `DecideApproval`, by `request_id`.
-    /// The card stays up until the settling frames arrive, and settling
-    /// rebuilds the card from the request — so the request lives here
-    /// between the press and the resolution. Cleared as each card settles.
-    decided: HashMap<String, ApprovalRequest>,
-    /// Where each carded approval lives (`request_id` → site), so the
-    /// tool's own result (allowed, it ran) or the turn's `permission_denials`
-    /// (denied, it never ran) can settle the card. Survives `take_approval`:
-    /// the decision queues the answer line, the frames settle the card —
-    /// deciding never moves it, only resolving does.
-    approval_sites: HashMap<String, ApprovalSite>,
     /// Requests the host answered with a deny. The CLI's error
     /// `tool_result` for a denied call arrives long before the turn's
     /// `permission_denials` would correct the card, so without this the
     /// card read "Allowed once · exit 1" for the rest of the live turn.
     denied: HashSet<String>,
     /// `tool_use` id → `request_id`, the join a result needs to settle the
-    /// approval whose tool just answered. Same lifetime as `approval_sites`.
+    /// approval whose tool just answered (the tool's result settles it
+    /// allowed, the turn's `permission_denials` denied). Same lifetime as
+    /// the card's open approval in the builder: deciding never moves the
+    /// card, only resolving does.
     tool_approvals: HashMap<String, String>,
-    /// B12: the open thinking block waiting on its duration: the turn, its
-    /// block index, its text, and when it started — the line's `timestamp`
-    /// on replay, the arrival clock live. The next frame resolves it.
+    /// B12: the open thinking block waiting on its duration: the turn and
+    /// when it started — the line's `timestamp` on replay, the arrival
+    /// clock live. The next frame resolves it.
     thinking_pending: Option<ThinkingSite>,
     /// B12: `request_id` → when the approval was asked, for the settled
     /// card's real duration. Wall clock: exact live, ~0 on a fast replay.
@@ -952,7 +680,7 @@ fn epoch_ms_now() -> u64 {
 impl ClaudeFold {
     /// An empty fold.
     pub fn new() -> Self {
-        Self::default()
+        Self { builder: TranscriptBuilder::new(Provider::Claude), ..Self::default() }
     }
 
     /// Track the live stream (`true`) or a stored replay (`false`): what
@@ -1159,15 +887,13 @@ impl ClaudeFold {
     }
 
     /// Take a pending request for deciding. Moves it off the answerable
-    /// queue (so a second decision cannot answer the same request twice)
-    /// into the decided shelf, where the settling frames still find it:
-    /// deciding queues the answer line, resolving settles the card, and
-    /// the card rebuild needs the request either way. `None` means nobody
-    /// asked for that id — an unknown approval decides nothing.
+    /// queue, so a second decision cannot answer the same request twice:
+    /// deciding queues the answer line, and only the settling frames move
+    /// the card. `None` means nobody asked for that id — an unknown
+    /// approval decides nothing.
     pub fn take_approval(&mut self, request_id: &str) -> Option<ApprovalRequest> {
         let position = self.pending.iter().position(|queued| queued.request_id == request_id)?;
         let request = self.pending.remove(position);
-        self.decided.insert(request_id.to_owned(), request.clone());
         // Q1b: the gated command's measured time excludes the approval
         // wait — the run starts when the person allows it, not when the
         // `tool_use` arrived. A `tool_use` arriving after the decision
@@ -1199,14 +925,11 @@ impl ClaudeFold {
     }
 
     /// Put a claimed request back after an undeliverable answer, without
-    /// duplicating ids. Leaves the decided shelf alone when the request
-    /// never left it through this path (defensive; same id both places
-    /// would answer twice).
+    /// duplicating ids.
     pub fn requeue_approval(&mut self, request: ApprovalRequest) {
         if !self.pending.iter().any(|queued| queued.request_id == request.request_id) {
-            self.pending.push(request.clone());
+            self.pending.push(request);
         }
-        self.decided.remove(&request.request_id);
     }
 
     /// Put a claimed unknown-subtype request back, without duplicating ids.
@@ -1216,14 +939,19 @@ impl ClaudeFold {
         }
     }
 
+
     /// Fold one decoded frame into render-ready deltas.
     pub fn apply(&mut self, frame: &Frame) -> Vec<Delta> {
+        self.fold_frame(frame);
+        self.builder.take()
+    }
+
+    fn fold_frame(&mut self, frame: &Frame) {
         match frame {
             Frame::Init(init) => {
                 self.session_id = Some(init.session_id.clone());
                 self.model = Some(init.model.clone());
                 self.session_cwd = init.cwd.clone();
-                Vec::new()
             }
             Frame::Assistant { message_id, blocks, parent_tool_use_id, model, usage, at_ms, .. } => {
                 // Nested (sub-agent) blocks buffer into their `Agent` card,
@@ -1235,8 +963,7 @@ impl ClaudeFold {
                 }
                 // The turn this message belongs to: opened on the turn's
                 // first message, shared by the rest.
-                let mut deltas = Vec::new();
-                let turn_id = self.assistant_turn_id(message_id, &mut deltas);
+                let turn_id = self.assistant_turn_id(message_id);
                 // Each line carries footer facts on the message itself:
                 // remembered per turn so the history path can close it
                 // (the stored transcript has no `result` frame). The
@@ -1246,18 +973,16 @@ impl ClaudeFold {
                 // A `<...>` placeholder (`<synthetic>` on error/synthetic
                 // messages) is not a model id: it never claims the turn,
                 // so the next source answers instead.
-                let real_model =
-                    model.as_deref().filter(|name| crate::frame::is_model_id(name));
+                let real_model = model.as_deref().filter(|name| crate::frame::is_model_id(name));
                 if model.is_some() || usage.is_some() {
                     let usage = usage.clone().unwrap_or_default();
                     self.stored_meta.insert(turn_id.clone(), TurnMeta {
                         model: real_model.unwrap_or_default().to_owned(),
                         duration_ms: 0,
-                        tokens_in: usage.input_tokens.saturating_add(
-                            usage.cache_read_tokens.unwrap_or(0),
-                        ).saturating_add(
-                            usage.cache_write_tokens.unwrap_or(0),
-                        ),
+                        tokens_in: usage
+                            .input_tokens
+                            .saturating_add(usage.cache_read_tokens.unwrap_or(0))
+                            .saturating_add(usage.cache_write_tokens.unwrap_or(0)),
                         tokens_out: usage.output_tokens,
                         reasoning_tokens: usage.reasoning_tokens,
                         // The stored file carries no cost: 0.0 is the
@@ -1286,24 +1011,24 @@ impl ClaudeFold {
                 // thinking is dropped unknown rather than timed against
                 // this turn's clock.
                 if self.thinking_pending.as_ref().is_some_and(|site| site.turn_id == turn_id) {
-                    self.resolve_open_thinking(*at_ms, &mut deltas);
+                    self.resolve_open_thinking(*at_ms);
                 } else {
                     self.thinking_pending = None;
                 }
-                deltas.extend(self.apply_blocks(&turn_id, blocks, *at_ms));
-                deltas
+                self.apply_blocks(&turn_id, blocks, *at_ms);
             }
             Frame::UserResult { results, parent_tool_use_id, .. } => {
-                if parent_tool_use_id.is_empty() {
-                    results.iter().flat_map(|result| self.apply_result(result)).collect()
-                } else {
-                    results.iter().for_each(|result| self.apply_nested_result(parent_tool_use_id, result));
-                    Vec::new()
+                for result in results {
+                    if parent_tool_use_id.is_empty() {
+                        self.apply_result(result);
+                    } else {
+                        self.apply_nested_result(parent_tool_use_id, result);
+                    }
                 }
             }
             Frame::UserText { uuid, text, images, .. } => {
                 self.note_echo(uuid);
-                self.apply_user_text(uuid, text, images)
+                self.apply_user_text(uuid, text, images);
             }
             Frame::TurnResult {
                 input_tokens,
@@ -1359,17 +1084,16 @@ impl ClaudeFold {
                     cache_write_tokens: *cache_write_tokens,
                     cached_tokens: 0,
                 };
-                let mut deltas = Vec::new();
                 // B12: the turn's tail thinking resolves against the
                 // arrival clock here — the only end clock a live turn
                 // ever has. On replay the lines carry timestamps, so a
                 // half-known pair stays unknown instead (see
                 // `resolve_open_thinking`).
-                self.resolve_open_thinking(None, &mut deltas);
+                self.resolve_open_thinking(None);
                 // Async sub-agents may still be streaming when the turn
                 // ends: flush whatever they buffered into their cards
                 // before the finish, or their work vanishes silently.
-                self.flush_agents(&mut deltas);
+                self.flush_agents();
                 // After-the-fact refusals, on the transcript before the
                 // finish: decoded, visible, and never a substitute for
                 // answering the request itself. A denial that joins to a
@@ -1389,42 +1113,29 @@ impl ClaudeFold {
                                 .first()
                                 .map(|denial| format!("denial-{}", denial.tool_use_id))
                                 .unwrap_or_else(|| "denial".to_owned());
-                            self.control_turn(&key, &mut deltas)
+                            self.control_turn(&key)
                         }
                     };
                     for denial in permission_denials {
-                        let request_id =
-                            self.tool_approvals.get(&denial.tool_use_id).cloned();
-                        match request_id {
+                        match self.tool_approvals.get(&denial.tool_use_id).cloned() {
                             Some(request_id) => {
-                                self.resolve_approval_card(
-                                    &request_id,
-                                    ApprovalState::Denied,
-                                    &mut deltas,
-                                );
-                                if let Some(site) = self.tools.get(&denial.tool_use_id).cloned() {
-                                    if let Some(block) = gated_tool_block(
-                                        &denial.tool_use_id,
-                                        &site,
-                                        ToolStatus::Cancelled,
-                                        "Denied",
-                                    ) {
-                                        deltas.push(Delta::BlockUpdated {
-                                            turn_id: site.turn_id,
-                                            block_index: site.block_index,
-                                            block,
-                                        });
+                                self.resolve_approval_card(&request_id, ApprovalState::Denied);
+                                if let Some(site) = self.tools.get(&denial.tool_use_id) {
+                                    if let Some(block) =
+                                        gated_tool_block(&denial.tool_use_id, site, ToolStatus::Cancelled)
+                                    {
+                                        self.builder.update(&tool_key(&denial.tool_use_id), block);
                                     }
                                 }
                             }
-                            None => deltas.push(Delta::BlockAdded {
-                                turn_id: turn_id.clone(),
-                                block: Block::Generic {
+                            None => {
+                                let card = Block::Generic {
                                     kind: "permission-denial".into(),
                                     status: "denied".into(),
                                     text: format!("{} refused", denial.tool_name),
-                                },
-                            }),
+                                };
+                                self.builder.add(&turn_id, None, card);
+                            }
                         }
                     }
                 }
@@ -1441,26 +1152,15 @@ impl ClaudeFold {
                 // message) must not claim the next submission's turn.
                 self.close_answered();
                 let finishing = std::mem::take(&mut self.open);
-                let owner = self
-                    .assistant_turn
-                    .take()
-                    .or_else(|| finishing.last().cloned());
+                let owner = self.assistant_turn.take().or_else(|| finishing.last().cloned());
                 for turn_id in finishing {
                     self.stored_meta.remove(&turn_id);
                     self.turn_model.remove(&turn_id);
-                    let finished = if Some(&turn_id) == owner.as_ref() {
-                        meta.clone()
-                    } else {
-                        TurnMeta::default()
-                    };
-                    deltas.push(Delta::TurnFinished { turn_id, meta: finished });
+                    let finished = if Some(&turn_id) == owner.as_ref() { meta.clone() } else { TurnMeta::default() };
+                    self.builder.finish_turn(&turn_id, finished);
                 }
-                deltas
             }
-            Frame::RateLimit(info) => {
-                self.account.observe(info.clone());
-                Vec::new()
-            }
+            Frame::RateLimit(info) => self.account.observe(info.clone()),
             // A permission decision the child is suspended on. Queued as
             // pending and carded — never folded away, or the turn hangs
             // forever with no timeout to save it.
@@ -1469,9 +1169,7 @@ impl ClaudeFold {
             // An unrecognised control subtype: recorded and carded, never
             // dropped and never panicked on. The next subtype must be
             // visible when it arrives.
-            Frame::ControlUnknown { request_id, subtype, raw } => {
-                self.apply_unknown_control(request_id, subtype, raw)
-            }
+            Frame::ControlUnknown { request_id, subtype, raw } => self.apply_unknown_control(request_id, subtype, raw),
             // The child withdrew an ask: it leaves the answerable queue and
             // its card settles, so a late decision finds nothing (PM-15).
             Frame::ControlCancel { request_id } => self.withdraw_ask(request_id),
@@ -1491,37 +1189,31 @@ impl ClaudeFold {
                     models: models.clone(),
                     mcp_servers: mcp_servers.clone(),
                 });
-                Vec::new()
             }
             // The other lane, by choice (see module docs): parsed, ignored.
             // A mode report renders nothing: [`step_line`] carries it out
             // as its own event.
-            Frame::Ignored { note } if note == crate::frame::PROCESS_START_NOTE => {
-                self.note_new_process();
-                Vec::new()
-            }
-            Frame::Stream { .. } | Frame::Ignored { .. } | Frame::PermissionMode { .. } => Vec::new(),
+            Frame::Ignored { note } if note == crate::frame::PROCESS_START_NOTE => self.note_new_process(),
+            Frame::Stream { .. } | Frame::Ignored { .. } | Frame::PermissionMode { .. } => {}
         }
     }
 
     /// The turn a main-thread `assistant` message belongs to: the open one
     /// when a turn is running, else a fresh turn keyed by this first
-    /// message's id (announced in `deltas`). The id is content, not
-    /// timing — the same first message opens the same turn on the live
-    /// fold and on the history replay, so the ledger key agrees and a
-    /// reopen adds no rows.
+    /// message's id. The id is content, not timing — the same first message
+    /// opens the same turn on the live fold and on the history replay, so
+    /// the ledger key agrees and a reopen adds no rows.
     ///
     /// A message seen before with no turn open is a repeat after its turn
     /// closed: it addresses its old turn without announcing a second one,
     /// exactly as the per-message fold did.
-    fn assistant_turn_id(&mut self, message_id: &str, deltas: &mut Vec<Delta>) -> String {
+    fn assistant_turn_id(&mut self, message_id: &str) -> String {
         if let Some(open) = self.assistant_turn.clone() {
             return open;
         }
-        if self.started.contains_key(message_id) {
+        if self.builder.has_turn(message_id) {
             return message_id.to_owned();
         }
-        self.started.insert(message_id.to_owned(), ());
         self.open.push(message_id.to_owned());
         self.assistant_turn = Some(message_id.to_owned());
         // The line the CLI last echoed is this turn's; with no echo to go
@@ -1543,15 +1235,7 @@ impl ClaudeFold {
         }
         // A live turn starts now (its rows tick from here); a replayed
         // turn keeps its filed `None`.
-        let timestamp = self.live.then(epoch_ms_now);
-        deltas.push(Delta::TurnStarted {
-            turn: Turn::Assistant {
-                id: message_id.to_owned(),
-                blocks: Vec::new(),
-                meta: TurnMeta::default(),
-                timestamp,
-            },
-        });
+        self.builder.open_turn(message_id, self.live.then(epoch_ms_now));
         message_id.to_owned()
     }
 
@@ -1563,39 +1247,31 @@ impl ClaudeFold {
     /// meet, so the arrival clock is the only honest span left.
     /// Zero-length gaps resolve to nothing — the card keeps its zero
     /// honestly.
-    fn resolve_open_thinking(&mut self, at_ms: Option<u64>, deltas: &mut Vec<Delta>) {
+    fn resolve_open_thinking(&mut self, at_ms: Option<u64>) {
         let Some(site) = self.thinking_pending.take() else { return };
         let elapsed = match (site.start_ms, at_ms) {
             (Some(start), Some(end)) => end.saturating_sub(start),
-            (None, None) => wall_ms_since(site.start_instant),
-            (Some(_), None) | (None, Some(_)) => wall_ms_since(site.start_instant),
+            _ => wall_ms_since(site.start_instant),
         };
         if elapsed == 0 {
             return;
         }
-        deltas.push(Delta::BlockUpdated {
-            turn_id: site.turn_id,
-            block_index: site.block_index,
-            block: Block::Thinking {
-                text: site.text,
-                elapsed_ms: elapsed,
-                summary: None,
-                state: ThinkingState::Done,
-            },
+        self.builder.modify(THINKING_KEY, |block| {
+            if let Block::Thinking { elapsed_ms, .. } = block {
+                *elapsed_ms = elapsed;
+            }
         });
     }
 
-    fn apply_blocks(&mut self, turn_id: &str, blocks: &[ContentBlock], at_ms: Option<u64>) -> Vec<Delta> {
-        let mut deltas = Vec::new();
+    fn apply_blocks(&mut self, turn_id: &str, blocks: &[ContentBlock], at_ms: Option<u64>) {
         for block in blocks.iter() {
-            let block_index = self.emitted.get(turn_id).copied().unwrap_or(0);
-            let emitted = match block {
+            match block {
                 // An empty thinking block is the redacted kind: the child
                 // billed the thought (its signature) without uttering it.
                 // Carding it renders an empty "Thought for 0.0 s" shell, so
                 // it folds to nothing — the billed count still reaches the
                 // footer through `reasoning_tokens`.
-                ContentBlock::Thinking { text } if text.trim().is_empty() => None,
+                ContentBlock::Thinking { text } if text.trim().is_empty() => {}
                 ContentBlock::Thinking { text } => {
                     // B12: the duration lands on the next frame
                     // (`resolve_open_thinking`); the card opens at zero and
@@ -1603,41 +1279,22 @@ impl ClaudeFold {
                     // A second thinking block in one frame first resolves
                     // the first against this frame's own clock.
                     if self.thinking_pending.as_ref().is_some_and(|site| site.turn_id == turn_id) {
-                        self.resolve_open_thinking(at_ms, &mut deltas);
+                        self.resolve_open_thinking(at_ms);
                     }
-                    if self.thinking_pending.is_none() {
+                    let key = self.thinking_pending.is_none().then(|| {
                         self.thinking_pending = Some(ThinkingSite {
                             turn_id: turn_id.to_owned(),
-                            block_index,
-                            text: text.clone(),
                             start_ms: at_ms,
                             start_instant: Instant::now(),
                         });
-                    }
-                    Some(Block::Thinking {
-                        text: text.clone(),
-                        elapsed_ms: 0,
-                        summary: None,
-                        state: ThinkingState::Done,
-                    })
+                        THINKING_KEY
+                    });
+                    let thinking =
+                        Block::Thinking { text: text.clone(), elapsed_ms: 0, summary: None, state: ThinkingState::Done };
+                    self.builder.add(turn_id, key, thinking);
                 }
                 ContentBlock::Text { text } => {
-                    Some(Block::Text { text: text.clone(), streaming: false })
-                }
-                ContentBlock::ToolUse { .. } | ContentBlock::Other { .. } => None,
-            };
-            match block {
-                ContentBlock::Thinking { .. } | ContentBlock::Text { .. } => {
-                    // A redacted thinking block folds to no card at all:
-                    // nothing is pushed and no index is consumed, so the
-                    // cards around the hole keep their addresses.
-                    if let Some(block) = emitted {
-                        deltas.push(Delta::BlockAdded {
-                            turn_id: turn_id.to_owned(),
-                            block,
-                        });
-                        self.emitted.insert(turn_id.to_owned(), block_index + 1);
-                    }
+                    self.builder.add(turn_id, None, Block::Text { text: text.clone(), streaming: false });
                 }
                 ContentBlock::ToolUse { id, name, input } => {
                     if is_todo_tool(name) {
@@ -1646,53 +1303,38 @@ impl ClaudeFold {
                         // `apply_todo_call`). Never a `ToolSite`, so its
                         // result routes to the card, not to a card update.
                         self.todo_tool_ids.insert(id.clone());
-                        self.apply_todo_call(turn_id, block_index, id, name, input, &mut deltas);
+                        self.apply_todo_call(turn_id, id, name, input);
                     } else if name == ASK_TOOL {
                         // The live question cards say it (see `apply_ask`).
                         self.ask_tool_uses.insert(id.clone(), (turn_id.to_owned(), input.clone()));
                     } else {
-                        self.add_tool_site(turn_id, block_index, id, name, input, &mut deltas);
+                        self.add_tool_site(turn_id, id, name, input);
                     }
                 }
                 ContentBlock::Other { .. } => {}
             }
         }
-        deltas
     }
 
-    /// One tool card at `block_index` of `turn_id`, with its site.
-    fn add_tool_site(
-        &mut self,
-        turn_id: &str,
-        block_index: usize,
-        id: &str,
-        name: &str,
-        input: &serde_json::Value,
-        deltas: &mut Vec<Delta>,
-    ) {
-        let site = tool_card(id, name, input);
-        if site.kind == ToolKind::SubAgent {
-            self.agents.insert(id.to_owned(), AgentCard {
-                turn_id: turn_id.to_owned(),
-                block_index,
-                status: ToolStatus::Running,
-                blocks: Vec::new(),
-                nested_tools: HashMap::new(),
-                flushed: false,
-            });
+    /// One tool card appended to `turn_id`, filed under its id, with what
+    /// it was.
+    fn add_tool_site(&mut self, turn_id: &str, id: &str, name: &str, input: &serde_json::Value) {
+        let card = tool_card(id, name, input);
+        if card.kind == ToolKind::SubAgent {
+            self.agents.insert(
+                id.to_owned(),
+                AgentCard { status: ToolStatus::Running, blocks: Vec::new(), nested_tools: HashMap::new(), flushed: false },
+            );
         }
         self.tools.insert(id.to_owned(), ToolSite {
-            turn_id: turn_id.to_owned(),
-            block_index,
-            kind: site.kind.clone(),
-            verb: site.verb.clone(),
-            target: site.target.clone(),
+            kind: card.kind,
+            verbs: card.verbs,
+            target: card.target,
             name: name.to_owned(),
-            params: site.params.clone(),
+            params: card.params,
             started: Instant::now(),
         });
-        deltas.push(Delta::BlockAdded { turn_id: turn_id.to_owned(), block: site.block });
-        self.emitted.insert(turn_id.to_owned(), block_index + 1);
+        self.builder.add(turn_id, Some(&tool_key(id)), card.block);
     }
 
     /// The session's model from stored history: the last stored
@@ -1703,6 +1345,16 @@ impl ClaudeFold {
         self.stored_model.as_deref()
     }
 
+    /// Finish every open turn with its stored footer (or a default one),
+    /// oldest first.
+    fn finish_open_turns(&mut self) {
+        self.assistant_turn = None;
+        for turn_id in std::mem::take(&mut self.open) {
+            let meta = self.stored_meta.remove(&turn_id).unwrap_or_default();
+            self.builder.finish_turn(&turn_id, meta);
+        }
+    }
+
     /// Close every still-open turn with its stored footer, oldest first.
     /// STORED-HISTORY ONLY: the adapter calls this once on the throwaway
     /// fold that replayed the stored file, never on the live fold — a
@@ -1711,15 +1363,9 @@ impl ClaudeFold {
     /// (with a default meta) so a reopened view never shows a stuck
     /// "working" indicator for a turn that settled before the restart.
     pub fn finish_stored_turns(&mut self) -> Vec<Delta> {
-        let mut deltas = Vec::new();
-        self.flush_agents(&mut deltas);
-        self.assistant_turn = None;
-        let open = std::mem::take(&mut self.open);
-        deltas.extend(open.into_iter().map(|turn_id| {
-            let meta = self.stored_meta.remove(&turn_id).unwrap_or_default();
-            Delta::TurnFinished { turn_id, meta }
-        }));
-        deltas
+        self.flush_agents();
+        self.finish_open_turns();
+        self.builder.take()
     }
 
     /// Whether a turn is open (a submission answered and not yet settled
@@ -1741,18 +1387,29 @@ impl ClaudeFold {
 
     /// The child withdrew `request_id` (`control_cancel_request`): it is no
     /// longer answerable, and its card reads "Not run — withdrawn".
-    fn withdraw_ask(&mut self, request_id: &str) -> Vec<Delta> {
-        let mut deltas = Vec::new();
+    fn withdraw_ask(&mut self, request_id: &str) {
         self.pending.retain(|request| request.request_id != request_id);
         self.pending_unknown.retain(|request| request.request_id != request_id);
-        if self.approval_sites.contains_key(request_id) {
-            self.resolve_approval_card(
-                request_id,
-                ApprovalState::Cancelled { reason: Some("withdrawn".to_owned()) },
-                &mut deltas,
-            );
+        self.resolve_approval_card(request_id, ApprovalState::Cancelled { reason: Some("withdrawn".to_owned()) });
+    }
+
+    /// Settle every carded approval nobody can answer any more: denied
+    /// where the person denied it, else "Not run — `why`" (never a refusal
+    /// the person did not make) — and, with `card_turn`, close the story
+    /// with a [`CHILD_EXITED_CARD`] naming `reason` there. The answerable
+    /// queues empty: a late decision must find nothing to answer.
+    fn abandon_asks(&mut self, why: &str, card_turn: Option<&str>, reason: &str) {
+        let settled = self.builder.open_approvals().to_vec();
+        let denied = &self.denied;
+        self.builder.abandon(card_turn, CHILD_EXITED_CARD, reason, |id| {
+            approval::abandoned(denied.contains(id), why)
+        });
+        for request_id in settled {
+            self.approval_started.remove(&request_id);
+            self.tool_approvals.retain(|_, held| held != &request_id);
         }
-        deltas
+        self.pending.clear();
+        self.pending_unknown.clear();
     }
 
     /// A relaunch replaced the child (docs/81 B PM-14): the asks the old
@@ -1761,19 +1418,8 @@ impl ClaudeFold {
     /// restarted" (denied when the person denied them). Without this a
     /// late decision was written to the new child under the old id.
     pub fn drop_pending_asks(&mut self) -> Vec<Delta> {
-        let mut deltas = Vec::new();
-        let carded: Vec<String> = self.approval_sites.keys().cloned().collect();
-        for request_id in carded {
-            let state = if self.denied.contains(&request_id) {
-                ApprovalState::Denied
-            } else {
-                ApprovalState::Cancelled { reason: Some("Claude Code restarted".to_owned()) }
-            };
-            self.resolve_approval_card(&request_id, state, &mut deltas);
-        }
-        self.pending.clear();
-        self.pending_unknown.clear();
-        deltas
+        self.abandon_asks("Claude Code restarted", None, "");
+        self.builder.take()
     }
 
     /// Stop's fallback (docs/82 0.8): the child is being ended on purpose,
@@ -1784,28 +1430,12 @@ impl ClaudeFold {
     pub fn interrupt_live_turns(&mut self) -> (Vec<Delta>, Vec<String>) {
         self.stopping = false;
         self.forget_submissions();
-        let mut deltas = Vec::new();
-        self.resolve_open_thinking(None, &mut deltas);
-        self.flush_agents(&mut deltas);
-        let carded: Vec<String> = self.approval_sites.keys().cloned().collect();
-        for request_id in carded {
-            let state = if self.denied.contains(&request_id) {
-                ApprovalState::Denied
-            } else {
-                ApprovalState::Cancelled { reason: Some("Stopped".to_owned()) }
-            };
-            self.resolve_approval_card(&request_id, state, &mut deltas);
-        }
-        self.pending.clear();
-        self.pending_unknown.clear();
-        self.assistant_turn = None;
-        let open = std::mem::take(&mut self.open);
-        let stopped = open.clone();
-        deltas.extend(open.into_iter().map(|turn_id| {
-            let meta = self.stored_meta.remove(&turn_id).unwrap_or_default();
-            Delta::TurnFinished { turn_id, meta }
-        }));
-        (deltas, stopped)
+        self.resolve_open_thinking(None);
+        self.flush_agents();
+        self.abandon_asks("Stopped", None, "");
+        let stopped = self.open.clone();
+        self.finish_open_turns();
+        (self.builder.take(), stopped)
     }
 
     /// Close every live turn the child left open when its stream ended:
@@ -1821,48 +1451,19 @@ impl ClaudeFold {
         // The child that would have answered the waiting submissions is
         // gone: none of them will ever open a turn on it.
         self.forget_submissions();
-        let mut deltas = Vec::new();
         if self.open.is_empty() {
             // No turn to card, but nothing the dead child asked survives
             // it either: a late decision must find nothing to answer.
             self.pending.clear();
             self.pending_unknown.clear();
-            return deltas;
+            return self.builder.take();
         }
-        self.resolve_open_thinking(None, &mut deltas);
-        self.flush_agents(&mut deltas);
-        // Nobody can answer them now: a card the person denied reads
-        // Denied, any other reads "Not run — Claude Code stopped" — never a
-        // refusal the person did not make.
-        let carded: Vec<String> = self.approval_sites.keys().cloned().collect();
-        for request_id in carded {
-            let state = if self.denied.contains(&request_id) {
-                ApprovalState::Denied
-            } else {
-                ApprovalState::Cancelled { reason: Some("Claude Code stopped".to_owned()) }
-            };
-            self.resolve_approval_card(&request_id, state, &mut deltas);
-        }
-        self.pending.clear();
-        self.pending_unknown.clear();
+        self.resolve_open_thinking(None);
+        self.flush_agents();
         let card_turn = self.assistant_turn.clone().or_else(|| self.open.last().cloned());
-        if let Some(turn_id) = card_turn {
-            deltas.push(Delta::BlockAdded {
-                turn_id,
-                block: Block::Generic {
-                    kind: CHILD_EXITED_CARD.into(),
-                    status: "error".into(),
-                    text: reason.to_owned(),
-                },
-            });
-        }
-        self.assistant_turn = None;
-        let open = std::mem::take(&mut self.open);
-        deltas.extend(open.into_iter().map(|turn_id| {
-            let meta = self.stored_meta.remove(&turn_id).unwrap_or_default();
-            Delta::TurnFinished { turn_id, meta }
-        }));
-        deltas
+        self.abandon_asks("Claude Code stopped", card_turn.as_deref(), reason);
+        self.finish_open_turns();
+        self.builder.take()
     }
 
     /// Remember the bubble text for a submit carrying `display_text`.
@@ -1914,55 +1515,40 @@ impl ClaudeFold {
     /// it now would close the turn still running. Call it before
     /// [`Self::note_submission_line`]; [`Self::retract_submitted_user_turn`]
     /// undoes it for a line that never reached the child.
-    pub fn submitted_user_turn(
-        &mut self,
-        uuid: &str,
-        text: &str,
-        images: &[crate::frame::UserImage],
-    ) -> Vec<Delta> {
-        if !self.submissions.is_empty() || !self.open.is_empty() || self.assistant_turn.is_some() {
-            return Vec::new();
+    pub fn submitted_user_turn(&mut self, uuid: &str, text: &str, images: &[crate::frame::UserImage]) -> Vec<Delta> {
+        if self.submissions.is_empty() && self.open.is_empty() && self.assistant_turn.is_none() {
+            self.apply_user_text(uuid, text, images);
         }
-        self.apply_user_text(uuid, text, images)
+        self.builder.take()
     }
 
     /// Undo [`Self::submitted_user_turn`] for a line the child never got:
     /// the bubble leaves the transcript, and the uuid may bubble again.
     /// Nothing drawn, nothing to undo.
     pub fn retract_submitted_user_turn(&mut self, uuid: &str) -> Vec<Delta> {
-        if !self.user_echoes.remove(uuid) {
-            return Vec::new();
+        if self.user_echoes.remove(uuid) {
+            self.builder.push(Delta::TurnRemoved { turn_id: uuid.to_owned() });
         }
-        vec![Delta::TurnRemoved { turn_id: uuid.to_owned() }]
+        self.builder.take()
     }
 
     /// The echoed prompt (`--replay-user-messages`) as the person's own
     /// turn: the bubble the pre-replay CLI never sent. Exactly once per
     /// echo uuid — a replayed fixture must not mint the bubble twice.
-    fn apply_user_text(
-        &mut self,
-        uuid: &str,
-        text: &str,
-        images: &[crate::frame::UserImage],
-    ) -> Vec<Delta> {
+    fn apply_user_text(&mut self, uuid: &str, text: &str, images: &[crate::frame::UserImage]) {
         if uuid.is_empty() || !self.user_echoes.insert(uuid.to_owned()) {
-            return Vec::new();
+            return;
         }
         // The echo carries the whole submitted input; a submit that
         // recorded `display_text` shows the short text instead. The uuid
         // join wins (it names the replayed message exactly); the full
         // text is the fallback, and its hit teaches the uuid map so a
         // later replay keyed by uuid alone still shows the short text.
-        let bubble = self
-            .display_by_uuid
-            .get(uuid)
-            .cloned()
-            .or_else(|| self.display_by_text.get(text).cloned());
+        let bubble = self.display_by_uuid.get(uuid).cloned().or_else(|| self.display_by_text.get(text).cloned());
         if let Some(display) = &bubble {
             self.display_by_uuid.insert(uuid.to_owned(), display.clone());
         }
         let bubble = bubble.unwrap_or_else(|| text.to_owned());
-        let mut deltas = Vec::new();
         // A fresh prompt ends the previous turn when one is still open.
         // Live that turn already closed on its `result` frame, so this is
         // a no-op; stored history carries no `result` frame, so the echo
@@ -1973,7 +1559,7 @@ impl ClaudeFold {
         if let Some(turn_id) = self.assistant_turn.take() {
             self.open.retain(|open| open != &turn_id);
             let meta = self.stored_meta.remove(&turn_id).unwrap_or_default();
-            deltas.push(Delta::TurnFinished { turn_id, meta });
+            self.builder.finish_turn(&turn_id, meta);
         }
         let attachments = images
             .iter()
@@ -1988,16 +1574,9 @@ impl ClaudeFold {
                 quote_of: None,
             })
             .collect();
-        deltas.push(Delta::TurnStarted {
-            turn: Turn::User {
-                id: uuid.to_owned(),
-                text: bubble,
-                attachments,
-                mentions: Vec::new(),
-                timestamp: None,
-            },
+        self.builder.push(Delta::TurnStarted {
+            turn: Turn::User { id: uuid.to_owned(), text: bubble, attachments, mentions: Vec::new(), timestamp: None },
         });
-        deltas
     }
 
     /// Complete one tool card from its result, settling the linked approval
@@ -2008,29 +1587,26 @@ impl ClaudeFold {
     /// look identical here, and the turn's `permission_denials` still
     /// corrects a denial to `Denied` below (the join is kept for exactly
     /// that correction).
-    fn apply_result(&mut self, result: &crate::frame::ToolResult) -> Vec<Delta> {
+    fn apply_result(&mut self, result: &ToolResult) {
         if self.todo_tool_ids.contains(&result.tool_use_id) {
-            return self.apply_todo_result(result).into_iter().collect();
+            return self.apply_todo_result(result);
         }
         if let Some((turn_id, input)) = self.ask_tool_uses.remove(&result.tool_use_id) {
             if self.carded_asks.remove(&result.tool_use_id) {
-                return Vec::new();
+                return;
             }
             // No live cards (a stored history): the plain tool card, settled.
-            let mut deltas = Vec::new();
-            let block_index = self.emitted.get(&turn_id).copied().unwrap_or(0);
-            self.add_tool_site(&turn_id, block_index, &result.tool_use_id, ASK_TOOL, &input, &mut deltas);
-            deltas.extend(self.apply_result(result));
-            return deltas;
+            self.add_tool_site(&turn_id, &result.tool_use_id, ASK_TOOL, &input);
+            return self.apply_result(result);
         }
-        let Some(site) = self.tools.get(&result.tool_use_id).cloned() else { return Vec::new() };
+        let Some(site) = self.tools.get(&result.tool_use_id).cloned() else { return };
         let status = if result.is_error { ToolStatus::Error } else { ToolStatus::Success };
         if site.kind == ToolKind::SubAgent {
-            return self.apply_agent_result(&result.tool_use_id, &site, status, result).into_iter().collect();
+            return self.apply_agent_result(&result.tool_use_id, &site, status);
         }
         let block = finish_tool_block(
             &site.kind,
-            &site.verb,
+            site.verbs,
             &site.target,
             &site.name,
             &site.params,
@@ -2041,229 +1617,130 @@ impl ClaudeFold {
         // its `tool_use`; a replay keeps the filed block as is. A
         // result-carried duration (terminal runs) always wins — the wall
         // gap only fills an unset one.
-        let block = if self.live {
-            with_tool_duration(block, wall_ms_since(site.started))
-        } else {
-            block
-        };
-        let mut deltas =
-            vec![Delta::BlockUpdated { turn_id: site.turn_id, block_index: site.block_index, block }];
+        let block = if self.live { with_tool_duration(block, wall_ms_since(site.started)) } else { block };
+        self.builder.update(&tool_key(&result.tool_use_id), block);
         if let Some(request_id) = self.tool_approvals.get(&result.tool_use_id).cloned() {
             let exit_code = match &site.kind {
                 ToolKind::Shell => parse_exit_code(&result.text).unwrap_or(i32::from(result.is_error)),
                 _ => i32::from(result.is_error),
             };
-            let state = ApprovalState::AllowedOnce {
-                exit_code,
-                duration_ms: self.approval_duration_ms(&request_id),
-            };
+            let state = ApprovalState::AllowedOnce { exit_code, duration_ms: self.approval_duration_ms(&request_id) };
             if result.is_error && self.denied.contains(&request_id) {
-                self.resolve_approval_card(&request_id, ApprovalState::Denied, &mut deltas);
+                self.resolve_approval_card(&request_id, ApprovalState::Denied);
             } else if result.is_error {
-                self.update_approval_state(&request_id, state, &mut deltas);
+                self.update_approval_state(&request_id, state);
             } else {
-                self.resolve_approval_card(&request_id, state, &mut deltas);
+                self.resolve_approval_card(&request_id, state);
             }
         }
-        deltas
     }
 
     /// Refine the turn's todo card from one TaskCreate/TaskUpdate/TodoWrite
     /// call: the first call opens the card, every later call rewrites it
-    /// wholesale. Only the opening call consumes a block index — updates
-    /// address the recorded one.
+    /// wholesale in place.
     ///
     /// The card spans the CLI turn's many assistant messages: one card per
-    /// turn, refined by every call (a `BlockUpdated` to an earlier turn is
+    /// turn, refined by every call (an update to an earlier turn's card is
     /// exactly how tool results already address older cards). A new CLI
     /// turn has no open turns left — its first call always opens a fresh
     /// card.
-    fn apply_todo_call(
-        &mut self,
-        turn_id: &str,
-        block_index: usize,
-        tool_id: &str,
-        name: &str,
-        input: &serde_json::Value,
-        deltas: &mut Vec<Delta>,
-    ) {
+    fn apply_todo_call(&mut self, turn_id: &str, tool_id: &str, name: &str, input: &serde_json::Value) {
         // The card to refine: this turn's own, else any card on a
-        // still-open turn (a `BlockUpdated` to an earlier turn is exactly
-        // how tool results already address older cards). `None` means no
-        // card is open anywhere — this call opens one.
+        // still-open turn. `None` means no card is open anywhere — this
+        // call opens one.
         let key = if self.todos.contains_key(turn_id) {
             Some(turn_id.to_owned())
         } else {
-            self.todos
-                .iter()
-                .find(|(_, card)| self.open.iter().any(|turn| turn == &card.turn_id))
-                .map(|(key, _)| key.clone())
+            self.todos.keys().find(|card| self.open.iter().any(|turn| &turn == card)).cloned()
         };
-        let (key, is_new) = match key {
-            Some(key) => (key, false),
-            None => {
-                self.todos.insert(turn_id.to_owned(), TodoCard {
-                    turn_id: turn_id.to_owned(),
-                    block_index,
-                    items: Vec::new(),
-                });
-                (turn_id.to_owned(), true)
-            }
-        };
-        if let Some(card) = self.todos.get_mut(&key) {
-            apply_todo_input(&mut card.items, tool_id, name, input);
-        }
-        let card = self.todos.get(&key).expect("inserted above");
-        let block = Block::Todo {
-            items: card
-                .items
-                .iter()
-                .map(|entry| TodoItem {
-                    label: entry.label.clone(),
-                    state: entry.state,
-                    elapsed_ms: None,
-                })
-                .collect(),
-        };
+        let is_new = key.is_none();
+        let key = key.unwrap_or_else(|| turn_id.to_owned());
+        let items = self.todos.entry(key.clone()).or_default();
+        apply_todo_input(items, tool_id, name, input);
+        let block = todo_block(items);
         if is_new {
-            deltas.push(Delta::BlockAdded { turn_id: card.turn_id.clone(), block });
-            self.emitted.insert(turn_id.to_owned(), block_index + 1);
+            self.builder.add(&key, Some(&todo_key(&key)), block);
         } else {
-            deltas.push(Delta::BlockUpdated {
-                turn_id: card.turn_id.clone(),
-                block_index: card.block_index,
-                block,
-            });
+            self.builder.update(&todo_key(&key), block);
         }
     }
 
     /// Refine the turn's todo card from one todo-call result: TaskCreate
     /// names the task's real id, TaskUpdate moves its state. A result for
     /// a call the fold never saw refines nothing.
-    fn apply_todo_result(&mut self, result: &ToolResult) -> Option<Delta> {
+    fn apply_todo_result(&mut self, result: &ToolResult) {
         let detail = result.detail.as_ref();
         // The card this call belongs to: the one still holding its
         // provisional tool-use key, or the one already holding its task id.
-        let task_id = detail
-            .and_then(|detail| detail.get("task"))
-            .and_then(|task| task.get("id"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| {
-                detail
-                    .and_then(|detail| detail.get("taskId"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .or_else(|| task_number_from(&result.text).map(|number| number.to_owned()));
+        let str_at = |value: Option<&serde_json::Value>| value.and_then(serde_json::Value::as_str).map(str::to_owned);
+        let task_id = str_at(detail.and_then(|detail| detail.get("task")).and_then(|task| task.get("id")))
+            .or_else(|| str_at(detail.and_then(|detail| detail.get("taskId"))))
+            .or_else(|| task_number_from(&result.text).map(str::to_owned));
+        let change = str_at(detail.and_then(|detail| detail.get("statusChange")).and_then(|change| change.get("to")));
         let mut found = None;
-        for card in self.todos.values_mut() {
-            if let Some(entry) =
-                card.items.iter_mut().find(|entry| Some(entry.key.as_str()) == task_id.as_deref())
-            {
-                if entry.key == result.tool_use_id {
-                    if let Some(id) = task_id.clone() {
-                        entry.key = id;
-                    }
+        for (turn_id, items) in self.todos.iter_mut() {
+            if let Some(entry) = items.iter_mut().find(|entry| Some(entry.key.as_str()) == task_id.as_deref()) {
+                if let Some(change) = &change {
+                    entry.state = todo_state(change);
                 }
-                if let Some(change) =
-                    detail.and_then(|detail| detail.get("statusChange")).and_then(|change| {
-                        change.get("to").and_then(serde_json::Value::as_str)
-                    })
-                {
-                    entry.state = map_todo_state(change);
-                }
-                found = Some((card.turn_id.clone(), card.block_index));
+                found = Some(turn_id.clone());
                 break;
             }
             // A creation result whose provisional key is still the
             // `tool_use` id: claim it for this task id.
-            if let Some(entry) =
-                card.items.iter_mut().find(|entry| entry.key == result.tool_use_id)
-            {
+            if let Some(entry) = items.iter_mut().find(|entry| entry.key == result.tool_use_id) {
                 if let Some(id) = task_id.clone() {
                     entry.key = id;
                 }
-                found = Some((card.turn_id.clone(), card.block_index));
+                found = Some(turn_id.clone());
                 break;
             }
         }
-        let (turn_id, block_index) = found?;
-        let card = self.todos.values().find(|card| card.turn_id == turn_id)?;
-        Some(Delta::BlockUpdated {
-            turn_id,
-            block_index,
-            block: Block::Todo {
-                items: card
-                    .items
-                    .iter()
-                    .map(|entry| TodoItem {
-                        label: entry.label.clone(),
-                        state: entry.state,
-                        elapsed_ms: None,
-                    })
-                    .collect(),
-            },
-        })
+        let Some(turn_id) = found else { return };
+        let block = todo_block(&self.todos[&turn_id]);
+        self.builder.update(&todo_key(&turn_id), block);
     }
 
     /// Buffer one sub-agent message's blocks into its `Agent` card: no
     /// deltas yet — the card refreshes when the agent answers, or at turn
     /// end when the agent is still running async.
-    fn apply_subagent_blocks(
-        &mut self,
-        agent_id: &str,
-        blocks: &[ContentBlock],
-    ) -> Vec<Delta> {
-        if !self.agents.contains_key(agent_id) {
-            // Frames out of order (or a fixture starting mid-agent): a
-            // card shell so the blocks land somewhere owned.
-            self.agents.insert(agent_id.to_owned(), AgentCard {
-                turn_id: agent_id.to_owned(),
-                block_index: 0,
-                status: ToolStatus::Running,
-                blocks: Vec::new(),
-                nested_tools: HashMap::new(),
-                flushed: false,
-            });
-        }
-        if let Some(card) = self.agents.get_mut(agent_id) {
-            for block in blocks {
-                match block {
-                    ContentBlock::Thinking { text } => {
-                        // Redacted thinking stays out of the nested card
-                        // too: an empty trace with a spinner is noise
-                        // wherever it renders.
-                        if !text.trim().is_empty() {
-                            card.blocks.push(Block::Thinking {
-                                text: text.clone(),
-                                elapsed_ms: 0,
-                                summary: None,
-                                state: ThinkingState::Done,
-                            });
-                        }
-                    }
-                    ContentBlock::Text { text } => {
-                        card.blocks.push(Block::Text { text: text.clone(), streaming: false });
-                    }
-                    ContentBlock::ToolUse { id, name, input } => {
-                        let site = tool_card(id, name, input);
-                        card.nested_tools.insert(id.clone(), NestedSite {
-                            index: card.blocks.len(),
-                            kind: site.kind.clone(),
-                            verb: site.verb.clone(),
-                            target: site.target.clone(),
-                            name: name.clone(),
-                            params: site.params.clone(),
-                        });
-                        card.blocks.push(site.block);
-                    }
-                    ContentBlock::Other { .. } => {}
+    fn apply_subagent_blocks(&mut self, agent_id: &str, blocks: &[ContentBlock]) {
+        // Frames out of order (or a fixture starting mid-agent): a buffer
+        // so the blocks land somewhere owned.
+        let card = self.agents.entry(agent_id.to_owned()).or_insert_with(|| AgentCard {
+            status: ToolStatus::Running,
+            blocks: Vec::new(),
+            nested_tools: HashMap::new(),
+            flushed: false,
+        });
+        for block in blocks {
+            match block {
+                // Redacted thinking stays out of the nested card too: an
+                // empty trace with a spinner is noise wherever it renders.
+                ContentBlock::Thinking { text } if text.trim().is_empty() => {}
+                ContentBlock::Thinking { text } => card.blocks.push(Block::Thinking {
+                    text: text.clone(),
+                    elapsed_ms: 0,
+                    summary: None,
+                    state: ThinkingState::Done,
+                }),
+                ContentBlock::Text { text } => card.blocks.push(Block::Text { text: text.clone(), streaming: false }),
+                ContentBlock::ToolUse { id, name, input } => {
+                    let site = tool_card(id, name, input);
+                    card.nested_tools.insert(id.clone(), NestedSite {
+                        index: card.blocks.len(),
+                        kind: site.kind,
+                        verbs: site.verbs,
+                        target: site.target,
+                        name: name.clone(),
+                        params: site.params,
+                    });
+                    card.blocks.push(site.block);
                 }
+                ContentBlock::Other { .. } => {}
             }
-            card.flushed = false;
         }
-        Vec::new()
+        card.flushed = false;
     }
 
     /// Complete one nested tool card inside its `Agent` card's buffer. An
@@ -2274,7 +1751,7 @@ impl ClaudeFold {
         let Some(site) = card.nested_tools.get(&result.tool_use_id) else { return };
         let block = finish_tool_block(
             &site.kind,
-            &site.verb,
+            site.verbs,
             &site.target,
             &site.name,
             &site.params,
@@ -2290,49 +1767,25 @@ impl ClaudeFold {
     /// Complete the `Agent` card with its buffered nested transcript: one
     /// nested assistant turn carrying every block the sub-agent produced.
     /// Marks the buffer flushed, so the turn-end pass leaves it alone.
-    fn apply_agent_result(
-        &mut self,
-        tool_id: &str,
-        site: &ToolSite,
-        status: ToolStatus,
-        _result: &ToolResult,
-    ) -> Option<Delta> {
-        let card = self.agents.get_mut(tool_id)?;
+    fn apply_agent_result(&mut self, tool_id: &str, site: &ToolSite, status: ToolStatus) {
+        let Some(card) = self.agents.get_mut(tool_id) else { return };
         card.status = status;
         card.flushed = true;
         let block = agent_block(tool_id, site, status, &card.blocks);
-        Some(Delta::BlockUpdated {
-            turn_id: card.turn_id.clone(),
-            block_index: card.block_index,
-            block,
-        })
+        self.builder.update(&tool_key(tool_id), block);
     }
 
     /// Flush every unflushed non-empty agent buffer into its card, ahead
     /// of the turn finish: the async agent outlives the turn, and without
     /// this its buffered work would never render.
-    fn flush_agents(&mut self, deltas: &mut Vec<Delta>) {
-        let mut pending = Vec::new();
+    fn flush_agents(&mut self) {
         for (id, card) in self.agents.iter_mut() {
-            if !card.flushed && !card.blocks.is_empty() {
-                card.flushed = true;
-                pending.push((
-                    id.clone(),
-                    card.turn_id.clone(),
-                    card.block_index,
-                    card.status,
-                    card.blocks.clone(),
-                ));
+            if card.flushed || card.blocks.is_empty() {
+                continue;
             }
-        }
-        for (id, turn_id, block_index, status, blocks) in pending {
-            if let Some(site) = self.tools.get(&id) {
-                let site = site.clone();
-                deltas.push(Delta::BlockUpdated {
-                    turn_id,
-                    block_index,
-                    block: agent_block(&id, &site, status, &blocks),
-                });
+            card.flushed = true;
+            if let Some(site) = self.tools.get(id) {
+                self.builder.update(&tool_key(id), agent_block(id, site, card.status, &card.blocks));
             }
         }
     }
@@ -2344,29 +1797,15 @@ impl ClaudeFold {
     /// A repeat request for an already-carded id cards nothing twice: the
     /// card moves only when the tool's result or the turn's denials
     /// resolve it, never on a re-request.
-    fn apply_approval(&mut self, request: &ApprovalRequest) -> Vec<Delta> {
+    fn apply_approval(&mut self, request: &ApprovalRequest) {
         if !self.pending.iter().any(|queued| queued.request_id == request.request_id) {
             self.pending.push(request.clone());
         }
-        if self.approval_sites.contains_key(&request.request_id) {
-            return Vec::new();
+        if self.builder.approval_open(&request.request_id) {
+            return;
         }
-        let mut deltas = Vec::new();
-        let turn_id = self.control_turn(&request.request_id, &mut deltas);
-        let block_index = self.emitted.get(&turn_id).copied().unwrap_or(0);
-        deltas.push(Delta::BlockAdded {
-            turn_id: turn_id.clone(),
-            block: approval_card(request, &self.session_cwd),
-        });
-        self.emitted.insert(turn_id.clone(), block_index + 1);
-        self.approval_sites.insert(
-            request.request_id.clone(),
-            ApprovalSite {
-                turn_id: turn_id.clone(),
-                block_index,
-                tool_use_id: request.tool_use_id.clone(),
-            },
-        );
+        let turn_id = self.control_turn(&request.request_id);
+        self.builder.approval_raised(&turn_id, approval_card(request, &self.session_cwd));
         if !request.tool_use_id.is_empty() {
             self.tool_approvals.insert(request.tool_use_id.clone(), request.request_id.clone());
         }
@@ -2378,52 +1817,31 @@ impl ClaudeFold {
         // The gated call has not run: its open card (when the `tool_use`
         // arrived first) drops from Running to Pending, so no spinner ever
         // reads done beside the waiting approval.
-        if let Some(site) = self.tools.get(&request.tool_use_id).cloned() {
-            if let Some(block) = waiting_tool_block(&request.tool_use_id, &site) {
-                deltas.push(Delta::BlockUpdated {
-                    turn_id: site.turn_id,
-                    block_index: site.block_index,
-                    block,
-                });
-            }
+        if let Some(block) =
+            self.tools.get(&request.tool_use_id).and_then(|site| gated_tool_block(&request.tool_use_id, site, ToolStatus::Pending))
+        {
+            self.builder.update(&tool_key(&request.tool_use_id), block);
         }
-        deltas
+    }
+
+    /// Take a decided request off the answerable queue (when the frames
+    /// outran the decision bookkeeping it is still there).
+    fn unqueue(&mut self, request_id: &str) {
+        self.pending.retain(|queued| queued.request_id != request_id);
     }
 
     /// Re-face one carded approval without consuming its join: an error
     /// tool result means the command ran and failed, so the card reads
     /// allowed-with-exit-code now — while a later `permission_denials`
-    /// can still correct it to denied through the kept site. The request
-    /// moves off the answerable queue (pending to decided), so a failed
-    /// tool is never offered for a decision; a repeat for an
-    /// already-settled id is a no-op.
-    fn update_approval_state(&mut self, request_id: &str, state: ApprovalState, deltas: &mut Vec<Delta>) {
-        let Some(site) = self.approval_sites.get(request_id).cloned() else { return };
-        let request = self
-            .decided
-            .get(request_id)
-            .cloned()
-            .or_else(|| {
-                self.pending
-                    .iter()
-                    .position(|queued| queued.request_id == request_id)
-                    .map(|position| {
-                        let request = self.pending.remove(position);
-                        self.decided.insert(request_id.to_owned(), request.clone());
-                        request
-                    })
-            });
-        let Some(request) = request else { return };
-        let mut card = approval_card(&request, &self.session_cwd);
-        if let Block::Approval { state: slot, .. } = &mut card {
-            *slot = state;
+    /// can still correct it to denied through the kept join. The request
+    /// moves off the answerable queue, so a failed tool is never offered
+    /// for a decision; a repeat for an already-settled id is a no-op.
+    fn update_approval_state(&mut self, request_id: &str, state: ApprovalState) {
+        if self.builder.approval_restated(request_id, state) {
+            self.unqueue(request_id);
         }
-        deltas.push(Delta::BlockUpdated { turn_id: site.turn_id, block_index: site.block_index, block: card });
     }
 
-    /// Settle one carded approval to its decided state: the only thing that
-    /// ever moves the card after the press. A repeat resolution for an
-    /// already-settled id is a no-op.
     /// B12: wall-clock milliseconds since the approval was asked: the
     /// settled card's real duration. Zero when the ask was never timed
     /// (an old replay), never a guess.
@@ -2431,32 +1849,16 @@ impl ClaudeFold {
         self.approval_started.get(request_id).map(|start| wall_ms_since(*start)).unwrap_or(0)
     }
 
-    fn resolve_approval_card(&mut self, request_id: &str, state: ApprovalState, deltas: &mut Vec<Delta>) {
-        let Some(site) = self.approval_sites.remove(request_id) else { return };
+    /// Settle one carded approval to its decided state: the only thing that
+    /// ever moves the card after the press. A repeat resolution for an
+    /// already-settled id is a no-op.
+    fn resolve_approval_card(&mut self, request_id: &str, state: ApprovalState) {
+        if !self.builder.approval_resolved(request_id, state) {
+            return;
+        }
         self.approval_started.remove(request_id);
-        if !site.tool_use_id.is_empty() {
-            self.tool_approvals.remove(&site.tool_use_id);
-        }
-        // The request is on the decided shelf whenever a press preceded
-        // the settling frames (the ordinary order), or still queued when
-        // the frames outran the decision bookkeeping. Either way the card
-        // rebuilds from it; a repeated resolution finds no site and stops
-        // above.
-        let request = self
-            .decided
-            .remove(request_id)
-            .or_else(|| {
-                self.pending
-                    .iter()
-                    .position(|queued| queued.request_id == request_id)
-                    .map(|position| self.pending.remove(position))
-            });
-        let Some(request) = request else { return };
-        let mut card = approval_card(&request, &self.session_cwd);
-        if let Block::Approval { state: slot, .. } = &mut card {
-            *slot = state;
-        }
-        deltas.push(Delta::BlockUpdated { turn_id: site.turn_id, block_index: site.block_index, block: card });
+        self.tool_approvals.retain(|_, held| held != request_id);
+        self.unqueue(request_id);
     }
 
     /// Record an unrecognised control subtype, queue it for an explicit
@@ -2464,12 +1866,7 @@ impl ClaudeFold {
     /// decision would vanish inside the noise. The queue is the handling:
     /// without it no code path could answer the request and the child
     /// would hang.
-    fn apply_unknown_control(
-        &mut self,
-        request_id: &str,
-        subtype: &str,
-        raw: &serde_json::Value,
-    ) -> Vec<Delta> {
+    fn apply_unknown_control(&mut self, request_id: &str, subtype: &str, raw: &serde_json::Value) {
         if !self.unknown_control.iter().any(|(known, _)| known == request_id) {
             self.unknown_control.push((request_id.to_owned(), subtype.to_owned()));
         }
@@ -2480,45 +1877,33 @@ impl ClaudeFold {
                 raw: raw.clone(),
             });
         }
-        let mut deltas = Vec::new();
-        let turn_id = self.control_turn(request_id, &mut deltas);
-        deltas.push(Delta::BlockAdded {
-            turn_id,
-            block: Block::Generic {
-                kind: format!("control-request:{subtype}"),
-                status: "pending".into(),
-                text: format!("control_request {request_id} subtype {subtype:?}: {raw}"),
-            },
-        });
-        deltas
+        let turn_id = self.control_turn(request_id);
+        let card = Block::Generic {
+            kind: format!("control-request:{subtype}"),
+            status: "pending".into(),
+            text: format!("control_request {request_id} subtype {subtype:?}: {raw}"),
+        };
+        self.builder.add(&turn_id, None, card);
     }
 
-    /// The turn hosting a control-channel card: the running assistant turn
-    /// when one is open, else a fresh turn keyed by `key` (announced in
-    /// `deltas`) so the card lands somewhere the transcript owns.
     /// Card an `AskUserQuestion` call: one question card per question, in the
     /// running turn. A call carrying no questions falls back to the approval
     /// card, so the child is never left waiting on nothing.
-    fn apply_ask(&mut self, request: &ApprovalRequest) -> Vec<Delta> {
+    fn apply_ask(&mut self, request: &ApprovalRequest) {
         if self.asks.iter().any(|ask| ask.request.request_id == request.request_id) {
-            return Vec::new();
+            return;
         }
         let questions = ask_questions(&request.input);
         if questions.is_empty() {
             return self.apply_approval(request);
         }
-        let mut deltas = Vec::new();
-        let turn_id = self.control_turn(&request.request_id, &mut deltas);
-        let mut sites = Vec::with_capacity(questions.len());
+        let turn_id = self.control_turn(&request.request_id);
         for (index, question) in questions.iter().enumerate() {
-            let block_index = self.emitted.get(&turn_id).copied().unwrap_or(0);
-            deltas.push(Delta::BlockAdded { turn_id: turn_id.clone(), block: ask_block(request, index, question, None) });
-            self.emitted.insert(turn_id.clone(), block_index + 1);
-            sites.push((turn_id.clone(), block_index));
+            let id = ask_block_id(&request.request_id, index);
+            self.builder.question_raised(&turn_id, &id, ask_block(request, index, question, None));
         }
         self.carded_asks.insert(request.tool_use_id.clone());
-        self.asks.push(AskPrompt { request: request.clone(), questions, answers: BTreeMap::new(), sites });
-        deltas
+        self.asks.push(AskPrompt { request: request.clone(), questions, answers: BTreeMap::new() });
     }
 
     /// The question cards still waiting, as `(block id, headline)`.
@@ -2540,7 +1925,9 @@ impl ClaudeFold {
     /// CLI expects). `None` when no waiting card has this id.
     pub fn answer_ask(&mut self, block_id: &str, reply: AskReply) -> Option<AskStep> {
         let (at, index) = self.asks.iter().enumerate().find_map(|(at, ask)| {
-            (0..ask.questions.len()).find(|index| ask_block_id(&ask.request.request_id, *index) == block_id).map(|index| (at, index))
+            (0..ask.questions.len())
+                .find(|index| ask_block_id(&ask.request.request_id, *index) == block_id)
+                .map(|index| (at, index))
         })?;
         let ask = &mut self.asks[at];
         let question = ask.questions[index].clone();
@@ -2553,13 +1940,8 @@ impl ClaudeFold {
             AskReply::Text(words) => (words.clone(), aui_protocol::Answer { selected: Vec::new(), other: Some(words) }),
         };
         ask.answers.insert(index, text);
-        let (turn_id, block_index) = ask.sites[index].clone();
+        let card = ask_block(&ask.request, index, &question, Some(answer));
         let mut step = AskStep::default();
-        step.deltas.push(Delta::BlockUpdated {
-            turn_id,
-            block_index,
-            block: ask_block(&ask.request, index, &question, Some(answer)),
-        });
         if ask.answers.len() == ask.questions.len() {
             let ask = self.asks.remove(at);
             let answers: serde_json::Map<String, serde_json::Value> = ask
@@ -2574,6 +1956,8 @@ impl ClaudeFold {
             input["answers"] = serde_json::Value::Object(answers);
             step.line = Some(crate::frame::encode_control_allow_with(&ask.request.request_id, input));
         }
+        self.builder.question_answered(block_id, card);
+        step.deltas = self.builder.take();
         Some(step)
     }
 
@@ -2584,37 +1968,26 @@ impl ClaudeFold {
             (0..ask.questions.len()).any(|index| ask_block_id(&ask.request.request_id, index) == block_id)
         })?;
         let ask = self.asks.remove(at);
-        let mut step = AskStep::default();
         for (index, question) in ask.questions.iter().enumerate() {
-            let (turn_id, block_index) = ask.sites[index].clone();
             let answer = aui_protocol::Answer { selected: Vec::new(), other: Some(String::from("Declined")) };
-            step.deltas.push(Delta::BlockUpdated {
-                turn_id,
-                block_index,
-                block: ask_block(&ask.request, index, question, Some(answer)),
-            });
+            let card = ask_block(&ask.request, index, question, Some(answer));
+            self.builder.question_answered(&ask_block_id(&ask.request.request_id, index), card);
         }
-        step.line = Some(crate::frame::encode_control_deny(&ask.request.request_id, message));
-        Some(step)
+        let line = Some(crate::frame::encode_control_deny(&ask.request.request_id, message));
+        Some(AskStep { deltas: self.builder.take(), line })
     }
 
-    fn control_turn(&mut self, key: &str, deltas: &mut Vec<Delta>) -> String {
+    /// The turn hosting a control-channel card: the running assistant turn
+    /// when one is open, else a fresh turn keyed by `key` so the card lands
+    /// somewhere the transcript owns.
+    fn control_turn(&mut self, key: &str) -> String {
         if let Some(open) = self.assistant_turn.clone() {
             return open;
         }
-        self.started.insert(key.to_owned(), ());
         self.open.push(key.to_owned());
         // Live control turns start now, like assistant turns; replays
         // keep `None`.
-        let timestamp = self.live.then(epoch_ms_now);
-        deltas.push(Delta::TurnStarted {
-            turn: Turn::Assistant {
-                id: key.to_owned(),
-                blocks: Vec::new(),
-                meta: TurnMeta::default(),
-                timestamp,
-            },
-        });
+        self.builder.open_turn(key, self.live.then(epoch_ms_now));
         key.to_owned()
     }
 }
@@ -2644,8 +2017,6 @@ pub struct AskPrompt {
     pub questions: Vec<AskQuestion>,
     /// Answers gathered so far, by question index: the text sent back.
     pub answers: BTreeMap<usize, String>,
-    /// Each question's card, by question index.
-    pub sites: Vec<(String, usize)>,
 }
 
 /// One question card's block id: `ask-<request>-<index>`. No `:`: the app
@@ -3030,62 +2401,37 @@ fn approval_body_kind(tool_name: &str) -> ApprovalBodyKind {
 fn approval_card(request: &ApprovalRequest, session_cwd: &str) -> Block {
     let (command, reason, cwd) = approval_face(request, session_cwd);
     let mut capabilities = Vec::new();
-    for suggestion in &request.suggestions {
-        for name in &suggestion.tool_names {
-            if !capabilities.contains(name) {
-                capabilities.push(name.clone());
-            }
+    for name in request.suggestions.iter().flat_map(|suggestion| &suggestion.tool_names) {
+        if !capabilities.contains(name) {
+            capabilities.push(name.clone());
         }
     }
-    let rule = capabilities.first().cloned();
-    Block::Approval {
-        id: request.request_id.clone(),
-        tool: request.tool_name.clone(),
-        command,
-        reason,
-        cwd,
-        capabilities,
-        scope: ApprovalScope::ThisCommand,
-        body_kind: approval_body_kind(&request.tool_name),
-        state: ApprovalState::Pending,
-        rule,
-        choices: vec![
-            ApprovalChoice {
-                id: "allow".into(),
-                label: "Allow".into(),
-                decision: ApprovalDecision::Once,
-                scope: ApprovalScope::ThisCommand,
-                rule_preview: None,
-                accepts_feedback: false,
-            },
-            ApprovalChoice {
-                id: "deny".into(),
-                label: "Deny".into(),
-                decision: ApprovalDecision::Deny,
-                scope: ApprovalScope::ThisCommand,
-                rule_preview: None,
-                accepts_feedback: true,
-            },
-        ],
-        stages: Vec::new(),
-        current_stage: None,
-        badges: ApprovalBadges::default(),
-        feedback: None,
-        resolved_by: None,
+    let mut deny = choice("deny", "Deny", ApprovalDecision::Deny, ApprovalScope::ThisCommand);
+    deny.accepts_feedback = true;
+    let choices = vec![choice("allow", "Allow", ApprovalDecision::Once, ApprovalScope::ThisCommand), deny];
+    let body_kind = approval_body_kind(&request.tool_name);
+    let mut card = approval::card(&request.request_id, &request.tool_name, command, reason, cwd, body_kind, choices);
+    if let Block::Approval { capabilities: slot, rule, .. } = &mut card {
+        *rule = capabilities.first().cloned();
+        *slot = capabilities;
     }
+    card
 }
 
 struct ToolCard {
     kind: ToolKind,
-    verb: String,
+    verbs: Verbs,
     target: String,
     params: Vec<(String, String)>,
     block: Block,
 }
 
-/// The opening card for a `tool_use` block: shell for `Bash`, MCP for
+/// The opening card for a `tool_use` block: shell for `Bash`, the file
+/// cards, search, web, sub-agent and terminal cards, MCP for
 /// `mcp__<server>__<tool>`, and the mandated [`Block::Generic`] fallback
-/// for anything else (a richer card would be a guess).
+/// for anything else (a richer card would be a guess). Every opening card
+/// reads its present verb: the call has not run yet, and past tense
+/// beside a spinner reads done while an approval may still be gating it.
 fn tool_card(id: &str, name: &str, input: &serde_json::Value) -> ToolCard {
     let params = input
         .as_object()
@@ -3102,224 +2448,99 @@ fn tool_card(id: &str, name: &str, input: &serde_json::Value) -> ToolCard {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    if name == "Bash" {
-        let target =
-            input.get("command").and_then(serde_json::Value::as_str).unwrap_or(name).to_owned();
-        // The opening verb is present tense: the call has not run yet, and
-        // past tense beside a spinner reads done while an approval may
-        // still be gating it. The result maps it back (see `past_verb`).
-        let block = Block::ToolCall {
-            id: id.to_owned(),
-            kind: ToolKind::Shell,
-            verb: "Run".into(),
-            target: target.clone(),
-            status: ToolStatus::Running,
-            duration_ms: None,
-            body: ToolBody::Shell { output_lines: Vec::new(), exit_code: None, live: true },
-            diff_stat: None,
-        };
-        ToolCard { kind: ToolKind::Shell, verb: "Run".into(), target, params, block }
-    } else if matches!(name, "Write" | "Edit" | "Read") {
-        // File cards: the header names the path; the body (diff, line
-        // count) lands when the result's structured detail arrives. Verbs
-        // stay present until the result lands, for the same reason.
-        let (kind, verb) = match name {
-            "Write" => (ToolKind::Write, "Write"),
-            "Edit" => (ToolKind::Edit, "Edit"),
-            _ => (ToolKind::Read, "Read"),
-        };
-        let target = input
-            .get("file_path")
-            .and_then(serde_json::Value::as_str)
+    // The first non-blank of `keys` in the input, else the tool's name.
+    let field = |keys: &[&str]| {
+        keys.iter()
+            .filter_map(|key| input.get(*key).and_then(serde_json::Value::as_str))
+            .next()
             .unwrap_or(name)
-            .to_owned();
-        let block = Block::ToolCall {
-            id: id.to_owned(),
-            kind: kind.clone(),
-            verb: verb.into(),
-            target: target.clone(),
-            status: ToolStatus::Running,
-            duration_ms: None,
-            body: ToolBody::None,
-            diff_stat: None,
-        };
-        ToolCard { kind, verb: verb.into(), target, params, block }
-    } else if name == "Skill" {
+            .to_owned()
+    };
+    let generic = |text: String| ToolCard {
+        kind: ToolKind::Search,
+        verbs: Verbs::fixed(""),
+        target: String::new(),
+        params: Vec::new(),
+        block: Block::Generic { kind: name.to_owned(), status: "running".into(), text },
+    };
+    let shell_body = || ToolBody::Shell { output_lines: Vec::new(), exit_code: None, live: true };
+    let (kind, verbs, target, body) = match name {
+        "Bash" => (ToolKind::Shell, Verbs::of(&ToolKind::Shell), field(&["command"]), shell_body()),
+        // File cards: the header names the path; the body (diff, line
+        // count) lands when the result's structured detail arrives.
+        "Write" => (ToolKind::Write, Verbs::of(&ToolKind::Write), field(&["file_path"]), ToolBody::None),
+        "Edit" => (ToolKind::Edit, Verbs::of(&ToolKind::Edit), field(&["file_path"]), ToolBody::None),
+        "Read" => (ToolKind::Read, Verbs::of(&ToolKind::Read), field(&["file_path"]), ToolBody::None),
         // A skill invocation: the quiet "Loaded skill `name`" row, the same
         // one `read_skill` folds to on the muse lane (D63). The tool's input
         // names the skill under `skill`; without one the card names the tool
         // rather than guessing.
-        let target =
-            input.get("skill").and_then(serde_json::Value::as_str).unwrap_or(name).to_owned();
-        let block = Block::ToolCall {
-            id: id.to_owned(),
-            kind: ToolKind::Read,
-            verb: "Loaded skill".into(),
-            target: target.clone(),
-            status: ToolStatus::Running,
-            duration_ms: None,
-            body: ToolBody::None,
-            diff_stat: None,
-        };
-        ToolCard { kind: ToolKind::Read, verb: "Loaded skill".into(), target, params, block }
-    } else if name == "Agent" {
+        "Skill" => (ToolKind::Read, Verbs::fixed("Loaded skill"), field(&["skill"]), ToolBody::None),
         // A sub-agent delegation: the card nests the agent's own blocks
         // (routed by `parent_tool_use_id`) once they arrive.
-        let agent_type = input
-            .get("subagent_type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let description = input
-            .get("description")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let target = match (agent_type.is_empty(), description.is_empty()) {
-            (false, false) => format!("{agent_type}: {description}"),
-            (false, true) => agent_type.to_owned(),
-            (true, false) => description.to_owned(),
-            (true, true) => name.to_owned(),
-        };
-        let block = Block::ToolCall {
-            id: id.to_owned(),
-            kind: ToolKind::SubAgent,
-            verb: "Delegate".into(),
-            target: target.clone(),
-            status: ToolStatus::Running,
-            duration_ms: None,
-            body: ToolBody::SubAgent { turns: Vec::new() },
-            diff_stat: None,
-        };
-        ToolCard { kind: ToolKind::SubAgent, verb: "Delegate".into(), target, params, block }
-    } else if terminal_tool_name(name).is_some() {
+        "Agent" => {
+            let text = |key: &str| input.get(key).and_then(serde_json::Value::as_str).unwrap_or("");
+            let target = match (text("subagent_type"), text("description")) {
+                ("", "") => name.to_owned(),
+                (agent_type, "") => agent_type.to_owned(),
+                ("", description) => description.to_owned(),
+                (agent_type, description) => format!("{agent_type}: {description}"),
+            };
+            (ToolKind::SubAgent, Verbs::of(&ToolKind::SubAgent), target, ToolBody::SubAgent { turns: Vec::new() })
+        }
         // A baaz terminal tool call opens as a shell card with the
         // command in the header (D51): the result completes it to "Ran
         // in terminal" with the tab, the exit and the output.
-        let target = input
-            .get("command")
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| input.get("tab").and_then(serde_json::Value::as_str))
-            .filter(|text| !text.trim().is_empty())
-            .unwrap_or(name)
-            .to_owned();
-        let block = Block::ToolCall {
-            id: id.to_owned(),
-            kind: ToolKind::Shell,
-            verb: TERMINAL_RUNNING_VERB.into(),
-            target: target.clone(),
-            status: ToolStatus::Running,
-            duration_ms: None,
-            body: ToolBody::Shell { output_lines: Vec::new(), exit_code: None, live: true },
-            diff_stat: None,
-        };
-        ToolCard { kind: ToolKind::Shell, verb: TERMINAL_RUNNING_VERB.into(), target, params, block }
-    } else if matches!(name, "Grep" | "Glob" | "ToolSearch") {
+        _ if terminal_tool_name(name).is_some() => {
+            let target = ["command", "tab"]
+                .iter()
+                .filter_map(|key| input.get(*key).and_then(serde_json::Value::as_str))
+                .next()
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or(name)
+                .to_owned();
+            (ToolKind::Shell, Verbs::TERMINAL, target, shell_body())
+        }
         // B12: one-line search cards instead of the generic dump: the
         // header names the query and the body stays header-only (chevron),
         // never the result listing.
-        let target = input
-            .get("pattern")
-            .or_else(|| input.get("query"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(name)
-            .to_owned();
-        let block = Block::ToolCall {
-            id: id.to_owned(),
-            kind: ToolKind::Search,
-            verb: "Search".into(),
-            target: target.clone(),
-            status: ToolStatus::Running,
-            duration_ms: None,
-            body: ToolBody::None,
-            diff_stat: None,
-        };
-        ToolCard { kind: ToolKind::Search, verb: "Search".into(), target, params, block }
-    } else if name == "WebFetch" || name == "WebSearch" {
+        "Grep" | "Glob" | "ToolSearch" => {
+            (ToolKind::Search, Verbs::of(&ToolKind::Search), field(&["pattern", "query"]), ToolBody::None)
+        }
         // B12: one-line web cards: the header names the URL or query, and
         // the page text never inlines — it opens in the pane on demand.
-        let key = if name == "WebFetch" { "url" } else { "query" };
-        let verb = if name == "WebFetch" { "Fetch" } else { "Search" };
-        let target =
-            input.get(key).and_then(serde_json::Value::as_str).unwrap_or(name).to_owned();
-        let block = Block::ToolCall {
-            id: id.to_owned(),
-            kind: ToolKind::Web,
-            verb: verb.into(),
-            target: target.clone(),
-            status: ToolStatus::Running,
-            duration_ms: None,
-            body: ToolBody::None,
-            diff_stat: None,
-        };
-        ToolCard { kind: ToolKind::Web, verb: verb.into(), target, params, block }
-    } else if name == "NotebookEdit" {
+        "WebFetch" => (ToolKind::Web, Verbs::of(&ToolKind::Web), field(&["url"]), ToolBody::None),
+        "WebSearch" => (ToolKind::Web, Verbs::WEB_SEARCH, field(&["query"]), ToolBody::None),
         // B12: a notebook edit is an edit: the header names the file, and
         // the result's detail (when structured) completes the diff.
-        let target =
-            input.get("file_path").and_then(serde_json::Value::as_str).unwrap_or(name).to_owned();
-        let block = Block::ToolCall {
-            id: id.to_owned(),
-            kind: ToolKind::Edit,
-            verb: "Edit".into(),
-            target: target.clone(),
-            status: ToolStatus::Running,
-            duration_ms: None,
-            body: ToolBody::None,
-            diff_stat: None,
-        };
-        ToolCard { kind: ToolKind::Edit, verb: "Edit".into(), target, params, block }
-    } else if let Some((server, tool)) = mcp_split(name) {
-        let target = format!("{server} · {tool}");
-        let block = Block::ToolCall {
-            id: id.to_owned(),
-            kind: ToolKind::Mcp { server: server.clone(), tool: tool.clone() },
-            verb: "Run".into(),
-            target: target.clone(),
-            status: ToolStatus::Running,
-            duration_ms: None,
-            body: ToolBody::Mcp { params: params.clone(), result_json: String::new() },
-            diff_stat: None,
-        };
-        ToolCard {
-            kind: ToolKind::Mcp { server, tool },
-            verb: "Run".into(),
-            target,
-            params,
-            block,
+        "NotebookEdit" => (ToolKind::Edit, Verbs::of(&ToolKind::Edit), field(&["file_path"]), ToolBody::None),
+        _ => {
+            if let Some((server, tool)) = mcp_split(name) {
+                let kind = ToolKind::Mcp { server: server.clone(), tool: tool.clone() };
+                let body = ToolBody::Mcp { params: params.clone(), result_json: String::new() };
+                (kind.clone(), Verbs::of(&kind), format!("{server} · {tool}"), body)
+            } else if name == "Artifact" {
+                // B12fix: the Artifact tool reads as a one-line summary
+                // card, never the generic dump: the opening names the
+                // titled thing, or nothing until the result lands. The
+                // transcript formats the detail (`Artifact · published …`);
+                // the body never inlines.
+                let detail = ["title", "url", "id"]
+                    .iter()
+                    .filter_map(|key| input.get(*key).and_then(serde_json::Value::as_str))
+                    .find(|value| !value.trim().is_empty())
+                    .unwrap_or("");
+                return generic(detail.to_owned());
+            } else if params.is_empty() {
+                return generic(format!("{name} called"));
+            } else {
+                let pairs = params.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>();
+                return generic(format!("{name} called ({})", pairs.join(", ")));
+            }
         }
-    } else if name == "Artifact" {
-        // B12fix: the Artifact tool reads as a one-line summary card,
-        // never the generic dump: the opening names the titled thing, or
-        // nothing until the result lands. The transcript formats the
-        // detail (`Artifact · published …`); the body never inlines.
-        let detail = ["title", "url", "id"]
-            .iter()
-            .filter_map(|key| input.get(key).and_then(serde_json::Value::as_str))
-            .find(|value| !value.trim().is_empty())
-            .unwrap_or("")
-            .to_owned();
-        ToolCard {
-            kind: ToolKind::Search,
-            verb: String::new(),
-            target: String::new(),
-            params: Vec::new(),
-            block: Block::Generic { kind: name.to_owned(), status: "running".into(), text: detail },
-        }
-    } else {
-        let text = if params.is_empty() {
-            format!("{name} called")
-        } else {
-            let pairs =
-                params.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>();
-            format!("{name} called ({})", pairs.join(", "))
-        };
-        ToolCard {
-            kind: ToolKind::Search,
-            verb: String::new(),
-            target: String::new(),
-            params: Vec::new(),
-            block: Block::Generic { kind: name.to_owned(), status: "running".into(), text },
-        }
-    }
+    };
+    let block = ToolEvent::new(id, kind.clone(), target.clone(), ToolStatus::Running).verbs(verbs).body(body).block();
+    ToolCard { kind, verbs, target, params, block }
 }
 
 /// B12fix: the Artifact tool's raw detail for its one-line summary card:
@@ -3344,35 +2565,15 @@ fn artifact_detail(params: &[(String, String)], result_text: &str) -> String {
 /// the opening card's, minus any live output (nothing ran, so nothing
 /// streams). SubAgent cards are left alone (`None`): their nested
 /// transcript is the truth about them, not the gate.
-fn gated_tool_block(
-    tool_use_id: &str,
-    site: &ToolSite,
-    status: ToolStatus,
-    verb: &str,
-) -> Option<Block> {
+fn gated_tool_block(tool_use_id: &str, site: &ToolSite, status: ToolStatus) -> Option<Block> {
     let body = match &site.kind {
         ToolKind::Shell => ToolBody::Shell { output_lines: Vec::new(), exit_code: None, live: false },
         ToolKind::Edit | ToolKind::Write | ToolKind::Read => ToolBody::None,
-        ToolKind::Mcp { .. } => {
-            ToolBody::Mcp { params: site.params.clone(), result_json: String::new() }
-        }
+        ToolKind::Mcp { .. } => ToolBody::Mcp { params: site.params.clone(), result_json: String::new() },
         _ => return None,
     };
-    Some(Block::ToolCall {
-        id: tool_use_id.to_owned(),
-        kind: site.kind.clone(),
-        verb: verb.to_owned(),
-        target: site.target.clone(),
-        status,
-        duration_ms: None,
-        body,
-        diff_stat: None,
-    })
-}
-
-/// The gated call has not run: its open card drops to waiting.
-fn waiting_tool_block(tool_use_id: &str, site: &ToolSite) -> Option<Block> {
-    gated_tool_block(tool_use_id, site, ToolStatus::Pending, &site.verb)
+    let card = ToolEvent::new(tool_use_id, site.kind.clone(), site.target.clone(), status).verbs(site.verbs);
+    Some(card.body(body).block())
 }
 
 /// Split `mcp__<server>__<tool>`; anything else is not an MCP name.
@@ -3529,6 +2730,7 @@ mod tests {
     }
 
     use super::*;
+    use aui_protocol::DiffKind;
     use crate::frame::decode_line;
 
     fn fixture_lines(name: &str) -> Vec<String> {
@@ -5640,7 +4842,7 @@ mod tests {
         // it folds to the same quiet row `read_skill` folds to (D63).
         let card = tool_card("t-1", "Skill", &serde_json::json!({"skill": "decoction"}));
         assert_eq!(card.kind, ToolKind::Read);
-        assert_eq!(card.verb, "Loaded skill");
+        assert_eq!(card.verbs.present, "Loaded skill");
         assert_eq!(card.target, "decoction");
         match card.block {
             Block::ToolCall { kind: ToolKind::Read, verb, target, .. } => {
@@ -5695,13 +4897,13 @@ mod tests {
     fn unmodelled_tools_get_one_line_summaries() {
         let card = tool_card("g-1", "Grep", &serde_json::json!({"pattern": "fold_finished"}));
         assert_eq!(card.kind, ToolKind::Search);
-        assert_eq!((card.verb.as_str(), card.target.as_str()), ("Search", "fold_finished"));
+        assert_eq!((card.verbs.present, card.target.as_str()), ("Search", "fold_finished"));
         let card = tool_card("w-1", "WebFetch", &serde_json::json!({"url": "https://example.com"}));
         assert_eq!(card.kind, ToolKind::Web);
-        assert_eq!((card.verb.as_str(), card.target.as_str()), ("Fetch", "https://example.com"));
+        assert_eq!((card.verbs.present, card.target.as_str()), ("Fetch", "https://example.com"));
         let finished = finish_tool_block(
             &ToolKind::Web,
-            "Fetch",
+            Verbs::of(&ToolKind::Web),
             "https://example.com",
             "WebFetch",
             &[],
@@ -5719,7 +4921,7 @@ mod tests {
         );
         let finished = finish_tool_block(
             &ToolKind::Search,
-            "Search",
+            Verbs::of(&ToolKind::Search),
             "mcp",
             "ToolSearch",
             &[],
@@ -5754,7 +4956,7 @@ mod tests {
         }
         let finished = finish_tool_block(
             &ToolKind::Search,
-            "",
+            Verbs::fixed(""),
             "",
             "Artifact",
             &[],

@@ -1,0 +1,133 @@
+{
+  "final": {
+    "claude": {
+      "id": "claude",
+      "agent": "claude",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "msg_011CfLXy39jTbRX9bkeGGm55",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "toolu_01BCNDjSghJ9GYjoFK95mzAT",
+              "tool_kind": {
+                "kind": "search"
+              },
+              "verb": "Searched",
+              "target": "select:mcp__baaz__ping · 1 tools",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "none"
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "toolu_019SVL1cAVibZoQHMn8xz1gp",
+              "tool_kind": {
+                "kind": "mcp",
+                "server": "baaz",
+                "tool": "ping"
+              },
+              "verb": "Ran",
+              "target": "baaz · ping",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "mcp",
+                "params": [],
+                "result_json": "PONG"
+              }
+            },
+            {
+              "kind": "text",
+              "text": "The ping tool from the baaz server returned: **PONG**",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "claude-haiku-4-5-20251001",
+            "duration_ms": 6893,
+            "tokens_in": 88946,
+            "tokens_out": 288,
+            "reasoning_tokens": 141,
+            "cost_usd": 0.0187046,
+            "cache_read_tokens": 84526,
+            "cache_write_tokens": 4392,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:ffdc458af9e37b66",
+    "6:e7b5f3a0de62f87a",
+    "7:966e0b8773ef3c5b",
+    "8:d7a94b4f539e1009",
+    "11:9a176a177ce3b776",
+    "12:637991275cce99e8",
+    "14:49832bb55cf5b221",
+    "16:55e60412534ae76d"
+  ],
+  "abandon": [
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "6:639f4a86c24a366e",
+    "6:157b85bd77266d66",
+    "6:e7b5f3a0de62f87a",
+    "7:dca8c392f59dbaaf",
+    "7:a1d7bb60eae5d13b",
+    "7:966e0b8773ef3c5b",
+    "8:1e27f05f56484bc1",
+    "8:fbe316773d68b3e9",
+    "8:d7a94b4f539e1009",
+    "9:1e27f05f56484bc1",
+    "9:fbe316773d68b3e9",
+    "9:d7a94b4f539e1009",
+    "10:cad9bf1f46809b62",
+    "10:c312ed2bb4d1f9da",
+    "10:d7a94b4f539e1009",
+    "11:cda7ebcc2694a853",
+    "11:4482d8033955e0eb",
+    "11:9a176a177ce3b776",
+    "12:ee0b96f22293b2e5",
+    "12:c7cde52b90bf4b49",
+    "12:637991275cce99e8",
+    "13:b7ea83a687f398ee",
+    "13:836c11acc922729a",
+    "13:637991275cce99e8",
+    "14:2d3ae01096576a35",
+    "14:30a6dabf7e11ab3d",
+    "14:49832bb55cf5b221",
+    "15:2d3ae01096576a35",
+    "15:30a6dabf7e11ab3d",
+    "15:49832bb55cf5b221",
+    "16:55e60412534ae76d",
+    "16:55e60412534ae76d",
+    "16:55e60412534ae76d",
+    "16:55e60412534ae76d"
+  ]
+}

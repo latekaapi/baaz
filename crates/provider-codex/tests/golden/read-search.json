@@ -1,0 +1,120 @@
+{
+  "final": {
+    "codex": {
+      "id": "codex",
+      "agent": "codex",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "01a0ddff-c1f8-7842-aa06-b0e3957fafb7",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "exec-6dc31a6c-36de-4a67-8c20-2b2af7bc81d9",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "sed -n '1,240p' notes.txt && rg -n --hidden --glob '!.git' 'gamma' .",
+              "status": "success",
+              "duration_ms": 0,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "hello",
+                  "world",
+                  "./data.txt:3:gamma"
+                ],
+                "exit_code": 0,
+                "live": false
+              }
+            },
+            {
+              "kind": "text",
+              "text": "DONE",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "golden-model",
+            "duration_ms": 8898,
+            "tokens_in": 30002,
+            "tokens_out": 130,
+            "reasoning_tokens": 47,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 25344
+          }
+        },
+        {
+          "kind": "user",
+          "id": "01a0ddff-cc8d-77e2-8d85-23cdc3b06d4f",
+          "text": "Read the file notes.txt, then search for the word 'gamma' in the working directory. Reply with just DONE.",
+          "attachments": [],
+          "mentions": []
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "5:c11f324e035c08d3",
+    "22:768e1c5dc11219c3",
+    "27:a174d8fe5baa9671",
+    "30:396f82208fcbdad4",
+    "31:a3a4478b09bef994",
+    "36:5a7720872446a1fb",
+    "40:fd1661c347a21161"
+  ],
+  "abandon": [
+    "1:c11f324e035c08d3",
+    "2:c11f324e035c08d3",
+    "3:c11f324e035c08d3",
+    "4:c11f324e035c08d3",
+    "5:c11f324e035c08d3",
+    "6:c11f324e035c08d3",
+    "7:c11f324e035c08d3",
+    "8:c11f324e035c08d3",
+    "9:c11f324e035c08d3",
+    "10:c11f324e035c08d3",
+    "11:c11f324e035c08d3",
+    "12:c11f324e035c08d3",
+    "13:c11f324e035c08d3",
+    "14:c11f324e035c08d3",
+    "15:c11f324e035c08d3",
+    "16:c11f324e035c08d3",
+    "17:c11f324e035c08d3",
+    "18:c11f324e035c08d3",
+    "19:c11f324e035c08d3",
+    "20:c11f324e035c08d3",
+    "21:c11f324e035c08d3",
+    "22:cda3470a2dc3b359",
+    "23:cda3470a2dc3b359",
+    "24:cda3470a2dc3b359",
+    "25:cda3470a2dc3b359",
+    "26:cda3470a2dc3b359",
+    "27:a6d4ee19d7c63aaf",
+    "28:a6d4ee19d7c63aaf",
+    "29:a6d4ee19d7c63aaf",
+    "30:ee48f3bb7ebd2979",
+    "31:e97bc20dad76da32",
+    "32:16ed2aef39c14911",
+    "33:16ed2aef39c14911",
+    "34:16ed2aef39c14911",
+    "35:742cd8f968c046c4",
+    "36:a1e336e12d65843a",
+    "37:8e822c624e25e759",
+    "38:8e822c624e25e759",
+    "39:8e822c624e25e759",
+    "40:fd1661c347a21161"
+  ]
+}

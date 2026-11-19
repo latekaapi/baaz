@@ -1,0 +1,128 @@
+{
+  "final": {
+    "01a081e5-3361-7952-94ce-456eda0dd590": {
+      "id": "01a081e5-3361-7952-94ce-456eda0dd590",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "0f47e444-3e8f-4933-8e71-d2881590a7ee",
+          "text": "hello from the probe",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "01a081e5-3401-7813-884a-b7c4f774ead7",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "Hello — Muse Code here. What do you need?",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-1.3-contributor",
+            "duration_ms": 5136,
+            "tokens_in": 19213,
+            "tokens_out": 115,
+            "reasoning_tokens": 94,
+            "cost_usd": 0.0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "marker:v:01a081e5-3361-7952-94ce-456eda0dd590:18",
+          "blocks": [
+            {
+              "kind": "marker",
+              "marker_kind": {
+                "kind": "permission_mode_changed",
+                "mode": "promptUnmatched"
+              },
+              "text": "Approval mode · Ask"
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "7:eb29b03a6c129888",
+    "16:041722595307cd7e",
+    "17:4cb3b4aec59e32c8",
+    "18:9e1590f6c268bb1c",
+    "19:0c2f14a7a6f8cd5d",
+    "20:5900e1739ce8cb93",
+    "21:83d195e987940559",
+    "22:9a6eda28fad6dd68",
+    "23:6bf73d7a8d32d6c3",
+    "24:715a88474049d1ce",
+    "25:2e8be1964f1a7f8b",
+    "28:03b0652eb5974119",
+    "37:877024bf64e3c587"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:08f44b07b5901a25",
+    "4:08f44b07b5901a25",
+    "5:08f44b07b5901a25",
+    "6:08f44b07b5901a25",
+    "7:eb29b03a6c129888",
+    "8:eb29b03a6c129888",
+    "9:eb29b03a6c129888",
+    "10:eb29b03a6c129888",
+    "11:eb29b03a6c129888",
+    "12:eb29b03a6c129888",
+    "13:eb29b03a6c129888",
+    "14:eb29b03a6c129888",
+    "15:eb29b03a6c129888",
+    "16:041722595307cd7e",
+    "17:0c5771250d2ecefe",
+    "18:065d4507d6175802",
+    "19:815b72c275c0a945",
+    "20:ba1fb0260cb68b0f",
+    "21:8eea1e62c0aac151",
+    "22:64383e77a9c6361e",
+    "23:211f1747c1213b1f",
+    "24:a7d9a954f8912518",
+    "25:a7d9a954f8912518",
+    "26:848d3173d94dc370",
+    "27:848d3173d94dc370",
+    "28:03b0652eb5974119",
+    "29:03b0652eb5974119",
+    "30:03b0652eb5974119",
+    "31:03b0652eb5974119",
+    "32:03b0652eb5974119",
+    "33:03b0652eb5974119",
+    "34:03b0652eb5974119",
+    "35:03b0652eb5974119",
+    "36:03b0652eb5974119",
+    "37:877024bf64e3c587",
+    "38:877024bf64e3c587"
+  ]
+}

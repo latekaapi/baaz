@@ -1,0 +1,386 @@
+{
+  "final": {
+    "synthetic-toolgroup": {
+      "id": "synthetic-toolgroup",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-syn-user-1",
+          "text": "Build it and check the configs.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn-1",
+          "blocks": [
+            {
+              "kind": "tool_group",
+              "calls": [
+                {
+                  "id": "i-tg-1",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo build --workspace",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "[build] compiling harness",
+                      "[build] linking harness"
+                    ],
+                    "exit_code": null,
+                    "live": false
+                  }
+                },
+                {
+                  "id": "i-tg-2",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo test --workspace",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "ok"
+                    ],
+                    "exit_code": null,
+                    "live": false
+                  }
+                },
+                {
+                  "id": "i-tg-3",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo clippy --workspace",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "done"
+                    ],
+                    "exit_code": null,
+                    "live": false
+                  }
+                }
+              ],
+              "summary": "Ran 3 commands",
+              "state": "done"
+            },
+            {
+              "kind": "thinking",
+              "text": "Checking the plan",
+              "elapsed_ms": 0,
+              "summary": "Checking the plan",
+              "state": "done"
+            },
+            {
+              "kind": "tool_group",
+              "calls": [
+                {
+                  "id": "i-tg-4",
+                  "tool_kind": {
+                    "kind": "read"
+                  },
+                  "verb": "Read",
+                  "target": "/tmp/synthetic/harness/notes.txt",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "read",
+                    "lines": 2,
+                    "output_lines": [
+                      "alpha",
+                      "beta"
+                    ]
+                  }
+                },
+                {
+                  "id": "i-tg-5",
+                  "tool_kind": {
+                    "kind": "read"
+                  },
+                  "verb": "Read",
+                  "target": "/tmp/synthetic/harness/todo.txt",
+                  "status": "success",
+                  "duration_ms": null,
+                  "body": {
+                    "kind": "read",
+                    "lines": 1,
+                    "output_lines": [
+                      "gamma"
+                    ]
+                  }
+                }
+              ],
+              "summary": "Read 2 files",
+              "state": "done"
+            },
+            {
+              "kind": "approval",
+              "id": "ap-tg-1",
+              "tool": "bash",
+              "command": "cargo run -- --no-connect",
+              "reason": "",
+              "cwd": "/tmp/synthetic",
+              "capabilities": [],
+              "scope": "this_command",
+              "body_kind": "command",
+              "state": {
+                "kind": "allowed_once",
+                "exit_code": 0,
+                "duration_ms": 0
+              },
+              "rule": null,
+              "choices": [
+                {
+                  "id": "allow_once",
+                  "label": "Allow once",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                }
+              ],
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              },
+              "resolved_by": "user"
+            },
+            {
+              "kind": "tool_call",
+              "id": "i-tg-6",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "cargo clippy -- --deny warnings",
+              "status": "error",
+              "duration_ms": null,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "error: warnings denied"
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "i-tg-7",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "cargo clippy -- --allow warnings",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "recovered"
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-test",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "user",
+          "id": "i-tg2-user-1",
+          "text": "Run the checks.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn-2",
+          "blocks": [
+            {
+              "kind": "tool_group",
+              "calls": [
+                {
+                  "id": "i-tg2-bash-1",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo test --workspace",
+                  "status": "success",
+                  "duration_ms": 8100,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "[test] running 42 tests",
+                      "[test] .... ok"
+                    ],
+                    "exit_code": 0,
+                    "live": false
+                  }
+                },
+                {
+                  "id": "i-tg2-bash-2",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo clippy --workspace --all-targets",
+                  "status": "success",
+                  "duration_ms": 3200,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "[lint] clippy clean"
+                    ],
+                    "exit_code": 0,
+                    "live": false
+                  }
+                },
+                {
+                  "id": "i-tg2-bash-3",
+                  "tool_kind": {
+                    "kind": "shell"
+                  },
+                  "verb": "Ran",
+                  "target": "cargo build --workspace",
+                  "status": "success",
+                  "duration_ms": 12400,
+                  "body": {
+                    "kind": "shell",
+                    "output_lines": [
+                      "[build] linking harness",
+                      "[build] finished in 12.4 s"
+                    ],
+                    "exit_code": 0,
+                    "live": false
+                  }
+                }
+              ],
+              "summary": "Ran 3 commands",
+              "state": "done"
+            },
+            {
+              "kind": "text",
+              "text": "All three checks pass: tests, lint and build.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-test",
+            "duration_ms": 24000,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "20:f33e7dfa2407453a",
+    "22:30e2fa8e21c725a8",
+    "23:71a2d4cdf7823dbc",
+    "24:821f3ff58ba1700e",
+    "25:f243640aa9d659ec",
+    "26:bcbcaef99e30787d",
+    "27:b2c98a6168b69155",
+    "28:552529936a3569d2",
+    "29:bf874834c75cde52",
+    "30:be00eb4b87c7be2f",
+    "31:16e5a7cb70b54ffa",
+    "32:8e0cd20adba629dc",
+    "33:62bb6ed1f77f0335",
+    "34:3904cc15cf9fb2c5",
+    "35:8946776426106c10",
+    "36:a74aa315c48d197b",
+    "37:82a144a41d253617",
+    "39:c0ab6c6968502459",
+    "40:05a701b0fcf70bf7",
+    "41:b0c630d7843f9f01",
+    "42:24bcbc6ff8bc9d8a",
+    "43:844882c33b7b071d",
+    "44:50492da2ec511418"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:08f44b07b5901a25",
+    "4:08f44b07b5901a25",
+    "5:08f44b07b5901a25",
+    "6:08f44b07b5901a25",
+    "7:08f44b07b5901a25",
+    "8:08f44b07b5901a25",
+    "9:08f44b07b5901a25",
+    "10:08f44b07b5901a25",
+    "11:08f44b07b5901a25",
+    "12:08f44b07b5901a25",
+    "13:08f44b07b5901a25",
+    "14:08f44b07b5901a25",
+    "15:08f44b07b5901a25",
+    "16:08f44b07b5901a25",
+    "17:08f44b07b5901a25",
+    "18:08f44b07b5901a25",
+    "19:08f44b07b5901a25",
+    "20:f33e7dfa2407453a",
+    "21:f33e7dfa2407453a",
+    "22:30e2fa8e21c725a8",
+    "23:954d717caffe92d1",
+    "24:553a1f27ef30df47",
+    "25:ec0acef240a6552d",
+    "26:717dd8e4f633acda",
+    "27:c0e7d0efcb8801b6",
+    "28:898ec68150465a07",
+    "29:4cf2e19c82f2df17",
+    "30:4bcb0818c92e7570",
+    "31:7c7650d9a2911f4f",
+    "32:338d218649fee611",
+    "33:db93b375dd85582a",
+    "34:5a2c02eb70f2b450",
+    "35:cb2bc517d4508b2f",
+    "36:62a231f097f2d942",
+    "37:82a144a41d253617",
+    "38:82a144a41d253617",
+    "39:c0ab6c6968502459",
+    "40:a05417c94abd0d28",
+    "41:aa8d67c15d76082a",
+    "42:628f69b61d17327f",
+    "43:3f8f2da2340c9bee",
+    "44:50492da2ec511418"
+  ]
+}

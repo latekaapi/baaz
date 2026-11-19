@@ -1,0 +1,183 @@
+{
+  "final": {
+    "codex": {
+      "id": "codex",
+      "agent": "codex",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "01a0d345-cbbd-7802-bb29-6c378d6d6adb",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "I’ll run the requested shell write exactly once.",
+              "streaming": false
+            },
+            {
+              "kind": "tool_call",
+              "id": "exec-62dc5340-e75e-455b-9d08-b19f577b8fea",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "printf 'HELLO' > /tmp/baaz_probe_write.txt",
+              "status": "success",
+              "duration_ms": 0,
+              "body": {
+                "kind": "shell",
+                "output_lines": [],
+                "exit_code": 0,
+                "live": false
+              }
+            },
+            {
+              "kind": "approval",
+              "id": "exec-62dc5340-e75e-455b-9d08-b19f577b8fea",
+              "tool": "Bash",
+              "command": "printf 'HELLO' > /tmp/baaz_probe_write.txt",
+              "reason": "Allow creating /tmp/baaz_probe_write.txt containing HELLO as requested?",
+              "cwd": "/Users/owner/Projects/harness",
+              "capabilities": [],
+              "scope": "this_command",
+              "body_kind": "command",
+              "state": {
+                "kind": "allowed_once",
+                "exit_code": 0,
+                "duration_ms": 0
+              },
+              "rule": null,
+              "choices": [
+                {
+                  "id": "accept",
+                  "label": "Allow once",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "accept-for-session",
+                  "label": "Allow for this session",
+                  "decision": "approved_for_session",
+                  "scope": "this_session",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "decline",
+                  "label": "Deny",
+                  "decision": "deny",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "cancel",
+                  "label": "Deny and stop",
+                  "decision": "abort",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                }
+              ],
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              }
+            }
+          ],
+          "meta": {
+            "model": "golden-model",
+            "duration_ms": 8139,
+            "tokens_in": 28530,
+            "tokens_out": 115,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 24576
+          }
+        },
+        {
+          "kind": "user",
+          "id": "01a0d345-d455-7de1-9769-7637f9e489d4",
+          "text": "Create a file at /tmp/baaz_probe_write.txt containing the word HELLO, using a shell command. Then stop.",
+          "attachments": [],
+          "mentions": []
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "3:c11f324e035c08d3",
+    "22:1a61467e8c254d6a",
+    "27:179a4a0616d6f5c4",
+    "40:451551cf082b3ce9",
+    "42:8ad4a0e360a5dcb4",
+    "43:5c5b944cdfd97794",
+    "47:e598e18e267d27bf",
+    "55:a60e1846ca472eea"
+  ],
+  "abandon": [
+    "1:c11f324e035c08d3",
+    "2:c11f324e035c08d3",
+    "3:c11f324e035c08d3",
+    "4:c11f324e035c08d3",
+    "5:c11f324e035c08d3",
+    "6:c11f324e035c08d3",
+    "7:c11f324e035c08d3",
+    "8:c11f324e035c08d3",
+    "9:c11f324e035c08d3",
+    "10:c11f324e035c08d3",
+    "11:c11f324e035c08d3",
+    "12:c11f324e035c08d3",
+    "13:c11f324e035c08d3",
+    "14:c11f324e035c08d3",
+    "15:c11f324e035c08d3",
+    "16:c11f324e035c08d3",
+    "17:c11f324e035c08d3",
+    "18:c11f324e035c08d3",
+    "19:c11f324e035c08d3",
+    "20:c11f324e035c08d3",
+    "21:c11f324e035c08d3",
+    "22:1f06e1bc43afac10",
+    "23:1f06e1bc43afac10",
+    "24:1f06e1bc43afac10",
+    "25:1f06e1bc43afac10",
+    "26:1f06e1bc43afac10",
+    "27:7396589b9e638ca6",
+    "28:7396589b9e638ca6",
+    "29:7396589b9e638ca6",
+    "30:f4c4a0cd98333688",
+    "31:ae358cf0008e7ee9",
+    "32:6699a68431cae23a",
+    "33:f72dbcb830ad57eb",
+    "34:15d3955ac668bab3",
+    "35:64ebad805264a199",
+    "36:e838b67ad4aa698c",
+    "37:6c27da00450dab80",
+    "38:50e365cdf01c6671",
+    "39:5679ce9674558223",
+    "40:d5f8e3d522eace99",
+    "41:d5f8e3d522eace99",
+    "42:678a36f5d480f921",
+    "43:c5372b7735bfd47b",
+    "44:c5372b7735bfd47b",
+    "45:c5372b7735bfd47b",
+    "46:c5372b7735bfd47b",
+    "47:bc86fba12cdef483",
+    "48:22b22b9bd84d2f55",
+    "49:22b22b9bd84d2f55",
+    "50:22b22b9bd84d2f55",
+    "51:22b22b9bd84d2f55",
+    "52:6dd98fd65bfe4e6c",
+    "53:6dd98fd65bfe4e6c",
+    "54:6dd98fd65bfe4e6c",
+    "55:a60e1846ca472eea"
+  ]
+}

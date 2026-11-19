@@ -14,6 +14,7 @@ chrono = { workspace = true }
 muse-client = { workspace = true }
 provider = { workspace = true }
 session-store = { workspace = true }
+transcript-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

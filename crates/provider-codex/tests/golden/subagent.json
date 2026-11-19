@@ -1,0 +1,226 @@
+{
+  "final": {
+    "codex": {
+      "id": "codex",
+      "agent": "codex",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "01a0de03-17db-7451-be8f-db02f831c6e2",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "call_JF42APZAXAjjI6jm3lgJFB8b",
+              "tool_kind": {
+                "kind": "sub_agent"
+              },
+              "verb": "Delegate",
+              "target": "/root/read_notes",
+              "status": "running",
+              "duration_ms": null,
+              "body": {
+                "kind": "sub_agent",
+                "turns": []
+              }
+            },
+            {
+              "kind": "generic",
+              "item_kind": "collabAgentToolCall",
+              "status": "completed",
+              "text": ""
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "user",
+          "id": "01a0de03-1e92-7af2-8e66-4b620fd48479",
+          "text": "Delegate to a subagent to read notes.txt and report its contents back. Then reply with just DONE.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "01a0de03-2cde-7bc1-af25-ee628ec665ae",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "I’ll read the file without making changes and report the exact contents to the parent agent.",
+              "streaming": false
+            },
+            {
+              "kind": "tool_call",
+              "id": "exec-77f2d449-535c-4e10-8460-91bfa6f28837",
+              "tool_kind": {
+                "kind": "read"
+              },
+              "verb": "Read",
+              "target": "/tmp/w4b/work/notes.txt",
+              "status": "success",
+              "duration_ms": 0,
+              "body": {
+                "kind": "none"
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "call_iz2kJ0xzybGKwcKBRc2vOrrv",
+              "tool_kind": {
+                "kind": "sub_agent"
+              },
+              "verb": "Delegated",
+              "target": "/root",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "sub_agent",
+                "turns": []
+              }
+            },
+            {
+              "kind": "text",
+              "text": "hello\nworld",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "golden-model",
+            "duration_ms": 9585,
+            "tokens_in": 45222,
+            "tokens_out": 159,
+            "reasoning_tokens": 24,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 43648
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "5:c11f324e035c08d3",
+    "22:5ad4f9bf4b4ecfb1",
+    "27:d9b5917f5a523ec2",
+    "31:1b69a746094699f1",
+    "38:e980347c093d7121",
+    "66:2dbb448e66176725",
+    "67:5308bb4ccf09b017",
+    "68:a134986afd0050ce",
+    "73:64213133832509b1",
+    "74:7e43849054a0c24a",
+    "84:ab56e478e07098ab",
+    "88:6a1e6489cee004c2"
+  ],
+  "abandon": [
+    "1:c11f324e035c08d3",
+    "2:c11f324e035c08d3",
+    "3:c11f324e035c08d3",
+    "4:c11f324e035c08d3",
+    "5:c11f324e035c08d3",
+    "6:c11f324e035c08d3",
+    "7:c11f324e035c08d3",
+    "8:c11f324e035c08d3",
+    "9:c11f324e035c08d3",
+    "10:c11f324e035c08d3",
+    "11:c11f324e035c08d3",
+    "12:c11f324e035c08d3",
+    "13:c11f324e035c08d3",
+    "14:c11f324e035c08d3",
+    "15:c11f324e035c08d3",
+    "16:c11f324e035c08d3",
+    "17:c11f324e035c08d3",
+    "18:c11f324e035c08d3",
+    "19:c11f324e035c08d3",
+    "20:c11f324e035c08d3",
+    "21:c11f324e035c08d3",
+    "22:caa1d638943de4ff",
+    "23:caa1d638943de4ff",
+    "24:caa1d638943de4ff",
+    "25:caa1d638943de4ff",
+    "26:caa1d638943de4ff",
+    "27:df83c7d8231b46dc",
+    "28:df83c7d8231b46dc",
+    "29:df83c7d8231b46dc",
+    "30:df83c7d8231b46dc",
+    "31:bd71e6501cfb370b",
+    "32:bd71e6501cfb370b",
+    "33:bd71e6501cfb370b",
+    "34:bd71e6501cfb370b",
+    "35:91d7f214da09930c",
+    "36:91d7f214da09930c",
+    "37:91d7f214da09930c",
+    "38:efceecd4ed5d78ef",
+    "39:efceecd4ed5d78ef",
+    "40:efceecd4ed5d78ef",
+    "41:efceecd4ed5d78ef",
+    "42:efceecd4ed5d78ef",
+    "43:efceecd4ed5d78ef",
+    "44:efceecd4ed5d78ef",
+    "45:efceecd4ed5d78ef",
+    "46:efceecd4ed5d78ef",
+    "47:efceecd4ed5d78ef",
+    "48:fd7e9430beacb457",
+    "49:442c74462ee98228",
+    "50:102dfc14b4805892",
+    "51:1e7981b969e9ebdb",
+    "52:57cfec8db475436d",
+    "53:3c57a3fade32d101",
+    "54:37daa3ebb355509e",
+    "55:5436b99c0a523391",
+    "56:eac819328919dffe",
+    "57:d1779a37523ff58a",
+    "58:ea606c2c95ced143",
+    "59:ce47e626e4d13a1a",
+    "60:4d0a7deeae966786",
+    "61:3b31e5a260ec50e7",
+    "62:d2bc17bb79f2e4ee",
+    "63:3c12e7a4c9c28820",
+    "64:17ebae7fa46cda77",
+    "65:dfcce07d85c1b215",
+    "66:0a41ee9f220e9dc9",
+    "67:3479e22cddeb2c90",
+    "68:b072d57e068932e4",
+    "69:b072d57e068932e4",
+    "70:b072d57e068932e4",
+    "71:b072d57e068932e4",
+    "72:b072d57e068932e4",
+    "73:4a09361edae4bccd",
+    "74:adbbce210ff71108",
+    "75:adbbce210ff71108",
+    "76:adbbce210ff71108",
+    "77:adbbce210ff71108",
+    "78:adbbce210ff71108",
+    "79:adbbce210ff71108",
+    "80:adbbce210ff71108",
+    "81:699b90a99dd9543f",
+    "82:7c4d498c56dc6559",
+    "83:f3c8bef3c10df68d",
+    "84:c0ac8d0de2efaf93",
+    "85:c0ac8d0de2efaf93",
+    "86:c0ac8d0de2efaf93",
+    "87:c0ac8d0de2efaf93",
+    "88:6a1e6489cee004c2",
+    "89:6a1e6489cee004c2",
+    "90:6a1e6489cee004c2"
+  ]
+}

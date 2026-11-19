@@ -1,0 +1,314 @@
+{
+  "final": {
+    "claude": {
+      "id": "claude",
+      "agent": "claude",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "7a231788-ea64-4ed3-9715-d88834397ebd",
+          "text": "Create the file greet.txt with exactly one line 'hi there'. Then edit greet.txt so the first line reads 'hello there' and append a second line 'bye'. Reply with just DONE.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "msg_011CfSA57uMmg7Rwv9YfqGEa",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "toolu_01Xx4ckhkDsSZgir3HZBrLe6",
+              "tool_kind": {
+                "kind": "write"
+              },
+              "verb": "Wrote",
+              "target": "/private/tmp/w4b/work/greet.txt",
+              "status": "success",
+              "duration_ms": "set",
+              "body": {
+                "kind": "edit",
+                "diff": {
+                  "path": "/private/tmp/w4b/work/greet.txt",
+                  "hunks": [
+                    {
+                      "header": "@@ -0,0 +1,1 @@",
+                      "lines": [
+                        {
+                          "kind": "add",
+                          "old_no": null,
+                          "new_no": 1,
+                          "text": "hi there"
+                        }
+                      ]
+                    }
+                  ],
+                  "added": 1,
+                  "removed": 0
+                }
+              },
+              "diff_stat": {
+                "added": 1,
+                "removed": 0,
+                "files": 1
+              }
+            },
+            {
+              "kind": "approval",
+              "id": "ca7cec6e-8f5d-4c28-9fac-2249d27aca46",
+              "tool": "Write",
+              "command": "/private/tmp/w4b/work/greet.txt",
+              "reason": "/private/tmp/w4b/work/greet.txt\nhi there",
+              "cwd": "/private/tmp/w4b/work",
+              "capabilities": [],
+              "scope": "this_command",
+              "body_kind": "file_write",
+              "state": {
+                "kind": "allowed_once",
+                "exit_code": 0,
+                "duration_ms": "set"
+              },
+              "rule": null,
+              "choices": [
+                {
+                  "id": "allow",
+                  "label": "Allow",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "deny",
+                  "label": "Deny",
+                  "decision": "deny",
+                  "scope": "this_command",
+                  "accepts_feedback": true
+                }
+              ],
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "toolu_01WkVGfirU79fSbb3MRF2Pz4",
+              "tool_kind": {
+                "kind": "edit"
+              },
+              "verb": "Edited",
+              "target": "/private/tmp/w4b/work/greet.txt",
+              "status": "success",
+              "duration_ms": "set",
+              "body": {
+                "kind": "edit",
+                "diff": {
+                  "path": "/private/tmp/w4b/work/greet.txt",
+                  "hunks": [
+                    {
+                      "header": "@@ -1,1 +1,2 @@",
+                      "lines": [
+                        {
+                          "kind": "del",
+                          "old_no": 1,
+                          "new_no": null,
+                          "text": "hi there"
+                        },
+                        {
+                          "kind": "add",
+                          "old_no": null,
+                          "new_no": 1,
+                          "text": "hello there"
+                        },
+                        {
+                          "kind": "add",
+                          "old_no": null,
+                          "new_no": 2,
+                          "text": "bye"
+                        }
+                      ]
+                    }
+                  ],
+                  "added": 2,
+                  "removed": 1
+                }
+              },
+              "diff_stat": {
+                "added": 2,
+                "removed": 1,
+                "files": 1
+              }
+            },
+            {
+              "kind": "approval",
+              "id": "7400ac9d-2da3-4547-a6a5-3de28dc862fc",
+              "tool": "Edit",
+              "command": "/private/tmp/w4b/work/greet.txt",
+              "reason": "/private/tmp/w4b/work/greet.txt\n- hi there\n+ hello there\n+ bye",
+              "cwd": "/private/tmp/w4b/work",
+              "capabilities": [],
+              "scope": "this_command",
+              "body_kind": "file_write",
+              "state": {
+                "kind": "allowed_once",
+                "exit_code": 0,
+                "duration_ms": "set"
+              },
+              "rule": null,
+              "choices": [
+                {
+                  "id": "allow",
+                  "label": "Allow",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "deny",
+                  "label": "Deny",
+                  "decision": "deny",
+                  "scope": "this_command",
+                  "accepts_feedback": true
+                }
+              ],
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              }
+            },
+            {
+              "kind": "text",
+              "text": "DONE",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "claude-haiku-4-5-20251001",
+            "duration_ms": "set",
+            "tokens_in": 95014,
+            "tokens_out": 531,
+            "reasoning_tokens": 324,
+            "cost_usd": 0.023237800000000003,
+            "cache_read_tokens": 89168,
+            "cache_write_tokens": 5820,
+            "cached_tokens": 0
+          },
+          "timestamp": "set"
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:ffdc458af9e37b66",
+    "8:d081647045eb0f5f",
+    "9:d2daf0a92a17bf30",
+    "10:7adb1db02652c82e",
+    "11:bc4e5ad3d88cc55c",
+    "16:07a5e2c5469a5e2c",
+    "20:1ed091f327ee1e07",
+    "21:8f45dd588693c31b",
+    "24:6bdd7523e8fad300",
+    "28:f7154f30221e5e97",
+    "30:3391dc6cbd00bd7f"
+  ],
+  "abandon": [
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "8:d081647045eb0f5f",
+    "8:d081647045eb0f5f",
+    "8:d081647045eb0f5f",
+    "9:2fc3b05b0206b951",
+    "9:71ea7d9e5f181699",
+    "9:d2daf0a92a17bf30",
+    "10:cfdbaffbd881a5db",
+    "10:f49662dc5b3ec32f",
+    "10:7adb1db02652c82e",
+    "11:797342ece2806453",
+    "11:2d944fbb60031678",
+    "11:bbeeac5221ee3e2d",
+    "12:797342ece2806453",
+    "12:2d944fbb60031678",
+    "12:bbeeac5221ee3e2d",
+    "13:797342ece2806453",
+    "13:2d944fbb60031678",
+    "13:bbeeac5221ee3e2d",
+    "14:797342ece2806453",
+    "14:2d944fbb60031678",
+    "14:bbeeac5221ee3e2d",
+    "15:797342ece2806453",
+    "15:2d944fbb60031678",
+    "15:bbeeac5221ee3e2d",
+    "16:4ac820e9a1bb837d",
+    "16:852c53ed9210ef55",
+    "16:07a5e2c5469a5e2c",
+    "17:4ac820e9a1bb837d",
+    "17:852c53ed9210ef55",
+    "17:07a5e2c5469a5e2c",
+    "18:4ac820e9a1bb837d",
+    "18:852c53ed9210ef55",
+    "18:07a5e2c5469a5e2c",
+    "19:09c182d9a0b2639c",
+    "19:98f8b7d579b41e84",
+    "19:07a5e2c5469a5e2c",
+    "20:56f56f68cdf5d2f3",
+    "20:3675e5a8d1d4bb5b",
+    "20:1ed091f327ee1e07",
+    "21:88531df30f0e152b",
+    "21:bb3dd0e7f4c33bac",
+    "21:1f4a9297e48153cc",
+    "22:88531df30f0e152b",
+    "22:bb3dd0e7f4c33bac",
+    "22:1f4a9297e48153cc",
+    "23:88531df30f0e152b",
+    "23:bb3dd0e7f4c33bac",
+    "23:1f4a9297e48153cc",
+    "24:2fb35dca8e0c25b0",
+    "24:f9b7389c6388e020",
+    "24:6bdd7523e8fad300",
+    "25:2fb35dca8e0c25b0",
+    "25:f9b7389c6388e020",
+    "25:6bdd7523e8fad300",
+    "26:2fb35dca8e0c25b0",
+    "26:f9b7389c6388e020",
+    "26:6bdd7523e8fad300",
+    "27:1acd1813a110e23a",
+    "27:67dcab1933ce886a",
+    "27:6bdd7523e8fad300",
+    "28:4aed16ebf796d907",
+    "28:4af959d71253ca6f",
+    "28:f7154f30221e5e97",
+    "29:4aed16ebf796d907",
+    "29:4af959d71253ca6f",
+    "29:f7154f30221e5e97",
+    "30:3391dc6cbd00bd7f",
+    "30:3391dc6cbd00bd7f",
+    "30:3391dc6cbd00bd7f",
+    "30:3391dc6cbd00bd7f"
+  ]
+}

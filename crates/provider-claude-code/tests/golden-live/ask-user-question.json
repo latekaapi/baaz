@@ -1,0 +1,109 @@
+{
+  "final": {
+    "claude": {
+      "id": "claude",
+      "agent": "claude",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "msg_011CgnQMZHTpfe8bSkMzYXUb",
+          "blocks": [
+            {
+              "kind": "question",
+              "id": "ask-e586236e-94af-49cc-99f8-8a57466084c9-0",
+              "header": "Colour choice",
+              "prompt": "Which colour do you prefer?",
+              "subtitle": "",
+              "options": [
+                {
+                  "label": "Red",
+                  "description": "The colour red",
+                  "key": "1"
+                },
+                {
+                  "label": "Blue",
+                  "description": "The colour blue",
+                  "key": "2"
+                }
+              ],
+              "multi": false,
+              "allow_other": false,
+              "answer": null
+            },
+            {
+              "kind": "text",
+              "text": "Blue",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "claude-haiku-4-5-20251001",
+            "duration_ms": "set",
+            "tokens_in": 62355,
+            "tokens_out": 225,
+            "reasoning_tokens": 101,
+            "cost_usd": 0.066841,
+            "cache_read_tokens": 31040,
+            "cache_write_tokens": 31297,
+            "cached_tokens": 0
+          },
+          "timestamp": "set"
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:ffdc458af9e37b66",
+    "3:a67a311231ff072c",
+    "5:b486d6e9326754ab",
+    "10:41e527f171597184",
+    "12:cb87bb1d3d4c49d3"
+  ],
+  "abandon": [
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "3:a068248f4d7806d4",
+    "3:48442a6e2ad311d4",
+    "3:a67a311231ff072c",
+    "4:a068248f4d7806d4",
+    "4:48442a6e2ad311d4",
+    "4:a67a311231ff072c",
+    "5:c11eb06b7968b819",
+    "5:5322455f21ee3d09",
+    "5:b486d6e9326754ab",
+    "6:c11eb06b7968b819",
+    "6:5322455f21ee3d09",
+    "6:b486d6e9326754ab",
+    "7:c11eb06b7968b819",
+    "7:5322455f21ee3d09",
+    "7:b486d6e9326754ab",
+    "8:c11eb06b7968b819",
+    "8:5322455f21ee3d09",
+    "8:b486d6e9326754ab",
+    "9:b2c69557279ec8ba",
+    "9:0b81c719715af46a",
+    "9:b486d6e9326754ab",
+    "10:7fe075961fae71b3",
+    "10:cb62c93326a8eafb",
+    "10:41e527f171597184",
+    "11:7fe075961fae71b3",
+    "11:cb62c93326a8eafb",
+    "11:41e527f171597184",
+    "12:cb87bb1d3d4c49d3",
+    "12:cb87bb1d3d4c49d3",
+    "12:cb87bb1d3d4c49d3",
+    "12:cb87bb1d3d4c49d3"
+  ]
+}

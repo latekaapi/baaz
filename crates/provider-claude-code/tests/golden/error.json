@@ -1,0 +1,180 @@
+{
+  "final": {
+    "claude": {
+      "id": "claude",
+      "agent": "claude",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "cde72d0c-6e75-49ef-bb38-8470325fc0dc",
+          "text": "Run the command 'ls /nonexistent-dir-xyz-123' with the Bash tool, then reply with just DONE.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "msg_011CfSA9kGVKNPZYgBdWfAoX",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "toolu_01DqRQ4b1mehXUvvBBNtMYrH",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "ls /nonexistent-dir-xyz-123",
+              "status": "error",
+              "duration_ms": null,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "Exit code 1",
+                  "ls: /nonexistent-dir-xyz-123: No such file or directory"
+                ],
+                "exit_code": 1,
+                "live": false
+              }
+            },
+            {
+              "kind": "approval",
+              "id": "99cc3623-327d-4c69-8135-a7cf40121f6f",
+              "tool": "Bash",
+              "command": "ls /nonexistent-dir-xyz-123",
+              "reason": "ls /nonexistent-dir-xyz-123",
+              "cwd": "/private/tmp/w4b/work",
+              "capabilities": [],
+              "scope": "this_command",
+              "body_kind": "command",
+              "state": {
+                "kind": "allowed_once",
+                "exit_code": 1,
+                "duration_ms": 0
+              },
+              "rule": null,
+              "choices": [
+                {
+                  "id": "allow",
+                  "label": "Allow",
+                  "decision": "once",
+                  "scope": "this_command",
+                  "accepts_feedback": false
+                },
+                {
+                  "id": "deny",
+                  "label": "Deny",
+                  "decision": "deny",
+                  "scope": "this_command",
+                  "accepts_feedback": true
+                }
+              ],
+              "badges": {
+                "protected_write": false,
+                "judge_escalated": false
+              }
+            },
+            {
+              "kind": "text",
+              "text": "DONE",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "claude-haiku-4-5-20251001",
+            "duration_ms": 5611,
+            "tokens_in": 62619,
+            "tokens_out": 238,
+            "reasoning_tokens": 165,
+            "cost_usd": 0.017768,
+            "cache_read_tokens": 57180,
+            "cache_write_tokens": 5421,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:ffdc458af9e37b66",
+    "7:7f2622a91078330c",
+    "8:23e9d31a3c73787a",
+    "9:62c675039c2b34e2",
+    "10:158f9e847e59a187",
+    "15:0d405dace2df306f",
+    "19:9bf3ec3a4d55cd34",
+    "21:007e8cd03c3de3ae"
+  ],
+  "abandon": [
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "7:7f2622a91078330c",
+    "7:7f2622a91078330c",
+    "7:7f2622a91078330c",
+    "8:c8ca3c52e5325fff",
+    "8:cb14d1a2bebd2847",
+    "8:23e9d31a3c73787a",
+    "9:0a18f54be8e66d6f",
+    "9:550df79c530231bf",
+    "9:62c675039c2b34e2",
+    "10:d0b465e3ad5a9766",
+    "10:22b94f6700cd1241",
+    "10:55c99099b479d538",
+    "11:d0b465e3ad5a9766",
+    "11:22b94f6700cd1241",
+    "11:55c99099b479d538",
+    "12:d0b465e3ad5a9766",
+    "12:22b94f6700cd1241",
+    "12:55c99099b479d538",
+    "13:d0b465e3ad5a9766",
+    "13:22b94f6700cd1241",
+    "13:55c99099b479d538",
+    "14:d0b465e3ad5a9766",
+    "14:22b94f6700cd1241",
+    "14:55c99099b479d538",
+    "15:bb05731b639c9c1f",
+    "15:3a2c741536102ab4",
+    "15:f9aa3b97a0a97bad",
+    "16:bb05731b639c9c1f",
+    "16:3a2c741536102ab4",
+    "16:f9aa3b97a0a97bad",
+    "17:bb05731b639c9c1f",
+    "17:3a2c741536102ab4",
+    "17:f9aa3b97a0a97bad",
+    "18:9dbae526f291d2bd",
+    "18:96553fee7d8b060e",
+    "18:f9aa3b97a0a97bad",
+    "19:80bec28d27434b2a",
+    "19:57731fc3194f0f35",
+    "19:bdff133fe3f416ba",
+    "20:80bec28d27434b2a",
+    "20:57731fc3194f0f35",
+    "20:bdff133fe3f416ba",
+    "21:007e8cd03c3de3ae",
+    "21:0b0ba3506f1a734c",
+    "21:3c1ec1b8f5c9aa2c",
+    "21:007e8cd03c3de3ae"
+  ]
+}

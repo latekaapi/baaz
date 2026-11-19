@@ -1,0 +1,92 @@
+{
+  "final": {
+    "01a09a06-df47-76e3-b1ac-d4d1447e85d3": {
+      "id": "01a09a06-df47-76e3-b1ac-d4d1447e85d3",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "00068268-1b9f-7e51-97ae-161538f34ca1",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "700e2c5d-f719-417f-8066-d64a4668cbad",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "$",
+              "target": "echo hi && ls",
+              "status": "error",
+              "duration_ms": 19,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "tool failed: environment failure: managed shell sandbox is unavailable",
+                  "The execution environment is broken: the command was never started and every later command will fail the same way. Do not retry and do not fabricate command output; report this environment failure."
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "15:0df35f1690d5bfee",
+    "19:a85cc5d238f565bd",
+    "21:a79c4ff79d065790"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:08f44b07b5901a25",
+    "4:08f44b07b5901a25",
+    "5:08f44b07b5901a25",
+    "6:08f44b07b5901a25",
+    "7:08f44b07b5901a25",
+    "8:08f44b07b5901a25",
+    "9:08f44b07b5901a25",
+    "10:08f44b07b5901a25",
+    "11:08f44b07b5901a25",
+    "12:08f44b07b5901a25",
+    "13:08f44b07b5901a25",
+    "14:08f44b07b5901a25",
+    "15:0df35f1690d5bfee",
+    "16:0df35f1690d5bfee",
+    "17:0df35f1690d5bfee",
+    "18:0df35f1690d5bfee",
+    "19:a85cc5d238f565bd",
+    "20:a85cc5d238f565bd",
+    "21:a79c4ff79d065790",
+    "22:a79c4ff79d065790",
+    "23:a79c4ff79d065790",
+    "24:a79c4ff79d065790",
+    "25:a79c4ff79d065790",
+    "26:a79c4ff79d065790",
+    "27:a79c4ff79d065790",
+    "28:a79c4ff79d065790",
+    "29:a79c4ff79d065790"
+  ]
+}

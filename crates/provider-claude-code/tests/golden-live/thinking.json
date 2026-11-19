@@ -1,0 +1,97 @@
+{
+  "final": {
+    "claude": {
+      "id": "claude",
+      "agent": "claude",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "07e97453-5098-4627-91ce-bef07f3dd964",
+          "text": "Consider the 8-puzzle with rows [1,2,3] [4,5,6] [7,0,8] where 0 is the blank. Think carefully step by step about which single move reaches the goal state and why the alternatives fail. Then reply with just DONE.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "msg_011CfSALndBiGr9SbCiyxw3i",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "DONE",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "claude-sonnet-5",
+            "duration_ms": "set",
+            "tokens_in": 44202,
+            "tokens_out": 267,
+            "reasoning_tokens": 262,
+            "cost_usd": 0.17947400000000002,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 44200,
+            "cached_tokens": 0
+          },
+          "timestamp": "set"
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:ffdc458af9e37b66",
+    "8:18fa964471bb3e29",
+    "9:cca515d651cf2a58",
+    "10:8b293e9707cdefb7",
+    "13:ce476dd583ce92e6"
+  ],
+  "abandon": [
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "7:ffdc458af9e37b66",
+    "8:18fa964471bb3e29",
+    "8:18fa964471bb3e29",
+    "8:18fa964471bb3e29",
+    "9:0d8285b2d0bf201e",
+    "9:56b16f7b4e8822d6",
+    "9:cca515d651cf2a58",
+    "10:f19c13cb2f1b1be3",
+    "10:e6a7231697d2f62b",
+    "10:8b293e9707cdefb7",
+    "11:f19c13cb2f1b1be3",
+    "11:e6a7231697d2f62b",
+    "11:8b293e9707cdefb7",
+    "12:f19c13cb2f1b1be3",
+    "12:e6a7231697d2f62b",
+    "12:8b293e9707cdefb7",
+    "13:ce476dd583ce92e6",
+    "13:ce476dd583ce92e6",
+    "13:ce476dd583ce92e6",
+    "13:ce476dd583ce92e6"
+  ]
+}

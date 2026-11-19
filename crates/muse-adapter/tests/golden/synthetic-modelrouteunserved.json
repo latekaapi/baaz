@@ -1,0 +1,35 @@
+{
+  "final": {
+    "synthetic-modelrouteunserved": {
+      "id": "synthetic-modelrouteunserved",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": []
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "11:305d5d373a86d3fa"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:08f44b07b5901a25",
+    "4:08f44b07b5901a25",
+    "5:08f44b07b5901a25",
+    "6:08f44b07b5901a25",
+    "7:08f44b07b5901a25",
+    "8:08f44b07b5901a25",
+    "9:08f44b07b5901a25",
+    "10:08f44b07b5901a25",
+    "11:305d5d373a86d3fa",
+    "12:305d5d373a86d3fa"
+  ]
+}

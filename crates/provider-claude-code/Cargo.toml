@@ -14,6 +14,7 @@ aui-protocol = { workspace = true }
 crossbeam-channel = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+transcript-core = { workspace = true }
 
 [dev-dependencies]
 # Fault tests SIGKILL their own stand-in child.

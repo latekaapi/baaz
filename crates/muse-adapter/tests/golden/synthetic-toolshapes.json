@@ -1,0 +1,204 @@
+{
+  "final": {
+    "synthetic-toolshapes": {
+      "id": "synthetic-toolshapes",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-syn-user-1",
+          "text": "Check the workspace, tidy the todos, then estimate the tidy.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn-1",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "i-syn-bash-1",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "ls -la",
+              "status": "success",
+              "duration_ms": 120,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "README.md",
+                  "notes.txt"
+                ],
+                "exit_code": 0,
+                "live": false
+              }
+            },
+            {
+              "kind": "text",
+              "text": "Workspace listed. Tidying now.",
+              "streaming": false
+            },
+            {
+              "kind": "text",
+              "text": "Todos captured.",
+              "streaming": false
+            },
+            {
+              "kind": "tool_call",
+              "id": "i-syn-read-1",
+              "tool_kind": {
+                "kind": "read"
+              },
+              "verb": "Read",
+              "target": "/tmp/synthetic/notes.txt",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "read",
+                "lines": 3,
+                "output_lines": [
+                  "line one",
+                  "line two",
+                  "line three"
+                ]
+              }
+            },
+            {
+              "kind": "text",
+              "text": "Notes read. Estimating.",
+              "streaming": false
+            },
+            {
+              "kind": "tool_call",
+              "id": "i-syn-est-1",
+              "tool_kind": {
+                "kind": "mcp",
+                "server": "muse",
+                "tool": "estimate"
+              },
+              "verb": "Ran",
+              "target": "estimate",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "mcp",
+                "params": [
+                  [
+                    "task",
+                    "tidy"
+                  ],
+                  [
+                    "depth",
+                    "2"
+                  ]
+                ],
+                "result_json": "{\n  \"estimate_minutes\": 12,\n  \"steps\": [\n    \"sweep\",\n    \"sort\"\n  ]\n}"
+              }
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-test",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "todo:synthetic-toolshapes",
+          "blocks": [
+            {
+              "kind": "todo",
+              "items": [
+                {
+                  "label": "Sweep the workspace",
+                  "state": "running",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "Update the changelog",
+                  "state": "pending",
+                  "elapsed_ms": null
+                },
+                {
+                  "label": "File the notes",
+                  "state": "done",
+                  "elapsed_ms": null
+                }
+              ]
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "15:80149c7ced07d8fa",
+    "17:b5b2f9536ad6240e",
+    "18:f6e67facb0d4bdec",
+    "19:303cb3ccd89fb5dc",
+    "20:ad5ccfa708a16531",
+    "21:204a54fc54a77fe0",
+    "23:140d8d7837204e08",
+    "24:2e922235ad4a2e5a",
+    "25:df089f50740c62ef",
+    "26:1d78abade6c0d7ea",
+    "27:fb2da4c1bc39f745"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:08f44b07b5901a25",
+    "4:08f44b07b5901a25",
+    "5:08f44b07b5901a25",
+    "6:08f44b07b5901a25",
+    "7:08f44b07b5901a25",
+    "8:08f44b07b5901a25",
+    "9:08f44b07b5901a25",
+    "10:08f44b07b5901a25",
+    "11:08f44b07b5901a25",
+    "12:08f44b07b5901a25",
+    "13:08f44b07b5901a25",
+    "14:08f44b07b5901a25",
+    "15:80149c7ced07d8fa",
+    "16:80149c7ced07d8fa",
+    "17:b5b2f9536ad6240e",
+    "18:b1dd49ae8d64ca31",
+    "19:20e165e1ff522a11",
+    "20:097feb39a35f4cfa",
+    "21:7b52b53c2671e1ab",
+    "22:7b52b53c2671e1ab",
+    "23:ae960eda4603b603",
+    "24:fcd6ac2361523615",
+    "25:5a9cbfee6b97c86a",
+    "26:fb2da4c1bc39f745",
+    "27:fb2da4c1bc39f745"
+  ]
+}

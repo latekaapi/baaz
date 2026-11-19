@@ -5442,6 +5442,7 @@ dependencies = [
  "serde",
  "serde_json",
  "session-store",
+ "transcript-core",
  "uuid",
 ]
 
@@ -6806,6 +6807,7 @@ dependencies = [
  "provider",
  "serde",
  "serde_json",
+ "transcript-core",
 ]
 
 [[package]]
@@ -6818,6 +6820,7 @@ dependencies = [
  "provider",
  "serde",
  "serde_json",
+ "transcript-core",
 ]
 
 [[package]]
@@ -9205,6 +9208,14 @@ dependencies = [
  "thread_local",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "transcript-core"
+version = "0.1.0"
+dependencies = [
+ "aui-protocol",
+ "serde_json",
 ]
 
 [[package]]

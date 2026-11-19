@@ -40,7 +40,6 @@ pub mod failure;
 mod fold;
 pub mod mirror;
 mod side;
-mod slots;
 
 pub use failure::{humanize, Failure};
 pub use fold::{permission_mode, permission_profile, MuseFold, GAP_ABORT_PREFIX, SESSION_CACHE_LIMIT};

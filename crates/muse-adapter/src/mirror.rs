@@ -1,7 +1,8 @@
 //! Muse's fold, mirrored into the neutral [`SessionStore`] a view renders.
 //!
-//! The fold is the MSP translator: it keeps its own copy of each session
-//! because MSP addresses items by slots the deltas do not carry. What a view
+//! The fold is the MSP translator: it keeps its own copy of each session (its
+//! transcript builder's, docs/82 5.3) because MSP addresses items by ids the
+//! positional deltas do not carry. What a view
 //! draws is the store, so every fold step is mirrored: the deltas it
 //! returned, the header fields it writes in place (model, mode, branch,
 //! workspace), the turn clocks it refines without a delta, and its side

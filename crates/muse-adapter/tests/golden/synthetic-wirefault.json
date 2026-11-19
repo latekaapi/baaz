@@ -1,0 +1,167 @@
+{
+  "final": {
+    "synthetic-wirefault": {
+      "id": "synthetic-wirefault",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-syn-user-1",
+          "text": "say something",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn-1",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "Something.",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "muse-spark-1.3",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "protocol-error:synthetic-wirefault:1",
+          "blocks": [
+            {
+              "kind": "error",
+              "title": "Protocol error",
+              "detail": "expected value at line 1 column 1",
+              "retryable": false
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "marker:v:syn:6",
+          "blocks": [
+            {
+              "kind": "marker",
+              "marker_kind": {
+                "kind": "view_gap"
+              },
+              "text": "Some events were missed while disconnected; backfilling to v:syn:99"
+            },
+            {
+              "kind": "marker",
+              "marker_kind": {
+                "kind": "view_gap"
+              },
+              "text": "Backfill did not finish: view/page failed: request timed out: view/page"
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "protocol-error:synthetic-wirefault:4",
+          "blocks": [
+            {
+              "kind": "error",
+              "title": "Protocol error",
+              "detail": "response for unknown or timed-out request id 41",
+              "retryable": false
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "22:56474b128b109dae",
+    "24:c8dcd0d370b154e9",
+    "25:f10cc9be9441882f",
+    "26:a750fb2c3d10ba78",
+    "27:18dcfbda9dd454db",
+    "28:8fc1456e604c8740",
+    "29:93175af0b4a1b8bc",
+    "30:f7f912d8e9c45e7a"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:08f44b07b5901a25",
+    "4:08f44b07b5901a25",
+    "5:08f44b07b5901a25",
+    "6:08f44b07b5901a25",
+    "7:08f44b07b5901a25",
+    "8:08f44b07b5901a25",
+    "9:08f44b07b5901a25",
+    "10:08f44b07b5901a25",
+    "11:08f44b07b5901a25",
+    "12:08f44b07b5901a25",
+    "13:08f44b07b5901a25",
+    "14:08f44b07b5901a25",
+    "15:08f44b07b5901a25",
+    "16:08f44b07b5901a25",
+    "17:08f44b07b5901a25",
+    "18:08f44b07b5901a25",
+    "19:08f44b07b5901a25",
+    "20:08f44b07b5901a25",
+    "21:08f44b07b5901a25",
+    "22:56474b128b109dae",
+    "23:56474b128b109dae",
+    "24:c8dcd0d370b154e9",
+    "25:a750fb2c3d10ba78",
+    "26:a750fb2c3d10ba78",
+    "27:18dcfbda9dd454db",
+    "28:8fc1456e604c8740",
+    "29:93175af0b4a1b8bc",
+    "30:f7f912d8e9c45e7a"
+  ]
+}

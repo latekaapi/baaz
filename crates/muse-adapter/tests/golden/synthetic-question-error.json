@@ -1,0 +1,102 @@
+{
+  "final": {
+    "synthetic-question-error": {
+      "id": "synthetic-question-error",
+      "agent": "muse",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "i-syn2-1",
+          "text": "Describe one of the two files, and ask me which.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "t-syn2-1",
+          "blocks": [
+            {
+              "kind": "question",
+              "id": "ui-syn2-1:file_choice",
+              "header": "File",
+              "prompt": "Which of the listed files do you want described?",
+              "subtitle": "",
+              "options": [
+                {
+                  "label": "README.md",
+                  "description": "The project's own introduction",
+                  "key": "1",
+                  "preview": {
+                    "content": "# checkout-flow-v2\n\nAddress validation for the `acme` checkout, with `country`-aware rules.",
+                    "format": "markdown"
+                  }
+                },
+                {
+                  "label": "notes.txt",
+                  "description": "Scratch notes from the last session",
+                  "key": "2",
+                  "preview": {
+                    "content": "- GB outward codes still fail on the space\n- ask about CA before touching the regex",
+                    "format": "text"
+                  }
+                }
+              ],
+              "multi": false,
+              "allow_other": false,
+              "answer": null,
+              "timeout_ms": 120000
+            }
+          ],
+          "meta": {
+            "model": "",
+            "duration_ms": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "18:b037110b6ce93734",
+    "20:19259fb649b0536f",
+    "21:12db91d4c50f1feb"
+  ],
+  "abandon": [
+    "1:08f44b07b5901a25",
+    "2:08f44b07b5901a25",
+    "3:08f44b07b5901a25",
+    "4:08f44b07b5901a25",
+    "5:08f44b07b5901a25",
+    "6:08f44b07b5901a25",
+    "7:08f44b07b5901a25",
+    "8:08f44b07b5901a25",
+    "9:08f44b07b5901a25",
+    "10:08f44b07b5901a25",
+    "11:08f44b07b5901a25",
+    "12:08f44b07b5901a25",
+    "13:08f44b07b5901a25",
+    "14:08f44b07b5901a25",
+    "15:08f44b07b5901a25",
+    "16:08f44b07b5901a25",
+    "17:08f44b07b5901a25",
+    "18:b037110b6ce93734",
+    "19:b037110b6ce93734",
+    "20:19259fb649b0536f",
+    "21:6934945c72832504"
+  ]
+}

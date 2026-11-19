@@ -1,0 +1,160 @@
+{
+  "final": {
+    "claude": {
+      "id": "claude",
+      "agent": "claude",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "user",
+          "id": "4697ad11-2c5a-4076-9873-55d8f3748114",
+          "text": "Read the file notes.txt, then grep for the word 'gamma' in data.txt. Reply with just DONE.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "msg_011CfSA9AvHU7yjDmy4izfim",
+          "blocks": [
+            {
+              "kind": "tool_call",
+              "id": "toolu_01QT56pcAbWPBA1upnAzSSoG",
+              "tool_kind": {
+                "kind": "read"
+              },
+              "verb": "Read",
+              "target": "/private/tmp/w4b/work/notes.txt",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "read",
+                "lines": 3,
+                "output_lines": [
+                  "1\thello",
+                  "2\tworld",
+                  "3\t"
+                ]
+              }
+            },
+            {
+              "kind": "tool_call",
+              "id": "toolu_0153N8Jb4eW5aBRoT8TJGQzR",
+              "tool_kind": {
+                "kind": "shell"
+              },
+              "verb": "Ran",
+              "target": "grep -n 'gamma' /private/tmp/w4b/work/data.txt",
+              "status": "success",
+              "duration_ms": null,
+              "body": {
+                "kind": "shell",
+                "output_lines": [
+                  "3:gamma"
+                ],
+                "exit_code": null,
+                "live": false
+              }
+            },
+            {
+              "kind": "text",
+              "text": "DONE",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "claude-haiku-4-5-20251001",
+            "duration_ms": 5877,
+            "tokens_in": 62701,
+            "tokens_out": 286,
+            "reasoning_tokens": 129,
+            "cost_usd": 0.0181739,
+            "cache_read_tokens": 57179,
+            "cache_write_tokens": 5504,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:ffdc458af9e37b66",
+    "7:0db2ee0d3ea9bb87",
+    "8:e6433ba550b26df8",
+    "9:65f6723848db55ee",
+    "10:434397e7efb01cf7",
+    "11:e232b900ff8866ad",
+    "14:a2afdc6863ea8176",
+    "18:4f5492179f021d95",
+    "20:e370e5cef09e593c"
+  ],
+  "abandon": [
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "4:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "5:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "6:ffdc458af9e37b66",
+    "7:0db2ee0d3ea9bb87",
+    "7:0db2ee0d3ea9bb87",
+    "7:0db2ee0d3ea9bb87",
+    "8:9fa75876c90c76da",
+    "8:1cb7595f6839d862",
+    "8:e6433ba550b26df8",
+    "9:f05e61da50906b9c",
+    "9:4d01caed9d14fe64",
+    "9:65f6723848db55ee",
+    "10:b87407df55bdaf35",
+    "10:ddca82c78223ef19",
+    "10:434397e7efb01cf7",
+    "11:1bc9297e23cde063",
+    "11:6b8ff8e81850e0d3",
+    "11:e232b900ff8866ad",
+    "12:1bc9297e23cde063",
+    "12:6b8ff8e81850e0d3",
+    "12:e232b900ff8866ad",
+    "13:1bc9297e23cde063",
+    "13:6b8ff8e81850e0d3",
+    "13:e232b900ff8866ad",
+    "14:8525c4abed38db44",
+    "14:d2fff55ef703dcac",
+    "14:a2afdc6863ea8176",
+    "15:8525c4abed38db44",
+    "15:d2fff55ef703dcac",
+    "15:a2afdc6863ea8176",
+    "16:8525c4abed38db44",
+    "16:d2fff55ef703dcac",
+    "16:a2afdc6863ea8176",
+    "17:7b12ca45e5ec409a",
+    "17:581deed2336eb562",
+    "17:a2afdc6863ea8176",
+    "18:04302b37fc27f8f5",
+    "18:ca2f063ada83e8a5",
+    "18:4f5492179f021d95",
+    "19:04302b37fc27f8f5",
+    "19:ca2f063ada83e8a5",
+    "19:4f5492179f021d95",
+    "20:e370e5cef09e593c",
+    "20:e370e5cef09e593c",
+    "20:e370e5cef09e593c",
+    "20:e370e5cef09e593c"
+  ]
+}
