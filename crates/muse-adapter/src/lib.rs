@@ -42,7 +42,7 @@ pub mod mirror;
 mod side;
 
 pub use failure::{humanize, Failure};
-pub use fold::{permission_mode, permission_profile, MuseFold, GAP_ABORT_PREFIX, SESSION_CACHE_LIMIT};
+pub use fold::{approval_choices, permission_mode, permission_profile, MuseFold, GAP_ABORT_PREFIX, SESSION_CACHE_LIMIT};
 pub use side::{QueuedTurn, SideState};
 pub use mirror::{neutral_side, Mirror};
 

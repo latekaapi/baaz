@@ -108,7 +108,7 @@ impl SessionView {
                     .unwrap_or(0)
                 }
             },
-            MenuKind::Mode => MODES.iter().position(|m| *m == self.runtime.read(cx).mode()).unwrap_or(0),
+            MenuKind::Mode => self.runtime.read(cx).modes().iter().position(|m| *m == self.runtime.read(cx).mode()).unwrap_or(0),
             MenuKind::Provider => SessionRuntime::provider_rows(self.runtime.read(cx).provider_kind(), self.runtime.read(cx).has_turns())
                 .iter()
                 .position(|row| row.id == self.runtime.read(cx).provider_kind().as_str())
@@ -165,7 +165,7 @@ impl SessionView {
                 // failure, not an empty state.
                 None => 1,
             },
-            Some(MenuKind::Mode) => MODES.len(),
+            Some(MenuKind::Mode) => self.runtime.read(cx).modes().len(),
             Some(MenuKind::Provider) => {
                 SessionRuntime::provider_rows(self.runtime.read(cx).provider_kind(), self.runtime.read(cx).has_turns()).len()
             }
@@ -233,7 +233,7 @@ impl SessionView {
                 }
             }
             MenuKind::Mode => {
-                if let Some(mode) = MODES.get(selected).copied() {
+                if let Some(mode) = self.runtime.read(cx).modes().get(selected).copied() {
                     self.pick_mode(mode, cx);
                 }
             }
@@ -281,13 +281,7 @@ impl SessionView {
             self.run_command(command, window, cx);
             return;
         }
-        let name = self
-            .overlays
-            .read(cx)
-            .skills_for(&self.runtime.read(cx).workspace)
-            .iter()
-            .find(|s| s.id == id.as_ref())
-            .map(|s| s.name.clone());
+        let name = self.menu_skills(cx).iter().find(|s| s.id == id.as_ref()).map(|s| s.name.clone());
         if let Some(name) = name {
             self.replace_token(&format!("/{name} "), window, cx);
         }
@@ -717,7 +711,7 @@ impl SessionView {
     /// leaving Auto) moves the check with it, never leaving it on a mode the
     /// chip no longer names.
     pub(super) fn sync_mode_menu_check(&mut self, cx: &mut Context<Self>) {
-        let checked = MODES.iter().position(|mode| *mode == self.runtime.read(cx).mode()).unwrap_or(0);
+        let checked = self.runtime.read(cx).modes().iter().position(|mode| *mode == self.runtime.read(cx).mode()).unwrap_or(0);
         self.overlays.update(cx, |overlays, cx| {
             overlays.edit_menu(Some(MenuKind::Mode), |menu| std::mem::replace(&mut menu.selected, checked) != checked, cx);
         });
@@ -1008,20 +1002,26 @@ impl SessionRuntime {
     /// The `/status` and `/usage` body: everything the session knows about
     /// itself, from the fold rather than from what the app last sent.
     pub(super) fn status_text(&self, cx: &gpui::App) -> String {
-        let context = self.context();
         let branch = self.session().and_then(|s| s.branch.clone()).unwrap_or_else(|| "—".to_owned());
         let queued = self.store.side().queued.len();
         let _ = cx;
+        // Context only where the provider reported it; cost only where it
+        // reports one (Claude Code) — docs/82 5.5.
+        let (prompt, output, cost) = self.turn_totals();
+        let (prompt, output, total) = match self.context() {
+            Some(meter) if self.provider_kind().has(provider::ProviderTrait::LiveContextMeter) => {
+                (meter.prompt_tokens, meter.output_tokens, meter.total_tokens)
+            }
+            _ => (prompt, output, prompt + output),
+        };
+        let context = self.context().map_or_else(|| "not reported".to_owned(), |meter| meter.label());
+        let cost = if cost > 0.0 { format!("\nCost: ${cost:.4}") } else { String::new() };
         format!(
-            "Model: {}\nApproval mode: {}\nReasoning effort: {}\nPlan mode: {}\nContext: {}\nSession tokens: {} prompt · {} output · {} total\nQueued: {queued}\nSession: {}\nWorkspace: {}\nBranch: {branch}",
+            "Model: {}\nApproval mode: {}\nReasoning effort: {}\nPlan mode: {}\nContext: {context}\nSession tokens: {prompt} prompt · {output} output · {total} total{cost}\nQueued: {queued}\nSession: {}\nWorkspace: {}\nBranch: {branch}",
             self.model(),
             self.mode_label(),
             crate::overlays::effort_label(self.effort),
             if self.plan { "on" } else { "off" },
-            context.label(),
-            context.prompt_tokens,
-            context.output_tokens,
-            context.total_tokens,
             self.session_id,
             self.workspace,
         )
@@ -1105,9 +1105,15 @@ impl SessionRuntime {
 impl SessionView {
     /// ⌘V with an image on the clipboard.
     ///
-    /// Returns `false` when the clipboard holds no image, so the caller can let
-    /// the textarea's own paste have the keystroke.
+    /// Returns `false` when the clipboard holds no image, or the provider
+    /// takes none, so the caller can let the textarea's own paste have the
+    /// keystroke.
     pub fn paste_image(&mut self, cx: &mut Context<Self>) -> bool {
+        // A provider that takes no images: ⌘V is the text field's own paste
+        // (docs/82 5.5) — never an image refused after the press.
+        if !self.runtime.read(cx).offers(provider::Capability::ImageInput) {
+            return false;
+        }
         let Some(item) = cx.read_from_clipboard() else { return false };
         let mut pasted = false;
         for entry in item.into_entries() {

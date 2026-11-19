@@ -21,7 +21,7 @@ use gpui::{Context, Window};
 
 use super::{RuntimeEvent, SessionHost, SessionRuntime, SessionView};
 use gpui::AppContext as _;
-use crate::providers::{ExternalApproval, ExternalApprovalKind, ProviderId};
+use crate::providers::{ExternalApproval, ProviderId};
 use crate::wire::{ProviderCall as _, SharedProvider};
 use aui_protocol::{ApprovalState, Block, Delta, Turn};
 
@@ -456,25 +456,21 @@ impl SessionRuntime {
                     self.note_reply_progress(false, cx);
                 }
             }
-            provider::ProviderEvent::ApprovalRequested { session_id, approval_id, headline } => {
+            provider::ProviderEvent::ApprovalRequested { session_id, approval_id, headline, options } => {
                 if session_id != self.session_id {
                     return;
                 }
                 // The card itself arrived as a delta; this is the tap on the
-                // shoulder, carrying only what a decision needs. An MCP
-                // tool-call elicitation parks under the pump's prefixed
-                // id, so the tap takes the elicitation kind without a new
-                // event shape — the prefix IS the kind tag.
-                let kind = self.provider_kind().external_approval_kind(&approval_id);
+                // shoulder, carrying only what a decision needs: the answers
+                // it takes, typed in the one vocabulary (docs/82 5.5).
                 self.inject_external_approval(
                     ExternalApproval {
                         id: approval_id,
                         session_id,
                         provider: self.provider_kind(),
-                        kind,
+                        options,
                         headline: headline.clone(),
                         reason: headline,
-                        dont_ask_again: None,
                         stage_token: None,
                         decision_sent: None,
                     },
@@ -524,6 +520,35 @@ impl SessionRuntime {
                 let effort = effort.as_deref().and_then(crate::projects::parse_effort);
                 self.set_initial_effort(effort, cx);
             }
+            // The provider's own skills (docs/82 5.5): the `/` menu lists
+            // these on this session, never another provider's.
+            provider::ProviderEvent::SkillsListed { session_id, skills } => {
+                if session_id != self.session_id {
+                    return;
+                }
+                self.provider_skills = skills
+                    .into_iter()
+                    .map(|skill| crate::skills::Skill {
+                        id: skill.name.clone(),
+                        name: skill.name,
+                        description: skill.description,
+                        ..Default::default()
+                    })
+                    .collect();
+                cx.emit(RuntimeEvent::MenusStale);
+            }
+            // The provider's own plan mode moved (docs/82 5.5): the toggle
+            // follows it — entered by the toggle, or left by the agent once
+            // its plan was approved.
+            provider::ProviderEvent::PlanModeChanged { session_id, on } => {
+                if session_id != self.session_id {
+                    return;
+                }
+                if self.plan != on {
+                    self.plan = on;
+                    cx.emit(RuntimeEvent::ComposerChanged);
+                }
+            }
             // The turn an ack named now has its streamed id (Claude Code
             // acks before the CLI names the turn): keep the alias, and
             // re-key the one thing recorded under the ack's id — the plan
@@ -534,6 +559,11 @@ impl SessionRuntime {
                 }
                 if self.plan_turn.as_deref() == Some(accepted.as_str()) {
                     self.plan_turn = Some(turn_id.clone());
+                }
+                // The words the ack's id was kept under follow the turn, so
+                // its failure card can offer Retry (docs/82 5.5).
+                if let Some(text) = self.store.command_text(&accepted).map(str::to_owned) {
+                    self.remember_command(&turn_id, &text);
                 }
                 if self.turn_aliases.len() >= super::MAX_COMPLETED_TURNS {
                     self.turn_aliases.clear();
@@ -1395,18 +1425,15 @@ impl SessionRuntime {
             if self.external_approvals.get(&pending.id).is_some() {
                 continue;
             }
-            let kind = match self.provider_kind() {
-                ProviderId::ClaudeCode => ExternalApprovalKind::ClaudeCanUseTool,
-                _ => ExternalApprovalKind::CodexCommand,
-            };
+            // A pulled approval names no answers: its inline card carries
+            // the choices, and the press reads them there.
             self.external_approvals.inject(ExternalApproval {
                 id: pending.id,
                 session_id: pending.session_id,
                 provider: self.provider_kind(),
-                kind,
+                options: Vec::new(),
                 headline: pending.headline.clone(),
                 reason: pending.headline,
-                dont_ask_again: None,
                 stage_token: pending.stage_token,
                 decision_sent: None,
             });
@@ -1608,6 +1635,7 @@ mod tests {
                 session_id: "s-1".to_owned(),
                 approval_id: "ap-1".to_owned(),
                 headline: "rm -rf /tmp/probe".to_owned(),
+                options: provider::ApprovalOption::of_choices(&provider_codex::fold::codex_choices(true)),
             })
             .expect("the lane channel is open");
         });
@@ -1622,11 +1650,11 @@ mod tests {
         });
     }
 
-    /// T3b: an MCP tool-call elicitation tap parks under the elicitation
-    /// kind — not the command kind — and its Allow press travels as one
-    /// `DecideApproval` carrying `accept`. Drop the prefix routing and
-    /// the tap mislabels; drop the press arm and no decision leaves the
-    /// lane, which is exactly what `choose:1` did to the live gate.
+    /// T3b, typed since docs/82 5.5: an MCP tool-call elicitation tap
+    /// parks with the answers it takes, in the one vocabulary, and the
+    /// card's first digit travels as one `DecideApproval` carrying the
+    /// option's own choice id (`accept`) — read off the seam's typed
+    /// options, never off the approval id's prefix.
     #[gpui::test]
     fn elicitation_tap_parks_answerable_and_allows(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -1638,29 +1666,21 @@ mod tests {
                 session_id: "s-1".to_owned(),
                 approval_id: "mcp-elicitation-0".to_owned(),
                 headline: "Allow the baaz MCP server to run tool \"terminal_run\"?".to_owned(),
+                options: provider::ApprovalOption::of_choices(&provider_codex::fold::codex_choices(false)),
             })
             .expect("the lane channel is open");
         });
         vc.run_until_parked();
-        vc.update(|_, cx| {
+        vc.update(|window, cx| {
             let approval = view
                 .read(cx)
                 .rt(cx).external_approvals
                 .get("mcp-elicitation-0")
+                .cloned()
                 .expect("the tap parks on the approvals surface");
-            assert_eq!(
-                approval.kind,
-                crate::providers::ExternalApprovalKind::CodexMcpElicitation,
-                "the prefix routes the kind, not the provider default"
-            );
-            view.update(cx, |view, cx| {
-                view.runtime().clone().update(cx, |rt, cx| rt.decide_external_approval(
-                    "mcp-elicitation-0".to_owned(),
-                    crate::providers::ApprovalChoice::Accept,
-                    None,
-                    cx,
-                ));
-            });
+            let answers: Vec<_> = approval.options.iter().map(|option| option.answer).collect();
+            assert_eq!(answers, [provider::ApprovalAnswer::Once, provider::ApprovalAnswer::Deny], "no session scope on an elicitation");
+            view.update(cx, |view, cx| view.choose(1, window, cx)).expect("the first answer is Once");
         });
         vc.run_until_parked();
         let decides: Vec<_> = handle
@@ -1672,7 +1692,7 @@ mod tests {
         match &decides[0] {
             provider::Command::DecideApproval { approval, choice, .. } => {
                 assert_eq!(approval, "mcp-elicitation-0");
-                assert_eq!(choice, "accept", "Allow travels as the wire's accept");
+                assert_eq!(choice, "accept", "Once travels as the wire's accept");
             }
             other => panic!("a press must travel as DecideApproval, travelled as {other:?}"),
         }
@@ -1688,6 +1708,7 @@ mod tests {
                 session_id: "s-1".to_owned(),
                 approval_id: "ap-1".to_owned(),
                 headline: "rm -rf /tmp/probe".to_owned(),
+                options: provider::ApprovalOption::of_choices(&provider_codex::fold::codex_choices(true)),
             })
             .expect("the lane channel is open");
         });
@@ -1919,6 +1940,7 @@ mod tests {
             session_id: "s-1".to_owned(),
             approval_id: "ap-revived".to_owned(),
             headline: "from the revived child".to_owned(),
+            options: provider::ApprovalOption::of_choices(&provider_codex::fold::codex_choices(true)),
         })
         .expect("the lane still drains after the loss");
         vc.run_until_parked();
@@ -1988,10 +2010,9 @@ mod tests {
                         id: "ap-1".to_owned(),
                         session_id: "s-1".to_owned(),
                         provider: ProviderId::ClaudeCode,
-                        kind: ExternalApprovalKind::ClaudeCanUseTool,
+                        options: provider::ApprovalOption::of_choices(&provider_claude_code::fold::approval_choices()),
                         headline: "Bash".to_owned(),
                         reason: "Bash".to_owned(),
-                        dont_ask_again: None,
                         stage_token: None,
                         decision_sent: None,
                     },
@@ -2012,6 +2033,7 @@ mod tests {
             session_id: "s-1".to_owned(),
             approval_id: "ap-2".to_owned(),
             headline: "from the resumed child".to_owned(),
+            options: provider::ApprovalOption::of_choices(&provider_claude_code::fold::approval_choices()),
         })
         .expect("a Claude Code lane still drains after the loss");
         vc.run_until_parked();
@@ -2421,6 +2443,7 @@ mod tests {
                 }
                 provider::Command::SelectModel { .. }
                 | provider::Command::SelectApprovalMode { .. }
+                | provider::Command::SetPlanMode { .. }
                 | provider::Command::CompactSession { .. } => Ok(provider::Ack::Accepted),
                 provider::Command::ForkSession { .. } => {
                     Ok(provider::Ack::Session { session_id: "s-fork".into(), title: None })
@@ -2772,10 +2795,9 @@ mod tests {
                     id: "ap-1".to_owned(),
                     session_id: "s-1".to_owned(),
                     provider: crate::providers::ProviderId::Codex,
-                    kind: crate::providers::ExternalApprovalKind::CodexCommand,
+                    options: provider::ApprovalOption::of_choices(&provider_codex::fold::codex_choices(true)),
                     headline: "rm -rf /tmp/probe".to_owned(),
                     reason: "the model wants a clean slate".to_owned(),
-                    dont_ask_again: None,
                     stage_token: Some("st-1".to_owned()),
                     decision_sent: None,
                 }, cx));
@@ -2783,7 +2805,7 @@ mod tests {
             view.update(cx, |view, cx| {
                 view.runtime().clone().update(cx, |rt, cx| rt.decide_external_approval(
                     "ap-1".to_owned(),
-                    crate::providers::ApprovalChoice::Accept,
+                    "accept",
                     Some("looks fine".to_owned()),
                     cx,
                 ));
@@ -2897,6 +2919,7 @@ mod tests {
                     session_id: "s-1".to_owned(),
                     approval_id: approval_id.clone(),
                     headline: "run the approved command".to_owned(),
+                    options: provider::ApprovalOption::of_choices(&provider_codex::fold::codex_choices(true)),
                 })
                 .expect("the lane channel is open");
             });
@@ -2909,7 +2932,7 @@ mod tests {
                 view.update(cx, |view, cx| {
                     view.runtime().clone().update(cx, |rt, cx| rt.decide_external_approval(
                         approval_id.clone(),
-                        crate::providers::ApprovalChoice::Accept,
+                        "accept",
                         None,
                         cx,
                     ));
@@ -3335,7 +3358,7 @@ mod tests {
     #[gpui::test]
     fn a_model_without_auto_falls_back_to_ask_on_the_pick(cx: &mut gpui::TestAppContext) {
         use aui_protocol::PermissionMode;
-        use crate::overlays::{MODES, MenuKind};
+        use crate::overlays::MenuKind;
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (adapter, handle) = RecordingProvider::with_catalog(vec![
@@ -3369,7 +3392,7 @@ mod tests {
         vc.update(|_, cx| view.update(cx, |view, cx| view.toggle_picker(MenuKind::Mode, cx)));
         vc.update(|_, cx| {
             let checked = view.read(cx).overlays.read(cx).menu().map(|menu| menu.selected);
-            assert_eq!(checked, MODES.iter().position(|mode| *mode == PermissionMode::PromptUnmatched));
+            assert_eq!(checked, view.read(cx).rt(cx).modes().iter().position(|mode| *mode == PermissionMode::PromptUnmatched));
         });
         vc.update(|_, cx| view.update(cx, |view, cx| view.close_menu(cx)));
         vc.run_until_parked();
@@ -3383,7 +3406,7 @@ mod tests {
             .collect();
         assert_eq!(asked, [PermissionMode::PromptUnmatched], "the requested mode becomes Ask");
         // The person picks Read-only: the banner comes down at once.
-        let read_only = MODES.iter().position(|mode| *mode == PermissionMode::DenyUnmatched).expect("listed");
+        let read_only = provider_claude_code::registry::DESCRIPTOR.modes.iter().position(|mode| mode.id == PermissionMode::DenyUnmatched).expect("listed");
         choose_row(vc, &view, MenuKind::Mode, read_only);
         vc.update(|_, cx| {
             let view = view.read(cx);
@@ -3548,20 +3571,20 @@ mod tests {
         });
     }
 
-    /// W4: the lane meter reads the folded transcript's `TurnMeta` — real
-    /// input/output totals after a turn, no window no percentage, and the
-    /// strip stays silent where nothing is refused.
+    /// docs/82 5.5: the meter shows real context use where the CLI reports
+    /// it and is absent otherwise. A Claude Code or Codex lane has no meter
+    /// until its first reading (a finished turn's tokens alone never draw
+    /// one — the old summed "N tokens" is gone); the reading draws a
+    /// percentage of the model's window, with the session's own totals in
+    /// the breakdown.
     #[gpui::test]
-    fn the_lane_meter_reads_turn_meta_tokens(cx: &mut gpui::TestAppContext) {
+    fn the_lane_meter_is_absent_until_the_provider_reports_context(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let (adapter, _handle) = RecordingProvider::new();
-        let (view, tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        vc.update(|_, cx| {
-            let meter = view.read(cx).rt(cx).context();
-            assert_eq!(meter.used_tokens, 0, "no turns yet: the meter reads zero, honestly");
-        });
-        vc.update(|_, _| {
+        for provider_id in ["claude-code", "codex"] {
+            let vc = cx.add_empty_window();
+            let (adapter, _handle) = RecordingProvider::new();
+            let (view, tx) = open_recording_view(vc, "s-1", provider_id, adapter);
+            vc.update(|_, cx| assert!(view.read(cx).rt(cx).context().is_none(), "{provider_id}: no reading, no meter"));
             tx.unbounded_send(provider::ProviderEvent::Deltas {
                 session_id: Some("s-1".to_owned()),
                 deltas: vec![
@@ -3575,27 +3598,32 @@ mod tests {
                     },
                     aui_protocol::Delta::TurnFinished {
                         turn_id: "a-1".to_owned(),
-                        meta: aui_protocol::TurnMeta {
-                            tokens_in: 1200,
-                            tokens_out: 300,
-                            ..Default::default()
-                        },
+                        meta: aui_protocol::TurnMeta { tokens_in: 1200, tokens_out: 300, cost_usd: 0.25, ..Default::default() },
                     },
                 ],
             })
             .expect("the lane channel is open");
-        });
-        vc.run_until_parked();
-        vc.update(|_, cx| {
-            let view = view.read(cx);
-            let meter = view.rt(cx).context();
-            assert_eq!(meter.prompt_tokens, 1200, "input tokens out of TurnMeta");
-            assert_eq!(meter.output_tokens, 300, "output tokens out of TurnMeta");
-            assert_eq!(meter.total_tokens, 1500);
-            assert_eq!(meter.used_tokens, 1500, "the footer meter shows real numbers");
-            assert_eq!(meter.window_tokens, None, "no adapter reports a window");
-            assert!(meter.label().contains("tokens"), "no window, no percentage: {}", meter.label());
-        });
+            vc.run_until_parked();
+            vc.update(|_, cx| assert!(view.read(cx).rt(cx).context().is_none(), "{provider_id}: tokens alone draw no meter"));
+            tx.unbounded_send(provider::ProviderEvent::SessionFacts {
+                session_id: "s-1".into(),
+                side: provider::facts::SessionSide {
+                    context: Some(provider::facts::ContextReading::measured(50_000, Some(200_000))),
+                    ..Default::default()
+                },
+            })
+            .expect("the lane channel is open");
+            vc.run_until_parked();
+            vc.update(|_, cx| {
+                let meter = view.read(cx).rt(cx).context().expect("the reading draws the meter");
+                assert_eq!((meter.used_tokens, meter.window_tokens), (50_000, Some(200_000)));
+                assert_eq!(meter.label(), "25%", "real context use, as a share of the window");
+                assert_eq!((meter.prompt_tokens, meter.output_tokens, meter.total_tokens), (1200, 300, 1500));
+                // Cost is shown where the provider reports one.
+                let status = view.read(cx).rt(cx).status_text(cx);
+                assert!(status.contains("Cost: $0.2500"), "{status}");
+            });
+        }
     }
 
     /// W5b: a reopened view shows replayed history, appends the next
@@ -4001,10 +4029,9 @@ mod tests {
     }
 
     /// W4: the approval-mode pick travels as `SelectApprovalMode` with the
-    /// provider's own closed mode set — and plan mode attempts the same
-    /// switch, standing back down when the child refuses it.
+    /// provider's own closed mode set.
     #[gpui::test]
-    fn approval_mode_and_plan_travel_as_select_approval_mode(cx: &mut gpui::TestAppContext) {
+    fn an_approval_mode_pick_travels_as_select_approval_mode(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (adapter, handle) = RecordingProvider::new();
@@ -4025,16 +4052,258 @@ mod tests {
             }
             other => panic!("a mode pick must travel as SelectApprovalMode, travelled as {other:?}"),
         }
-        // Plan mode attempts the same switch on a lane that accepts it.
-        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_plan(true, cx))));
-        vc.run_until_parked();
-        let modes: Vec<_> = handle
+    }
+
+    /// docs/82 5.5: a Claude Code or Codex turn that fails leaves its
+    /// error card — the fold's `Block::Error` — and the card offers Retry:
+    /// the sent words are kept under the provider's own turn id, so Retry
+    /// resends them as a new turn.
+    #[gpui::test]
+    fn a_failed_provider_turn_offers_retry_on_its_card(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        for provider_id in ["claude-code", "codex"] {
+            let vc = cx.add_empty_window();
+            let (adapter, handle) = RecordingProvider::new();
+            let (view, tx) = open_recording_view(vc, "s-1", provider_id, adapter);
+            vc.run_until_parked();
+            vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("hello".to_owned(), cx))));
+            vc.run_until_parked();
+            drain_recording(&view, &tx, vc);
+            let turn_id = vc.update(|_, cx| {
+                view.read(cx).rt(cx).running.as_ref().map(|running| running.turn_id.clone()).expect("the turn runs")
+            });
+            tx.unbounded_send(provider::ProviderEvent::Deltas {
+                session_id: Some("s-1".into()),
+                deltas: vec![
+                    aui_protocol::Delta::BlockAdded {
+                        turn_id: turn_id.clone(),
+                        block: aui_protocol::Block::Error {
+                            title: "Rate limit reached".into(),
+                            detail: "429".into(),
+                            retryable: true,
+                        },
+                    },
+                    aui_protocol::Delta::TurnFinished { turn_id: turn_id.clone(), meta: aui_protocol::TurnMeta::default() },
+                ],
+            })
+            .expect("lane open");
+            tx.unbounded_send(provider::ProviderEvent::TurnSettled {
+                session_id: "s-1".into(),
+                turn_id: turn_id.clone(),
+                outcome: provider::facts::TurnOutcome::Failed { message: Some("429".into()), signed_out: false },
+            })
+            .expect("lane open");
+            vc.run_until_parked();
+            vc.update(|_, cx| {
+                assert!(view.read(cx).rt(cx).retryable_turns().contains(&turn_id), "{provider_id}: the card offers Retry");
+            });
+            vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.retry_turn(turn_id.clone(), cx))));
+            vc.run_until_parked();
+            let sent: Vec<String> = handle
+                .received()
+                .into_iter()
+                .filter_map(|command| match command {
+                    provider::Command::SubmitInput { display_text, .. } => display_text,
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(sent, ["hello", "hello"], "{provider_id}: Retry resends the failed turn's words");
+        }
+    }
+
+    /// docs/82 5.5, rule 13 ratchet: for every registered provider, every
+    /// control the composer and the session header offer is one its own
+    /// declaration supports — capabilities `Native`/`Emulated`, its plan
+    /// mode, its traits, its modes. A control that would be refused is
+    /// absent, never shown-then-refused. The oracle reads the registry
+    /// directly, apart from the predicates the UI uses, so a gate the UI
+    /// drops (or a provider whose table changes) fails here.
+    #[gpui::test]
+    fn every_offered_composer_control_is_supported_by_its_provider(cx: &mut gpui::TestAppContext) {
+        use crate::overlays::Command;
+        use provider::{Capability as C, PlanMode, ProviderTrait as T};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let supported = |id: ProviderId, capability: C| crate::providers::capability_state(id, capability).allows_attempt();
+        for id in ProviderId::all() {
+            let descriptor = id.descriptor();
+            // The `/` menu: each offered command is one the provider runs.
+            for command in Command::ALL {
+                if !command.offered_on(id) {
+                    continue;
+                }
+                let backed = match command {
+                    Command::Compact => supported(id, C::CompactSession),
+                    Command::Fork => supported(id, C::ForkSession),
+                    Command::Plan => descriptor.plan != PlanMode::None,
+                    Command::Skills => descriptor.has(T::ManagedSkills),
+                    Command::Logout => descriptor.has(T::AccountOnConnection),
+                    Command::Mode => supported(id, C::SessionConfig) && !descriptor.modes.is_empty(),
+                    Command::Model | Command::Effort => supported(id, C::ModelCatalog),
+                    _ => true,
+                };
+                assert!(backed, "{}: `{}` is offered but not supported", id.as_str(), command.slash());
+            }
+            // The composer's always-shown controls: send, Stop and the mode
+            // picker stand on every provider, so every provider runs them.
+            for capability in [C::SubmitTurn, C::TurnControl, C::SessionConfig] {
+                assert!(supported(id, capability), "{}: {capability:?} backs an always-shown control", id.as_str());
+            }
+            // The view's own gates, on a live lane of this provider.
+            let vc = cx.add_empty_window();
+            let (adapter, _handle) = RecordingProvider::new();
+            let (view, _tx) = open_recording_view(vc, "s-1", id.as_str(), adapter);
+            vc.update(|_, cx| {
+                let rt = view.read(cx).rt(cx);
+                assert_eq!(rt.modes().len(), descriptor.modes.len(), "{}: the picker lists exactly its modes", id.as_str());
+                assert_eq!(rt.plan_support(), descriptor.plan, "{}: the Plan toggle is its own plan mode", id.as_str());
+                assert_eq!(
+                    rt.offers(C::ImageInput),
+                    supported(id, C::ImageInput),
+                    "{}: photos are offered exactly where images are taken",
+                    id.as_str()
+                );
+                assert_eq!(rt.offers(C::ForkSession), supported(id, C::ForkSession), "{}: header Fork", id.as_str());
+                assert_eq!(rt.steer_gate().is_none(), supported(id, C::SteerTurn), "{}: steer", id.as_str());
+                assert_eq!(rt.turn_gate().is_none(), supported(id, C::TurnControl), "{}: Stop", id.as_str());
+                let (commands, _) = view.read(cx).command_rows("", cx);
+                assert!(commands.iter().all(|command| command.offered_on(id)), "{}: the menu lists only offered commands", id.as_str());
+            });
+        }
+    }
+
+    /// docs/82 5.5: a typed escape the provider cannot run is not
+    /// intercepted and refused — `!ls` and `/compact` on a provider with no
+    /// shell and no compaction go to the agent as the person's words (it
+    /// may well have its own `/compact`), never a "Not available" banner.
+    #[gpui::test]
+    fn typed_escapes_a_provider_cannot_run_go_to_the_agent_as_words(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::new();
+        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        for typed in ["!ls -la", "/compact"] {
+            vc.update(|window, cx| view.update(cx, |view, cx| view.dispatch_text(typed.to_owned(), window, cx)));
+            vc.run_until_parked();
+            drain_recording(&view, &tx, vc);
+        }
+        let sent: Vec<String> = handle
             .received()
             .into_iter()
-            .filter(|c| matches!(c, provider::Command::SelectApprovalMode { .. }))
+            .filter_map(|command| match command {
+                provider::Command::SubmitInput { display_text, .. } => display_text,
+                _ => None,
+            })
             .collect();
-        assert_eq!(modes.len(), 2, "plan mode attempts the DenyUnmatched switch, drew {modes:?}");
-        vc.update(|_, cx| assert!(view.read(cx).rt(cx).plan_mode(), "the accepted switch holds the pill"));
+        assert_eq!(sent, ["!ls -la", "/compact"]);
+        assert!(handle.commands_of("run-shell").is_empty() && handle.commands_of("compact-session").is_empty());
+        vc.update(|_, cx| assert_eq!(view.read(cx).rt(cx).banner_text(), None, "nothing refused"));
+    }
+
+    /// docs/82 5.5 (docs/81 F H): the `/` menu's skills come from the
+    /// session's own provider — the managed catalog on Muse, what Claude
+    /// Code's `init` listed on Claude Code, none on Codex — never Muse's
+    /// list on another provider; `/skills` (the managed page) is offered
+    /// from Muse sessions only.
+    #[gpui::test]
+    fn the_slash_menu_lists_the_session_providers_own_skills(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let muse_skill = crate::skills::Skill { id: "user:muse-only".into(), name: "muse-only".into(), ..Default::default() };
+        for (provider_id, listed, expect) in [
+            ("meta", Vec::new(), vec!["muse-only"]),
+            ("claude-code", vec!["code-review", "simplify"], vec!["code-review", "simplify"]),
+            ("codex", Vec::new(), Vec::new()),
+        ] {
+            let vc = cx.add_empty_window();
+            let (adapter, _handle) = RecordingProvider::new();
+            let (view, tx) = open_recording_view(vc, "s-1", provider_id, adapter);
+            // Muse's catalog is cached for this folder on every lane.
+            vc.update(|_, cx| {
+                let overlays = view.read(cx).overlays.clone();
+                let skills = vec![muse_skill.clone()];
+                overlays.update(cx, |overlays, cx| overlays.set_skills("/tmp/w3-lane".into(), skills, cx));
+            });
+            if !listed.is_empty() {
+                tx.unbounded_send(provider::ProviderEvent::SkillsListed {
+                    session_id: "s-1".into(),
+                    skills: listed
+                        .iter()
+                        .map(|name| provider::facts::ProviderSkill { name: (*name).to_owned(), description: None })
+                        .collect(),
+                })
+                .expect("lane open");
+            }
+            vc.run_until_parked();
+            vc.update(|_, cx| {
+                let (commands, skills) = view.read(cx).command_rows("", cx);
+                let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+                assert_eq!(names, expect, "{provider_id}: the session provider's own skills");
+                assert_eq!(
+                    commands.contains(&crate::overlays::Command::Skills),
+                    provider_id == "meta",
+                    "{provider_id}: the managed Skills page is Muse's"
+                );
+            });
+        }
+    }
+
+    /// docs/82 5.5: one Plan toggle turns on each provider's own plan mode.
+    /// Muse's is a skill (the Read-only switch, the `/plan ` prefix on the
+    /// send); Claude Code's is native (`SetPlanMode`, no mode switch, the
+    /// words go as typed); Codex has none, so the toggle is absent: `/plan`
+    /// is not offered and a toggle press sends nothing.
+    #[gpui::test]
+    fn the_plan_toggle_turns_on_each_providers_own_plan_mode(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        for (provider_id, expect) in [("meta", provider::PlanMode::Skill), ("claude-code", provider::PlanMode::Native), ("codex", provider::PlanMode::None)] {
+            let vc = cx.add_empty_window();
+            let (adapter, handle) = RecordingProvider::new();
+            let (view, _tx) = open_recording_view(vc, "s-1", provider_id, adapter);
+            vc.run_until_parked();
+            vc.update(|_, cx| {
+                assert_eq!(view.read(cx).rt(cx).plan_support(), expect, "{provider_id}");
+                let kind = view.read(cx).rt(cx).provider_kind();
+                assert_eq!(
+                    crate::overlays::Command::Plan.offered_on(kind),
+                    expect != provider::PlanMode::None,
+                    "{provider_id}: `/plan` is offered only where a plan mode exists"
+                );
+            });
+            vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_plan(true, cx))));
+            vc.run_until_parked();
+            let sent = handle.received();
+            let modes: Vec<_> = sent.iter().filter_map(|c| match c {
+                provider::Command::SelectApprovalMode { mode, .. } => Some(*mode),
+                _ => None,
+            }).collect();
+            let plans: Vec<_> = sent.iter().filter_map(|c| match c {
+                provider::Command::SetPlanMode { on, .. } => Some(*on),
+                _ => None,
+            }).collect();
+            match expect {
+                provider::PlanMode::Skill => {
+                    assert_eq!(modes, [aui_protocol::PermissionMode::DenyUnmatched], "the skill holds Read-only");
+                    assert!(plans.is_empty());
+                }
+                provider::PlanMode::Native => {
+                    assert_eq!(plans, [true], "the provider's own plan mode");
+                    assert!(modes.is_empty(), "no Read-only stand-in");
+                }
+                provider::PlanMode::None => {
+                    assert!(modes.is_empty() && plans.is_empty(), "the absent toggle sends nothing: {sent:?}");
+                }
+            }
+            vc.update(|_, cx| {
+                assert_eq!(view.read(cx).rt(cx).plan_mode(), expect != provider::PlanMode::None, "{provider_id}: the pill");
+            });
+            if expect == provider::PlanMode::Native {
+                // The provider reports leaving its plan mode (its plan was
+                // approved): the pill follows.
+                _tx.unbounded_send(provider::ProviderEvent::PlanModeChanged { session_id: "s-1".into(), on: false })
+                    .expect("lane open");
+                vc.run_until_parked();
+                vc.update(|_, cx| assert!(!view.read(cx).rt(cx).plan_mode(), "the pill follows the provider"));
+            }
+        }
     }
 
     /// The chip shows the mode the adapter reports, not the seam's
@@ -4113,7 +4382,7 @@ mod tests {
     /// longer names.
     #[gpui::test]
     fn an_open_mode_menu_checks_the_reported_mode(cx: &mut gpui::TestAppContext) {
-        use crate::overlays::{MODES, MenuKind};
+        use crate::overlays::MenuKind;
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (view, tx) = open_lane_view(vc, "s-1");
@@ -4129,7 +4398,7 @@ mod tests {
             let view = view.read(cx);
             assert_eq!(view.rt(cx).mode_label(), "Full access");
             let selected = view.overlays.read(cx).menu().map(|menu| menu.selected);
-            assert_eq!(selected, MODES.iter().position(|mode| *mode == aui_protocol::PermissionMode::AllowAll));
+            assert_eq!(selected, view.rt(cx).modes().iter().position(|mode| *mode == aui_protocol::PermissionMode::AllowAll));
         });
     }
 
@@ -4196,7 +4465,8 @@ mod tests {
     fn plan_mode_stands_down_on_refusal(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
-        let (view, _tx) = open_lane_view(vc, "s-1");
+        // A plan skill's lane (Codex has no plan mode since docs/82 5.5).
+        let (view, _tx) = open_lane_view_as(vc, "s-1", "meta");
         vc.run_until_parked();
         vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_plan(true, cx))));
         vc.run_until_parked();
@@ -4204,7 +4474,7 @@ mod tests {
             let view = view.read(cx);
             assert!(!view.rt(cx).plan_mode(), "the refused switch stands the pill back down");
             assert!(
-                view.rt(cx).banner.as_deref().is_some_and(|banner| banner == "Not available in Codex."),
+                view.rt(cx).banner.as_deref().is_some_and(|banner| banner == "Not available in Muse."),
                 "the refusal names the provider in plain words, drew {:?}",
                 view.rt(cx).banner
             );
@@ -4351,6 +4621,7 @@ mod tests {
                 session_id: "s-1".to_owned(),
                 approval_id: "ap-1".to_owned(),
                 headline: "/tmp/probe/note.txt".to_owned(),
+                options: provider::ApprovalOption::of_choices(&provider_codex::fold::codex_choices(true)),
             })
             .expect("the lane channel is open");
         });
@@ -4361,10 +4632,6 @@ mod tests {
             "the fold holds the one inline card"
         );
         vc.update(|_, cx| {
-            assert!(
-                view.read(cx).external_strip().is_empty(),
-                "the strip stays empty on a provider lane: the inline card is the surface"
-            );
             // The row still stands on the waiting ask, as muse rows do.
             assert_eq!(
                 view.read(cx).rt(cx).row_pending(),
@@ -4456,10 +4723,9 @@ mod tests {
                         id: "ap-1".to_owned(),
                         session_id: "s-1".to_owned(),
                         provider: ProviderId::Codex,
-                        kind: ExternalApprovalKind::CodexMcpElicitation,
+                        options: provider::ApprovalOption::of_choices(&provider_codex::fold::codex_choices(false)),
                         headline: "echo hi-from-codex".to_owned(),
                         reason: "the model asked".to_owned(),
-                        dont_ask_again: None,
                         stage_token: None,
                         decision_sent: None,
                     },
@@ -4639,10 +4905,9 @@ mod tests {
                 .unwrap_or(0);
             assert_eq!(assistants, 1, "one user turn is one assistant turn");
             assert!(!view.rt(cx).busy(), "the result settles the running state");
-            let meter = view.rt(cx).context();
-            assert_eq!(meter.prompt_tokens, want_in, "prompt tokens counted once");
-            assert_eq!(meter.output_tokens, want_out, "output tokens counted once");
-            assert_eq!(meter.total_tokens, want_in + want_out);
+            let (prompt_tokens, output_tokens, _) = view.rt(cx).turn_totals();
+            assert_eq!(prompt_tokens, want_in, "prompt tokens counted once");
+            assert_eq!(output_tokens, want_out, "output tokens counted once");
         });
     }
 
@@ -5179,6 +5444,7 @@ mod tests {
             session_id: "s-1".to_owned(),
             approval_id: "ap-1".to_owned(),
             headline: "/tmp/probe/note.txt".to_owned(),
+            options: provider::ApprovalOption::of_choices(&provider_codex::fold::codex_choices(true)),
         })
         .expect("the lane channel is open");
         vc.run_until_parked();

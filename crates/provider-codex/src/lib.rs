@@ -1169,6 +1169,10 @@ impl ProviderAdapter for CodexAdapter {
                 self.announce_mode(&session_id, Some(mode));
                 Ok(Ack::Accepted)
             }
+            Command::SetPlanMode { .. } => Err(ProviderError::unsupported(
+                "set-plan-mode",
+                "no request field carries the app-server's plan collaboration mode in the vendored schema",
+            )),
             Command::RunShell { .. } => Err(ProviderError::Rejected {
                 reason: "no out-of-turn shell surface was captured; the shell runs inside turns"
                     .into(),

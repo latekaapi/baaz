@@ -2760,6 +2760,28 @@ fn approval_body_kind(request: &msp::ApprovalRequestParams) -> ApprovalBodyKind 
     }
 }
 
+/// The server's choices for this stage, restated in the one approval
+/// vocabulary (docs/82 5.5): Once, This session, Always here, Deny — the
+/// first native choice of each kept with its own id, rule preview and
+/// feedback field, every other one (a refusal written into a rule, a
+/// second "always" variant) not offered. The title says what is asked;
+/// the buttons never carry the server's own words.
+pub fn approval_choices(request: &msp::ApprovalRequestParams) -> Vec<ApprovalChoice> {
+    let native: Vec<ApprovalChoice> = request
+        .available_choices
+        .iter()
+        .map(|choice| ApprovalChoice {
+            id: choice.choice_id.clone(),
+            label: choice.label.clone(),
+            decision: approval_decision(&choice.decision),
+            scope: approval_scope(&choice.scope),
+            rule_preview: choice.rule_preview.clone(),
+            accepts_feedback: choice.accepts_feedback.unwrap_or(false),
+        })
+        .collect();
+    provider::ApprovalAnswer::restate(&native)
+}
+
 fn approval_block(
     request: &msp::ApprovalRequestParams,
     state: ApprovalState,
@@ -2780,18 +2802,7 @@ fn approval_block(
         .collect();
     let current_stage = Some(request.current_requirement_id.source_index as usize)
         .filter(|index| *index < stages.len());
-    let choices: Vec<ApprovalChoice> = request
-        .available_choices
-        .iter()
-        .map(|choice| ApprovalChoice {
-            id: choice.choice_id.clone(),
-            label: choice.label.clone(),
-            decision: approval_decision(&choice.decision),
-            scope: approval_scope(&choice.scope),
-            rule_preview: choice.rule_preview.clone(),
-            accepts_feedback: choice.accepts_feedback.unwrap_or(false),
-        })
-        .collect();
+    let choices = approval_choices(request);
     let scope = choices
         .iter()
         .find(|choice| choice.scope != ApprovalScope::ThisCommand)

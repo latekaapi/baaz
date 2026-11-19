@@ -351,9 +351,9 @@ impl SessionRuntime {
     /// `setmode:<mode>`: `session/setApprovalMode`, without opening the
     /// picker. An unknown mode fails and changes nothing.
     pub(crate) fn step_setmode(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
-        let mode = MODES
-            .iter()
-            .copied()
+        let mode = self
+            .modes()
+            .into_iter()
             .find(|m| format!("{m:?}").eq_ignore_ascii_case(rest) || m.label().eq_ignore_ascii_case(rest))
             .ok_or_else(|| format!("unknown approval mode `{rest}`"))?;
         self.set_mode(mode, cx);

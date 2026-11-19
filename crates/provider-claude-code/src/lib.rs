@@ -217,6 +217,23 @@ pub fn apply_effort_control_request(request_id: &str, level: &str) -> String {
     .to_string()
 }
 
+/// `set_permission_mode` into the CLI's own `plan` mode, or — `on` false —
+/// back to `back` (docs/82 5.5). `plan` is one of the modes `claude --help`
+/// (2.1.276) lists for `--permission-mode`; the live switch into it is the
+/// same request the other modes take.
+pub fn set_plan_mode_control_request(request_id: &str, on: bool, back: PermissionMode) -> String {
+    let mode = if on { PLAN_PERMISSION_MODE } else { argv::claude_permission_mode(back) };
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "set_permission_mode", "mode": mode},
+    })
+    .to_string()
+}
+
+/// The CLI's spelling of its plan permission mode.
+pub const PLAN_PERMISSION_MODE: &str = "plan";
+
 /// `set_permission_mode` switches the live child's approval mode with no
 /// relaunch: answered `{"mode": …}` and followed by a `system/status`
 /// frame carrying `permissionMode` (probed live 2026-10-16, every mode but
@@ -716,6 +733,24 @@ impl ClaudeCodeAdapter {
             sent_at: Instant::now(),
         };
         self.send_control(&set_permission_mode_control_request(&request_id, mode), pending)
+    }
+
+    /// The `set_permission_mode` line turning plan mode on (`plan`) or off
+    /// (back to `back`, the mode the session was in).
+    fn send_set_plan_mode(&self, on: bool, back: PermissionMode) -> Result<(), ProviderError> {
+        let request_id = self.next_control_id();
+        let pending = PendingControl {
+            kind: PendingControlKind::SetPlanMode(on),
+            request_id: request_id.clone(),
+            wanted_model: None,
+            previous_model: None,
+            previous_fold_model: None,
+            wanted_effort: None,
+            previous_effort: None,
+            wanted_mcp: None,
+            sent_at: Instant::now(),
+        };
+        self.send_control(&set_plan_mode_control_request(&request_id, on, back), pending)
     }
 
     /// The `apply_flag_settings` line putting the Read-only deny layer on
@@ -1883,6 +1918,18 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 // a pick still waiting on its relaunch.
                 *self.mode_relaunch_due.lock().expect("mode relaunch mutex") = None;
                 self.send_set_permission_mode(mode)?;
+                Ok(Ack::Accepted)
+            }
+            // Its own `plan` permission mode, live over the control
+            // channel (docs/82 5.5). Off returns to the mode the chip
+            // reads: plan folds to no neutral mode, so the fold still holds
+            // the mode the session was in. The child's `status` frame then
+            // reports the move, and the pump says so with
+            // `PlanModeChanged`.
+            Command::SetPlanMode { session_id, on, .. } => {
+                self.check_session(&session_id)?;
+                let back = self.fold.lock().expect("fold mutex").permission_mode().unwrap_or_default();
+                self.send_set_plan_mode(on, back)?;
                 Ok(Ack::Accepted)
             }
             Command::RunShell { .. } => Err(ProviderError::unsupported(
@@ -3727,6 +3774,58 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// docs/82 5.5: the Plan toggle turns on the CLI's own `plan` mode over
+    /// `set_permission_mode`, and off returns to the mode the chip reads.
+    /// The toggle follows the child's reports: entering plan announces it
+    /// once and moves no neutral mode; leaving it (the agent's plan was
+    /// approved, or the toggle) announces it off.
+    #[test]
+    fn the_plan_toggle_rides_the_clis_own_plan_mode() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.fold.lock().expect("fold mutex").set_session_id("sess-1");
+        adapter.fold.lock().expect("fold mutex").note_permission_mode(PermissionMode::OnRequest);
+        adapter
+            .dispatch(Command::SetPlanMode { request_id: "r-1".into(), session_id: "sess-1".into(), on: true })
+            .expect("plan on lands");
+        adapter
+            .dispatch(Command::SetPlanMode { request_id: "r-2".into(), session_id: "sess-1".into(), on: false })
+            .expect("plan off lands");
+        let modes: Vec<String> = adapter
+            .sent_control_lines()
+            .iter()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("json"))
+            .filter(|value| value["request"]["subtype"] == "set_permission_mode")
+            .map(|value| value["request"]["mode"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(modes, ["plan", "auto"], "on is `plan`; off is the mode the session was in");
+        let plan_events = |events: &[ProviderEvent]| -> Vec<bool> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    ProviderEvent::PlanModeChanged { session_id, on } if session_id == "sess-1" => Some(*on),
+                    _ => None,
+                })
+                .collect()
+        };
+        drain_events(&adapter);
+        adapter.ingest_child_line(
+            r#"{"type":"system","subtype":"status","status":null,"permissionMode":"plan","session_id":"sess-1"}"#,
+        );
+        adapter.ingest_child_line(
+            r#"{"type":"system","subtype":"status","status":null,"permissionMode":"plan","session_id":"sess-1"}"#,
+        );
+        let entered = drain_events(&adapter);
+        assert_eq!(plan_events(&entered), [true], "entering is announced once");
+        assert!(mode_events(&entered).is_empty(), "plan moves no neutral mode: the chip keeps its mode");
+        adapter.ingest_child_line(
+            r#"{"type":"system","subtype":"status","status":null,"permissionMode":"default","session_id":"sess-1"}"#,
+        );
+        let left = drain_events(&adapter);
+        assert_eq!(plan_events(&left), [false], "leaving plan is announced");
+        assert_eq!(mode_events(&left), vec![("sess-1".to_owned(), PermissionMode::PromptUnmatched)]);
     }
 
     /// A live mode pick rides `set_permission_mode` with the CLI's own

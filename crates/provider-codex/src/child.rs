@@ -68,6 +68,23 @@ pub enum ApprovalKind {
     Unknown,
 }
 
+impl ApprovalKind {
+    /// The answers this lane's card offers, in the one vocabulary, with
+    /// the choice ids the adapter answers (docs/82 5.5): the card and the
+    /// tap read the same declaration.
+    pub fn options(self, params: &Value) -> Vec<provider::ApprovalOption> {
+        let choices = match self {
+            ApprovalKind::Command | ApprovalKind::FileChange => crate::fold::codex_choices(true),
+            ApprovalKind::McpElicitation => crate::fold::codex_choices(false),
+            ApprovalKind::Permissions => {
+                crate::fold::permission_choices(params.get("permissions").unwrap_or(&Value::Null))
+            }
+            ApprovalKind::Unknown => Vec::new(),
+        };
+        provider::ApprovalOption::of_choices(&choices)
+    }
+}
+
 /// The approval id an MCP tool-call elicitation is parked under, on the
 /// transcript and on the answerable surface alike. The elicitation names
 /// no item id, so the JSON-RPC request id alone would collide with the
@@ -176,19 +193,19 @@ impl ApprovalKind {
         }
     }
 
-    /// The human question a pending approval asks with, in the words the
-    /// Claude Code and Muse cards use ("Allow Codex to run this command?")
+    /// The human question a pending approval asks with, in the words every
+    /// approval card asks with ("Run this command?", docs/82 5.5)
     /// — never the wire method, which is what the tap carried before
     /// when the request named no `reason`. The model's reason stays on
     /// the transcript card. An MCP elicitation carries its own sentence
     /// (`message`), so this is only its fallback.
     pub fn headline(self) -> &'static str {
         match self {
-            ApprovalKind::Command => "Allow Codex to run this command?",
-            ApprovalKind::FileChange => "Allow Codex to edit this file?",
-            ApprovalKind::Permissions => "Allow Codex to change permissions?",
-            ApprovalKind::McpElicitation => "Allow Codex to use this tool?",
-            ApprovalKind::Unknown => "Allow Codex to continue?",
+            ApprovalKind::Command => "Run this command?",
+            ApprovalKind::FileChange => "Edit this file?",
+            ApprovalKind::Permissions => "Change permissions?",
+            ApprovalKind::McpElicitation => "Use this tool?",
+            ApprovalKind::Unknown => "Continue?",
         }
     }
 }
@@ -1327,6 +1344,7 @@ impl RunningChild {
                 session_id: thread_id,
                 approval_id: item_id,
                 headline,
+                options: ApprovalKind::McpElicitation.options(params),
             });
         } else if ApprovalKind::from_method(method) == Some(ApprovalKind::Unknown) {
             // An approval this client cannot read cannot be said yes to,
@@ -1361,6 +1379,7 @@ impl RunningChild {
                 session_id: thread_id,
                 approval_id: item_id,
                 headline,
+                options: kind.options(params),
             });
         } else if method.contains("requestUserInput") || method.contains("elicitation/request") {
             let id_string = id.to_string();
@@ -2147,10 +2166,10 @@ mod tests {
         // blind.
         assert_eq!(ApprovalKind::from_method("item/future/requestApproval"), Some(K::Unknown));
         // Each lane asks in words, never with its wire method.
-        assert_eq!(K::Command.headline(), "Allow Codex to run this command?");
-        assert_eq!(K::FileChange.headline(), "Allow Codex to edit this file?");
-        assert_eq!(K::Permissions.headline(), "Allow Codex to change permissions?");
-        assert_eq!(K::Unknown.headline(), "Allow Codex to continue?");
+        assert_eq!(K::Command.headline(), "Run this command?");
+        assert_eq!(K::FileChange.headline(), "Edit this file?");
+        assert_eq!(K::Permissions.headline(), "Change permissions?");
+        assert_eq!(K::Unknown.headline(), "Continue?");
         assert_eq!(ApprovalKind::from_method("turn/start"), None);
         assert_eq!(ApprovalKind::from_method("item/tool/requestUserInput"), None);
         // Elicitations classify on params, never on method alone: only an
@@ -2354,8 +2373,14 @@ mod tests {
             assert!(
                 matches!(
                     seen.as_slice(),
-                    [ProviderEvent::ApprovalRequested { headline, .. }]
-                    if headline == "Allow Codex to run this command?"
+                    [ProviderEvent::ApprovalRequested { headline, options, .. }]
+                    if headline == "Run this command?"
+                        && options.iter().map(|option| (option.answer, option.choice.as_str())).collect::<Vec<_>>()
+                            == [
+                                (provider::ApprovalAnswer::Once, "accept"),
+                                (provider::ApprovalAnswer::ThisSession, "accept-for-session"),
+                                (provider::ApprovalAnswer::Deny, "decline"),
+                            ]
                 ),
                 "{seen:?}"
             );
@@ -2387,9 +2412,11 @@ mod tests {
         assert!(
             matches!(
                 seen.as_slice(),
-                [ProviderEvent::ApprovalRequested { session_id, approval_id, headline }]
+                [ProviderEvent::ApprovalRequested { session_id, approval_id, headline, options }]
                 if session_id == "t" && approval_id == "mcp-elicitation-7"
                     && headline.contains("terminal_run")
+                    && options.iter().map(|option| (option.answer, option.choice.as_str())).collect::<Vec<_>>()
+                        == [(provider::ApprovalAnswer::Once, "accept"), (provider::ApprovalAnswer::Deny, "decline")]
             ),
             "the tap routes back through the adapter: {seen:?}"
         );

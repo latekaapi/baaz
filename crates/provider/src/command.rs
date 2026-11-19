@@ -159,6 +159,17 @@ pub enum Command {
         /// The mode to select. Closed set, never constructed.
         mode: PermissionMode,
     },
+    /// Turn the provider's own plan mode on or off: offered only where the
+    /// descriptor declares [`crate::PlanMode::Native`] (docs/82 5.5). Off
+    /// returns the session to the approval mode it was in.
+    SetPlanMode {
+        /// Client-minted idempotency handle.
+        request_id: String,
+        /// The target session.
+        session_id: String,
+        /// Plan mode on or off.
+        on: bool,
+    },
     /// Run a shell command inside the session, outside any turn. Still
     /// subject to the approval policy; output arrives as events.
     RunShell {
@@ -395,6 +406,7 @@ impl Command {
             Self::CompactSession { .. } => "compact-session",
             Self::SelectModel { .. } => "select-model",
             Self::SelectApprovalMode { .. } => "select-approval-mode",
+            Self::SetPlanMode { .. } => "set-plan-mode",
             Self::RunShell { .. } => "run-shell",
             Self::SubmitInput { .. } => "submit-input",
             Self::SteerInput { .. } => "steer-input",

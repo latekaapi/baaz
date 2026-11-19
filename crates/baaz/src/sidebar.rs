@@ -155,14 +155,11 @@ impl SessionRow for SessionEntry {
         }
     }
 
-    /// The library row for this session, labelled against `now`. A
-    /// provider-lane row carries its provider's mark after the tags; a
-    /// muse row carries none.
+    /// The library row for this session, labelled against `now`. Every
+    /// row carries its provider's mark after the tags (docs/82 5.5).
     fn summary(&self, now: DateTime<Local>) -> SessionSummary {
-        let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed_at(self.updated, now));
-        if let Some(provider) = self.provider.row_mark() {
-            row = row.provider(provider);
-        }
+        let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed_at(self.updated, now))
+            .provider(self.provider.row_mark());
         // Option B's context priority: the live approval/question override
         // first, then the ladder below.
         if let Some(command) = self.approval_text() {
@@ -446,16 +443,10 @@ pub fn lift_pinned(grouping: Grouping) -> (Grouping, Vec<aui::nav::SessionSummar
     }
 }
 
-/// The wire id's sidebar mark. `None` is the muse lane or an id no
-/// release ever taught the sidebar — a row that cannot name its lane
-/// draws like a muse one rather than nothing.
+/// The wire id's sidebar mark: the registered provider's own badge;
+/// `None` for an id no registered provider answers to.
 pub fn provider_mark(id: &str) -> Option<aui_icons::Provider> {
-    match id {
-        "muse" => Some(aui_icons::Provider::Muse),
-        "claude-code" => Some(aui_icons::Provider::Claude),
-        "codex" => Some(aui_icons::Provider::Codex),
-        _ => None,
-    }
+    crate::providers::ProviderId::parse_known(id).map(|provider| provider.row_mark())
 }
 
 #[cfg(test)]
@@ -468,6 +459,21 @@ pub(crate) mod tests {
     use crate::providers::ProviderId;
     use provider::facts::Attention;
     use crate::projects::Projects;
+
+    /// docs/82 5.5 (docs/81 F C3): every row wears its provider's badge —
+    /// Muse's too, where "no badge" used to mean Muse — and the wire id's
+    /// mark is the registry's.
+    #[test]
+    fn every_row_wears_its_providers_badge() {
+        let now = Local::now();
+        for id in crate::providers::ProviderId::all() {
+            let mut row = entry(id.as_str());
+            row.provider = id;
+            assert_eq!(row.summary(now).providers, vec![id.icon()], "{}", id.as_str());
+            assert_eq!(provider_mark(id.as_str()), Some(id.icon()));
+        }
+        assert_eq!(provider_mark("no-such-provider"), None);
+    }
 
     /// The summary carries the state the trailing slot draws (docs/83 §4):
     /// Waiting (the amber dot), Failed (the danger dot), Running (the
@@ -694,7 +700,7 @@ pub(crate) mod tests {
     /// Option B's context priority, end to end through `summary()`: the
     /// approval command beats the pending question, which beats the byline,
     /// which beats the preview, which beats `project · branch`, which beats
-    /// empty space.
+    /// the provider mark's meta line.
     #[test]
     fn context_priority_runs_approval_question_byline_preview_project() {
         use aui::nav::{context_line_kind, ContextLineKind};
@@ -719,7 +725,9 @@ pub(crate) mod tests {
         assert_eq!(context_line_kind(&full.summary(now)), ContextLineKind::Project);
         full.project_name = None;
         full.branch = None;
-        assert_eq!(context_line_kind(&full.summary(now)), ContextLineKind::Empty);
+        // Every row wears its provider's mark (docs/82 5.5), so the last
+        // rung is the mark's meta line, never empty space.
+        assert_eq!(context_line_kind(&full.summary(now)), ContextLineKind::Meta);
     }
 
     /// The status vocabulary, one state at a time: the exact sentence the
@@ -1573,7 +1581,7 @@ pub(crate) mod tests {
         let row = SessionEntry::provider_row(&codex, None, &projects).expect("a registered provider");
         assert!(row.summary(now).providers.contains(&aui_icons::Provider::Codex));
         let muse = SessionEntry::join(&wire_session(), None, None, &projects);
-        assert!(muse.summary(now).providers.is_empty(), "a muse row wears no mark");
+        assert_eq!(muse.summary(now).providers, vec![aui_icons::Provider::Muse], "a muse row wears Muse's mark (docs/82 5.5)");
     }
 
     /// [`lift_pinned`]: pinned rows leave their project groups, in group

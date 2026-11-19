@@ -40,6 +40,9 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     // Haiku is the utility model the app's one-shot completions run on.
     utility_models: &[("haiku", "Claude Haiku"), ("sonnet", "Claude Sonnet"), ("opus", "Claude Opus")],
     modes: &provider::registry::protocol_modes("Anything without a matching rule is refused.", None),
+    // Its own `plan` permission mode (`claude --help` 2.1.276 lists it),
+    // switched live over `set_permission_mode`.
+    plan: provider::PlanMode::Native,
     routes: &[],
     traits: &[ProviderTrait::ModelsLimitModes],
     capabilities: |_| crate::caps::capabilities(),

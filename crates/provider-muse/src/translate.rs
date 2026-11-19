@@ -341,6 +341,12 @@ pub fn dispatch(
                 .map_err(transport_error)?;
             Ok(Ack::Accepted)
         }
+        // Muse's plan mode is a skill the prompt reaches (`PlanMode::Skill`):
+        // there is no mode to switch, so the command is never offered.
+        Command::SetPlanMode { .. } => Err(ProviderError::unsupported(
+            "set-plan-mode",
+            "Muse plans through its `plan` skill, reached by the prompt, not a mode",
+        )),
         Command::RunShell { request_id, session_id, command } => {
             client
                 .session_user_shell(&SessionUserShellParams {

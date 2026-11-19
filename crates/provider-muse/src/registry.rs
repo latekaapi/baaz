@@ -42,6 +42,9 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     own_mcp_note: None,
     utility_models: &[(crate::oneshot::UTILITY_MODEL_ID, "Muse Spark 1.3"), ("", "Muse default")],
     modes: &MODES,
+    // Its bundled `plan` skill, reached by a `/plan ` prefix
+    // (`fixtures/msp/transcript-plan-probe.jsonl`).
+    plan: provider::PlanMode::Skill,
     // `--provider meta` / `--provider echo` name the model vendor a Muse
     // open routes to (`OpenSession.model_provider`).
     routes: &["meta", "echo"],
@@ -60,8 +63,6 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         ProviderTrait::ManagedSkills,
         ProviderTrait::PagesHistory,
         ProviderTrait::AccountOnConnection,
-        ProviderTrait::UnmarkedRows,
-        ProviderTrait::InlineApprovals,
     ],
     capabilities: |version| crate::capabilities_for_version(version.unwrap_or(crate::MUSE_MCP_VERSION_FLOOR)),
 };

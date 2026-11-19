@@ -70,9 +70,18 @@ impl Lane<'_> {
                     self.reported = Some(mode);
                 }
             }
-            ProviderEvent::ApprovalRequested { session_id, approval_id, headline } => {
+            ProviderEvent::ApprovalRequested { session_id, approval_id, headline, options } => {
                 turn.asked.push(headline);
-                let choice = if std::mem::take(deny_next) { self.choices.deny } else { self.choices.allow };
+                // The answer is picked from the tap's own options (docs/82
+                // 5.5); the configured ids only stand in for a tap that
+                // offers neither.
+                let (answer, fallback) = if std::mem::take(deny_next) {
+                    (provider::ApprovalAnswer::Deny, self.choices.deny)
+                } else {
+                    (provider::ApprovalAnswer::Once, self.choices.allow)
+                };
+                let offered = options.iter().find(|option| option.answer == answer).map(|option| option.choice.clone());
+                let choice: &str = &offered.unwrap_or_else(|| fallback.to_owned());
                 let result = self.provider.send(Command::DecideApproval {
                     request_id: id(),
                     session_id,
@@ -143,7 +152,10 @@ impl Lane<'_> {
                 }
             }
             // The effort chip's word; the mode matrix reads none of it.
-            ProviderEvent::EffortInForce { .. } | ProviderEvent::ModelCatalogChanged { .. } => {}
+            ProviderEvent::EffortInForce { .. }
+            | ProviderEvent::ModelCatalogChanged { .. }
+            | ProviderEvent::PlanModeChanged { .. }
+            | ProviderEvent::SkillsListed { .. } => {}
         }
     }
 

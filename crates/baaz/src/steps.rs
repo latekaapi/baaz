@@ -995,7 +995,15 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "compact", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_compact(cx)) },
     SessionVerb { verb: "meter", run: |v, _, _, cx| v.step_meter(cx) },
     SessionVerb { verb: "context", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_context(rest, cx)) },
-    SessionVerb { verb: "plan", run: |v, _, _, cx| { v.runtime().clone().update(cx, |rt, cx| rt.set_plan(true, cx)); Ok(()) } },
+    // The Plan toggle, on: a provider with no plan mode has no toggle
+    // (docs/82 5.5), so the step fails rather than doing nothing.
+    SessionVerb { verb: "plan", run: |v, _, _, cx| {
+        if v.rt(cx).plan_support() == provider::PlanMode::None {
+            return Err("this session's provider has no plan mode".into());
+        }
+        v.runtime().clone().update(cx, |rt, cx| rt.set_plan(true, cx));
+        Ok(())
+    } },
     SessionVerb { verb: "image", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_attach(rest, cx)) },
     SessionVerb { verb: "file", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_attach(rest, cx)) },
     SessionVerb { verb: "plus", run: |v, _, _, cx| v.step_plus(cx) },

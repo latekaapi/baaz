@@ -100,8 +100,9 @@ pub struct SkillDiagnostic {
     pub path: Option<String>,
 }
 
-/// One row of `muse skills list --json`.
-#[derive(Clone, Debug, Deserialize)]
+/// One row of `muse skills list --json` — or, built with its defaults, one
+/// skill another provider listed for its `/` menu (docs/82 5.5).
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct Skill {
     /// `bundled:plan`, `user:my-thing`, bare for user and project rows.
     #[serde(default)]

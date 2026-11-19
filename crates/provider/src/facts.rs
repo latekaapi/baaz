@@ -37,6 +37,21 @@ pub struct ContextReading {
     pub pressure: ContextPressure,
 }
 
+impl ContextReading {
+    /// A reading from a provider that reports the numbers but grades
+    /// nothing (Claude Code's `modelUsage`, Codex's `tokenUsage`; docs/82
+    /// 5.5): Warning from nine tenths of the window, never Blocked — only
+    /// a provider that refuses a full context says when it will.
+    pub fn measured(used_tokens: u64, window_tokens: Option<u64>) -> Self {
+        let window_tokens = window_tokens.filter(|window| *window > 0);
+        let pressure = match window_tokens {
+            Some(window) if used_tokens.saturating_mul(10) >= window.saturating_mul(9) => ContextPressure::Warning,
+            _ => ContextPressure::Normal,
+        };
+        Self { used_tokens, window_tokens, pressure }
+    }
+}
+
 /// A session's running token totals. Never goes backward.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TokenTotals {
@@ -201,3 +216,13 @@ impl Attention {
 /// stopped short; what follows it is the reason. (The other gap marker —
 /// history the provider no longer holds — carries its own words.)
 pub const BACKFILL_ABORTED_PREFIX: &str = "Backfill did not finish: ";
+
+/// One skill a provider offers as a `/name` command in its sessions
+/// ([`crate::ProviderEvent::SkillsListed`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderSkill {
+    /// The name the command uses, without the slash.
+    pub name: String,
+    /// One line on what it does, when the provider says.
+    pub description: Option<String>,
+}

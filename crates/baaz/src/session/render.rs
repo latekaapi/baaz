@@ -9,7 +9,6 @@ use aui_tokens::TextRole;
 use std::path::Path;
 use aui::data::button;
 use aui_tokens::{ActiveAui, AuiStyled as _};
-use crate::providers::{ApprovalChoice, ExternalApproval};
 use crate::layout::LayoutGlobal as _;
 use crate::providers::ProviderMark as _;
 
@@ -71,7 +70,6 @@ impl SessionView {
             self.newest_pending_approval().is_some() || self.runtime.read(cx).external_approvals.has_pending(),
         );
         let status = self.render_status(cx);
-        let external = self.render_external_approvals(window, cx);
         let needs_you = self.render_needs_you(cx);
         let banner = self.render_banner(cx);
         let tier_banner = self.render_tier_banner(cx);
@@ -86,7 +84,6 @@ impl SessionView {
         let stack = v_flex()
             .w_full()
             .children(status)
-            .children(external)
             .children(needs_you)
             .children(banner)
             .children(tier_banner)
@@ -419,11 +416,6 @@ impl SessionView {
             // picking an option are local, and anything that would reach the
             // wire is refused by `wire_client` with a banner that says why.
             cards: Some(self.card_intents(window, cx)),
-            // A provider session's approval cards ask in the provider's
-            // name ("Allow Claude Code to write this file?"); a provider
-            // whose own cards carry their choices keeps its own title.
-            approval_host: (!self.runtime.read(cx).provider_kind().has(provider::ProviderTrait::InlineApprovals))
-                .then(|| self.runtime.read(cx).provider_kind().label().to_owned()),
             titles: Rc::clone(&self.titles),
             at_rest: self.at_rest,
             // One clock per frame for every turn age, and the one turn (if
@@ -538,7 +530,7 @@ impl SessionView {
             // shows, omitted when it knows no such skill.
             skill_scopes: {
                 let mut scopes = std::collections::HashMap::new();
-                for row in self.overlays.read(cx).skills_for(&self.runtime.read(cx).workspace) {
+                for row in &self.menu_skills(cx) {
                     scopes.insert(row.name.clone(), crate::skills::scope_word(row.scope()).to_owned());
                 }
                 Rc::new(scopes)
@@ -1940,17 +1932,6 @@ impl SessionView {
 /// outranks running (a tool in flight names its family), which outranks a
 /// growing reasoning trace. `None` is the generic working/finishing pair —
 /// nothing here was specific enough to name.
-    /// The approval card's body: the reason sentence, unless it says nothing
-    /// the headline does not already say — a lane tap carries the headline in
-    /// both fields when the backend supplies no separate reason, and drawing
-    /// both repeated the same sentence twice.
-    fn card_reason(headline: &str, reason: &str) -> Option<String> {
-        let reason = reason.trim();
-        if reason.is_empty() || reason == headline.trim() {
-            return None;
-        }
-        Some(reason.to_owned())
-    }
 fn status_phase_for_blocks(blocks: &[Block]) -> Option<String> {
     use aui_protocol::{ApprovalState, ThinkingState};
     if blocks.iter().any(|block| matches!(block, Block::Approval { state: ApprovalState::Pending, .. })) {
@@ -2383,6 +2364,19 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     }
 
     /// The `/` menu's two sections, filtered by what has been typed.
+    /// The skills the `/` menu lists: the session provider's own (docs/82
+    /// 5.5) — the managed catalog for a provider whose skills the Skills
+    /// page manages (Muse), else what the provider itself listed (Claude
+    /// Code's `init`), else none. Never another provider's list.
+    pub(super) fn menu_skills(&self, cx: &gpui::App) -> Vec<skills::Skill> {
+        let rt = self.runtime.read(cx);
+        if rt.provider_kind().has(provider::ProviderTrait::ManagedSkills) {
+            self.overlays.read(cx).skills_for(&rt.workspace).to_vec()
+        } else {
+            rt.provider_skills.clone()
+        }
+    }
+
     pub(super) fn command_rows(&self, filter: &str, cx: &gpui::App) -> (Vec<Command>, Vec<skills::Skill>) {
         let needle = filter.to_lowercase();
         let commands: Vec<Command> = Command::ALL
@@ -2393,9 +2387,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         // D64: the menu shares the page's catalog — Off hidden — then the
         // menu's own prefix match and the F7 command-name shadow rule.
         let skill_rows: Vec<skills::Skill> = self
-            .overlays
-            .read(cx)
-            .skills_for(&self.runtime.read(cx).workspace)
+            .menu_skills(cx)
             .iter()
             .filter(|s| s.in_slash_menu())
             .filter(|s| s.name.to_lowercase().starts_with(&needle))
@@ -2486,7 +2478,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     }
 
     pub(super) fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {
-        let blocked = self.runtime.read(cx).context().pressure == ContextPressure::Blocked;
+        let blocked = self.runtime.read(cx).context().is_some_and(|meter| meter.pressure == ContextPressure::Blocked);
         let intent = cx.listener(|this: &mut Self, intent: &ComposerIntent, window, cx| match intent {
             ComposerIntent::Send => this.send(window, cx),
             ComposerIntent::Stop => this.runtime.update(cx, |rt, cx| rt.interrupt(cx)),
@@ -2522,7 +2514,14 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         let plus_item = plus_menu(
             "plus",
             vec![
-                PlusMenuItem::new("attach", IconName::Paperclip, "Attach file or photo").key("⌘U"),
+                // Photos only where the provider takes images (docs/82
+                // 5.5): a Codex session attaches files.
+                PlusMenuItem::new(
+                    "attach",
+                    IconName::Paperclip,
+                    if self.runtime.read(cx).offers(provider::Capability::ImageInput) { "Attach file or photo" } else { "Attach file" },
+                )
+                .key("⌘U"),
                 PlusMenuItem::new("mention", IconName::At, "Mention file").key("@"),
                 PlusMenuItem::new("commands", IconName::Slash, "Slash commands").key("/"),
             ],
@@ -2540,7 +2539,6 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             .raised(true)
             .mode(self.runtime.read(cx).mode_label())
             .effort(crate::overlays::effort_label(self.runtime.read(cx).effort))
-            .context(self.runtime.read(cx).context())
             .context_open(self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Meter))
             .plan(self.runtime.read(cx).plan)
             .chips(
@@ -2599,6 +2597,11 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             )
             .plus_menu(plus_open, Some(plus_item))
             .on_intent(move |i, window, cx| intent(&i, window, cx));
+        // The meter only where the provider reported real context (docs/82
+        // 5.5): absent, never a running token sum.
+        if let Some(meter) = self.runtime.read(cx).context() {
+            element = element.context(meter);
+        }
         for (anchor, menu) in self.render_pickers(cx) {
             element = element.chip_menu(anchor, menu);
         }
@@ -2799,21 +2802,28 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 vec![(ComposerChipAnchor::Effort, menu.into_any_element())]
             }
             MenuKind::Mode => {
-                let rows: Vec<PickerRow> = MODES
+                // The session provider's own modes, in its words (docs/82
+                // 5.5): the registry's declaration, never a fixed list.
+                let rows: Vec<PickerRow> = self
+                    .runtime
+                    .read(cx)
+                    .provider_kind()
+                    .descriptor()
+                    .modes
                     .iter()
-                    .map(|mode| {
+                    .map(|declared| {
                         // An unavailable mode says why on its detail line;
                         // the pick restates it rather than switching.
                         let detail = self
-                            .rt(cx).mode_unavailable(*mode)
-                            .unwrap_or_else(|| {
-                                crate::providers::mode_description(self.runtime.read(cx).provider_kind(), *mode).to_owned()
-                            });
-                        PickerRow::new(format!("{mode:?}"), mode.label(), detail)
+                            .rt(cx)
+                            .mode_unavailable(declared.id)
+                            .unwrap_or_else(|| declared.description.to_owned());
+                        PickerRow::new(format!("{:?}", declared.id), declared.label, detail)
                     })
                     .collect();
                 let pick = cx.listener(|this: &mut Self, id: &SharedString, _, cx| {
-                    if let Some(mode) = MODES.iter().copied().find(|m| format!("{m:?}") == id.as_ref()) {
+                    let mode = this.runtime.read(cx).modes().into_iter().find(|m| format!("{m:?}") == id.as_ref());
+                    if let Some(mode) = mode {
                         this.pick_mode(mode, cx);
                     }
                 });
@@ -3037,155 +3047,6 @@ impl SessionView {
     // banner the registry's own reason when invoked — and "Answer
     // questions" has no control, so it simply disappears.
 
-    /// Which parked provider taps the strip below the transcript may show.
-    /// Empty on a provider lane: the fold's inline approval card carries
-    /// the full choice set the adapter declares, so a second strip above
-    /// the composer would double every ask. The parked tap stays as the
-    /// decision-routing record (and the row's fallback), never as a
-    /// surface.
-    pub(super) fn external_strip(&self) -> Vec<ExternalApproval> {
-        Vec::new()
-    }
-
-    /// The external approval cards: one per new-provider approval the
-    /// server has not resolved yet, on the same surface as the legacy
-    /// cards and under the same rule — the card changes only on the
-    /// server's notification, never on the press.
-    ///
-    /// Awaiting cards offer all four answers, with `decline` ("Deny":
-    /// no, do something else) and `cancel` ("Deny and stop": no, stop)
-    /// as visibly different buttons. A sent card offers no second press:
-    /// it reads "sent, waiting for the server".
-    ///
-    /// Never on a provider lane: [`Self::external_strip`] is empty there,
-    /// because the inline card is the one surface.
-    pub(super) fn render_external_approvals(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let approvals: Vec<ExternalApproval> = self.external_strip();
-        if approvals.is_empty() {
-            return None;
-        }
-        let p = cx.aui().colors;
-        let cards: Vec<AnyElement> = approvals
-            .into_iter()
-            .map(|approval| self.render_external_card(&approval, p.fg_muted, p.fg_muted, cx))
-            .collect();
-        Some(
-            div()
-                .w_full()
-                .px(px(TRANSCRIPT_PAD_X))
-                .pb(px(scale::SP_3))
-                .child(centred(
-                    v_flex()
-                        .id("external-approvals")
-                        .role(gpui::Role::Group)
-                        .aria_label("Provider approvals waiting")
-                        .gap(px(scale::SP_2))
-                        .children(cards),
-                ))
-                .into_any_element(),
-        )
-    }
-
-    /// The accessibility name for one external approval choice button
-    /// (V1): the choice's human label naming the decision, headlined with
-    /// what it decides — "Approve: rm -rf /tmp/probe". Decline and Cancel
-    /// never share one, because "no, do something else" and "no, stop"
-    /// are different answers.
-    pub(super) fn external_choice_label(choice: ApprovalChoice, headline: &str) -> String {
-        format!("{}: {}", choice.label(), headline)
-    }
-
-    /// One external approval card. Every choice button carries its
-    /// accessibility role and human label directly (V1: the library
-    /// `Button` names itself from `accessibility_label`, which also sets
-    /// the button role — so the button is the one named control, with no
-    /// role-bearing wrapper around it).
-    fn render_external_card(
-        &self,
-        approval: &ExternalApproval,
-        ink: gpui::Hsla,
-        dim: gpui::Hsla,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut card = v_flex()
-            .id(format!("ext-appr-{}", approval.id))
-            .role(gpui::Role::Group)
-            .aria_label(format!("Approval: {}", approval.headline))
-            .gap(px(scale::SP_1))
-            .child(div().text_color(dim).child(approval.kind.tag().to_owned()))
-            .child(div().text_color(ink).child(approval.headline.clone()));
-        // The lane carries only the headline when the backend supplies no
-        // separate reason sentence — rendering both read the same words
-        // twice ("Allow me to create … as requested?" as headline and
-        // body), so the body draws only when it says something new.
-        if let Some(reason) = Self::card_reason(&approval.headline, &approval.reason) {
-            card = card.child(div().text_color(dim).child(reason));
-        }
-        if let Some(note) = approval.dont_ask_again.clone() {
-            card = card.child(
-                div()
-                    .id(format!("ext-rule-{}", approval.id))
-                    .role(gpui::Role::Label)
-                    .aria_label(format!("Do not ask again option: {note}"))
-                    .text_color(dim)
-                    .child(format!("Don't ask again: {note}")),
-            );
-        }
-        match approval.decision_sent.clone() {
-            // Sent and waiting: no second press, no ahead-of-server change.
-            Some(sent) => card.child(
-                div()
-                    .id(format!("ext-sent-{}", approval.id))
-                    .role(gpui::Role::Label)
-                    .aria_label(format!("Decision {sent} sent, waiting for the server"))
-                    .text_color(dim)
-                    .child(format!("Sent {sent} — waiting for the server.")),
-            ),
-            None => card.child(
-                h_flex()
-                    .gap(px(scale::SP_2))
-                    .children(ApprovalChoice::all().into_iter().map(|choice| {
-                        let approval_id = approval.id.clone();
-                        let headline = approval.headline.clone();
-                        let mut press = button(
-                            format!("ext-{}-{}", approval.id, choice.choice_id()),
-                            choice.label(),
-                        );
-                        press = match choice {
-                            ApprovalChoice::Accept | ApprovalChoice::AcceptForSession => {
-                                press.primary()
-                            }
-                            ApprovalChoice::Decline | ApprovalChoice::Cancel => press.danger(),
-                        };
-                        // The human label from the same helper the test
-                        // pins: naming the button also gives it the button
-                        // role, so the choice answers an AX query by name.
-                        let press = press.accessibility_label(Self::external_choice_label(
-                            choice,
-                            &headline,
-                        ));
-                        let press = press.on_click(cx.listener(
-                            move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                                this.runtime.update(cx, |rt, cx| rt.decide_external_approval(
-                                    approval_id.clone(),
-                                    choice,
-                                    None,
-                                    cx,
-                                ));
-                            },
-                        ));
-                        div()
-                            .id(format!("ext-wrap-{}-{}", approval.id, choice.choice_id()))
-                            .child(press)
-                    })),
-            ),
-        }
-        .into_any_element()
-    }
 }
 
 /// The inline progress row's words (see [`SessionView::inline_progress`]).
@@ -3401,51 +3262,6 @@ mod tests {
     fn an_absolute_path_outside_the_workspace_resolves_as_is() {
         assert_eq!(resolve_link_path(&workspace(), "/etc/passwd"), PathBuf::from("/etc/passwd"));
         assert_eq!(resolve_link_path(&workspace(), "/tmp/scratch/note.txt"), PathBuf::from("/tmp/scratch/note.txt"));
-    }
-
-    /// V1: every approval choice answers an AX query by a human name —
-    /// the same string the card sets as the button's accessibility label
-    /// (which also gives it the button role). A choice that shared
-    /// another's name — or shipped none — would decide silently for a
-    /// screen-reader user, so decline and cancel never share one.
-    #[test]
-    fn every_approval_choice_names_its_button() {
-        assert_eq!(
-            SessionView::external_choice_label(ApprovalChoice::Accept, "rm -rf /tmp/probe"),
-            "Approve: rm -rf /tmp/probe"
-        );
-        assert_eq!(
-            SessionView::external_choice_label(
-                ApprovalChoice::AcceptForSession,
-                "rm -rf /tmp/probe"
-            ),
-            "Approve for this session: rm -rf /tmp/probe"
-        );
-        assert_eq!(
-            SessionView::external_choice_label(ApprovalChoice::Decline, "rm -rf /tmp/probe"),
-            "Deny: rm -rf /tmp/probe"
-        );
-        assert_eq!(
-            SessionView::external_choice_label(ApprovalChoice::Cancel, "rm -rf /tmp/probe"),
-            "Deny and stop: rm -rf /tmp/probe"
-        );
-    }
-
-    #[test]
-    fn an_approval_card_shows_a_duplicated_reason_once() {
-        // The lane tap carries the headline in both fields when the
-        // backend supplies no separate reason: drawing both repeats the
-        // sentence. Remove the `card_reason` arm and the card reads the
-        // same words twice.
-        assert_eq!(
-            SessionView::card_reason("Allow me to create X as requested?", "Allow me to create X as requested?"),
-            None
-        );
-        assert_eq!(SessionView::card_reason("headline", "  "), None);
-        assert_eq!(
-            SessionView::card_reason("headline", "because the backend asked nicely"),
-            Some("because the backend asked nicely".to_owned())
-        );
     }
 
     #[test]

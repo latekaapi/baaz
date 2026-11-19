@@ -103,6 +103,11 @@ pub struct SessionRuntime {
     /// queued words (no queue-strip row) until the turn starts and its
     /// echo replaces it.
     pub(super) tail_queued: HashMap<String, String>,
+    /// The skills the session's own provider offers as `/name`
+    /// ([`provider::ProviderEvent::SkillsListed`]): the `/` menu's Skills
+    /// section on a provider whose skills the app does not manage (docs/82
+    /// 5.5).
+    pub(super) provider_skills: Vec<crate::skills::Skill>,
     /// History is still being paged in behind the live stream.
     pub(super) loading_history: bool,
     /// A `view/page` chain is in flight. Separate from `loading_history`,
@@ -411,6 +416,7 @@ impl SessionRuntime {
             reply_done: None,
             models_fixture: false,
             tail_queued: HashMap::new(),
+            provider_skills: Vec::new(),
             loading_history: false,
             backfill_running: false,
             backfill_stale_retried: false,

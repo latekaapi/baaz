@@ -66,7 +66,12 @@ fn approval(id: &str, state: ApprovalState) -> Block {
 }
 
 fn tap(id: &str) -> ProviderEvent {
-    ProviderEvent::ApprovalRequested { session_id: SESSION.into(), approval_id: id.into(), headline: "ls".into() }
+    ProviderEvent::ApprovalRequested {
+        session_id: SESSION.into(),
+        approval_id: id.into(),
+        headline: "ls".into(),
+        options: Vec::new(),
+    }
 }
 
 /// A session opened, one submit admitted as `t-1`.
@@ -121,6 +126,32 @@ struct Fault {
 }
 
 const FAULTS: &[Fault] = &[
+    Fault {
+        invariant: invariants::TAP_OFFERS_THE_CARDS_ANSWERS,
+        what: "a tap offering an answer its card does not carry",
+        trace: || {
+            let mut trace = opened();
+            let mut card = approval("a-1", ApprovalState::Pending);
+            if let Block::Approval { choices, .. } = &mut card {
+                *choices = vec![provider::ApprovalAnswer::Once.choice("allow")];
+            }
+            trace.event(ProviderEvent::TurnRunning { session_id: SESSION.into(), turn_id: "t-1".into() });
+            trace.event(deltas(vec![assistant("t-1"), Delta::BlockAdded { turn_id: "t-1".into(), block: card }]));
+            trace.event(ProviderEvent::ApprovalRequested {
+                session_id: SESSION.into(),
+                approval_id: "a-1".into(),
+                headline: "ls".into(),
+                options: vec![
+                    provider::ApprovalOption { answer: provider::ApprovalAnswer::Once, choice: "allow".into() },
+                    provider::ApprovalOption { answer: provider::ApprovalAnswer::ThisSession, choice: "always".into() },
+                ],
+            });
+            trace.event(deltas(vec![finished("t-1", 0)]));
+            trace.event(settled("t-1"));
+            (trace, closed())
+        },
+        says: "which its card does not carry",
+    },
     Fault {
         invariant: invariants::ACK_BEFORE_OR_WITH_EVENTS,
         what: "an ack naming a turn that streamed before the submit left",

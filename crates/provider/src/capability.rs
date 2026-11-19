@@ -240,7 +240,7 @@ impl Command {
             | Command::ReadSession { .. } => Capability::SessionLifecycle,
             Command::ForkSession { .. } => Capability::ForkSession,
             Command::CompactSession { .. } => Capability::CompactSession,
-            Command::SelectModel { .. } | Command::SelectApprovalMode { .. } => {
+            Command::SelectModel { .. } | Command::SelectApprovalMode { .. } | Command::SetPlanMode { .. } => {
                 Capability::SessionConfig
             }
             Command::RunShell { .. } => Capability::SessionShell,

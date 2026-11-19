@@ -177,8 +177,10 @@ impl Harness {
                 self.rename_session(session_id, name.clone(), cx);
             }
             // The person picked a model, effort or approval mode in a
-            // session: it becomes the last pick, so the next session — in
-            // any project — starts with it. Scripted `setmodel:` /
+            // session: it becomes the last pick on that provider, so the
+            // next session on it — in any project — starts with it; the
+            // mode is also the session's project's own for that provider
+            // (docs/82 5.5). Scripted `setmodel:` /
             // `setmode:` steps and plan-mode toggles never emit these, so
             // scripted and transient choices stay out of the defaults.
             SessionEvent::ModelSelected { model_id } => {
@@ -194,9 +196,13 @@ impl Harness {
                 }, cx);
             }
             SessionEvent::ModeSelected { mode } => {
-                self.note_pick(|defaults| {
-                    defaults.approval_mode = Some(*mode);
-                }, cx);
+                let (provider, workspace) = {
+                    let rt = runtime.read(cx);
+                    (rt.provider_kind(), rt.workspace_path().to_owned())
+                };
+                let mode = *mode;
+                self.session_list.update(cx, |list, _| list.projects.note_mode(Some(&workspace), provider.as_str(), mode));
+                crate::projects::write(&self.session_list.read(cx).projects);
             }
             // A fresh session's composer chip picked another provider:
             // nothing was ever sent, so the pick becomes the default and a

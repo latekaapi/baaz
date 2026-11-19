@@ -55,9 +55,10 @@ pub const RUNNING_BEFORE_CONTENT: &str = "running-before-content";
 pub const QUESTION_CARD_WITH_TAP: &str = "question-card-with-tap";
 pub const RESTORED_FOLLOWS_LOST: &str = "restored-follows-lost";
 pub const EVENTS_NAME_THEIR_SESSION: &str = "events-name-their-session";
+pub const TAP_OFFERS_THE_CARDS_ANSWERS: &str = "tap-offers-the-cards-answers";
 
 /// Every invariant [`check`] asserts, by name.
-pub const INVARIANTS: [&str; 11] = [
+pub const INVARIANTS: [&str; 12] = [
     ACK_BEFORE_OR_WITH_EVENTS,
     ONE_TERMINAL_PER_TURN,
     APPROVAL_CARD_BEFORE_TAP,
@@ -69,6 +70,7 @@ pub const INVARIANTS: [&str; 11] = [
     QUESTION_CARD_WITH_TAP,
     RESTORED_FOLLOWS_LOST,
     EVENTS_NAME_THEIR_SESSION,
+    TAP_OFFERS_THE_CARDS_ANSWERS,
 ];
 
 /// A command the driver sent, as much of it as the invariants read.
@@ -183,6 +185,9 @@ struct TurnLife {
 #[derive(Default)]
 struct ApprovalLife {
     card_at: Option<usize>,
+    /// The card's choices as last carried: what the tap's typed options
+    /// must name (docs/82 5.5).
+    choices: Vec<aui_protocol::ApprovalChoice>,
     pending: bool,
     settled_at: Option<usize>,
     taps: Vec<usize>,
@@ -281,8 +286,9 @@ impl<'a> Checker<'a> {
 
     fn card(&mut self, block: &Block, at: usize) {
         match block {
-            Block::Approval { id, state, .. } => {
+            Block::Approval { id, state, choices, .. } => {
                 let life = self.approvals.entry(id.clone()).or_default();
+                life.choices = choices.clone();
                 if life.card_at.is_none() {
                     life.card_at = Some(at);
                     self.approval_order.push(id.clone());
@@ -484,7 +490,7 @@ impl<'a> Checker<'a> {
                     self.delta(delta, at);
                 }
             }
-            ProviderEvent::ApprovalRequested { session_id, approval_id, .. } => {
+            ProviderEvent::ApprovalRequested { session_id, approval_id, options, .. } => {
                 self.session_named(session_id, "ApprovalRequested", at);
                 let lost = self.lost;
                 let life = self.approvals.entry(approval_id.clone()).or_default();
@@ -492,6 +498,28 @@ impl<'a> Checker<'a> {
                 life.tapped_before_loss = !lost;
                 let card = life.card_at;
                 let taps = life.taps.clone();
+                let choices = life.choices.clone();
+                // The tap's typed answers are the card's own buttons, in the
+                // one vocabulary, each answer once (docs/82 5.5): the app
+                // decides by them, never by the id's shape.
+                if card.is_some() {
+                    let mut seen = HashSet::new();
+                    for option in options {
+                        let on_card = choices
+                            .iter()
+                            .any(|choice| choice.id == option.choice && choice.label == option.answer.label());
+                        if !on_card || !seen.insert(option.answer) {
+                            self.fail(
+                                TAP_OFFERS_THE_CARDS_ANSWERS,
+                                at,
+                                format!(
+                                    "ApprovalRequested {approval_id:?} offers {:?} as {:?}, which its card does not carry once",
+                                    option.answer, option.choice
+                                ),
+                            );
+                        }
+                    }
+                }
                 if card.is_none() {
                     self.approval_order.push(approval_id.clone());
                     self.fail(
@@ -562,6 +590,8 @@ impl<'a> Checker<'a> {
                 }
             }
             ProviderEvent::ApprovalModeChanged { session_id, .. }
+            | ProviderEvent::PlanModeChanged { session_id, .. }
+            | ProviderEvent::SkillsListed { session_id, .. }
             | ProviderEvent::EffortInForce { session_id, .. }
             | ProviderEvent::ModelCatalogChanged { session_id }
             | ProviderEvent::SessionFacts { session_id, .. }

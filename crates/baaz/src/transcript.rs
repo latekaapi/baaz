@@ -36,12 +36,6 @@ use gpui::{div, prelude::*, px, AnyElement, App, ElementId, SharedString, Window
 use gpui_kit::base::v_flex;
 use crate::providers::ProviderMark as _;
 
-/// The title the pending approval card asks its question with.
-///
-/// Deliberately names Muse: the library's default is provider-free, because the
-/// library does not know whose command it is and this app does.
-pub const APPROVAL_TITLE: &str = "Allow Muse to run this command?";
-
 /// The library's batch for a sent turn's annotations.
 fn annotation_batch(sent: &crate::sent::SentAnnotations) -> aui::transcript::AnnotationBatch {
     aui::transcript::AnnotationBatch {
@@ -56,19 +50,24 @@ fn annotation_batch(sent: &crate::sent::SentAnnotations) -> aui::transcript::Ann
     }
 }
 
-/// The verb a provider approval title asks with, per tool: the card asks
-/// what the tool would do, not what the last tool did.
-fn approval_verb(tool: &str) -> String {
+/// The question an approval title asks, per tool: what the tool would do,
+/// not what the last tool did. A tool the table does not name asks by its
+/// body kind (a command runs, a file is written), else by its name.
+fn approval_question(kind: aui_protocol::ApprovalBodyKind, tool: &str) -> String {
     match tool {
-        "Bash" => "run this command".to_owned(),
-        "Write" => "write this file".to_owned(),
-        "Edit" | "MultiEdit" => "edit this file".to_owned(),
-        "Read" => "read this file".to_owned(),
-        "WebFetch" => "fetch this URL".to_owned(),
-        "WebSearch" => "search the web".to_owned(),
-        "Permissions" => "change permissions".to_owned(),
-        tool if is_terminal_tool_name(tool) => "run this command in the terminal".to_owned(),
-        other => format!("use {other}"),
+        "Bash" => "Run this command".to_owned(),
+        "Write" => "Write this file".to_owned(),
+        "Edit" | "MultiEdit" => "Edit this file".to_owned(),
+        "Read" => "Read this file".to_owned(),
+        "WebFetch" => "Fetch this URL".to_owned(),
+        "WebSearch" => "Search the web".to_owned(),
+        "Permissions" => "Change permissions".to_owned(),
+        tool if is_terminal_tool_name(tool) => "Run this command in the terminal".to_owned(),
+        other => match kind {
+            aui_protocol::ApprovalBodyKind::Command => "Run this command".to_owned(),
+            aui_protocol::ApprovalBodyKind::FileWrite => "Write this file".to_owned(),
+            aui_protocol::ApprovalBodyKind::Other => format!("Use {other}"),
+        },
     }
 }
 
@@ -89,16 +88,11 @@ fn is_terminal_tool_name(tool: &str) -> bool {
     TOOLS.iter().any(|name| tool == *name || tool == format!("mcp__baaz__{name}"))
 }
 
-/// The pending question for one approval card: the muse lane keeps
-/// [`APPROVAL_TITLE`], and a provider session names its provider
-/// ("Allow Claude Code to write this file?") with a verb that fits the
-/// tool. `None` is the muse lane — the host is only ever `Some` beside
-/// the fold's provider cards.
-pub fn approval_title(host: Option<&str>, tool: &str) -> String {
-    match host {
-        Some(host) => format!("Allow {host} to {}?", approval_verb(tool)),
-        None => APPROVAL_TITLE.to_owned(),
-    }
+/// The pending question for one approval card: what is asked, never which
+/// provider asks ("Write this file?", docs/82 5.5) — the same words on
+/// every provider.
+pub fn approval_title(kind: aui_protocol::ApprovalBodyKind, tool: &str) -> String {
+    format!("{}?", approval_question(kind, tool))
 }
 
 /// What a collapsible card needs from the view: which cards the person has
@@ -121,11 +115,6 @@ pub struct Folds {
     pub plan: Option<PlanHandler>,
     /// The live approval and question wiring. `None` renders both read-only.
     pub cards: Option<Cards>,
-    /// Whose command a pending approval card asks about: `Some` ("Claude
-    /// Code", "Codex") on a provider session, `None` on the muse lane
-    /// (which keeps [`APPROVAL_TITLE`]). The card title names the host
-    /// and a verb that fits the tool, per [`approval_title`].
-    pub approval_host: Option<String>,
     /// Session id → the label the sidebar shows for it, so a `ForkedFrom`
     /// marker can name the session it came from rather than its uuid.
     pub titles: Rc<HashMap<String, String>>,
@@ -2135,10 +2124,11 @@ fn tool_group_card(id: ElementId, key: &str, block: &Block, folds: &Folds) -> An
     group.into_any_element()
 }
 
-/// The pending approval's subtitle (docs/41 §2.6): who wants what, where —
-/// "Muse wants to run a shell command in acme-web".
-pub fn approval_subtitle(host: Option<&str>, kind: aui_protocol::ApprovalBodyKind, tool: &str, workspace_root: &str) -> String {
-    let who = host.unwrap_or("Muse");
+/// The pending approval's subtitle (docs/41 §2.6): what is wanted, where —
+/// "The agent wants to run a shell command in acme-web". It names no
+/// provider (docs/82 5.5, rule 14): the card is the same on every one.
+pub fn approval_subtitle(kind: aui_protocol::ApprovalBodyKind, tool: &str, workspace_root: &str) -> String {
+    let who = "The agent";
     let what = match kind {
         aui_protocol::ApprovalBodyKind::Command => "run a shell command".to_owned(),
         aui_protocol::ApprovalBodyKind::FileWrite => "write a file".to_owned(),
@@ -2176,8 +2166,8 @@ fn approval_block_card(id: ElementId, block: &Block, folds: &Folds) -> AnyElemen
         return div().into_any_element();
     };
     let mut card = approval_card(id, tool.clone(), command.clone(), state.clone())
-        .title(approval_title(folds.approval_host.as_deref(), tool))
-        .subtitle(approval_subtitle(folds.approval_host.as_deref(), *body_kind, tool, &folds.workspace_root))
+        .title(approval_title(*body_kind, tool))
+        .subtitle(approval_subtitle(*body_kind, tool, &folds.workspace_root))
         .reason(reason.clone())
         .cwd(cwd.clone())
         .body_kind(*body_kind)
@@ -3113,34 +3103,29 @@ mod tests {
         assert_eq!(display_target(&read, "/ws", "/home/u"), "~/notes/todo.md");
     }
 
-    /// W7b: the pending question names the host and fits the tool. The
-    /// muse lane keeps its own title; a provider session asks in the
-    /// provider's name with the tool's verb. Drop a verb arm and its
-    /// line here names the fallback instead.
+    /// W7b, provider-free since docs/82 5.5: the pending question says
+    /// what is asked and fits the tool, the same on every provider; a tool
+    /// the table does not name asks by its body kind. Drop a verb arm and
+    /// its line here names the fallback instead.
     #[test]
-    fn approval_titles_name_the_provider_and_fit_the_tool() {
-        assert_eq!(approval_title(None, "Bash"), APPROVAL_TITLE);
-        assert_eq!(approval_title(None, "Write"), APPROVAL_TITLE);
-        assert_eq!(approval_title(Some("Claude Code"), "Bash"), "Allow Claude Code to run this command?");
-        assert_eq!(approval_title(Some("Claude Code"), "Write"), "Allow Claude Code to write this file?");
-        assert_eq!(approval_title(Some("Claude Code"), "Edit"), "Allow Claude Code to edit this file?");
-        assert_eq!(approval_title(Some("Claude Code"), "MultiEdit"), "Allow Claude Code to edit this file?");
-        assert_eq!(approval_title(Some("Claude Code"), "WebFetch"), "Allow Claude Code to fetch this URL?");
-        assert_eq!(approval_title(Some("Codex"), "Bash"), "Allow Codex to run this command?");
-        assert_eq!(approval_title(Some("Codex"), "Edit"), "Allow Codex to edit this file?");
-        assert_eq!(
-            approval_title(Some("Codex"), "Permissions"),
-            "Allow Codex to change permissions?"
-        );
-        assert_eq!(
-            approval_title(Some("Claude Code"), "mcp__server__tool"),
-            "Allow Claude Code to use mcp__server__tool?"
-        );
-        assert_eq!(
-            approval_title(Some("Claude Code"), "mcp__baaz__terminal_run"),
-            "Allow Claude Code to run this command in the terminal?"
-        );
-        assert_eq!(approval_title(None, "terminal_run"), APPROVAL_TITLE);
+    fn approval_titles_say_what_is_asked_and_fit_the_tool() {
+        use aui_protocol::ApprovalBodyKind as K;
+        assert_eq!(approval_title(K::Command, "Bash"), "Run this command?");
+        assert_eq!(approval_title(K::Command, "bash"), "Run this command?", "Muse's tool names ask the same");
+        assert_eq!(approval_title(K::FileWrite, "Write"), "Write this file?");
+        assert_eq!(approval_title(K::FileWrite, "write_file"), "Write this file?");
+        assert_eq!(approval_title(K::FileWrite, "Edit"), "Edit this file?");
+        assert_eq!(approval_title(K::FileWrite, "MultiEdit"), "Edit this file?");
+        assert_eq!(approval_title(K::Other, "WebFetch"), "Fetch this URL?");
+        assert_eq!(approval_title(K::Other, "Permissions"), "Change permissions?");
+        assert_eq!(approval_title(K::Other, "mcp__server__tool"), "Use mcp__server__tool?");
+        assert_eq!(approval_title(K::Command, "mcp__baaz__terminal_run"), "Run this command in the terminal?");
+        assert_eq!(approval_title(K::Command, "terminal_run"), "Run this command in the terminal?");
+        for id in crate::providers::ProviderId::all() {
+            assert!(!approval_title(K::Command, "Bash").contains(id.label()), "no provider asks by name");
+            assert!(!approval_subtitle(K::Command, "Bash", "/ws/acme").contains(id.label()));
+        }
+        assert_eq!(approval_subtitle(K::Command, "Bash", "/ws/acme"), "The agent wants to run a shell command in acme");
     }
 
     /// D51: a terminal card is a shell card with the terminal verb — only
@@ -3186,7 +3171,6 @@ mod tests {
             plan: None,
             cards: None,
             titles: Rc::new(HashMap::new()),
-            approval_host: None,
             full_output: Rc::new(HashMap::new()),
             show_full_output: None,
             open_output: None,

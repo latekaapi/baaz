@@ -41,6 +41,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 mod ack;
+mod approval;
 mod capability;
 pub mod child_env;
 mod command;
@@ -55,6 +56,7 @@ pub mod usage;
 pub mod version;
 
 pub use ack::{AccountLane, Ack, LoginOutcome, ModelSummary, PendingApproval, PendingQuestion, SessionSummary};
+pub use approval::{ApprovalAnswer, ApprovalOption};
 pub use aui_protocol::Delta;
 pub use capability::{Capability, CapabilitySet, CapabilityState};
 pub use command::{Command, ProviderId, QuestionAnswer, SubmissionPart};
@@ -62,7 +64,7 @@ pub use crossbeam_channel::Receiver;
 pub use error::{ProviderError, Refusal, RefusalHint, Severity};
 pub use event::ProviderEvent;
 pub use registry::{
-    McpServer, ModeDescriptor, ProviderDescriptor, ProviderFactory, ProviderRegistry, ProviderTrait, SessionSpawn,
+    McpServer, ModeDescriptor, PlanMode, ProviderDescriptor, ProviderFactory, ProviderRegistry, ProviderTrait, SessionSpawn,
     SharedChild, SharedStart, StoredSessions, UnknownProvider,
 };
 pub use traits::{ConnectInfo, Handshake, Provider, ProviderAdapter, STDERR_TAIL_LINES};

@@ -64,6 +64,11 @@ fn approvals(deltas: &[Delta]) -> Vec<&Block> {
         .collect()
 }
 
+/// A card's buttons, as the person reads them.
+fn labels(choices: &[aui_protocol::ApprovalChoice]) -> Vec<&str> {
+    choices.iter().map(|choice| choice.label.as_str()).collect()
+}
+
 fn approval_updates(deltas: &[Delta]) -> Vec<&Block> {
     deltas
         .iter()
@@ -111,6 +116,9 @@ fn claude_write_ask_faces_the_path_with_a_preview() {
             assert!(!cwd.trim().is_empty(), "the run's directory, never blank");
             let ids: Vec<&str> = choices.iter().map(|choice| choice.id.as_str()).collect();
             assert_eq!(ids, ["allow", "deny"], "the full choice set the lane answers");
+            // The one vocabulary (docs/82 5.5): no session or always scope
+            // the lane was never seen to carry.
+            assert_eq!(labels(choices), ["Once", "Deny"]);
         }
         other => panic!("an approval card, got {other:?}"),
     }
@@ -182,8 +190,8 @@ fn claude_denied_call_settles_denied_and_continues() {
 }
 
 /// `codex/approval-default.jsonl`: the command ask cards the inner
-/// command with its cwd and the model's reason, offers all four
-/// choices, and the gated execution waits as "Run" — finishing "Ran"
+/// command with its cwd and the model's reason, offers Once, This
+/// session and Deny, and the gated execution waits as "Run" — finishing "Ran"
 /// with the card allowed.
 #[test]
 fn codex_command_ask_waits_then_runs() {
@@ -202,7 +210,10 @@ fn codex_command_ask_waits_then_runs() {
             assert!(!reason.contains("exec-"), "no item ids: {reason}");
             assert!(!reason.contains('{'), "no raw JSON: {reason}");
             let ids: Vec<&str> = choices.iter().map(|choice| choice.id.as_str()).collect();
-            assert_eq!(ids, ["accept", "accept-for-session", "decline", "cancel"]);
+            assert_eq!(ids, ["accept", "accept-for-session", "decline"]);
+            // The one vocabulary (docs/82 5.5): Deny and stop is no answer
+            // in it, and nothing Codex keeps is reachable, so no Always here.
+            assert_eq!(labels(choices), ["Once", "This session", "Deny"]);
         }
         other => panic!("an approval card, got {other:?}"),
     }
@@ -264,7 +275,8 @@ fn codex_mcp_tool_gate_is_answerable_and_refusal_reads_denied() {
             assert_eq!(command, "echo hi-from-codex", "the call's arguments, not the tool name");
             assert_eq!(*state, ApprovalState::Pending);
             let ids: Vec<&str> = choices.iter().map(|choice| choice.id.as_str()).collect();
-            assert_eq!(ids, ["accept", "decline", "cancel"]);
+            assert_eq!(ids, ["accept", "decline"]);
+            assert_eq!(labels(choices), ["Once", "Deny"], "the elicitation wire takes no scope");
         }
         other => panic!("an approval card, got {other:?}"),
     }

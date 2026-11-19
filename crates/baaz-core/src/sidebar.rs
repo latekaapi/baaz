@@ -2752,7 +2752,7 @@ pub mod tests {
         assert_eq!(row.id, "chain-c", "the head is what is listed");
         assert_eq!(row.label, "Chart the Greyport ferry routes", "the chain keeps its original title");
         assert_eq!(row.turns, 8, "2 + (3 - 1) + (5 - 1): each destination hides its pack exchange");
-        assert_eq!(row.provider, ProviderId::Muse, "the muse head wears no provider mark (`row_mark` is `None` for Muse alone)");
+        assert_eq!(row.provider, ProviderId::Muse, "the chain's row is its head's: the Muse head, wearing Muse's mark");
     }
 
     /// The collapsed row keeps the head's own recency: no reorder jump

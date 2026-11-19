@@ -328,6 +328,9 @@ pub enum Notification {
         status: String,
         /// Wall-clock time in milliseconds, when reported.
         duration_ms: u64,
+        /// What a `failed` turn's `error` says ([`TurnFailure`]): what the
+        /// transcript's error card carries (docs/82 5.5).
+        failure: Option<TurnFailure>,
     },
     /// `item/started`: an item began (carried; the fold renders nothing —
     /// see the lane choice in [`crate::fold`]).
@@ -664,6 +667,44 @@ fn decode_item(item: &Value) -> Item {
     }
 }
 
+/// A failed turn's `error` (`TurnError`: `{message, codexErrorInfo,
+/// additionalDetails}`), as the error card needs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnFailure {
+    /// The server's words, with its additional details when it sent any.
+    pub message: String,
+    /// The `codexErrorInfo` variant's name (`usageLimitExceeded`,
+    /// `httpConnectionFailed`, …), when it named one.
+    pub info: Option<String>,
+    /// The upstream HTTP status an object variant carried.
+    pub http_status: Option<u64>,
+}
+
+impl TurnFailure {
+    /// The failure a `turn` object's `error` describes; `None` when it
+    /// carries none.
+    pub fn decode(turn: &Value) -> Option<TurnFailure> {
+        let error = turn.get("error").filter(|error| !error.is_null())?;
+        let mut message = error.get("message").and_then(Value::as_str).unwrap_or_default().trim().to_owned();
+        if let Some(more) = error.get("additionalDetails").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+            if !message.is_empty() {
+                message.push('\n');
+            }
+            message.push_str(more);
+        }
+        let info = error.get("codexErrorInfo");
+        let (info, http_status) = match info {
+            Some(Value::String(name)) => (Some(name.clone()), None),
+            Some(Value::Object(variant)) => match variant.iter().next() {
+                Some((name, body)) => (Some(name.clone()), body.get("httpStatusCode").and_then(Value::as_u64)),
+                None => (None, None),
+            },
+            _ => (None, None),
+        };
+        Some(TurnFailure { message, info, http_status })
+    }
+}
+
 /// Whether a `TurnError` (`{message, codexErrorInfo}`) is a refused
 /// credential: `codexErrorInfo == "unauthorized"`, or any variant carrying
 /// `httpStatusCode: 401` (codex-cli 0.144.6's `CodexErrorInfo`). Typed
@@ -729,6 +770,7 @@ fn decode_notification(method: &str, params: &Value) -> Notification {
                 turn_id: str_field(turn_obj, "id"),
                 status: str_field(turn_obj, "status"),
                 duration_ms: turn_obj.get("durationMs").and_then(Value::as_u64).unwrap_or(0),
+                failure: TurnFailure::decode(turn_obj),
             }
         }
         "item/started" => Notification::ItemStarted {

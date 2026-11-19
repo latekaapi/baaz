@@ -68,13 +68,13 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use aui_protocol::{
-    ApprovalBodyKind, ApprovalDecision, ApprovalScope, ApprovalState, Attachment, AttachmentKind,
+    ApprovalBodyKind, ApprovalState, Attachment, AttachmentKind,
     Block, Delta, Diff, DiffKind, DiffStat, Hunk, PermissionMode, Provider, ThinkingState, TodoItem,
     ToolBody, ToolKind, ToolStatus, Turn, TurnMeta, UploadState,
 };
 use provider::ProviderEvent;
 use serde_json::Value;
-use transcript_core::approval::{self, choice};
+use transcript_core::approval;
 use transcript_core::builder::tool_key;
 use transcript_core::tool::{split_lines, terminal_event, terminal_target, TerminalAnswer};
 use transcript_core::{diff, is_terminal_tool, wall_ms_since, ToolEvent, TranscriptBuilder, Verbs};
@@ -487,25 +487,52 @@ impl PersonDecision {
     }
 }
 
-/// The answers an MCP tool-call elicitation takes — allow once, deny, deny
-/// and stop — and, with `for_session`, the command and file-change lanes'
-/// fourth: allow for this session. The ids ride `DecideApproval` verbatim:
-/// the adapter answers exactly these on each lane, so the card declares
+/// The answers a Codex approval takes, in the one vocabulary (docs/82
+/// 5.5): Once (`accept`) and Deny (`decline`) everywhere, and — with
+/// `for_session`, the command and file-change lanes — This session
+/// (`accept-for-session`). The ids ride `DecideApproval` verbatim: the
+/// adapter answers exactly these on each lane, so the card declares
 /// exactly these. The elicitation response schema admits no scope, and a
-/// card must never offer what the wire cannot carry.
-fn codex_choices(for_session: bool) -> Vec<aui_protocol::ApprovalChoice> {
-    let mut choices = vec![choice("accept", "Allow once", ApprovalDecision::Once, ApprovalScope::ThisCommand)];
+/// card must never offer what the wire cannot carry. Always here is
+/// absent: nothing Codex persists is reachable from this protocol. Deny
+/// and stop (`cancel`) is not an answer in the vocabulary — Stop stops the
+/// turn.
+pub fn codex_choices(for_session: bool) -> Vec<aui_protocol::ApprovalChoice> {
+    let mut choices = vec![provider::ApprovalAnswer::Once.choice("accept")];
     if for_session {
-        choices.push(choice(
-            "accept-for-session",
-            "Allow for this session",
-            ApprovalDecision::ApprovedForSession,
-            ApprovalScope::ThisSession,
-        ));
+        choices.push(provider::ApprovalAnswer::ThisSession.choice("accept-for-session"));
     }
-    choices.push(choice("decline", "Deny", ApprovalDecision::Deny, ApprovalScope::ThisCommand));
-    choices.push(choice("cancel", "Deny and stop", ApprovalDecision::Abort, ApprovalScope::ThisCommand));
+    choices.push(provider::ApprovalAnswer::Deny.choice("decline"));
     choices
+}
+
+/// The two grants an `item/permissions/requestApproval` can be answered
+/// with: what was requested, for this turn (Once) or this session. The
+/// choice id IS the answer shape (`{permissions, scope}`).
+pub fn permission_choices(permissions: &Value) -> Vec<aui_protocol::ApprovalChoice> {
+    let grant = |scope: &str| serde_json::json!({ "permissions": permissions, "scope": scope }).to_string();
+    vec![
+        provider::ApprovalAnswer::Once.choice(grant("turn")),
+        provider::ApprovalAnswer::ThisSession.choice(grant("session")),
+    ]
+}
+
+/// A failed turn's card words: the kind its typed `codexErrorInfo` (or
+/// upstream status) names — a usage limit or a 429 is a rate limit — then
+/// the server's message.
+fn failure_card_words(failure: Option<&crate::frame::TurnFailure>) -> (transcript_core::failure::FailureKind, String) {
+    use transcript_core::failure::FailureKind;
+    let Some(failure) = failure else { return (FailureKind::Other, String::new()) };
+    let kind = match (failure.info.as_deref(), failure.http_status) {
+        (_, Some(429)) | (Some("usageLimitExceeded" | "sessionBudgetExceeded"), _) => FailureKind::RateLimited,
+        (Some("contextWindowExceeded"), _) => FailureKind::ContextFull,
+        (Some("serverOverloaded" | "internalServerError"), _) | (_, Some(500..=599)) => FailureKind::Unavailable,
+        (Some(name), _) if name.ends_with("ConnectionFailed") || name == "responseStreamDisconnected" => {
+            FailureKind::Unavailable
+        }
+        _ => FailureKind::from_words(&failure.message),
+    };
+    (kind, failure.message.clone())
 }
 
 /// The card kind that closes a turn whose `codex app-server` died under it
@@ -666,6 +693,7 @@ impl CodexFold {
                 turn_id,
                 status: "interrupted".into(),
                 duration_ms: 0,
+                failure: None,
             });
         }
         self.builder.take()
@@ -791,6 +819,7 @@ impl CodexFold {
                 turn_id: turn_id.clone(),
                 status: turn.get("status").and_then(Value::as_str).unwrap_or("completed").to_owned(),
                 duration_ms: turn.get("durationMs").and_then(Value::as_u64).unwrap_or(0),
+                failure: crate::frame::TurnFailure::decode(turn),
             });
         }
         self.builder.take()
@@ -960,18 +989,7 @@ impl CodexFold {
                 lines.push(format!("Requests {}", keys.join(", ")));
             }
         }
-        let grant = |scope: &str| {
-            serde_json::json!({ "permissions": decoded.permissions, "scope": scope }).to_string()
-        };
-        let choices = vec![
-            choice(grant("turn"), "Allow for this turn", ApprovalDecision::Once, ApprovalScope::ThisCommand),
-            choice(
-                grant("session"),
-                "Allow for this session",
-                ApprovalDecision::ApprovedForSession,
-                ApprovalScope::ThisSession,
-            ),
-        ];
+        let choices = permission_choices(&decoded.permissions);
         let card = approval::card(
             &decoded.item_id,
             "Permissions",
@@ -1472,6 +1490,16 @@ impl CodexFold {
             self.builder.open_turn(turn_id, None);
             self.builder.add(turn_id, None, Block::Text { text, streaming: false });
         }
+        // A failed turn cards its failure — a rate limit included — so the
+        // transcript shows it and offers Retry (docs/82 5.5), even on a turn
+        // that said nothing before it failed.
+        if let Notification::TurnCompleted { status, failure, .. } = notification {
+            if status == "failed" {
+                let (kind, message) = failure_card_words(failure.as_ref());
+                self.builder.open_turn(turn_id, None);
+                self.builder.add(turn_id, None, transcript_core::failure::card(kind, &message));
+            }
+        }
         if !self.builder.has_turn(turn_id) {
             // No content lane ever opened this turn and no deltas survived
             // it: finishing it would mint an empty turn the transcript never
@@ -1536,6 +1564,17 @@ pub fn step_line(fold: &mut CodexFold, line: &str, emit: &mut impl FnMut(Provide
     let deltas = fold.apply(&frame);
     if !deltas.is_empty() {
         emit(ProviderEvent::Deltas { session_id: session_id.clone(), deltas });
+    }
+    // The context the next request carries: the latest request's tokens
+    // against the model's window (docs/82 5.5). `last` covers one request,
+    // which is exactly what the next one starts from.
+    if let (Frame::Notification(Notification::TokenUsage { usage, .. }), Some(session_id)) = (&frame, session_id.clone()) {
+        let window = Some(usage.model_context_window);
+        let side = provider::facts::SessionSide {
+            context: Some(provider::facts::ContextReading::measured(usage.last.total_tokens, window)),
+            ..Default::default()
+        };
+        emit(ProviderEvent::SessionFacts { session_id, side });
     }
     // A typed refused credential (`codexErrorInfo: unauthorized` / 401)
     // ends the turn with the sign-in hint the app turns into its signed-out
@@ -2673,15 +2712,12 @@ mod tests {
                 let ids: Vec<&str> = choices.iter().map(|choice| choice.id.as_str()).collect();
                 assert_eq!(
                     ids,
-                    ["accept", "accept-for-session", "decline", "cancel"],
-                    "the full choice set the lane answers"
+                    ["accept", "accept-for-session", "decline"],
+                    "the lane's answers in the one vocabulary (docs/82 5.5)"
                 );
                 let labels: Vec<&str> =
                     choices.iter().map(|choice| choice.label.as_str()).collect();
-                assert_eq!(
-                    labels,
-                    ["Allow once", "Allow for this session", "Deny", "Deny and stop"]
-                );
+                assert_eq!(labels, ["Once", "This session", "Deny"]);
             }
             other => panic!("an approval card, got {other:?}"),
         }
@@ -2760,7 +2796,7 @@ mod tests {
                     !reason.contains("did not say why"),
                     "a previewed ask no longer pleads ignorance: {reason}"
                 );
-                assert_eq!(choices.len(), 4, "the full choice set the lane answers");
+                assert_eq!(choices.len(), 3, "Once, This session, Deny: the lane's answers in the one vocabulary");
             }
             other => panic!("an approval card, got {other:?}"),
         }
@@ -3343,8 +3379,8 @@ mod tests {
                     choices.iter().map(|choice| choice.id.as_str()).collect();
                 assert_eq!(
                     ids,
-                    ["accept", "decline", "cancel"],
-                    "exactly what the wire carries — no session scope"
+                    ["accept", "decline"],
+                    "Once and Deny: what the wire carries — no session scope"
                 );
             }
             other => panic!("an approval card, got {other:?}"),

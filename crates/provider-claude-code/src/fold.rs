@@ -64,12 +64,12 @@ use std::io::BufRead;
 use std::time::Instant;
 
 use aui_protocol::{
-    ApprovalBodyKind, ApprovalDecision, ApprovalScope, ApprovalState, Attachment, AttachmentKind, Block,
+    ApprovalBodyKind, ApprovalState, Attachment, AttachmentKind, Block,
     Delta, Diff, Hunk, PermissionMode, Provider, ThinkingState, TodoItem, TodoState, ToolBody, ToolKind,
     ToolStatus, Turn, TurnMeta, UploadState,
 };
 use provider::{ProviderError, ProviderEvent};
-use transcript_core::approval::{self, choice};
+use transcript_core::approval;
 use transcript_core::builder::tool_key;
 use transcript_core::tool::{split_lines, terminal_event, terminal_target, TerminalAnswer};
 use transcript_core::todo::todo_state;
@@ -551,6 +551,9 @@ pub struct ClaudeFold {
     /// [`step_line`] compares a new report against, so only a move is
     /// announced, and what a relaunch re-applies.
     permission_mode: Option<PermissionMode>,
+    /// Whether the child last reported its own `plan` mode (docs/82 5.5):
+    /// plan folds to no neutral mode, so it is tracked beside it.
+    plan_mode: bool,
     account: AccountSnapshot,
     /// `can_use_tool` requests waiting on a human decision, oldest first. A
     /// request stays here until `DecideApproval` answers it: nothing in the
@@ -720,6 +723,12 @@ impl ClaudeFold {
     /// Record `mode` as the one in effect; `true` when that is a move.
     pub fn note_permission_mode(&mut self, mode: PermissionMode) -> bool {
         self.permission_mode.replace(mode) != Some(mode)
+    }
+
+    /// Record whether the child reports its plan mode; `true` when that is
+    /// a move.
+    pub fn note_plan_mode(&mut self, on: bool) -> bool {
+        std::mem::replace(&mut self.plan_mode, on) != on
     }
 
     /// The session's effective model: the last `init` frame's, or the last
@@ -1040,6 +1049,7 @@ impl ClaudeFold {
                 duration_ms,
                 model,
                 permission_denials,
+                failure,
                 ..
             } => {
                 // `tokens_in` is the whole billed prompt: the wire splits
@@ -1138,6 +1148,22 @@ impl ClaudeFold {
                             }
                         }
                     }
+                }
+                // A failed turn cards its failure on the turn it failed in
+                // — a rate limit included — so the transcript shows it and
+                // offers Retry (docs/82 5.5). The person's own Stop is not a
+                // failure (docs/82 0.8). With no turn open (an error before
+                // any message) a control turn carries the card, never lost.
+                if let Some(message) = failure.as_deref().filter(|_| !self.stopping) {
+                    let turn_id = match self.assistant_turn.clone().or_else(|| self.open.last().cloned()) {
+                        Some(open) => open,
+                        None => {
+                            let key = format!("failure-{}", self.builder.session().turns.len());
+                            self.control_turn(&key)
+                        }
+                    };
+                    let kind = transcript_core::failure::FailureKind::from_words(message);
+                    self.builder.add(&turn_id, None, transcript_core::failure::card(kind, message));
                 }
                 // One user turn, one finished turn: the assistant turn owns
                 // the `result` frame's totals, so the footer, the token
@@ -2391,9 +2417,28 @@ fn approval_body_kind(tool_name: &str) -> ApprovalBodyKind {
     }
 }
 
+/// A `can_use_tool` answer in the one vocabulary (docs/82 5.5): Once
+/// (`"allow"`) and Deny (`"deny"`, with a note for the model). This
+/// session and Always here are absent: the CLI's `permission_suggestions`
+/// would carry them back as `updatedPermissions`, but no answer of that
+/// shape was ever probed, and a card never offers what the wire was not
+/// seen to carry.
+pub fn approval_choices() -> Vec<aui_protocol::ApprovalChoice> {
+    let mut deny = provider::ApprovalAnswer::Deny.choice("deny");
+    deny.accepts_feedback = true;
+    vec![provider::ApprovalAnswer::Once.choice("allow"), deny]
+}
+
+/// What an unknown control subtype can be answered with: the same allow /
+/// deny pair the adapter answers every control request with, as Once and
+/// Deny.
+fn unknown_control_options() -> Vec<provider::ApprovalOption> {
+    provider::ApprovalOption::of_choices(&approval_choices())
+}
+
 /// The transcript card for a `can_use_tool` request: a pending approval the
-/// person resolves through `DecideApproval` with the card's `"allow"` /
-/// `"deny"` choices.
+/// person resolves through `DecideApproval` with the card's
+/// [`approval_choices`].
 ///
 /// The face is per tool, never the raw input JSON: the command line names
 /// what would run, the reason says it in the tool's own terms, and no
@@ -2406,9 +2451,7 @@ fn approval_card(request: &ApprovalRequest, session_cwd: &str) -> Block {
             capabilities.push(name.clone());
         }
     }
-    let mut deny = choice("deny", "Deny", ApprovalDecision::Deny, ApprovalScope::ThisCommand);
-    deny.accepts_feedback = true;
-    let choices = vec![choice("allow", "Allow", ApprovalDecision::Once, ApprovalScope::ThisCommand), deny];
+    let choices = approval_choices();
     let body_kind = approval_body_kind(&request.tool_name);
     let mut card = approval::card(&request.request_id, &request.tool_name, command, reason, cwd, body_kind, choices);
     if let Block::Approval { capabilities: slot, rule, .. } = &mut card {
@@ -2621,6 +2664,7 @@ pub fn step_line(fold: &mut ClaudeFold, line: &str, emit: &mut impl FnMut(Provid
             session_id: session_id.clone().unwrap_or_default(),
             approval_id: request.request_id.clone(),
             headline: approval_headline(request),
+            options: provider::ApprovalOption::of_choices(&approval_choices()),
         }),
         // An unknown subtype waits on a decision too: the row must say so,
         // not only the card (docs/81 B PM-15).
@@ -2628,6 +2672,7 @@ pub fn step_line(fold: &mut ClaudeFold, line: &str, emit: &mut impl FnMut(Provid
             session_id: session_id.clone().unwrap_or_default(),
             approval_id: request_id.clone(),
             headline: format!("Waiting on a request Baaz does not know ({subtype})"),
+            options: unknown_control_options(),
         }),
         _ => None,
     };
@@ -2636,6 +2681,12 @@ pub fn step_line(fold: &mut ClaudeFold, line: &str, emit: &mut impl FnMut(Provid
     // for a named session.
     let reported =
         frame.reported_permission_mode().and_then(crate::argv::permission_mode_from_claude);
+    // Its own plan mode, entered by the toggle or left by the agent once its
+    // plan is approved: announced only when it moved (docs/82 5.5).
+    let plan_moved = frame
+        .reported_permission_mode()
+        .map(|wire| wire == crate::PLAN_PERMISSION_MODE)
+        .filter(|on| fold.note_plan_mode(*on));
     let deltas = fold.apply(&frame);
     // An acknowledged turn found its streamed id: announced before the
     // deltas that carry it, so the app maps the ack's id first.
@@ -2693,6 +2744,28 @@ pub fn step_line(fold: &mut ClaudeFold, line: &str, emit: &mut impl FnMut(Provid
                 },
             });
         }
+    }
+    // The context the turn ended on, against the model's window (docs/82
+    // 5.5): the meter reads it; nothing else in the side is tracked here.
+    if let (Frame::TurnResult { context: Some((used, window)), .. }, Some(session_id)) = (&frame, session_id.clone()) {
+        let side = provider::facts::SessionSide {
+            context: Some(provider::facts::ContextReading::measured(*used, *window)),
+            ..Default::default()
+        };
+        emit(ProviderEvent::SessionFacts { session_id, side });
+    }
+    // Its own skills, named by `init`: the `/` menu lists these on this
+    // provider, never another provider's (docs/82 5.5).
+    if let (Frame::Init(init), Some(session_id)) = (&frame, session_id.clone()) {
+        let skills = init
+            .skills
+            .iter()
+            .map(|name| provider::facts::ProviderSkill { name: name.clone(), description: None })
+            .collect();
+        emit(ProviderEvent::SkillsListed { session_id, skills });
+    }
+    if let (Some(on), Some(session_id)) = (plan_moved, session_id.clone()) {
+        emit(ProviderEvent::PlanModeChanged { session_id, on });
     }
     if let (Some(mode), Some(session_id)) = (reported, session_id) {
         if fold.note_permission_mode(mode) {

@@ -35,6 +35,11 @@ pub enum ProviderEvent {
         approval_id: String,
         /// One-line human summary of what is being approved.
         headline: String,
+        /// The answers it offers, in the one vocabulary, each with the
+        /// adapter's own choice id: what the app decides with, never the
+        /// approval id's shape (docs/82 5.5, docs/81 B S-7). A scope the
+        /// provider cannot do is absent.
+        options: Vec<crate::ApprovalOption>,
     },
     /// The provider asked a question: settle it with the question commands.
     /// The full prompt also arrives as a delta; this carries only what a
@@ -56,6 +61,28 @@ pub enum ProviderEvent {
         session_id: String,
         /// The mode in effect.
         mode: PermissionMode,
+    },
+    /// The provider's own plan mode as it now stands (docs/82 5.5): sent by
+    /// an adapter whose plan mode is native when the backend reports it
+    /// entered or left it — the person's toggle, or the agent leaving it
+    /// once its plan is approved — so the Plan toggle never claims a mode
+    /// the backend is not in.
+    PlanModeChanged {
+        /// The owning session.
+        session_id: String,
+        /// Whether plan mode is on.
+        on: bool,
+    },
+    /// The skills the session's own provider offers as `/name` commands
+    /// (docs/82 5.5): what the `/` menu lists for a provider whose skills
+    /// the app does not manage itself. Sent when the session starts (Claude
+    /// Code's `init` names them); a provider that never sends it has none
+    /// in the menu.
+    SkillsListed {
+        /// The owning session.
+        session_id: String,
+        /// The skills, in the provider's order.
+        skills: Vec<crate::facts::ProviderSkill>,
     },
     /// The turn an earlier [`crate::Ack::TurnAccepted`] named streams
     /// under `turn_id`: from here on that turn is `turn_id` in every

@@ -99,11 +99,22 @@ fn unanswered_request_fails_and_explicit_allow_answers() {
                 session_id,
                 approval_id,
                 headline,
-            } => Some((session_id, approval_id, headline)),
+                options,
+            } => Some((session_id, approval_id, headline, options)),
             _ => None,
         })
         .collect();
     assert_eq!(taps.len(), 1, "one tap per request, never a silent wait");
+    // The answers in the one vocabulary (docs/82 5.5): Once and Deny, each
+    // carrying the adapter's own choice id; This session and Always here
+    // are absent because no answer of that shape was ever probed.
+    assert_eq!(
+        taps[0].3,
+        &vec![
+            provider::ApprovalOption { answer: provider::ApprovalAnswer::Once, choice: "allow".into() },
+            provider::ApprovalOption { answer: provider::ApprovalAnswer::Deny, choice: "deny".into() },
+        ]
+    );
     assert_eq!(taps[0].0, "fdd19e9e-e32b-4a7b-b88c-437271a08851");
     assert_eq!(taps[0].1, "b4554ab2-30c2-4271-8451-dd9d6f5e226d");
     assert_eq!(taps[0].2, &approval_headline(request));

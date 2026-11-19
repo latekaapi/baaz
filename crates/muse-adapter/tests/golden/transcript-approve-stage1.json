@@ -50,14 +50,14 @@
               "choices": [
                 {
                   "id": "allow_once",
-                  "label": "Allow once",
+                  "label": "Once",
                   "decision": "once",
                   "scope": "this_command",
                   "accepts_feedback": false
                 },
                 {
                   "id": "allow_local_prefix",
-                  "label": "Always allow in this workspace: echo ...",
+                  "label": "Always here",
                   "decision": "policy_amendment",
                   "scope": "this_worktree",
                   "rule_preview": "Always allow in this workspace: echo ...",
@@ -65,8 +65,8 @@
                 },
                 {
                   "id": "abort",
-                  "label": "Reject",
-                  "decision": "abort",
+                  "label": "Deny",
+                  "decision": "deny",
                   "scope": "this_command",
                   "accepts_feedback": true
                 }
@@ -120,7 +120,7 @@
     "1:08f44b07b5901a25",
     "5:0f8548a97bee3d48",
     "8:df3893aed28595f7",
-    "10:ff34e918f3b0d782"
+    "10:d2f0c2988f90d498"
   ],
   "abandon": [
     "1:08f44b07b5901a25",
@@ -132,6 +132,6 @@
     "7:0f8548a97bee3d48",
     "8:df3893aed28595f7",
     "9:df3893aed28595f7",
-    "10:814aaf9b61abef7e"
+    "10:664b185dd5bb9bfc"
   ]
 }

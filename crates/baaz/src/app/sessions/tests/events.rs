@@ -975,10 +975,9 @@ fn a_parked_cancelled_approval_stops_reading_needs_approval(cx: &mut gpui::TestA
                         id: "mcp-elicitation-0".into(),
                         session_id: rt.session_id.clone(),
                         provider: crate::providers::ProviderId::Codex,
-                        kind: crate::providers::ExternalApprovalKind::CodexMcpElicitation,
+                        options: provider::ApprovalOption::of_choices(&provider_codex::fold::codex_choices(false)),
                         headline: "Allow the baaz MCP server to run tool \"terminal_run\"?".into(),
                         reason: "Allow the baaz MCP server to run tool \"terminal_run\"?".into(),
-                        dont_ask_again: None,
                         stage_token: None,
                         decision_sent: None,
                     },
@@ -1022,7 +1021,7 @@ fn a_parked_cancelled_approval_stops_reading_needs_approval(cx: &mut gpui::TestA
             view.update(cx, |view, cx| {
                 view.runtime().clone().update(cx, |rt, cx| rt.decide_external_approval(
                     "mcp-elicitation-0".to_owned(),
-                    crate::providers::ApprovalChoice::Cancel,
+                    "decline",
                     None,
                     cx,
                 ));

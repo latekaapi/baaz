@@ -160,31 +160,6 @@ pub fn gate(id: ProviderId, capability: Capability) -> Option<String> {
     (!offers(id, capability)).then(|| not_available(id))
 }
 
-/// The mode picker's detail line for `mode` on `id`'s sessions: the
-/// adapter's own words for what the mode lets through, so the picker never
-/// claims more than the backend enforces; the protocol's sentence for a
-/// mode the adapter does not declare.
-pub fn mode_description(id: ProviderId, mode: aui_protocol::PermissionMode) -> &'static str {
-    id.descriptor().mode(mode).map_or_else(|| mode.description(), |declared| declared.description)
-}
-
-/// The approval kind and its decision shape (docs/81 B S-7: a typed kind
-/// on the request is 5.5's; until then the registry reads it off the id).
-impl ProviderId {
-    /// Which kind an approval this provider raised is, by its id: the
-    /// decision travels back on the provider's own wire shape.
-    pub fn external_approval_kind(self, approval_id: &str) -> ExternalApprovalKind {
-        match self {
-            ProviderId::ClaudeCode => ExternalApprovalKind::ClaudeCanUseTool,
-            ProviderId::Muse => ExternalApprovalKind::MuseApproval,
-            ProviderId::Codex if approval_id.starts_with(provider_codex::child::MCP_ELICITATION_ID_PREFIX) => {
-                ExternalApprovalKind::CodexMcpElicitation
-            }
-            ProviderId::Codex => ExternalApprovalKind::CodexCommand,
-        }
-    }
-}
-
 /// How a person gets, updates and reads about each provider's CLI — one
 /// table for the connect screen and Settings (docs/65 §3.1 #9), declared by
 /// each adapter. Commands are typed into a terminal for the person to run,
@@ -942,81 +917,6 @@ pub fn write_last_provider(id: ProviderId) {
 
 // ------------------------------------------------- external approvals
 
-/// Where an approval waiting on the person came from. The provider lane
-/// constructs it from the decoded request (`session::lane`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExternalApprovalKind {
-    /// Claude Code `can_use_tool` on the control channel: `tool_name`,
-    /// `display_name`, `input`, `tool_use_id`, `permission_suggestions`.
-    ClaudeCanUseTool,
-    /// Codex `item/commandExecution/requestApproval`.
-    CodexCommand,
-    /// Codex `mcpServer/elicitation/request`.
-    CodexMcpElicitation,
-    /// Muse `approval/request`: the inline card carries its choices.
-    MuseApproval,
-}
-
-impl ExternalApprovalKind {
-    /// The short source tag the card shows beside the headline.
-    pub fn tag(self) -> &'static str {
-        match self {
-            ExternalApprovalKind::ClaudeCanUseTool => "Claude Code tool request",
-            ExternalApprovalKind::CodexCommand => "Codex command approval",
-            ExternalApprovalKind::CodexMcpElicitation => "Codex tool question",
-            ExternalApprovalKind::MuseApproval => "Muse approval",
-        }
-    }
-}
-
-/// The person's answer. `decline` ("no, do something else" — the turn
-/// continues) and `cancel` ("no, stop" — the turn is interrupted) are
-/// different answers and ride as different choices; the card offers both.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ApprovalChoice {
-    /// Run it, once.
-    Accept,
-    /// Run it and stop asking for the rest of the session.
-    AcceptForSession,
-    /// Refuse; the turn continues.
-    Decline,
-    /// Refuse; the turn is interrupted.
-    Cancel,
-}
-
-impl ApprovalChoice {
-    /// Every choice the card offers, in card order.
-    pub fn all() -> [ApprovalChoice; 4] {
-        [
-            ApprovalChoice::Accept,
-            ApprovalChoice::AcceptForSession,
-            ApprovalChoice::Decline,
-            ApprovalChoice::Cancel,
-        ]
-    }
-
-    /// The decision token the provider lane sends.
-    pub fn choice_id(self) -> &'static str {
-        match self {
-            ApprovalChoice::Accept => "accept",
-            ApprovalChoice::AcceptForSession => "acceptForSession",
-            ApprovalChoice::Decline => "decline",
-            ApprovalChoice::Cancel => "cancel",
-        }
-    }
-
-    /// The card button label. Decline and Cancel never share one: "no, do
-    /// something else" and "no, stop" are different answers.
-    pub fn label(self) -> &'static str {
-        match self {
-            ApprovalChoice::Accept => "Approve",
-            ApprovalChoice::AcceptForSession => "Approve for this session",
-            ApprovalChoice::Decline => "Deny",
-            ApprovalChoice::Cancel => "Deny and stop",
-        }
-    }
-}
-
 /// One approval from a new provider, waiting on the person. Rendered on
 /// the existing approvals surface; decided through the provider lane; the
 /// card changes only when the server's notification resolves it — never
@@ -1029,18 +929,16 @@ pub struct ExternalApproval {
     pub session_id: String,
     /// Which backend asked.
     pub provider: ProviderId,
-    /// Which of the six request shapes this is.
-    pub kind: ExternalApprovalKind,
+    /// The answers it offers, in the one vocabulary, each with the
+    /// adapter's own choice id — typed on the seam's request (docs/82 5.5),
+    /// never read off the id. Empty for an approval pulled from the
+    /// pending set, whose inline card carries the choices.
+    pub options: Vec<provider::ApprovalOption>,
     /// One-line human summary: the tool name, the command, the question.
     pub headline: String,
     /// The model-written `reason` sentence (Codex), or the tool input
     /// summary (Claude Code). Shown on the card; never empty.
     pub reason: String,
-    /// Claude Code's `permission_suggestions`: the "don't ask again"
-    /// affordance (`addRules`/`allow`/`localSettings`). Shown beside the
-    /// session-scoped choice; `None` on Codex, which scopes
-    /// `acceptForSession` itself.
-    pub dont_ask_again: Option<String>,
     /// Opaque per-stage token passed back verbatim with the decision.
     /// Codex answers a single yes/no per approval, so this is `None`
     /// there; a backend that stages requires `Some`.
@@ -1101,13 +999,13 @@ impl ExternalApprovalStore {
     /// notification settles it through [`Self::resolve`]. A repeat press
     /// while one is in flight, or an unknown id, returns `None` and sends
     /// nothing twice.
-    pub fn decide(&mut self, id: &str, choice: ApprovalChoice) -> Option<(String, Option<String>)> {
+    pub fn decide(&mut self, id: &str, choice: &str) -> Option<(String, Option<String>)> {
         let approval = self.approvals.get_mut(id)?;
         if approval.decision_sent.is_some() {
             return None;
         }
-        let token = (choice.choice_id().to_owned(), approval.stage_token.clone());
-        approval.decision_sent = Some(choice.choice_id().to_owned());
+        let token = (choice.to_owned(), approval.stage_token.clone());
+        approval.decision_sent = Some(choice.to_owned());
         Some(token)
     }
 
@@ -1149,13 +1047,14 @@ mod tests {
     #[test]
     fn read_only_detail_never_claims_more_than_the_provider_enforces() {
         use aui_protocol::PermissionMode;
+        let line = |id: ProviderId, mode: PermissionMode| id.descriptor().mode(mode).expect("declared").description;
         let read_only = PermissionMode::DenyUnmatched;
-        assert_eq!(mode_description(ProviderId::ClaudeCode, read_only), read_only.description());
-        assert!(mode_description(ProviderId::Codex, read_only).contains("MCP tools your Codex config auto-approves still run"));
-        assert!(mode_description(ProviderId::Muse, read_only).contains("MCP tools you always allowed in Muse still run"));
+        assert_eq!(line(ProviderId::ClaudeCode, read_only), read_only.description());
+        assert!(line(ProviderId::Codex, read_only).contains("MCP tools your Codex config auto-approves still run"));
+        assert!(line(ProviderId::Muse, read_only).contains("MCP tools you always allowed in Muse still run"));
         for id in [ProviderId::ClaudeCode, ProviderId::Codex, ProviderId::Muse] {
             for mode in [PermissionMode::AllowAll, PermissionMode::OnRequest, PermissionMode::PromptUnmatched] {
-                assert_eq!(mode_description(id, mode), mode.description());
+                assert_eq!(line(id, mode), mode.description());
             }
         }
     }
@@ -1366,9 +1265,6 @@ mod tests {
             assert_eq!(id.update_command(), declared.update_command);
             assert_eq!(id.docs_url(), declared.docs_url);
             assert_eq!(id.version_floor(), declared.version_floor);
-            for mode in declared.modes {
-                assert_eq!(mode_description(id, mode.id), mode.description);
-            }
         }
         // One shared-child provider, and it is the one the window starts.
         let shared: Vec<ProviderId> =
@@ -1457,26 +1353,14 @@ mod tests {
         assert_eq!(gate(ProviderId::Codex, C::ForkSession).as_deref(), Some("Not available in Codex."));
     }
 
-    #[test]
-    fn decline_and_cancel_are_different_answers() {
-        assert_ne!(ApprovalChoice::Decline.choice_id(), ApprovalChoice::Cancel.choice_id());
-        assert_ne!(ApprovalChoice::Decline.label(), ApprovalChoice::Cancel.label());
-        assert_eq!(ApprovalChoice::Decline.choice_id(), "decline");
-        assert_eq!(ApprovalChoice::Cancel.choice_id(), "cancel");
-        let ids: Vec<&str> =
-            ApprovalChoice::all().iter().map(|c| c.choice_id()).collect();
-        assert_eq!(ids, vec!["accept", "acceptForSession", "decline", "cancel"]);
-    }
-
-    fn sample(kind: ExternalApprovalKind) -> ExternalApproval {
+    fn sample() -> ExternalApproval {
         ExternalApproval {
             id: "appr-1".into(),
             session_id: "s-1".into(),
             provider: ProviderId::Codex,
-            kind,
+            options: provider::ApprovalOption::of_choices(&provider_codex::fold::codex_choices(true)),
             headline: "Allow creating /tmp/probe.txt?".into(),
             reason: "Allow creating /tmp/probe.txt containing HELLO as requested?".into(),
-            dont_ask_again: None,
             stage_token: None,
             decision_sent: None,
         }
@@ -1485,14 +1369,14 @@ mod tests {
     #[test]
     fn the_card_is_never_ahead_of_the_server() {
         let mut store = ExternalApprovalStore::empty();
-        store.inject(sample(ExternalApprovalKind::CodexCommand));
+        store.inject(sample());
         assert!(store.has_pending());
         // The press sends exactly one decision and the card stays pending.
-        let sent = store.decide("appr-1", ApprovalChoice::Decline).expect("sent");
+        let sent = store.decide("appr-1", "decline").expect("sent");
         assert_eq!(sent.0, "decline");
         assert!(store.has_pending(), "a sent decision still waits on the server");
         // A repeat press sends nothing twice.
-        assert!(store.decide("appr-1", ApprovalChoice::Cancel).is_none());
+        assert!(store.decide("appr-1", "accept").is_none());
         // Only the server's notification settles the card.
         assert!(store.resolve("appr-1"));
         assert!(!store.has_pending());
@@ -1593,13 +1477,8 @@ mod tests {
     #[test]
     fn every_request_shape_reaches_the_store() {
         let mut store = ExternalApprovalStore::empty();
-        let kinds = [
-            ExternalApprovalKind::ClaudeCanUseTool,
-            ExternalApprovalKind::CodexCommand,
-            ExternalApprovalKind::CodexMcpElicitation,
-        ];
-        for (i, kind) in kinds.into_iter().enumerate() {
-            let mut approval = sample(kind);
+        for i in 0..3 {
+            let mut approval = sample();
             approval.id = format!("appr-{i}");
             store.inject(approval);
         }

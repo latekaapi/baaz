@@ -77,18 +77,23 @@ impl SessionView {
     /// once; a send made while the session was starting runs it on landing
     /// with the text captured at its Enter.
     pub(super) fn dispatch_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let provider_kind = self.runtime.read(cx).provider_kind();
         // `!` is the shell escape hatch (research §1.12): a command, not a turn,
-        // outside any turn, and still subject to the approval policy.
+        // outside any turn, and still subject to the approval policy — only
+        // where the provider runs one. Elsewhere the escape is absent, not
+        // refused: the words go to the agent as typed (docs/82 5.5, rule 13).
         if let Some(command) = text.strip_prefix('!') {
-            if !command.trim().is_empty() {
+            if !command.trim().is_empty() && crate::providers::offers(provider_kind, provider::Capability::SessionShell) {
                 self.runtime.update(cx, |rt, cx| rt.run_user_shell(command.trim().to_owned(), cx));
                 return;
             }
         }
         // A `/` command typed in full and sent is the command, not a prompt.
         // The menu is one way to reach these; typing is the other, and it is
-        // the only way to reach the one that takes an argument (`/name`).
-        if let Some((command, argument)) = Command::parse_line(&text) {
+        // the only way to reach the one that takes an argument (`/name`). A
+        // command not offered on this provider is not intercepted: the words
+        // go to the agent, whose own `/command` it may be (docs/82 5.5).
+        if let Some((command, argument)) = Command::parse_line(&text).filter(|(command, _)| command.offered_on(provider_kind)) {
             self.run_command_with(command, argument.to_owned(), window, cx);
             return;
         }
@@ -201,7 +206,10 @@ impl SessionRuntime {
         // Plan mode prefixes the model-visible input, exactly as on the
         // muse lane; the display text stays the person's words.
         let quoted = quoted_prompt(&self.quotes, &text);
-        let model_text = if self.plan { plan::prefix(&quoted) } else { quoted };
+        // Only a plan skill is reached through the prompt; a native plan
+        // mode is the provider's own state, and the words go as typed.
+        let skill_plan = self.plan && self.plan_support() == provider::PlanMode::Skill;
+        let model_text = if skill_plan { plan::prefix(&quoted) } else { quoted };
         // The provider echoes the whole model-visible input; the bubble
         // shows what the person typed, including across a restart (the
         // record mirrors the map for replayed histories).
@@ -236,7 +244,9 @@ impl SessionRuntime {
         );
         self.announce_landed(&landed, cx);
         self.pending_optimistic.push(PendingOptimistic { id: optimistic_id.clone(), text: text.clone() });
-        let planning = self.plan;
+        // Only a plan skill's reply becomes a plan card: a native plan mode
+        // presents its plan through the provider's own approval.
+        let planning = self.plan && self.plan_support() == provider::PlanMode::Skill;
         // A send while the reply is done but the turn still open (Muse
         // saving memories): the provider queues it behind the tail, and its
         // bubble stands from now on, so nothing looks lost.
@@ -278,6 +288,10 @@ impl SessionRuntime {
                 // which turn this ack names, use the streamed id; else
                 // `TurnIdentified` re-keys what this records when it lands.
                 let turn_id = self.streamed_turn_id(&turn_id).to_owned();
+                // The turn carries the words too, so a failure card on it
+                // can resend them (Retry, docs/82 5.5): the provider's turn
+                // id is not the request id the words were kept under.
+                self.remember_command(&turn_id, &text);
                 // Busy until the provider speaks (X1): the ack only admits
                 // the send, so `submitting` stays true — the status row
                 // keeps reading Working — until the first provider event
@@ -1023,19 +1037,67 @@ impl SessionRuntime {
 
     // -------------------------------------------------------------- plan mode
 
-    /// Turn plan mode on or off (Shift+Tab, `/plan`, the pill's `x`).
+    /// The session provider's plan mode (docs/82 5.5): what the one Plan
+    /// toggle turns on, or [`provider::PlanMode::None`] when the toggle is
+    /// absent.
+    pub(crate) fn plan_support(&self) -> provider::PlanMode {
+        self.provider_kind().descriptor().plan
+    }
+
+    /// Turn plan mode on or off (Shift+Tab, `/plan`, the pill's `x`): the
+    /// session provider's own (docs/82 5.5).
     ///
-    /// Turning it on asks the server for `denyUnmatched` and remembers what the
-    /// session was in; the chip only moves when `session/approvalModeChanged`
-    /// says it did.
+    /// - A skill (Muse): asks for `denyUnmatched` and remembers what the
+    ///   session was in; sends carry the `/plan ` prefix; the chip only
+    ///   moves when the provider says the mode did.
+    /// - Native (Claude Code): `SetPlanMode` switches the provider's own
+    ///   plan mode; the toggle then follows its `PlanModeChanged`.
+    /// - None (Codex): the toggle is absent — nothing happens.
     pub fn set_plan(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.plan == on {
             return;
         }
-        // A provider lane has no plan-mode channel: turning it on asks
-        // for `DenyUnmatched` through the mode switch, and the flag stands
-        // back down on refusal, so the pill never claims enforcement the
-        // child never took.
+        match self.plan_support() {
+            provider::PlanMode::None => {}
+            provider::PlanMode::Native => {
+                self.plan = on;
+                if let Some(queue) = self.start_queue() {
+                    queue.plan = Some(on);
+                    cx.emit(RuntimeEvent::ComposerChanged);
+                    return;
+                }
+                self.send_native_plan(on, cx);
+                cx.emit(RuntimeEvent::ComposerChanged);
+            }
+            provider::PlanMode::Skill => self.set_skill_plan(on, cx),
+        }
+    }
+
+    /// The provider's own plan mode, on or off: the toggle stands back
+    /// down on a refusal, so the pill never claims a mode the child never
+    /// took.
+    pub(super) fn send_native_plan(&mut self, on: bool, cx: &mut Context<Self>) {
+        let command = ProviderCommand::SetPlanMode {
+            request_id: provider::new_request_id(),
+            session_id: self.session_id.clone(),
+            on,
+        };
+        self.provider_send(command, cx, move |this, result, cx| {
+            if let Err(error) = result {
+                this.plan = !on;
+                this.report_provider_error(&error, cx);
+                cx.emit(RuntimeEvent::ComposerChanged);
+            }
+        });
+    }
+
+    /// Plan mode through a plan skill: Read-only while it stands, the prior
+    /// mode back when it ends.
+    fn set_skill_plan(&mut self, on: bool, cx: &mut Context<Self>) {
+        // No plan-mode channel: turning it on asks for `DenyUnmatched`
+        // through the mode switch, and the flag stands back down on
+        // refusal, so the pill never claims enforcement the child never
+        // took.
         self.plan = on;
         let restore = if on {
             self.plan_previous_mode = Some(self.mode());

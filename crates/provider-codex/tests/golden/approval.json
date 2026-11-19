@@ -57,14 +57,14 @@
               "choices": [
                 {
                   "id": "accept",
-                  "label": "Allow once",
+                  "label": "Once",
                   "decision": "once",
                   "scope": "this_command",
                   "accepts_feedback": false
                 },
                 {
                   "id": "accept-for-session",
-                  "label": "Allow for this session",
+                  "label": "This session",
                   "decision": "approved_for_session",
                   "scope": "this_session",
                   "accepts_feedback": false
@@ -73,13 +73,6 @@
                   "id": "decline",
                   "label": "Deny",
                   "decision": "deny",
-                  "scope": "this_command",
-                  "accepts_feedback": false
-                },
-                {
-                  "id": "cancel",
-                  "label": "Deny and stop",
-                  "decision": "abort",
                   "scope": "this_command",
                   "accepts_feedback": false
                 }
@@ -119,9 +112,9 @@
     "27:179a4a0616d6f5c4",
     "40:451551cf082b3ce9",
     "42:8ad4a0e360a5dcb4",
-    "43:5c5b944cdfd97794",
-    "47:e598e18e267d27bf",
-    "55:a60e1846ca472eea"
+    "43:4c972e331e76c059",
+    "47:aade69227bf7421c",
+    "55:4a5c4456bdf6e97f"
   ],
   "abandon": [
     "1:c11f324e035c08d3",
@@ -166,18 +159,18 @@
     "40:d5f8e3d522eace99",
     "41:d5f8e3d522eace99",
     "42:678a36f5d480f921",
-    "43:c5372b7735bfd47b",
-    "44:c5372b7735bfd47b",
-    "45:c5372b7735bfd47b",
-    "46:c5372b7735bfd47b",
-    "47:bc86fba12cdef483",
-    "48:22b22b9bd84d2f55",
-    "49:22b22b9bd84d2f55",
-    "50:22b22b9bd84d2f55",
-    "51:22b22b9bd84d2f55",
-    "52:6dd98fd65bfe4e6c",
-    "53:6dd98fd65bfe4e6c",
-    "54:6dd98fd65bfe4e6c",
-    "55:a60e1846ca472eea"
+    "43:eeb4984222e7897e",
+    "44:eeb4984222e7897e",
+    "45:eeb4984222e7897e",
+    "46:eeb4984222e7897e",
+    "47:79de8edce5574196",
+    "48:67473164c19e5e04",
+    "49:67473164c19e5e04",
+    "50:67473164c19e5e04",
+    "51:67473164c19e5e04",
+    "52:5587a8baa9105751",
+    "53:5587a8baa9105751",
+    "54:5587a8baa9105751",
+    "55:4a5c4456bdf6e97f"
   ]
 }

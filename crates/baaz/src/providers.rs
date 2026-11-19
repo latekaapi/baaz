@@ -8,18 +8,19 @@ pub use baaz_core::providers::*;
 
 /// A [`ProviderId`]'s badge in the library's icon set.
 pub trait ProviderMark {
-    /// The provider mark a sidebar row wears after its tags.
-    fn row_mark(self) -> Option<aui_icons::Provider>;
+    /// The provider mark a sidebar row wears after its tags: every row,
+    /// on every provider (docs/82 5.5) — a row with no mark used to mean
+    /// Muse.
+    fn row_mark(self) -> aui_icons::Provider;
     /// The mark beside the composer model chip.
     fn icon(self) -> aui_icons::Provider;
 }
 
 impl ProviderMark for ProviderId {
-    /// The provider mark a sidebar row wears after its tags; none for a
-    /// provider whose rows wear none ([`provider::ProviderTrait::UnmarkedRows`]:
-    /// the sidebar's baselines were drawn when it was the only provider).
-    fn row_mark(self) -> Option<aui_icons::Provider> {
-        (!self.has(provider::ProviderTrait::UnmarkedRows)).then(|| self.icon())
+    /// The provider mark a sidebar row wears after its tags: its own badge,
+    /// on every provider (docs/82 5.5).
+    fn row_mark(self) -> aui_icons::Provider {
+        self.icon()
     }
 
     /// The mark beside the composer model chip: each provider's own badge,
@@ -104,7 +105,7 @@ mod tests {
             assert_eq!(id.has(provider::ProviderTrait::CatalogFlagsSessionModel), muse);
             assert_eq!(id.has(provider::ProviderTrait::ModelsLimitModes), !muse);
             assert_eq!(id.has(provider::ProviderTrait::TurnLifecycleEvents), muse);
-            assert_eq!(id.row_mark().is_none(), muse);
+            assert_eq!(id.row_mark(), id.icon(), "every row wears its provider's badge, Muse's too");
         }
     }
 }

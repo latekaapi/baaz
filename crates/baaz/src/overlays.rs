@@ -23,7 +23,7 @@
 
 use aui::feedback::{ToastAction, ToastData, ToastKind};
 use aui::overlay::DialogKind;
-use aui_protocol::{PermissionMode, ReasoningEffort};
+use aui_protocol::ReasoningEffort;
 
 use crate::overlay_stack::{Entry, Layer, LayerKind, OverlayStack};
 
@@ -663,8 +663,25 @@ impl Command {
         }
     }
 
-    /// Whether the command is offered on `id`'s sessions.
+    /// Whether the command is offered on `id`'s sessions: a capability it
+    /// needs, `/plan` only where the provider has a plan mode, `/skills`
+    /// only where the app manages its skills and `/logout` only where the
+    /// account lives on the connection (docs/82 5.5, rule 13).
     pub fn offered_on(&self, id: crate::providers::ProviderId) -> bool {
+        if *self == Command::Plan && id.descriptor().plan == provider::PlanMode::None {
+            return false;
+        }
+        // The Skills page manages one provider's skills: it is offered
+        // from that provider's sessions only.
+        if *self == Command::Skills && !id.has(provider::ProviderTrait::ManagedSkills) {
+            return false;
+        }
+        // `/logout` signs out the account on the shared connection: only
+        // that provider's sessions have one to sign out of here (the CLIs
+        // sign out from Settings › Providers).
+        if *self == Command::Logout && !id.has(provider::ProviderTrait::AccountOnConnection) {
+            return false;
+        }
         self.needs().is_none_or(|capability| crate::providers::offers(id, capability))
     }
 
@@ -860,14 +877,6 @@ pub fn effort_detail(effort: Option<ReasoningEffort>) -> &'static str {
         Some(ReasoningEffort::Ultra) => "The largest budget MSP accepts.",
     }
 }
-
-/// The four approval modes, in the order the picker lists them (spec §3.6).
-pub const MODES: [PermissionMode; 4] = [
-    PermissionMode::AllowAll,
-    PermissionMode::OnRequest,
-    PermissionMode::PromptUnmatched,
-    PermissionMode::DenyUnmatched,
-];
 
 #[cfg(test)]
 mod tests {

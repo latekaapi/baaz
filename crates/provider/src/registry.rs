@@ -74,6 +74,9 @@ pub struct ProviderDescriptor {
     pub utility_models: &'static [(&'static str, &'static str)],
     /// The approval modes it runs, in picker order, in its own words.
     pub modes: &'static [ModeDescriptor],
+    /// Its plan mode, if it has one: what the one Plan toggle turns on
+    /// (docs/82 5.5). [`PlanMode::None`] leaves the toggle absent.
+    pub plan: PlanMode,
     /// The model-vendor routes its open can carry besides its key
     /// (`--provider echo`): a flag naming one of these opens this provider.
     pub routes: &'static [&'static str],
@@ -117,6 +120,21 @@ pub struct ModeDescriptor {
     /// The sandbox the provider applies under the mode, in its own words,
     /// when it applies one.
     pub sandbox: Option<&'static str>,
+}
+
+/// How a provider plans before it acts: the one Plan toggle turns on each
+/// provider's own (docs/82 5.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanMode {
+    /// It has none the seam can reach: the toggle is absent (rule 13).
+    None,
+    /// Its own plan permission mode, switched live with
+    /// [`crate::Command::SetPlanMode`]; it reports entering and leaving it
+    /// with [`crate::ProviderEvent::PlanModeChanged`].
+    Native,
+    /// A plan skill the prompt reaches by a `/plan ` prefix, with the
+    /// session held in Read-only meanwhile; the reply becomes a plan card.
+    Skill,
 }
 
 /// The four neutral modes with the protocol's own words, for an adapter
@@ -204,14 +222,9 @@ pub enum ProviderTrait {
     /// through the app's own sheet, and the account line reads the live
     /// connection.
     AccountOnConnection,
-    /// Its sidebar rows wear no provider mark.
-    UnmarkedRows,
     /// It signs in with a device code its own child mints, shown in the
     /// app; the others sign in through their CLI in a terminal.
     DeviceCodeSignIn,
-    /// Its own approval cards carry their choices; the session hosts no
-    /// separate approval surface.
-    InlineApprovals,
 }
 
 /// A stdio MCP server every session of a window gets: the terminal relay's
@@ -457,6 +470,7 @@ mod tests {
         own_mcp_note: None,
         utility_models: &[],
         modes: &protocol_modes("Anything without a matching rule is refused.", None),
+        plan: crate::PlanMode::None,
         routes: &["plain-route"],
         traits: &[ProviderTrait::ModelsLimitModes],
         capabilities: |_| {

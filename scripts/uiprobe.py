@@ -798,6 +798,34 @@ def _jump_entry(*extra, steps="wait:1500;wheel:300;wait:800"):
             "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-jump-state-")}}
 
 
+# docs/82 5.5 (product parity): the new states, each offline. Expected to
+# change with this row on purpose — rebaseline on main after merge, never
+# to silence a finding.
+#   approval-vocabulary   a pending Muse approval in the one vocabulary
+#                         (Once / Always here / Deny), its title provider-free
+#   error-card            a failed turn's error card with Retry (the Muse
+#                         replay; Claude Code and Codex now mint the same card)
+#   composer-plan         the Plan toggle on (Muse's plan skill: the pill)
+#   composer-commands-codex  the `/` menu on Codex: no /plan, /compact, /fork,
+#                         /skills or /logout, and no Muse skills
+#   sidebar-row-badges    every row wears its provider's badge, Muse's too
+ENTRIES.update({
+    "approval-vocabulary":     {"shot": ["--no-connect", "--login", "signed-in",
+                                         "--replay", "fixtures/msp/transcript-approve-stage1.jsonl",
+                                         "--steps", "wait:1500;end"],
+                                "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-approval-state-")}},
+    "error-card":              {"shot": ["--no-connect", "--login", "signed-in",
+                                         "--replay", "fixtures/msp/synthetic-error-retry.jsonl",
+                                         "--steps", "wait:1500;end"],
+                                "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-error-state-")}},
+    "composer-plan":           {"shot": ["--no-connect", "--login", "signed-in",
+                                         "--steps", "new;plan;wait:500"],
+                                "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-plan-state-")}},
+    "composer-commands-codex": {"shot": ["--no-connect", "--login", "signed-in",
+                                         "--steps", "new;setprovider:codex;command"],
+                                "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-commands-state-")}},
+})
+
 ENTRIES.update({
     "jump-pill":               _jump_entry("--tier", "subscription"),
     "jump-pill-plan-banner":   _jump_entry("--tier", "unknown"),
@@ -910,6 +938,7 @@ ENTRIES.update({
     "composer-menu-effort":    _populated("effort", replay=True),
     "composer-menu-provider":  _populated("provider", replay=True),
     "composer-menu-mode":      _populated("mode", replay=True),
+    "sidebar-row-badges":      _populated(_PROJECTS),
     "right-changes-full":      _populated("right-width:440;right:changes;changes-open:crates/baaz/src/right.rs", replay=True),
     "right-files-preview":     _populated("right-width:440;right:files;files-select:src/lib.rs",
                                           workspace=_REPO_ACME),

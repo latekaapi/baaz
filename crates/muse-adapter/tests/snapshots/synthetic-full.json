@@ -336,7 +336,7 @@
               "choices": [
                 {
                   "id": "allow_once",
-                  "label": "Allow once",
+                  "label": "Once",
                   "decision": "once",
                   "scope": "this_command",
                   "accepts_feedback": false
@@ -652,14 +652,14 @@
               "choices": [
                 {
                   "id": "allow_once",
-                  "label": "Allow once",
+                  "label": "Once",
                   "decision": "once",
                   "scope": "this_command",
                   "accepts_feedback": false
                 },
                 {
                   "id": "allow_local_prefix",
-                  "label": "Always allow in this workspace: echo ...",
+                  "label": "Always here",
                   "decision": "policy_amendment",
                   "scope": "this_worktree",
                   "rule_preview": "Always allow in this workspace: echo ...",
@@ -667,8 +667,8 @@
                 },
                 {
                   "id": "abort",
-                  "label": "Reject",
-                  "decision": "abort",
+                  "label": "Deny",
+                  "decision": "deny",
                   "scope": "this_command",
                   "accepts_feedback": true
                 }

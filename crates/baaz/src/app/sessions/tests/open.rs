@@ -1014,7 +1014,7 @@ fn a_draft_on_a_remembered_haiku_opens_in_ask(cx: &mut gpui::TestAppContext) {
         baaz.update(cx, |harness, cx| {
             harness.session_list.update(cx, |list, _| {
                 let adopted = list.projects.projects.iter_mut().find(|p| p.id == project).expect("adopted");
-                adopted.defaults.approval_mode = Some(aui_protocol::PermissionMode::OnRequest);
+                adopted.defaults.note_mode("claude-code", aui_protocol::PermissionMode::OnRequest);
             });
             harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
@@ -1037,6 +1037,41 @@ fn a_draft_on_a_remembered_haiku_opens_in_ask(cx: &mut gpui::TestAppContext) {
         shared.inner.lock().expect("y2b2").modes,
         [Some(aui_protocol::PermissionMode::PromptUnmatched)],
         "the child is asked to start in Ask"
+    );
+    lane_restore(state);
+}
+
+/// docs/82 5.5: the stored mode is per project per provider. Full access
+/// picked on Codex in this project stays Codex's: a new Claude Code
+/// session here opens in Claude Code's own stored mode, never Codex's.
+#[gpui::test]
+fn a_mode_picked_on_one_provider_never_starts_another(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("mode-per-provider");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    let (factory, shared) = y2b2_factory();
+    let _project = b2fix_project(vc, &baaz, "claude-code", &[("claude-code", "sonnet")], &[]);
+    let workspace = vc.update(|_, cx| baaz.read(cx).workspace(cx));
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, cx| {
+            harness.session_list.update(cx, |list, _| {
+                list.projects.note_mode(Some(&workspace), "codex", aui_protocol::PermissionMode::AllowAll);
+                list.projects.note_mode(Some(&workspace), "claude-code", aui_protocol::PermissionMode::DenyUnmatched);
+                // A later Full access pick on Codex elsewhere moves nothing here.
+                list.projects.note_mode(None, "codex", aui_protocol::PermissionMode::AllowAll);
+            });
+            harness.providers = harness.providers.with_opens_of(&factory);
+            mark_muse_up(harness);
+            harness.active = None;
+        });
+    });
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
+    y2b2_drain_until_opens(vc, &shared, 1);
+    assert_eq!(
+        shared.inner.lock().expect("y2b2").modes,
+        [Some(aui_protocol::PermissionMode::DenyUnmatched)],
+        "the Claude Code child starts in Claude Code's own stored mode"
     );
     lane_restore(state);
 }

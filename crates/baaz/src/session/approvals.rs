@@ -8,7 +8,7 @@
 //! their own files.
 
 use super::*;
-use crate::providers::{ApprovalChoice, ExternalApproval};
+use crate::providers::ExternalApproval;
 
 impl SessionRuntime {
     /// A server-minted choice was pressed: `approval/decide`.
@@ -258,7 +258,7 @@ impl SessionRuntime {
     pub fn decide_external_approval(
         &mut self,
         approval_id: String,
-        choice: ApprovalChoice,
+        choice: &str,
         feedback: Option<String>,
         cx: &mut Context<Self>,
     ) {
@@ -528,11 +528,14 @@ impl SessionView {
             return Ok(());
         }
         let tap = self.runtime.read(cx).external_approvals.pending().last().cloned().cloned().ok_or("no approval is pending")?;
-        let choices = crate::providers::ApprovalChoice::all();
-        let choice = choices
+        // The tap's own options, in the vocabulary's card order (docs/82
+        // 5.5): what the provider said it takes, never a fixed list.
+        let option = tap
+            .options
             .get(n - 1)
-            .ok_or_else(|| format!("the pending approval has {} choices, not {n}", choices.len()))?;
-        self.runtime.update(cx, |rt, cx| rt.decide_external_approval(tap.id.clone(), *choice, None, cx));
+            .ok_or_else(|| format!("the pending approval has {} choices, not {n}", tap.options.len()))?;
+        let choice = option.choice.clone();
+        self.runtime.update(cx, |rt, cx| rt.decide_external_approval(tap.id.clone(), &choice, None, cx));
         Ok(())
     }
 }

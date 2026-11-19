@@ -46,14 +46,17 @@ enum OverflowAction {
 }
 
 /// The header overflow menu's rows and their actions: Rename, Fork,
-/// Archive.
-fn overflow_rows() -> (Vec<MenuRow>, Vec<OverflowAction>) {
-    let rows = vec![
-        MenuRow::Toggle { label: "Rename".into(), checked: false },
-        MenuRow::Toggle { label: "Fork".into(), checked: false },
-        MenuRow::Toggle { label: "Archive".into(), checked: false },
-    ];
-    let actions = vec![OverflowAction::Rename, OverflowAction::Fork, OverflowAction::Archive];
+/// Archive — Fork only where the session's provider can fork (`fork`;
+/// docs/82 5.5, rule 13: a control is shown only if it works).
+fn overflow_rows(fork: bool) -> (Vec<MenuRow>, Vec<OverflowAction>) {
+    let mut rows = vec![MenuRow::Toggle { label: "Rename".into(), checked: false }];
+    let mut actions = vec![OverflowAction::Rename];
+    if fork {
+        rows.push(MenuRow::Toggle { label: "Fork".into(), checked: false });
+        actions.push(OverflowAction::Fork);
+    }
+    rows.push(MenuRow::Toggle { label: "Archive".into(), checked: false });
+    actions.push(OverflowAction::Archive);
     (rows, actions)
 }
 
@@ -621,7 +624,11 @@ impl Harness {
         if !self.overlays.read(cx).is_open(MenuKind::Overflow) {
             return None;
         }
-        let (rows, actions) = overflow_rows();
+        let fork = self
+            .active
+            .as_ref()
+            .is_some_and(|view| view.read(cx).rt(cx).offers(provider::Capability::ForkSession));
+        let (rows, actions) = overflow_rows(fork);
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
             let action = actions.get(*index).copied();
             this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
@@ -1092,17 +1099,22 @@ mod tests {
     use aui::nav::MenuRow;
     use crate::layout::LayoutGlobal as _;
 
-    /// The header ⋯ menu's rows: Rename, Fork, Archive, one action each.
+    /// The header ⋯ menu's rows: Rename, Fork, Archive, one action each;
+    /// Fork only where the session's provider forks.
     #[test]
     fn overflow_menu_rows_are_rename_fork_archive() {
         let label = |row: &MenuRow| match row {
             MenuRow::Toggle { label, checked } => (label.to_string(), *checked),
             _ => panic!("overflow rows are toggles"),
         };
-        let (rows, actions) = super::overflow_rows();
+        let (rows, actions) = super::overflow_rows(true);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Fork", "Archive"]);
         assert!(rows.iter().all(|r| !label(r).1), "no row is checked");
         assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::Fork, super::OverflowAction::Archive]);
+        // A provider that cannot fork shows no Fork row (docs/82 5.5).
+        let (rows, actions) = super::overflow_rows(false);
+        assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Archive"]);
+        assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::Archive]);
     }
 
     use crate::palette::{filter_commands, tilde_root};

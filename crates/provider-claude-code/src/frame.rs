@@ -81,6 +81,9 @@ pub struct InitFrame {
     /// The permission mode the turn runs in (`permissionMode`), as the
     /// CLI spells it (`default`, `auto`, `bypassPermissions`, …).
     pub permission_mode: Option<String>,
+    /// The skills the session can invoke as `/name` (`skills`): what the
+    /// composer's `/` menu lists on this provider (docs/82 5.5).
+    pub skills: Vec<String>,
 }
 
 /// Token usage inside a stored `assistant` line's message: the same keys
@@ -348,6 +351,14 @@ pub enum Frame {
         /// After-the-fact denials (`permission_denials[]`): useful for the
         /// transcript, never a substitute for answering the request.
         permission_denials: Vec<PermissionDenial>,
+        /// The CLI's words when the result is an error that says why
+        /// ([`result_failure`]): the turn failed, and the transcript cards
+        /// it (docs/82 5.5). `None` for a wordless error result — an
+        /// interrupted turn.
+        failure: Option<String>,
+        /// The context the turn's last request carried, and the model's
+        /// window from `modelUsage` ([`result_context`]; docs/82 5.5).
+        context: Option<(u64, Option<u64>)>,
     },
     /// A `control_request` with subtype `can_use_tool`: the child is
     /// suspended on a permission decision and waits silently — no timeout
@@ -1040,6 +1051,7 @@ fn decode_turn_result(value: &Value) -> Frame {
     let usage = value.get("usage");
     let uint = |key: &str| usage.and_then(|usage| usage.get(key)).and_then(Value::as_u64);
     let model = decode_result_model(value);
+    let model_for_context = model.clone();
     let permission_denials = value
         .get("permission_denials")
         .and_then(Value::as_array)
@@ -1061,7 +1073,51 @@ fn decode_turn_result(value: &Value) -> Frame {
         duration_ms: value.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
         model,
         permission_denials,
+        failure: result_failure(value).filter(|_| result_says_why(value)),
+        context: result_context(value, model_for_context.as_deref()),
     }
+}
+
+/// Whether an error `result` says why in words — its `result` text or its
+/// `errors`. One that says nothing is the CLI's interrupted turn (the
+/// `interrupt.jsonl` capture: `error_during_execution`, empty result, no
+/// errors), which the person's Stop or another client caused; it ends the
+/// turn without an error card (docs/82 0.8, 5.5).
+fn result_says_why(value: &Value) -> bool {
+    let text = value.get("result").and_then(Value::as_str).is_some_and(|text| !text.trim().is_empty());
+    let errors = value
+        .get("errors")
+        .and_then(Value::as_array)
+        .is_some_and(|errors| errors.iter().filter_map(Value::as_str).any(|error| !error.trim().is_empty()));
+    text || errors
+}
+
+/// The context a `result`'s last request carried — its last `iterations`
+/// entry (one per API request), else the turn's own `usage` — as the whole
+/// prompt (input plus cache read plus cache creation) plus the reply, and
+/// the answering model's `contextWindow` from `modelUsage` (else the
+/// largest named). `None` when the frame carries no usage at all.
+pub fn result_context(value: &Value, model: Option<&str>) -> Option<(u64, Option<u64>)> {
+    let usage = value.get("usage")?;
+    let request = usage
+        .get("iterations")
+        .and_then(Value::as_array)
+        .and_then(|iterations| iterations.last())
+        .unwrap_or(usage);
+    let uint = |key: &str| request.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let used = uint("input_tokens")
+        .saturating_add(uint("cache_read_input_tokens"))
+        .saturating_add(uint("cache_creation_input_tokens"))
+        .saturating_add(uint("output_tokens"));
+    let models = value.get("modelUsage").and_then(Value::as_object);
+    let window_of = |entry: &Value| entry.get("contextWindow").and_then(Value::as_u64);
+    let window = models.and_then(|models| {
+        model
+            .and_then(|model| models.get(model))
+            .and_then(window_of)
+            .or_else(|| models.values().filter_map(window_of).max())
+    });
+    Some((used, window))
 }
 
 /// The CLI's rejection text out of a `control_response`'s `response`
@@ -1129,6 +1185,11 @@ pub fn decode_line(line: &str) -> Result<Frame, DecodeError> {
                             .get("permissionMode")
                             .and_then(Value::as_str)
                             .map(str::to_owned),
+                        skills: value
+                            .get("skills")
+                            .and_then(Value::as_array)
+                            .map(|skills| skills.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                            .unwrap_or_default(),
                     }))
                 }
                 "status" => match value.get("permissionMode").and_then(Value::as_str) {

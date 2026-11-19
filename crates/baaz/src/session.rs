@@ -65,7 +65,7 @@ use gpui_kit::base::input::{InputEvent, Position, TextareaState};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::base::{h_flex, v_flex};
 
-use crate::overlays::{Command, Menu, MenuKind, Overlays, MODES};
+use crate::overlays::{Command, Menu, MenuKind, Overlays};
 use crate::transcript::{self, Cards, Folds, FullOutput, FullOutputState, PlanAction};
 use crate::providers::{ExternalApprovalStore, ProviderId};
 use crate::runtime::CaptureToken;
@@ -740,6 +740,9 @@ enum StartState {
 struct StartQueue {
     model: Option<String>,
     mode: Option<PermissionMode>,
+    /// A native plan toggle made while opening (docs/82 5.5), replayed
+    /// as `SetPlanMode` once the lane is up.
+    plan: Option<bool>,
     models: bool,
     sends: Vec<String>,
 }
@@ -1656,69 +1659,82 @@ impl SessionRuntime {
         if words.is_empty() { id.to_owned() } else { words.join(" ") }
     }
 
-    /// The context meter's state, from `session/contextUsage` joined with the
-    /// session's cumulative counters.
+    /// The context meter's state: the provider's own reading of the
+    /// context the next request carries, joined with the session's
+    /// cumulative counters for the breakdown. `None` — the meter absent —
+    /// until a provider that reports context has reported it (docs/82 5.5:
+    /// the meter shows real context use or nothing; the old summed "N
+    /// tokens" is gone).
     ///
-    /// A session that has not reported context yet still gets a meter: the
-    /// cumulative totals are real, and a meter that appeared only after the
-    /// first turn would move the toolbar under the person's hand. The muse
-    /// lane reads this path, exactly as it always did; a provider lane
-    /// never receives `session/contextUsage`, so it reads the folded
-    /// transcript's `TurnMeta` instead (see [`Self::provider_context`]).
-    pub fn context(&self) -> ContextMeterState {
-        if !self.provider_kind().has(provider::ProviderTrait::LiveContextMeter) {
-            return self.provider_context();
-        }
+    /// A provider whose context moves live ([`provider::ProviderTrait::
+    /// LiveContextMeter`], Muse) always has a meter: before its first
+    /// `session/contextUsage` it reads the cumulative totals, and a meter
+    /// that appeared only after the first turn would move the toolbar
+    /// under the person's hand. Claude Code and Codex report a reading at
+    /// each turn's end (each request's on Codex).
+    pub fn context(&self) -> Option<ContextMeterState> {
         let side = self.store.side();
-        let cumulative = side.totals.clone();
-        let usage = self.fake_context.clone().or_else(|| side.context.clone());
-        let (used, window, pressure) = match usage {
-            Some(usage) => (usage.used_tokens, usage.window_tokens, pressure(usage.pressure)),
-            None => (cumulative.total_tokens, None, ContextPressure::Normal),
-        };
-        ContextMeterState {
-            used_tokens: used,
-            window_tokens: window,
-            pressure,
-            prompt_tokens: cumulative.prompt_tokens,
-            output_tokens: cumulative.output_tokens,
-            total_tokens: cumulative.total_tokens,
+        let reading = self.fake_context.clone().or_else(|| side.context.clone());
+        if self.provider_kind().has(provider::ProviderTrait::LiveContextMeter) {
+            let cumulative = side.totals.clone();
+            let (used, window, pressure) = match reading {
+                Some(usage) => (usage.used_tokens, usage.window_tokens, pressure(usage.pressure)),
+                None => (cumulative.total_tokens, None, ContextPressure::Normal),
+            };
+            return Some(ContextMeterState {
+                used_tokens: used,
+                window_tokens: window,
+                pressure,
+                prompt_tokens: cumulative.prompt_tokens,
+                output_tokens: cumulative.output_tokens,
+                total_tokens: cumulative.total_tokens,
+            });
         }
+        let reading = reading?;
+        let (prompt_tokens, output_tokens, _) = self.turn_totals();
+        Some(ContextMeterState {
+            used_tokens: reading.used_tokens,
+            window_tokens: reading.window_tokens,
+            pressure: pressure(reading.pressure),
+            prompt_tokens,
+            output_tokens,
+            total_tokens: prompt_tokens + output_tokens,
+        })
     }
 
-    /// A provider lane's meter, folded from the transcript: every finished
-    /// assistant turn's `TurnMeta` summed into prompt/output totals. No
-    /// adapter reports a context window — `TurnMeta` carries none — so the
-    /// meter reads "N tokens", never a percentage, and pressure stays
-    /// `Normal`: only the server owns those thresholds. Cache tokens are
-    /// deliberately excluded from the sums: `TurnMeta` warns they may sit
-    /// inside `tokens_in` depending on the provider's convention, so adding
-    /// them double-counts.
-    fn provider_context(&self) -> ContextMeterState {
+    /// Every finished assistant turn's `TurnMeta` summed: prompt tokens,
+    /// output tokens and cost (USD, zero where the provider reports none).
+    /// Cache tokens are deliberately excluded: `TurnMeta` warns they may
+    /// sit inside `tokens_in` depending on the provider's convention, so
+    /// adding them double-counts.
+    pub(crate) fn turn_totals(&self) -> (u64, u64, f64) {
         let mut prompt_tokens = 0u64;
         let mut output_tokens = 0u64;
+        let mut cost = 0.0f64;
         if let Some(session) = self.session() {
             for turn in session.turns.iter() {
                 if let Turn::Assistant { meta, .. } = turn {
                     prompt_tokens += meta.tokens_in;
                     output_tokens += meta.tokens_out;
+                    cost += meta.cost_usd;
                 }
             }
         }
-        let total_tokens = prompt_tokens + output_tokens;
-        ContextMeterState {
-            used_tokens: total_tokens,
-            window_tokens: None,
-            pressure: ContextPressure::Normal,
-            prompt_tokens,
-            output_tokens,
-            total_tokens,
-        }
+        (prompt_tokens, output_tokens, cost)
     }
 
-    /// The approval mode chip's label.
+    /// The approval mode chip's label: the provider's own word for the
+    /// mode in force (docs/82 5.5), the protocol's for one it does not
+    /// declare.
     pub fn mode_label(&self) -> &'static str {
-        self.mode().label()
+        let mode = self.mode();
+        self.provider_kind().descriptor().mode(mode).map_or_else(|| mode.label(), |declared| declared.label)
+    }
+
+    /// The approval modes this session's provider runs, in its own picker
+    /// order: the mode picker lists exactly these (docs/82 5.5).
+    pub(crate) fn modes(&self) -> Vec<PermissionMode> {
+        self.provider_kind().descriptor().modes.iter().map(|declared| declared.id).collect()
     }
 
     /// The approval mode the server says the session is in — or, while the
@@ -1981,29 +1997,34 @@ impl SessionRuntime {
     /// question names the newest; a browser chat auto-accepts its own
     /// browser tools).
     pub(crate) fn answer_external(&mut self, id: &str, allow: bool, cx: &mut Context<Self>) {
-        use aui_protocol::ApprovalDecision as D;
-        // The approval's own choices, as its card offers them (Claude Code
-        // offers `allow`/`deny`; the generic Accept/Decline ids are Codex's
-        // words, and Claude Code refused them, seen live 8 Nov).
-        let own = self.store.session().and_then(|session| {
-            session.turns.iter().rev().flat_map(|turn| turn.blocks().iter()).find_map(|block| match block {
-                aui_protocol::Block::Approval { id: block_id, choices, .. } if block_id == id => choices
-                    .iter()
-                    .find(|c| if allow { matches!(c.decision, D::Once | D::ApprovedForSession) } else { matches!(c.decision, D::Deny) })
-                    .map(|c| c.id.clone()),
-                _ => None,
+        // The answer, in the one vocabulary: an allow takes Once, else This
+        // session; a refusal takes Deny (docs/82 5.5).
+        let wanted: &[provider::ApprovalAnswer] = if allow {
+            &[provider::ApprovalAnswer::Once, provider::ApprovalAnswer::ThisSession]
+        } else {
+            &[provider::ApprovalAnswer::Deny]
+        };
+        // The tap's typed options first, then the inline card's own
+        // choices — never a choice id guessed from which provider asked.
+        let typed = self.external_approvals.get(id).and_then(|tap| {
+            wanted.iter().find_map(|answer| tap.options.iter().find(|option| option.answer == *answer)).map(|option| option.choice.clone())
+        });
+        let own = typed.or_else(|| {
+            self.store.session().and_then(|session| {
+                session.turns.iter().rev().flat_map(|turn| turn.blocks().iter()).find_map(|block| match block {
+                    aui_protocol::Block::Approval { id: block_id, choices, .. } if block_id == id => wanted.iter().find_map(|answer| {
+                        choices
+                            .iter()
+                            .find(|c| provider::ApprovalAnswer::of(c.decision, c.scope) == Some(*answer))
+                            .map(|c| c.id.clone())
+                    }),
+                    _ => None,
+                })
             })
         });
         match own {
             Some(choice_id) => self.decide_provider_approval(id.to_owned(), choice_id, None, cx),
-            None if self.provider_kind() == ProviderId::ClaudeCode => {
-                let choice_id = if allow { "allow" } else { "deny" };
-                self.decide_provider_approval(id.to_owned(), choice_id.to_owned(), None, cx);
-            }
-            None => {
-                let choice = if allow { crate::providers::ApprovalChoice::Accept } else { crate::providers::ApprovalChoice::Decline };
-                self.decide_external_approval(id.to_owned(), choice, None, cx);
-            }
+            None => crate::baaz_log!("approval {id}: offers no {} answer; nothing sent", if allow { "allowing" } else { "refusing" }),
         }
     }
 }
@@ -2035,11 +2056,12 @@ impl SessionView {
             let _ = self.choose(index + 1, window, cx);
             return true;
         }
-        if self.runtime.read(cx).external_approvals.pending().is_empty() {
+        // A parked tap with no card: its typed options, in the vocabulary.
+        let Some(tap) = self.runtime.read(cx).external_approvals.pending().last().map(|tap| tap.options.clone()) else {
             return false;
-        }
-        let wanted = if allow { crate::providers::ApprovalChoice::Accept } else { crate::providers::ApprovalChoice::Decline };
-        let Some(index) = crate::providers::ApprovalChoice::all().iter().position(|c| *c == wanted) else { return false };
+        };
+        let wanted = if allow { provider::ApprovalAnswer::Once } else { provider::ApprovalAnswer::Deny };
+        let Some(index) = tap.iter().position(|option| option.answer == wanted) else { return false };
         let _ = self.choose(index + 1, window, cx);
         true
     }
@@ -2544,6 +2566,9 @@ impl SessionRuntime {
         }
         if queue.models {
             self.load_models(cx);
+        }
+        if let Some(on) = queue.plan {
+            self.send_native_plan(on, cx);
         }
         // The busy state the queued sends held is theirs to set again:
         // a send refused on landing (the billing guard) must not leave it.

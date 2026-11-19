@@ -135,6 +135,7 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
             command @ Command::SelectApprovalMode { .. } => {
                 Some((command, "select-approval-mode"))
             }
+            command @ Command::SetPlanMode { .. } => Some((command, "set-plan-mode")),
             command @ Command::RunShell { .. } => Some((command, "run-shell")),
             command @ Command::SteerInput { .. } => Some((command, "steer-input")),
             command @ Command::InterruptTurn { .. } => Some((command, "interrupt-turn")),
@@ -188,6 +189,7 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
             session_id: "s".into(),
             mode: aui_protocol::PermissionMode::OnRequest,
         },
+        Command::SetPlanMode { request_id: "r".into(), session_id: "s".into(), on: true },
         Command::RunShell { request_id: "r".into(), session_id: "s".into(), command: "ls".into() },
         Command::SteerInput {
             request_id: "r".into(),
@@ -263,7 +265,7 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
     }
     // Backstop for edits to the list itself (duplicates, dropped entries):
     // new variants are caught by `classify`, not by this count.
-    assert_eq!(refused.len(), 26, "the refusal list drifted from the 26 unimplemented commands");
+    assert_eq!(refused.len(), 27, "the refusal list drifted from the 27 unimplemented commands");
     refused
 }
 

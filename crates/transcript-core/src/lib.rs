@@ -30,6 +30,7 @@
 pub mod approval;
 pub mod builder;
 pub mod diff;
+pub mod failure;
 pub mod todo;
 pub mod tool;
 

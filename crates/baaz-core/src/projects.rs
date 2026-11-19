@@ -30,13 +30,15 @@ fn default_version() -> u32 {
 /// last-used model, effort and approval mode. `--approval-mode` still wins
 /// over the stored mode for the session it starts.
 ///
-/// Model and effort are keyed by provider wire id (`"muse"`,
-/// `"claude-code"`, `"codex"`): a pick on one lane never becomes another
-/// lane's start model. Files written before the keying still read: a lone
+/// All three are keyed by provider wire id (`"muse"`, `"claude-code"`,
+/// `"codex"`): a pick on one lane never becomes another lane's start model,
+/// and Full access picked on one CLI never follows the person to the next
+/// (docs/82 5.5). Files written before the keying still read: a lone
 /// `modelId`/`effort` migrates onto the `muse` entry (a `modelId` that is
 /// obviously another lane's is dropped instead — see
-/// [`looks_foreign_to_muse`]), and serializing always writes the keyed
-/// shape.
+/// [`looks_foreign_to_muse`]); a lone `approvalMode` migrates onto every
+/// registered provider that declares that mode, so nobody loses it; and
+/// serializing always writes the keyed shape.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectDefaults {
@@ -47,9 +49,9 @@ pub struct ProjectDefaults {
     /// `"xhigh"` …; see [`effort_string`] and [`parse_effort`]).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub efforts: std::collections::BTreeMap<String, String>,
-    /// The approval mode new sessions start in.
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::store::lenient")]
-    pub approval_mode: Option<aui_protocol::PermissionMode>,
+    /// The approval mode per provider, as [`mode_name`] spells it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub modes: std::collections::BTreeMap<String, String>,
 }
 
 /// An approval mode from its stored name (`allowAll`, `onRequest`,
@@ -87,6 +89,8 @@ struct RawProjectDefaults {
     #[serde(default)]
     effort: Option<String>,
     #[serde(default)]
+    modes: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
     approval_mode: Option<String>,
 }
 
@@ -110,7 +114,19 @@ impl<'de> Deserialize<'de> for ProjectDefaults {
                 efforts.insert(crate::providers::ProviderId::Muse.as_str().to_owned(), legacy);
             }
         }
-        Ok(Self { models, efforts, approval_mode: raw.approval_mode.as_deref().and_then(parse_mode) })
+        // One mode for every provider (before 5.5): it becomes each
+        // registered provider's own entry where that provider declares the
+        // mode, unless the file already keys one for it.
+        let mut modes: std::collections::BTreeMap<String, String> =
+            raw.modes.into_iter().filter(|(_, name)| parse_mode(name).is_some()).collect();
+        if let Some(legacy) = raw.approval_mode.as_deref().and_then(parse_mode) {
+            for id in crate::providers::ProviderId::all() {
+                if id.descriptor().mode(legacy).is_some() {
+                    modes.entry(id.defaults_key().to_owned()).or_insert_with(|| mode_name(legacy).to_owned());
+                }
+            }
+        }
+        Ok(Self { models, efforts, modes })
     }
 }
 
@@ -135,6 +151,21 @@ impl ProjectDefaults {
     pub fn effort_for(&self, provider: &str) -> Option<String> {
         let key = crate::providers::ProviderId::resolve(provider).ok()?.defaults_key();
         self.efforts.get(key).filter(|id| !id.is_empty()).cloned()
+    }
+
+    /// This provider's stored approval mode, if any — only a mode the
+    /// provider declares, so a stale word never starts a session in a mode
+    /// its adapter does not run.
+    pub fn mode_for(&self, provider: &str) -> Option<aui_protocol::PermissionMode> {
+        let id = crate::providers::ProviderId::resolve(provider).ok()?;
+        let mode = self.modes.get(id.defaults_key()).and_then(|name| parse_mode(name))?;
+        id.descriptor().mode(mode).map(|_| mode)
+    }
+
+    /// Record an approval-mode pick under the view's provider.
+    pub fn note_mode(&mut self, provider: &str, mode: aui_protocol::PermissionMode) {
+        let Ok(id) = crate::providers::ProviderId::resolve(provider) else { return };
+        self.modes.insert(id.defaults_key().to_owned(), mode_name(mode).to_owned());
     }
 
     /// Record a model pick under the view's provider.
@@ -216,12 +247,14 @@ pub struct Projects {
     /// The adoptions, in adoption order.
     #[serde(default)]
     pub projects: Vec<Project>,
-    /// The person's last model, effort and approval-mode picks, wherever
-    /// they were made: what every new session starts with (owner
-    /// 2026-10-21, replacing D35's per-project memory — "Last pick,
-    /// everywhere"). A project's own [`Project::defaults`] are only read
-    /// for a field never picked since (see [`Projects::picks`]), so an old
-    /// store keeps its choices until the next pick replaces them.
+    /// The person's last model, effort and approval-mode picks per
+    /// provider, wherever they were made: what every new session starts
+    /// with (owner 2026-10-21, replacing D35's per-project memory — "Last
+    /// pick, everywhere"). A project's own [`Project::defaults`] are only
+    /// read for a model or effort never picked since (see
+    /// [`Projects::picks`]); its approval mode per provider wins over the
+    /// last pick, so Full access picked in a scratch folder does not follow
+    /// the person into a project that chose otherwise (docs/82 5.5).
     #[serde(default, skip_serializing_if = "is_default_picks")]
     pub last_picks: ProjectDefaults,
     /// Root-exists answers per project id: `(exists, checked_at_secs)`.
@@ -438,8 +471,10 @@ impl CanonicalCache {
 
 impl Projects {
     /// What a new session starts with: the last picks (see
-    /// [`Projects::last_picks`]), each field falling back to `project`'s
-    /// stored default only when it was never picked since.
+    /// [`Projects::last_picks`]), the model and effort falling back to
+    /// `project`'s stored default only when never picked since; the
+    /// approval mode is `project`'s own for that provider first (see
+    /// [`Projects::note_mode`]).
     pub fn picks(&self, project: Option<&Project>) -> ProjectDefaults {
         let mut picks = self.last_picks.clone();
         if let Some(project) = project {
@@ -449,11 +484,25 @@ impl Projects {
             for (lane, effort) in &project.defaults.efforts {
                 picks.efforts.entry(lane.clone()).or_insert_with(|| effort.clone());
             }
-            if picks.approval_mode.is_none() {
-                picks.approval_mode = project.defaults.approval_mode;
+            // The mode is the project's own first (docs/82 5.5: per project
+            // per provider), then the last pick on that provider.
+            for (lane, mode) in &project.defaults.modes {
+                picks.modes.insert(lane.clone(), mode.clone());
             }
         }
         picks
+    }
+
+    /// Record an approval-mode pick on `provider` made in a session running
+    /// in `workspace`: the project holding that folder keeps it for that
+    /// provider, and it is the last pick on that provider everywhere else.
+    /// A pick never reaches another provider's entry (docs/82 5.5).
+    pub fn note_mode(&mut self, workspace: Option<&str>, provider: &str, mode: aui_protocol::PermissionMode) {
+        self.last_picks.note_mode(provider, mode);
+        let Some(id) = self.resolve(workspace, None).map(|project| project.id.clone()) else { return };
+        if let Some(project) = self.projects.iter_mut().find(|project| project.id == id) {
+            project.defaults.note_mode(provider, mode);
+        }
     }
 
     /// Adopt `root`, or hand back the project that already holds it.
@@ -775,22 +824,79 @@ mod tests {
 
     use super::*;
 
-    /// The stored mode reads as the seam's mode; a word this build does not
-    /// know reads as no mode and never fails the rest of the defaults.
+    /// The stored mode reads as the seam's mode per provider; a word this
+    /// build does not know reads as no mode and never fails the rest of the
+    /// defaults.
     #[test]
     fn a_stored_approval_mode_reads_and_an_unknown_one_is_dropped() {
         let known: ProjectDefaults =
-            serde_json::from_value(serde_json::json!({"approvalMode": "promptUnmatched", "models": {"muse": "m"}}))
+            serde_json::from_value(serde_json::json!({"modes": {"codex": "promptUnmatched"}, "models": {"muse": "m"}}))
                 .expect("defaults read");
-        assert_eq!(known.approval_mode, Some(aui_protocol::PermissionMode::PromptUnmatched));
+        assert_eq!(known.mode_for("codex"), Some(aui_protocol::PermissionMode::PromptUnmatched));
+        assert_eq!(known.mode_for("claude-code"), None, "one provider's mode is not another's");
         let unknown: ProjectDefaults =
-            serde_json::from_value(serde_json::json!({"approvalMode": "futureMode", "models": {"muse": "m"}}))
+            serde_json::from_value(serde_json::json!({"modes": {"codex": "futureMode"}, "approvalMode": "futureMode", "models": {"muse": "m"}}))
                 .expect("an unknown mode never fails the file");
-        assert_eq!(unknown.approval_mode, None);
+        assert!(unknown.modes.is_empty(), "{:?}", unknown.modes);
         assert_eq!(unknown.models.get("muse").map(String::as_str), Some("m"));
         let written = serde_json::to_value(&known).expect("defaults write");
-        assert_eq!(written["approvalMode"], "promptUnmatched", "written the way older builds wrote it");
+        assert_eq!(written["modes"]["codex"], "promptUnmatched", "written keyed by provider");
+        assert!(written.get("approvalMode").is_none(), "the one-for-all key is never written again");
         assert_eq!(parse_mode("DENYUNMATCHED"), Some(aui_protocol::PermissionMode::DenyUnmatched));
+    }
+
+    /// The one mode a pre-5.5 file kept for every provider becomes each
+    /// declaring provider's own (nothing lost), a keyed entry already there
+    /// wins, and a pick on one provider never moves another's.
+    #[test]
+    fn the_legacy_mode_migrates_to_every_provider_that_declares_it() {
+        use aui_protocol::PermissionMode;
+        let migrated: ProjectDefaults = serde_json::from_value(
+            serde_json::json!({"approvalMode": "allowAll", "modes": {"codex": "denyUnmatched"}}),
+        )
+        .expect("defaults read");
+        for id in crate::providers::ProviderId::all() {
+            let expected = if id.as_str() == "codex" {
+                Some(PermissionMode::DenyUnmatched)
+            } else if id.descriptor().mode(PermissionMode::AllowAll).is_some() {
+                Some(PermissionMode::AllowAll)
+            } else {
+                None
+            };
+            assert_eq!(migrated.mode_for(id.as_str()), expected, "{}", id.as_str());
+        }
+        let mut picks = migrated.clone();
+        picks.note_mode("claude-code", PermissionMode::PromptUnmatched);
+        assert_eq!(picks.mode_for("claude-code"), Some(PermissionMode::PromptUnmatched));
+        assert_eq!(picks.mode_for("muse"), migrated.mode_for("muse"), "a pick on one provider moves no other");
+        assert_eq!(picks.mode_for("codex"), Some(PermissionMode::DenyUnmatched));
+    }
+
+    /// Modes are per project per provider: the session's project keeps its
+    /// pick, a project with none reads the last pick on that provider, and
+    /// the project's own pick wins over a later pick made elsewhere.
+    #[test]
+    fn modes_are_kept_per_project_per_provider() {
+        use aui_protocol::PermissionMode;
+        let dir = std::env::temp_dir().join(format!("baaz-modes-{}", uuid::Uuid::new_v4()));
+        let (one, two) = (dir.join("one"), dir.join("two"));
+        std::fs::create_dir_all(&one).expect("one");
+        std::fs::create_dir_all(&two).expect("two");
+        let mut projects = Projects::default();
+        projects.add(&one);
+        projects.add(&two);
+        let one_s = one.to_string_lossy().into_owned();
+        let two_s = two.to_string_lossy().into_owned();
+        projects.note_mode(Some(&one_s), "codex", PermissionMode::AllowAll);
+        projects.note_mode(Some(&two_s), "codex", PermissionMode::DenyUnmatched);
+        let picks_one = projects.picks(projects.resolve(Some(&one_s), None));
+        let picks_two = projects.picks(projects.resolve(Some(&two_s), None));
+        assert_eq!(picks_one.mode_for("codex"), Some(PermissionMode::AllowAll), "project one keeps its own");
+        assert_eq!(picks_two.mode_for("codex"), Some(PermissionMode::DenyUnmatched));
+        assert_eq!(picks_one.mode_for("claude-code"), None, "Full access on Codex never follows to Claude Code");
+        let unfiled = projects.picks(None);
+        assert_eq!(unfiled.mode_for("codex"), Some(PermissionMode::DenyUnmatched), "elsewhere: the last pick on that provider");
+        let _ = std::fs::remove_dir_all(&dir);
     }
     use std::ffi::OsString;
 

@@ -101,6 +101,10 @@ pub(crate) enum PendingControlKind {
     /// mode, which is what moves the chip; error restores nothing (nothing
     /// moved) and banners the CLI's reason.
     SetPermissionMode(PermissionMode),
+    /// Plan mode on or off (`set_permission_mode` with `plan`, or back to
+    /// the session's mode): success needs nothing — the `status` frame
+    /// reports the move; error cards the CLI's reason.
+    SetPlanMode(bool),
     /// The Read-only deny layer going on (the mode is Read-only) or off
     /// (the mode being left for) over `apply_flag_settings`: error
     /// banners and records a resume relaunch, whose argv carries the layer
@@ -826,6 +830,15 @@ impl ControlHub {
                     format!(
                         "Claude Code rejected the approval mode change to \"{}\" ({reason}).",
                         wanted.label()
+                    ),
+                );
+            }
+            PendingControlKind::SetPlanMode(on) => {
+                self.emit_card(
+                    CONTROL_MODE_REJECTED_CARD,
+                    format!(
+                        "Claude Code rejected {} plan mode ({reason}).",
+                        if on { "entering" } else { "leaving" }
                     ),
                 );
             }

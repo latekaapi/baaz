@@ -40,6 +40,10 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     ),
     utility_models: &[("", "Codex default")],
     modes: &MODES,
+    // The app-server schema defines a `plan` collaboration mode, but no
+    // request field carries it in the vendored schema and no fixture shows
+    // one: not reached blind, so the Plan toggle is absent.
+    plan: provider::PlanMode::None,
     routes: &[],
     traits: &[ProviderTrait::ModelsLimitModes, ProviderTrait::DeviceCodeSignIn],
     capabilities: |_| crate::caps::capabilities(),

@@ -40,14 +40,14 @@
               "choices": [
                 {
                   "id": "accept",
-                  "label": "Allow once",
+                  "label": "Once",
                   "decision": "once",
                   "scope": "this_command",
                   "accepts_feedback": false
                 },
                 {
                   "id": "accept-for-session",
-                  "label": "Allow for this session",
+                  "label": "This session",
                   "decision": "approved_for_session",
                   "scope": "this_session",
                   "accepts_feedback": false
@@ -56,13 +56,6 @@
                   "id": "decline",
                   "label": "Deny",
                   "decision": "deny",
-                  "scope": "this_command",
-                  "accepts_feedback": false
-                },
-                {
-                  "id": "cancel",
-                  "label": "Deny and stop",
-                  "decision": "abort",
                   "scope": "this_command",
                   "accepts_feedback": false
                 }
@@ -169,12 +162,12 @@
     "22:bbf255efe49547cd",
     "27:214e059825bb9eb0",
     "42:81ca3c0aae274ed8",
-    "45:befa470dec8171dc",
-    "49:39f81156d881f0cc",
-    "56:677232682bce5dba",
-    "57:f791922a13fc8377",
-    "63:32c9ce7a40685688",
-    "68:cace3bc132bc7ec4"
+    "45:5f79757a2ccf2a6b",
+    "49:adac4b5b1b78f7c9",
+    "56:6cc3c4d5ccd7da7d",
+    "57:2b338c2c50dfa3a0",
+    "63:b9a7efe798c37bab",
+    "68:b6024a52f9c20791"
   ],
   "abandon": [
     "1:c11f324e035c08d3",
@@ -221,29 +214,29 @@
     "42:ef8288ebdaefcafc",
     "43:ef8288ebdaefcafc",
     "44:ef8288ebdaefcafc",
-    "45:0118eab31d0854f4",
-    "46:0118eab31d0854f4",
-    "47:0118eab31d0854f4",
-    "48:0118eab31d0854f4",
-    "49:50c5e57fc03cdcf8",
-    "50:50c5e57fc03cdcf8",
-    "51:05886cf575a450d9",
-    "52:05886cf575a450d9",
-    "53:05886cf575a450d9",
-    "54:05886cf575a450d9",
-    "55:05886cf575a450d9",
-    "56:c6e267c644a17d8c",
-    "57:30aade9fabf93182",
-    "58:81354c552d1eb54f",
-    "59:81354c552d1eb54f",
-    "60:81354c552d1eb54f",
-    "61:81354c552d1eb54f",
-    "62:a352e0b2f45c37ce",
-    "63:638d6335b7e0ddf8",
-    "64:8c29f394bf19e488",
-    "65:8c29f394bf19e488",
-    "66:8c29f394bf19e488",
-    "67:8c29f394bf19e488",
-    "68:cace3bc132bc7ec4"
+    "45:cba7b50631760025",
+    "46:cba7b50631760025",
+    "47:cba7b50631760025",
+    "48:cba7b50631760025",
+    "49:91cf095c8b5d61cb",
+    "50:91cf095c8b5d61cb",
+    "51:286517ba7b8179f4",
+    "52:286517ba7b8179f4",
+    "53:286517ba7b8179f4",
+    "54:286517ba7b8179f4",
+    "55:286517ba7b8179f4",
+    "56:cc5ec92b3ffe01a3",
+    "57:fda4b83d52229d2d",
+    "58:67531452c8a83620",
+    "59:67531452c8a83620",
+    "60:67531452c8a83620",
+    "61:67531452c8a83620",
+    "62:f556dd26dd663c65",
+    "63:c463162465be0763",
+    "64:f2aa4b88ac6dfb8f",
+    "65:f2aa4b88ac6dfb8f",
+    "66:f2aa4b88ac6dfb8f",
+    "67:f2aa4b88ac6dfb8f",
+    "68:b6024a52f9c20791"
   ]
 }

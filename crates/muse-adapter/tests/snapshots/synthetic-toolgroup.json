@@ -154,7 +154,7 @@
               "choices": [
                 {
                   "id": "allow_once",
-                  "label": "Allow once",
+                  "label": "Once",
                   "decision": "once",
                   "scope": "this_command",
                   "accepts_feedback": false

@@ -133,10 +133,12 @@ pub(crate) fn tap_for(
                     reason: format!("unusable approval/request params: {error}"),
                 })?;
             let headline = approval_headline(&request);
+            let options = provider::ApprovalOption::of_choices(&muse_adapter::approval_choices(&request));
             Ok(Some(ProviderEvent::ApprovalRequested {
                 session_id: request.session_id,
                 headline,
                 approval_id: request.approval_id,
+                options,
             }))
         }
         "userInput/request" => {

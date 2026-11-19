@@ -1019,3 +1019,31 @@ fn every_turn_the_dirty_set_leaves_out_is_unchanged() {
     }
     assert!(checked > 1_000, "the check compared too few turns to mean anything ({checked})");
 }
+
+/// docs/82 5.5: Muse's server-supplied choices restate in the one approval
+/// vocabulary. The captured approve stage offers Once, Always here (the
+/// server's local-persistent rule, its preview kept) and Deny (its only
+/// refusal, "Reject"); This session is absent because the server offered
+/// none — never a disabled button.
+#[test]
+fn muse_approval_choices_read_in_the_one_vocabulary() {
+    let fold = replay(&fixtures_dir().join("transcript-approve.jsonl"));
+    let mut seen = Vec::new();
+    for id in fold.session_ids() {
+        let session = fold.session(id).expect("session exists");
+        for turn in &session.turns {
+            for block in turn.blocks() {
+                if let aui_protocol::Block::Approval { choices, .. } = block {
+                    seen.push(choices.clone());
+                }
+            }
+        }
+    }
+    assert!(!seen.is_empty(), "the capture raises an approval");
+    for choices in seen {
+        let labels: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
+        assert_eq!(labels, ["Once", "Always here", "Deny"]);
+        assert!(choices[1].rule_preview.is_some(), "Always here keeps the server's rule preview");
+        assert!(choices.iter().all(|choice| !choice.id.is_empty()), "each carries the server's own choice id");
+    }
+}

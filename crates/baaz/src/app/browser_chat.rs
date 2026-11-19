@@ -48,7 +48,7 @@ impl Harness {
             },
             cx,
         );
-        let mode = self.provider_open_mode(Some(&workspace), None, cx);
+        let mode = self.provider_open_mode(choice.provider, Some(&workspace), None, cx);
         let host = SessionHost {
             provider_id: choice.provider.as_str().to_owned(),
             workspace: workspace.clone(),

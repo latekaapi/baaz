@@ -169,17 +169,29 @@ impl Harness {
         } else {
             provider_id.as_str().to_owned()
         };
-        let mode = self
-            .args
-            .approval_mode
-            .or_else(|| self.session_list.read(cx).projects.picks(self.session_list.read(cx).projects.resolve(workspace, project)).approval_mode);
+        let mode = self.args.approval_mode.or_else(|| {
+            let list = self.session_list.read(cx);
+            list.projects.picks(list.projects.resolve(workspace, project)).mode_for(provider_id.as_str())
+        });
         OpenExtras { model_provider: Some(model_provider), mode }
     }
 
-    pub(in crate::app) fn provider_open_mode(&self, workspace: Option<&str>, project: Option<&str>, cx: &gpui::App) -> aui_protocol::PermissionMode {
+    /// The mode a new `provider_id` session opens in: the flag, else that
+    /// provider's stored mode for the project (docs/82 5.5: per project
+    /// per provider), else the seam's default.
+    pub(in crate::app) fn provider_open_mode(
+        &self,
+        provider_id: ProviderId,
+        workspace: Option<&str>,
+        project: Option<&str>,
+        cx: &gpui::App,
+    ) -> aui_protocol::PermissionMode {
         self.args
             .approval_mode
-            .or_else(|| self.session_list.read(cx).projects.picks(self.session_list.read(cx).projects.resolve(workspace, project)).approval_mode)
+            .or_else(|| {
+                let list = self.session_list.read(cx);
+                list.projects.picks(list.projects.resolve(workspace, project)).mode_for(provider_id.as_str())
+            })
             .unwrap_or_default()
     }
 
@@ -214,7 +226,7 @@ impl Harness {
         let factory = self.lane_factory(provider_id);
         let inline = factory.lands_inline();
         let workspace_bg = workspace.clone();
-        let mode = self.provider_open_mode(Some(&workspace), project.as_deref(), cx);
+        let mode = self.provider_open_mode(provider_id, Some(&workspace), project.as_deref(), cx);
         // The terminal relay's route: the request id is the session id the
         // bridge will answer for (Claude Code takes it as `--session-id`;
         // Codex's bridge answers for it until the minted thread id lands) —
@@ -503,7 +515,7 @@ impl Harness {
         }
         crate::log::boot_mark("new-draft-open");
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
-        let mode = self.provider_open_mode(Some(&workspace), project.as_deref(), cx);
+        let mode = self.provider_open_mode(provider_id, Some(&workspace), project.as_deref(), cx);
         // The request id is the view's id until the child answers: Claude
         // Code takes it as `--session-id`, so it stays; Codex mints a
         // thread id, and the landing renames everything keyed by this one
@@ -995,7 +1007,7 @@ impl Harness {
         // The gate reads the registry off the UI thread: cloned up front
         // for the same reason.
         let registry = self.session_list.read(cx).provider_sessions.clone();
-        let mode = self.provider_open_mode(Some(&workspace), stored_project.as_deref(), cx);
+        let mode = self.provider_open_mode(provider_id, Some(&workspace), stored_project.as_deref(), cx);
         let work = move || -> (Result<ProviderOpen, crate::app::OpenFailed>, usize) {
             // The consent gate, on the background executor: before the
             // person's Move click an old session resumes from its
@@ -1236,7 +1248,7 @@ impl Harness {
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         // A fork is an ask like any other: it joins the last-wins epoch.
         let epoch = self.open_state.begin_open();
-        let mode = self.provider_open_mode(Some(&workspace), None, cx);
+        let mode = self.provider_open_mode(provider_id, Some(&workspace), None, cx);
         // On the scripted stand-in (`--no-connect` / `--replay`) the
         // stand-in answers `OpenSession` but no resume — the fork still
         // goes through `ResumeSession`, the same work as a live one, so the

@@ -53,14 +53,14 @@
               "choices": [
                 {
                   "id": "allow_once",
-                  "label": "Allow once",
+                  "label": "Once",
                   "decision": "once",
                   "scope": "this_command",
                   "accepts_feedback": false
                 },
                 {
                   "id": "allow_local_prefix",
-                  "label": "Always allow in this workspace: ls ...",
+                  "label": "Always here",
                   "decision": "policy_amendment",
                   "scope": "this_worktree",
                   "rule_preview": "Always allow in this workspace: ls ...",
@@ -68,8 +68,8 @@
                 },
                 {
                   "id": "abort",
-                  "label": "Reject",
-                  "decision": "abort",
+                  "label": "Deny",
+                  "decision": "deny",
                   "scope": "this_command",
                   "accepts_feedback": true
                 }
@@ -124,11 +124,11 @@
     "1:08f44b07b5901a25",
     "5:0f8548a97bee3d48",
     "8:df3893aed28595f7",
-    "10:ff34e918f3b0d782",
-    "13:3d63f125975ec3d2",
-    "16:676a76d0d1188283",
-    "17:184aa33f78f39457",
-    "18:32ee81b0079e434a"
+    "10:d2f0c2988f90d498",
+    "13:2df40e9102f38cf4",
+    "16:2a86862f7613fda5",
+    "17:b934632e0f54f5b1",
+    "18:b64d3a3bd024d684"
   ],
   "abandon": [
     "1:08f44b07b5901a25",
@@ -140,18 +140,18 @@
     "7:0f8548a97bee3d48",
     "8:df3893aed28595f7",
     "9:df3893aed28595f7",
-    "10:814aaf9b61abef7e",
-    "11:814aaf9b61abef7e",
-    "12:814aaf9b61abef7e",
-    "13:6220da2c9d918b5e",
-    "14:6220da2c9d918b5e",
-    "15:6220da2c9d918b5e",
-    "16:e028edd3081e8907",
-    "17:184aa33f78f39457",
-    "18:32ee81b0079e434a",
-    "19:32ee81b0079e434a",
-    "20:32ee81b0079e434a",
-    "21:32ee81b0079e434a",
-    "22:32ee81b0079e434a"
+    "10:664b185dd5bb9bfc",
+    "11:664b185dd5bb9bfc",
+    "12:664b185dd5bb9bfc",
+    "13:899f9c5940538cf0",
+    "14:899f9c5940538cf0",
+    "15:899f9c5940538cf0",
+    "16:4f887d92b32b1169",
+    "17:b934632e0f54f5b1",
+    "18:b64d3a3bd024d684",
+    "19:b64d3a3bd024d684",
+    "20:b64d3a3bd024d684",
+    "21:b64d3a3bd024d684",
+    "22:b64d3a3bd024d684"
   ]
 }
