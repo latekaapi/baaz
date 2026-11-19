@@ -106,7 +106,7 @@ pub enum Lanes {
 /// How sessions and status reach the providers this run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProviderSource {
-    /// How session lanes open ([`crate::providers::ProviderFactory`]).
+    /// How session lanes open ([`crate::providers::Registry`]).
     pub lanes: Lanes,
     /// Whether the scripted statuses answer for every provider: no CLI is
     /// resolved or run for install, sign-in, usage or one-shot completions,

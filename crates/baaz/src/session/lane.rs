@@ -712,7 +712,7 @@ impl SessionRuntime {
         // A Muse session wears the window's own reconnect banner
         // (its one child is the window's connection, and the hub
         // brings it back); every other lane speaks for itself.
-        if self.provider_kind().shares_one_child() {
+        if self.provider_kind().has(provider::ProviderTrait::SharedChild) {
             cx.emit(RuntimeEvent::TurnChanged);
         } else {
             self.note_child_lost(reason, stderr, cx);
@@ -814,7 +814,7 @@ impl SessionRuntime {
     /// banner, which this step does not raise, so the session would show
     /// nothing.
     pub(crate) fn step_child_lost(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        if self.provider_kind().shares_one_child() {
+        if self.provider_kind().has(provider::ProviderTrait::SharedChild) {
             return Err(format!(
                 "{} shares the window's connection: a lost child shows no session banner",
                 self.provider_kind().label()
@@ -1032,7 +1032,7 @@ impl SessionRuntime {
                         // the stop button up on a settled turn (W8c).
                         // Genuinely new work always carries a new turn id,
                         // exactly as on the muse lane.
-                        if !self.completed_turns.contains(id) && !self.provider_kind().reports_turn_lifecycle() {
+                        if !self.completed_turns.contains(id) && !self.provider_kind().has(provider::ProviderTrait::TurnLifecycleEvents) {
                             self.running = Some(super::Running {
                                 turn_id: id.clone(),
                                 started: crate::clock::now_instant(),
@@ -1092,7 +1092,7 @@ impl SessionRuntime {
                         // Codex) stands the row's "Failed" down here — its
                         // failure, when it was one, follows this finish.
                         self.note_turn_finished_live();
-                        if !self.provider_kind().reports_turn_lifecycle() {
+                        if !self.provider_kind().has(provider::ProviderTrait::TurnLifecycleEvents) {
                             cx.emit(super::SessionEvent::ProviderTurnOutcome {
                                 session_id: self.session_id.clone(),
                                 failed: false,

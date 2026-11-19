@@ -1330,8 +1330,14 @@ impl SessionRuntime {
     /// the host fixed at construction. One field, one truth: there is no
     /// second copy to disagree with and no setter to change lanes live —
     /// a session is served by exactly one lane (see `crate::providers`).
+    ///
+    /// Every host names a registered provider — its key or a route it
+    /// declares: boot refuses an unknown `--provider`, stored records are
+    /// read strictly, and the app mints the id from a [`ProviderId`]
+    /// everywhere else — so an id no provider answers to is a bug here,
+    /// never a reason to run the session on some other provider.
     pub fn provider_kind(&self) -> ProviderId {
-        ProviderId::parse(&self.provider_id)
+        ProviderId::resolve(&self.provider_id).unwrap_or_else(|error| panic!("a session host names no registered provider: {error}"))
     }
 
     /// Load the session's recorded bubble texts once, from its turns in
@@ -1466,7 +1472,7 @@ impl SessionRuntime {
         if let Some(id) = self.session().map(|s| s.model.clone()).filter(|m| !m.is_empty()) {
             return id;
         }
-        if self.provider_kind().catalog_flags_session_model() {
+        if self.provider_kind().has(provider::ProviderTrait::CatalogFlagsSessionModel) {
             // A reopened muse session's fold names no model, but its
             // `model/list` catalog still flags the effective row — and the
             // session's own past still outranks the catalog's default.
@@ -1512,7 +1518,7 @@ impl SessionRuntime {
     /// settings, last reported model, then the out-of-box default),
     /// anything else the provider's human label.
     pub fn model(&self) -> SharedString {
-        if self.provider_kind().catalog_flags_session_model() {
+        if self.provider_kind().has(provider::ProviderTrait::CatalogFlagsSessionModel) {
             return SharedString::from(self.muse_model_label());
         }
         let id = self.model_id();
@@ -1562,7 +1568,7 @@ impl SessionRuntime {
     /// as nothing here, and a muse view with no catalog yet contributes
     /// nothing — an empty cache never drops a default.
     pub(crate) fn cached_muse_catalog_ids(&self) -> Vec<String> {
-        if !self.provider_kind().catalog_flags_session_model() {
+        if !self.provider_kind().has(provider::ProviderTrait::CatalogFlagsSessionModel) {
             return Vec::new();
         }
         self.models.iter().map(|m| m.model_id.clone()).collect()
@@ -1660,7 +1666,7 @@ impl SessionRuntime {
     /// never receives `session/contextUsage`, so it reads the folded
     /// transcript's `TurnMeta` instead (see [`Self::provider_context`]).
     pub fn context(&self) -> ContextMeterState {
-        if !self.provider_kind().meters_context_live() {
+        if !self.provider_kind().has(provider::ProviderTrait::LiveContextMeter) {
             return self.provider_context();
         }
         let side = self.store.side();
@@ -1853,7 +1859,7 @@ impl SessionRuntime {
     /// composed. Only a provider with a reminder tail tracks it. Emits
     /// [`SessionEvent::ReplyComplete`] on the edge, so the row re-reads.
     pub(super) fn note_reply_progress(&mut self, usage_landed: bool, cx: &mut Context<Self>) {
-        if !self.provider_kind().has_reminder_tail() {
+        if !self.provider_kind().has(provider::ProviderTrait::ReminderTail) {
             return;
         }
         let complete = self.reply_complete_in_fold();
@@ -1874,7 +1880,7 @@ impl SessionRuntime {
     /// past its reply is still working on something the provider never
     /// named (seen on a Codex turn, 2026-10-17).
     pub fn on_reminder_tail(&self) -> bool {
-        self.provider_kind().has_reminder_tail()
+        self.provider_kind().has(provider::ProviderTrait::ReminderTail)
             && self.running.as_ref().is_some_and(|running| self.reply_done.as_deref() == Some(running.turn_id.as_str()))
             && self.reply_complete_in_fold()
     }
@@ -2072,7 +2078,7 @@ impl SessionRuntime {
     pub fn set_tier_banner(&mut self, banner: Option<TierBanner>, cx: &mut Context<Self>) {
         // The billing tier is Muse's account: no other provider's session
         // carries its banner or its guard, whichever lane it rides.
-        if !self.provider_kind().has_billing_tier() {
+        if !self.provider_kind().has(provider::ProviderTrait::BillingTier) {
             return;
         }
         if self.tier_banner != banner {

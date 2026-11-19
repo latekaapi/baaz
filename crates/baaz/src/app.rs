@@ -4,7 +4,8 @@
 //!
 //! Every session rides a provider lane ([`provider::Provider`]): Claude Code
 //! and Codex a child each, Muse a lane of the one `muse serve` hub the window
-//! connects ([`crate::conn::connect`], held in [`Harness::muse_slot`]). The
+//! connects ([`crate::conn::connect`], its slot in the window's registry,
+//! [`Harness::providers`]). The
 //! children run their own reader and writer threads, so no pipe touches the
 //! UI thread. Two directions cross the boundary:
 //!
@@ -609,18 +610,13 @@ pub struct Harness {
     /// Seeded from the command line, changed only by the picker — never by
     /// a live session, which keeps the lane it was created on.
     pub(crate) new_provider: String,
-    /// The `muse serve` child as a hub: one provider lane per Muse
-    /// session. Set alongside `client` on connect and cleared with it on
-    /// reconnect.
-    pub(crate) muse_hub: Option<provider_muse::MuseHub>,
-    /// The same hub as the provider factory sees it: a Muse open waits on
-    /// it while `muse serve` starts.
-    pub(crate) muse_slot: crate::providers::MuseSlot,
-    /// How a new Claude Code / Codex session connects: the production
-    /// factory spawns the real CLI child; tests inject a scripted provider.
-    /// Never touched on the UI thread — the open path runs it on the
-    /// background executor, where connecting and `OpenSession` may block.
-    pub(crate) provider_factory: crate::providers::ProviderFactory,
+    /// The window's provider registry: every adapter's factory, the slot
+    /// of the child a shared-child provider's lanes ride, and how this run
+    /// opens lanes (the production factories spawn the real CLI; a scripted
+    /// run and tests register stand-ins). Opens never run on the UI thread
+    /// — the open path runs them on the background executor, where
+    /// connecting and `OpenSession` may block.
+    pub(crate) providers: crate::providers::Registry,
     pub(crate) wire: Wire,
     pub(crate) auth: Auth,
     pub(crate) login: Entity<Login>,
@@ -691,11 +687,6 @@ pub struct Harness {
     /// window opens and to `capture_and_quit`, so a second window would wait
     /// on its own. Empty without the `probe` feature.
     pub(crate) capture: CaptureToken,
-    /// Whether `initialize` granted `sessionMcp` (muse ≥ 1.3). Requested
-    /// in `conn::connect`; a server that did not grant it opens sessions
-    /// with no terminal route — the bridge rides `session/start` and
-    /// `session/resume` only on the grant.
-    session_mcp: bool,
     pub(crate) focus_root: FocusHandle,
     /// True only while the overlay window draws content the main window
     /// would otherwise draw (the Browse modal): its listeners then run on
@@ -877,20 +868,16 @@ impl Harness {
         // WKWebView. Never sniffed in render.
         let browser_fake = args.screenshot.is_some();
         let browser = cx.new(|cx| crate::browser::BrowserView::new(browser_fake, overlays.clone(), cx));
-        let muse_slot = crate::providers::MuseSlot::default();
         // The runtime's provider source, made concrete for this window.
-        let provider_factory = crate::providers::ProviderFactory::for_window(
+        let providers = crate::providers::Registry::for_window(
             crate::runtime::lanes_for(crate::runtime::Lanes::scripted_if(args.offline || args.replay.is_some())),
             terminal_service.socket_path().to_path_buf(),
-            muse_slot.clone(),
         );
         let focus_root = cx.focus_handle();
         let mut this = Self {
             new_provider,
             args,
-            muse_hub: None,
-            muse_slot,
-            provider_factory,
+            providers,
             wire: Wire::Connecting,
             auth: Auth::Probing,
             login: cx.new(|_| Login::new(api_key.clone())),
@@ -908,7 +895,6 @@ impl Harness {
             browser,
             lights_hidden: false,
             capture,
-            session_mcp: false,
             focus_root,
             hosting_overlay: false,
             tier: None,
@@ -1385,20 +1371,32 @@ impl Harness {
 
     // ------------------------------------------------------------ connection
 
-    /// Spawn `muse serve`, initialize, and start draining its events.
+    /// Start the shared child (spawn, initialize), and start draining its
+    /// events.
     pub(crate) fn connect(&mut self, cx: &mut Context<Self>) {
+        let Some(shared_id) = crate::providers::Registry::shared_id() else { return };
         crate::log::boot_mark("connect-sent");
         // The path set in Settings (D5 B4) unless an env override names one.
-        let env_named = ["BAAZ_MUSE", "MUSE_BIN"].iter().any(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()));
-        let program = match crate::details::path_override(ProviderId::Muse) {
+        let env_named = shared_id
+            .descriptor()
+            .env_overrides
+            .iter()
+            .any(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()));
+        let program = match crate::details::path_override(shared_id) {
             Some(chosen) if !env_named => chosen.to_string_lossy().into_owned(),
             _ => self.args.program.clone(),
         };
+        // Its sessions' terminal relay rides the client-tools grant.
+        let relay = crate::providers::terminal_relay(self.terminal_service.socket_path());
+        let providers = self.providers.clone();
         self.wire_call(
             cx,
             move || {
                 let at = std::time::Instant::now();
-                let out = conn::connect(&program);
+                let shared = providers.shared().ok_or_else(|| provider::ProviderError::Unavailable {
+                    reason: "no provider shares a child".into(),
+                })?;
+                let out = conn::connect(shared, &program, relay);
                 crate::log::boot_mark(&format!("connect-work-done ok={} in={}ms", out.is_ok(), at.elapsed().as_millis()));
                 out
             },
@@ -1411,15 +1409,6 @@ impl Harness {
                     // failure: say so on stderr and carry on.
                     crate::baaz_log!("{warning}");
                 }
-                this.session_mcp = connected.session_mcp;
-                // Muse sessions are lanes on this hub; the terminal relay
-                // rides its `sessionMcp` grant.
-                connected.hub.set_terminal_relay(
-                    crate::terminal::relay::bridge_path(),
-                    this.terminal_service.socket_path().to_path_buf(),
-                );
-                this.muse_slot.set_ready(connected.hub.clone());
-                this.muse_hub = Some(connected.hub);
                 this.wire = Wire::Ready;
                 this.observe_provider(connected.events, cx);
                 this.probe_account(cx);
@@ -1458,7 +1447,9 @@ impl Harness {
     /// waiting for a `session/list` that will never come, and the other
     /// providers' rows show at once.
     pub(crate) fn muse_unavailable(&mut self, reason: String, cx: &mut Context<Self>) {
-        self.muse_slot.set_down(reason.clone());
+        if let Some(shared) = self.providers.shared() {
+            shared.set_down(reason.clone());
+        }
         self.wire = Wire::Down(reason);
         // A Muse draft waiting on the start stops saying "Starting Muse…".
         if let Some(view) = self.active.clone() {
@@ -1472,10 +1463,10 @@ impl Harness {
         cx.notify();
     }
 
-    /// Observe the provider stream alongside the legacy pump: the legacy
-    /// path still owns reconnect (on the transport's close) and rendering
-    /// (through the session views), so this task only notices a lost
-    /// connection for the log. It ends when the provider is dropped.
+    /// Observe the shared child's connection stream: the window's own facts
+    /// (row live state, sign-in, usage) and the child's loss, which starts
+    /// the reconnect. Session views hear their own lanes. It ends when the
+    /// stream's sender is dropped.
     fn observe_provider(&mut self, mut events: UnboundedReceiver<ProviderEvent>, cx: &mut Context<Self>) {
         self.tasks.push(cx.spawn(async move |this, cx| {
             // The hub keeps one connection stream across respawns, so this
@@ -1501,7 +1492,7 @@ impl Harness {
         match event {
             ProviderEvent::ConnectionLost { .. } => {
                 // The exit reason: whatever the child said on stderr last.
-                let tail = self.muse_hub.as_ref().map(|hub| hub.stderr_tail()).unwrap_or_default();
+                let tail = self.providers.shared().map(|shared| shared.stderr_tail()).unwrap_or_default();
                 if tail.is_empty() {
                     crate::baaz_log!("muse serve exited; reconnecting");
                 } else {
@@ -1585,29 +1576,35 @@ impl Harness {
     /// keep working. Only a failed respawn takes the wire down.
     pub(crate) fn reconnect(&mut self, cx: &mut Context<Self>) {
         // Never connected: this is the first start, not a respawn.
-        let Some(hub) = self.muse_hub.clone() else {
+        if !self.providers.shared().is_some_and(|shared| shared.started()) {
             self.wire = Wire::Connecting;
             self.connect(cx);
             return;
+        }
+        if let Some(shared) = self.providers.shared() {
+            shared.set_starting();
+        }
+        let providers = self.providers.clone();
+        let work = move || match providers.shared() {
+            Some(shared) => shared.reconnect().map(|refused| (providers.clone(), refused)),
+            None => Err(provider::ProviderError::Unavailable { reason: "no provider shares a child".into() }),
         };
-        self.muse_slot.set_starting();
-        let work = move || hub.reconnect().map(|refused| (hub, refused));
         self.wire_call(cx, work, move |this, result, cx| match result {
-            Ok((hub, refused)) => {
-                if let Some(warning) = hub.schema_warning() {
+            Ok((providers, refused)) => {
+                let Some(shared) = providers.shared() else { return };
+                if let Some(warning) = shared.schema_warning() {
                     // A fingerprint mismatch is additive evolution, never a
                     // failure: say so on stderr and carry on.
                     crate::baaz_log!("{warning}");
                 }
-                this.session_mcp = hub.session_mcp_granted();
-                this.muse_slot.set_ready(hub.clone());
+                shared.set_ready();
                 this.wire = Wire::Ready;
                 // Every followed session the respawned child re-attached has
                 // its lease back; one it would not re-attach keeps its view
                 // and history: another window holding it reads as the lease
                 // notice, anything else says what went wrong.
                 let refused_ids: Vec<String> = refused.iter().map(|(id, _)| id.clone()).collect();
-                for session_id in hub.followed() {
+                for session_id in shared.followed() {
                     if refused_ids.contains(&session_id) {
                         continue;
                     }
@@ -1639,7 +1636,9 @@ impl Harness {
                 cx.notify();
             }
             Err(error) => {
-                this.muse_slot.set_down(error.to_string());
+                if let Some(shared) = this.providers.shared() {
+                    shared.set_down(error.to_string());
+                }
                 this.wire = Wire::Down(error.to_string());
                 this.set_dialog(cx, Dialog {
                     title: conn::provider_title(&error),
@@ -3102,7 +3101,7 @@ impl Harness {
     fn render_wire_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Muse's connection is Muse's business: a Claude Code or Codex
         // session (or no session) never wears its banner (docs/50 P1).
-        let muse_session = self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).provider_kind().shares_one_child());
+        let muse_session = self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).provider_kind().has(provider::ProviderTrait::SharedChild));
         if !muse_session {
             return None;
         }
@@ -4150,13 +4149,13 @@ impl Harness {
     /// off (not installed then, or switched off) brings it up the first time
     /// the person reaches for it, instead of handing them a dead draft.
     pub(crate) fn ensure_muse_started(&mut self, cx: &mut Context<Self>) {
-        if self.muse_slot.is_ready() || self.args.offline || self.args.replay.is_some() {
+        if self.providers.shared_ready() || self.args.offline || self.args.replay.is_some() {
             return;
         }
         if matches!(self.wire, Wire::Connecting | Wire::Reconnecting) {
             return;
         }
-        if !crate::provider_status::provider_enabled(ProviderId::Muse) {
+        if !crate::providers::Registry::shared_id().is_some_and(crate::provider_status::provider_enabled) {
             return;
         }
         self.wire = Wire::Connecting;
@@ -4164,13 +4163,20 @@ impl Harness {
     }
 
     /// Start `id`'s shared child when its sessions ride one
-    /// ([`ProviderId::shares_one_child`]); a no-op for a provider that
+    /// ([`provider::ProviderTrait::SharedChild`]); a no-op for a provider that
     /// spawns a child per session. Every open and reopen calls it before
     /// asking the factory for a lane, which waits while the child starts.
     pub(crate) fn ensure_provider_started(&mut self, id: ProviderId, cx: &mut Context<Self>) {
-        if id.shares_one_child() {
+        if id.has(provider::ProviderTrait::SharedChild) {
             self.ensure_muse_started(cx);
         }
+    }
+
+    /// The switcher's pick as a registry entry. `None` only for a value no
+    /// registered provider answers to — which boot refuses (`--provider`)
+    /// and nothing else writes — so a caller refuses rather than guessing.
+    pub(crate) fn new_provider_id(&self) -> Option<ProviderId> {
+        ProviderId::resolve(&self.new_provider).ok()
     }
 
     pub(crate) fn select_new_provider(&mut self, id: ProviderId, cx: &mut Context<Self>) {
@@ -4259,8 +4265,8 @@ impl Harness {
         self.open_state.provider_opens_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
         self.cancel_pending_switch(cx);
         self.registry.shutdown_all(self.active.as_ref(), cx);
-        if let Some(hub) = &self.muse_hub {
-            hub.shutdown();
+        if let Some(shared) = self.providers.shared() {
+            shared.shutdown();
         }
     }
 

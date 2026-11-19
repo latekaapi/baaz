@@ -22,7 +22,7 @@ fn q4_pending_provider_switch_hides_the_previous_transcript(cx: &mut gpui::TestA
     let (factory, _) = recording_resumable_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -144,7 +144,7 @@ fn q4c_pending_pane_stays_neutral_and_saves_nothing(cx: &mut gpui::TestAppContex
     let (factory, _) = recording_resumable_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -326,7 +326,7 @@ fn q4b_clicking_the_active_session_cancels_without_reopening(cx: &mut gpui::Test
     let (factory, commands) = recording_resumable_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -439,7 +439,7 @@ fn q4b_late_landing_never_steals_the_centre(cx: &mut gpui::TestAppContext) {
     let (factory, commands) = recording_resumable_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -600,7 +600,7 @@ fn q4c_fork_pending_loses_to_a_cached_landing(cx: &mut gpui::TestAppContext) {
     let (factory, commands) = recording_resumable_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -709,7 +709,7 @@ fn q4c_retry_pending_loses_to_a_cached_landing(cx: &mut gpui::TestAppContext) {
     let (factory, _) = recording_resumable_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -734,7 +734,7 @@ fn q4c_retry_pending_loses_to_a_cached_landing(cx: &mut gpui::TestAppContext) {
     // failure with the first lane parked.
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = failing_factory("reopen down");
+            harness.providers = harness.providers.with_opens_of(&failing_factory("reopen down"));
         });
     });
     vc.update(|window, cx| {
@@ -754,7 +754,7 @@ fn q4c_retry_pending_loses_to_a_cached_landing(cx: &mut gpui::TestAppContext) {
     let (retry_factory, commands) = recording_resumable_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = retry_factory;
+            harness.providers = harness.providers.with_opens_of(&retry_factory);
         });
     });
     vc.update(|window, cx| {
@@ -824,7 +824,7 @@ fn q4c_cancel_back_to_the_open_session_rearms_focus(cx: &mut gpui::TestAppContex
     let (factory, _) = recording_resumable_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -901,7 +901,7 @@ fn q4b_actions_target_nothing_while_pending(cx: &mut gpui::TestAppContext) {
     let (factory, _) = recording_resumable_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -1018,7 +1018,7 @@ fn switch_provider_through_the_handler_leaves_one_row_and_one_open(
     let (factory, opens) = counting_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
             harness.new_provider = ProviderId::Codex.as_str().to_owned();
         });
@@ -1058,7 +1058,7 @@ fn switch_provider_through_the_handler_leaves_one_row_and_one_open(
         // what proves the replacement.)
         let _ = draft;
         let rows: Vec<_> =
-            harness.session_list.read(cx).sessions.iter().filter(|entry| !entry.provider.lists_sessions()).collect();
+            harness.session_list.read(cx).sessions.iter().filter(|entry| !entry.provider.has(provider::ProviderTrait::NativeSessionList)).collect();
         assert_eq!(rows.len(), 1, "exactly one provider row names the lane");
         assert_eq!(rows[0].id, view.read(cx).rt(cx).session_id, "the row is the replacement");
         assert!(!harness.open_state.switch_pending, "the switch landed");
@@ -1085,7 +1085,7 @@ fn y2b_switch_keeps_old_view_until_open_lands_and_carries_draft(
     let (factory, opens) = counting_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
             harness.new_provider = ProviderId::Codex.as_str().to_owned();
         });
@@ -1161,7 +1161,7 @@ fn y2b_failed_open_fails_on_the_replacement_with_the_text(cx: &mut gpui::TestApp
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = scripted_factory();
+            harness.providers = harness.providers.with_opens_of(&scripted_factory());
             mark_muse_up(harness);
             harness.new_provider = ProviderId::Codex.as_str().to_owned();
         });
@@ -1177,7 +1177,7 @@ fn y2b_failed_open_fails_on_the_replacement_with_the_text(cx: &mut gpui::TestApp
     });
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = failing_factory("no child here");
+            harness.providers = harness.providers.with_opens_of(&failing_factory("no child here"));
         });
     });
     vc.update(|_, cx| {
@@ -1244,7 +1244,7 @@ fn y2b2_clicking_another_session_parks_the_switched_draft(cx: &mut gpui::TestApp
     let (factory, shared) = y2b2_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -1318,7 +1318,7 @@ fn a_draft_switch_draws_the_new_provider_before_its_child_answers(cx: &mut gpui:
     let (factory, shared) = y2b2_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -1364,7 +1364,7 @@ fn y2b2_new_session_reopens_the_switched_draft(cx: &mut gpui::TestAppContext) {
     let (factory, shared) = y2b2_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -1409,7 +1409,7 @@ fn y2b2_second_switch_supersedes_the_first(cx: &mut gpui::TestAppContext) {
     let (factory, shared) = y2b2_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -1465,7 +1465,7 @@ fn y2b2_closing_the_switched_draft_discards_its_open(cx: &mut gpui::TestAppConte
     let (factory, shared) = y2b2_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -1508,7 +1508,7 @@ fn quit_hangs_up_the_browser_chat(cx: &mut gpui::TestAppContext) {
     let (factory, shared) = y2b2_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -1540,7 +1540,7 @@ fn y2b2_quit_discards_the_switched_drafts_open(cx: &mut gpui::TestAppContext) {
     let (factory, shared) = y2b2_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -1575,7 +1575,7 @@ fn a_late_finishing_earlier_open_never_steals_the_lane(cx: &mut gpui::TestAppCon
     let (factory, opens) = counting_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -1601,7 +1601,7 @@ fn a_late_finishing_earlier_open_never_steals_the_lane(cx: &mut gpui::TestAppCon
             "the last ask wins, however the finishes order"
         );
         let rows: Vec<_> =
-            harness.session_list.read(cx).sessions.iter().filter(|entry| !entry.provider.lists_sessions()).collect();
+            harness.session_list.read(cx).sessions.iter().filter(|entry| !entry.provider.has(provider::ProviderTrait::NativeSessionList)).collect();
         assert_eq!(rows.len(), 1, "the stale finish leaves no row");
         assert_eq!(rows[0].id, view.read(cx).rt(cx).session_id, "the row is the winner");
         assert!(!harness.open_state.switch_pending, "the switch landed");

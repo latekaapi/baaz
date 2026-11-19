@@ -1,7 +1,8 @@
 //! The provider registry's marks: which of the aui icon set's provider
-//! badges each [`ProviderId`] wears. The registry itself (ids, labels,
-//! capabilities, lane factories) is [`baaz_core::providers`], re-exported
-//! here so `crate::providers::…` names both.
+//! badges each [`ProviderId`] wears — the badge its adapter declares
+//! ([`provider::ProviderDescriptor::icon`]). The registry itself (ids,
+//! labels, capabilities, lane factories) is [`baaz_core::providers`],
+//! re-exported here so `crate::providers::…` names both.
 
 pub use baaz_core::providers::*;
 
@@ -14,36 +15,38 @@ pub trait ProviderMark {
 }
 
 impl ProviderMark for ProviderId {
-    /// The provider mark a sidebar row wears after its tags. Muse's rows
-    /// wear none: the sidebar's baselines were drawn when Muse was the only
-    /// provider.
+    /// The provider mark a sidebar row wears after its tags; none for a
+    /// provider whose rows wear none ([`provider::ProviderTrait::UnmarkedRows`]:
+    /// the sidebar's baselines were drawn when it was the only provider).
     fn row_mark(self) -> Option<aui_icons::Provider> {
-        match self {
-            ProviderId::Muse => None,
-            ProviderId::ClaudeCode => Some(aui_icons::Provider::Claude),
-            ProviderId::Codex => Some(aui_icons::Provider::Codex),
-        }
+        (!self.has(provider::ProviderTrait::UnmarkedRows)).then(|| self.icon())
     }
 
     /// The mark beside the composer model chip: each provider's own badge,
-    /// so a Codex session never wears the Muse "M".
+    /// so a session never wears another provider's mark.
     fn icon(self) -> aui_icons::Provider {
-        match self {
-            ProviderId::Muse => aui_icons::Provider::Muse,
-            ProviderId::ClaudeCode => aui_icons::Provider::Claude,
-            ProviderId::Codex => aui_icons::Provider::Codex,
-        }
+        icon_of(self.descriptor().icon)
     }
 }
 
-/// The provider behind a library mark; marks Baaz does not run map to
-/// Muse (never reached: Baaz only draws its own three).
-pub fn provider_from_icon(provider: aui_icons::Provider) -> ProviderId {
+/// The icon set's badge for a protocol provider identity: the two enums
+/// name the same seven agents.
+fn icon_of(provider: aui_protocol::Provider) -> aui_icons::Provider {
     match provider {
-        aui_icons::Provider::Claude => ProviderId::ClaudeCode,
-        aui_icons::Provider::Codex => ProviderId::Codex,
-        _ => ProviderId::Muse,
+        aui_protocol::Provider::Claude => aui_icons::Provider::Claude,
+        aui_protocol::Provider::Codex => aui_icons::Provider::Codex,
+        aui_protocol::Provider::Grok => aui_icons::Provider::Grok,
+        aui_protocol::Provider::Gemini => aui_icons::Provider::Gemini,
+        aui_protocol::Provider::Pi => aui_icons::Provider::Pi,
+        aui_protocol::Provider::Cursor => aui_icons::Provider::Cursor,
+        aui_protocol::Provider::Muse => aui_icons::Provider::Muse,
     }
+}
+
+/// The registered provider wearing a library mark; `None` for a mark no
+/// registered provider wears (Baaz only draws its own).
+pub fn provider_from_icon(provider: aui_icons::Provider) -> Option<ProviderId> {
+    ProviderId::all().into_iter().find(|id| id.icon() == provider)
 }
 
 #[cfg(test)]
@@ -94,13 +97,13 @@ mod tests {
     fn the_registry_names_what_each_provider_offers() {
         for id in ProviderId::all() {
             let muse = id == ProviderId::Muse;
-            assert_eq!(id.lists_sessions(), muse);
-            assert_eq!(id.has_billing_tier(), muse);
-            assert_eq!(id.meters_context_live(), muse);
-            assert_eq!(id.has_reminder_tail(), muse);
-            assert_eq!(id.catalog_flags_session_model(), muse);
-            assert_eq!(id.models_limit_modes(), !muse);
-            assert_eq!(id.reports_turn_lifecycle(), muse);
+            assert_eq!(id.has(provider::ProviderTrait::NativeSessionList), muse);
+            assert_eq!(id.has(provider::ProviderTrait::BillingTier), muse);
+            assert_eq!(id.has(provider::ProviderTrait::LiveContextMeter), muse);
+            assert_eq!(id.has(provider::ProviderTrait::ReminderTail), muse);
+            assert_eq!(id.has(provider::ProviderTrait::CatalogFlagsSessionModel), muse);
+            assert_eq!(id.has(provider::ProviderTrait::ModelsLimitModes), !muse);
+            assert_eq!(id.has(provider::ProviderTrait::TurnLifecycleEvents), muse);
             assert_eq!(id.row_mark().is_none(), muse);
         }
     }

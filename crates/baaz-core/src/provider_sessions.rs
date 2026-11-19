@@ -361,7 +361,7 @@ pub fn resume_command(
     // the view pages it in after the ack — and starts in the host's
     // posture unless a mode was picked, like its open.
     let pages = crate::providers::ProviderId::parse_known(&record.provider)
-        .is_some_and(crate::providers::pages_history);
+        .is_some_and(|id| id.has(provider::ProviderTrait::PagesHistory));
     provider::Command::ResumeSession {
         request_id: request_id.to_owned(),
         session_id: record.session_id.clone(),

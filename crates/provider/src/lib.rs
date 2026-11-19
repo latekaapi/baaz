@@ -48,6 +48,7 @@ pub mod env_path;
 mod error;
 mod event;
 pub mod facts;
+pub mod registry;
 pub mod scripted;
 mod traits;
 pub mod usage;
@@ -60,6 +61,10 @@ pub use command::{Command, ProviderId, QuestionAnswer, SubmissionPart};
 pub use crossbeam_channel::Receiver;
 pub use error::{ProviderError, Refusal, RefusalHint, Severity};
 pub use event::ProviderEvent;
+pub use registry::{
+    McpServer, ModeDescriptor, ProviderDescriptor, ProviderFactory, ProviderRegistry, ProviderTrait, SessionSpawn,
+    SharedChild, SharedStart, StoredSessions, UnknownProvider,
+};
 pub use traits::{ConnectInfo, Handshake, Provider, ProviderAdapter, STDERR_TAIL_LINES};
 pub use provider_runtime::StderrTail;
 /// The process runtime every adapter stands on: spawn, group kill, the pid

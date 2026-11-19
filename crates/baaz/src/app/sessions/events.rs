@@ -387,7 +387,7 @@ impl Harness {
             // the record, or for a provider that lists its own
             // sessions, as a local row until the list shows it.
             self.merge_provider_rows(cx);
-            if provider_kind.lists_sessions() {
+            if provider_kind.has(provider::ProviderTrait::NativeSessionList) {
                 let project = self.session_list.read(cx).overrides.get(&session_id).and_then(|m| m.project.clone());
                 let workspace = self.session_workspace(&session_id, cx);
                 self.ensure_listed_row(&session_id, project, workspace, cx);

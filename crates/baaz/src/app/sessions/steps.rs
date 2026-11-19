@@ -107,7 +107,7 @@ impl Harness {
             !self.args.steps.is_empty(),
             self.args.replay.is_some(),
             self.args.offline,
-            self.muse_slot.is_ready(),
+            self.providers.shared_ready(),
             self.active.is_some(),
             // A mixed script headed by a window verb can start: `new`
             // opens the session the later verbs need, so holding the whole

@@ -179,10 +179,10 @@ impl Harness {
     /// `account/read` is the only sign-in signal (`model/list` answers from
     /// the provider catalog while logged out, so it never was one).
     pub(crate) fn probe_account(&mut self, cx: &mut Context<Self>) {
-        if !self.muse_slot.is_ready() {
+        if !self.providers.shared_ready() {
             return;
         }
-        let slot = self.muse_slot.clone();
+        let slot = self.providers.clone();
         crate::log::boot_mark("account/read-sent");
         self.wire_call(
             cx,
@@ -352,7 +352,7 @@ impl Harness {
     /// device state (D26). Nothing here is logged but the state name.
     pub(crate) fn start_device_flow(&mut self, cx: &mut Context<Self>) {
         self.login.update(cx, |login, _| login.method = Some(LoginMethod::Account));
-        if !self.muse_slot.is_ready() {
+        if !self.providers.shared_ready() {
             self.set_login_state(
                 LoginState::Error { message: "Muse is not running.".into(), method: Some(LoginMethod::Account) },
                 cx,
@@ -360,7 +360,7 @@ impl Harness {
             return;
         }
         self.set_login_state(LoginState::Starting, cx);
-        let slot = self.muse_slot.clone();
+        let slot = self.providers.clone();
         let work = move || slot.control().and_then(|lane| lane.send(Command::BeginLogin { api_key: None }));
         self.wire_call(cx, work, |this, result, cx| match result {
             Ok(Ack::LoginChallenge { verification_url, user_code }) => match (verification_url, user_code) {
@@ -423,7 +423,7 @@ impl Harness {
         if trimmed.is_empty() {
             return;
         }
-        if !self.muse_slot.is_ready() {
+        if !self.providers.shared_ready() {
             self.set_login_state(
                 LoginState::ApiKey {
                     can_submit: false,
@@ -435,7 +435,7 @@ impl Harness {
         }
         self.login.update(cx, |login, _| login.method = Some(LoginMethod::ApiKey));
         self.set_login_state(LoginState::Validating, cx);
-        let slot = self.muse_slot.clone();
+        let slot = self.providers.clone();
         let work = move || slot.control().and_then(|lane| lane.send(Command::BeginLogin { api_key: Some(trimmed) }));
         // `wire_call_in` for the window the field-clear needs.
         self.wire_call_in(cx, work, |this, result, window, cx| {
@@ -465,10 +465,10 @@ impl Harness {
     /// already where it would go.
     pub(crate) fn cancel_login_flow(&mut self, cx: &mut Context<Self>) {
         self.login_back_to_choose(cx);
-        if !self.muse_slot.is_ready() {
+        if !self.providers.shared_ready() {
             return;
         }
-        let slot = self.muse_slot.clone();
+        let slot = self.providers.clone();
         cx.background_spawn(async move {
             let _ = slot.control().and_then(|lane| lane.send(Command::CancelLogin));
         })
@@ -485,21 +485,22 @@ impl Harness {
     /// only when it is a Muse one. Claude Code and Codex rows are not
     /// Muse's to clear (docs/50 P1).
     pub(crate) fn forget_muse_rows(&mut self, cx: &mut Context<Self>) {
-        if self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).provider_kind() == crate::providers::ProviderId::Muse) {
+        let Some(signed_out) = crate::providers::ProviderId::with(provider::ProviderTrait::AccountOnConnection) else { return };
+        if self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).provider_kind() == signed_out) {
             self.active = None;
         }
-        self.session_list.update(cx, |list, _| list.sessions.retain(|entry| entry.provider != crate::providers::ProviderId::Muse));
+        self.session_list.update(cx, |list, _| list.sessions.retain(|entry| entry.provider != signed_out));
         self.invalidate_list(cx);
     }
 
     pub(crate) fn logout(&mut self, cx: &mut Context<Self>) {
-        if !self.muse_slot.is_ready() {
+        if !self.providers.shared_ready() {
             self.forget_muse_rows(cx);
             self.auth = Auth::SignedOut;
             self.login_back_to_choose(cx);
             return;
         }
-        let slot = self.muse_slot.clone();
+        let slot = self.providers.clone();
         let work = move || slot.control().and_then(|lane| lane.send(Command::LogOut)).and_then(account_of);
         self.wire_call(cx, work, |this, result, cx| match result {
             Ok((lane, label)) => match Identity::from_account(&lane, label) {

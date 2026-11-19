@@ -24,6 +24,7 @@ pub mod frame;
 pub mod home;
 pub mod probe;
 pub mod rollout;
+pub mod registry;
 pub mod terminal;
 
 use std::collections::HashMap;

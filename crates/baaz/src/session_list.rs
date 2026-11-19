@@ -699,7 +699,7 @@ impl SessionList {
         // settled turn and its time — in place of the relist a settle used
         // to cost (2,661 rows joined, 64–144 ms).
         let before = self.sessions[ix].clone();
-        if self.sessions[ix].provider.lists_sessions() {
+        if self.sessions[ix].provider.has(provider::ProviderTrait::NativeSessionList) {
             let entry = &mut self.sessions[ix];
             let updated = chrono::DateTime::from_timestamp_millis(record.updated_ms)
                 .map(|at| at.with_timezone(&chrono::Local));
@@ -718,11 +718,13 @@ impl SessionList {
             }
             return;
         }
-        let mut row = sidebar::SessionEntry::provider_row(
+        let Some(mut row) = sidebar::SessionEntry::provider_row(
             &record,
             self.overrides.get(session_id),
             &self.projects,
-        );
+        ) else {
+            return;
+        };
         // The row's live facts survive the rejoin, like in
         // [`Self::merge_provider_rows`].
         row.running = self.sessions[ix].running;
@@ -770,7 +772,7 @@ impl SessionList {
         let provider_ids: Vec<String> = self
             .sessions
             .iter()
-            .filter(|entry| !entry.provider.lists_sessions() && wanted(&entry.id))
+            .filter(|entry| !entry.provider.has(provider::ProviderTrait::NativeSessionList) && wanted(&entry.id))
             .map(|entry| entry.id.clone())
             .collect();
         for id in provider_ids {
@@ -791,7 +793,7 @@ impl SessionList {
             })
             .unwrap_or_default();
         for entry in &mut self.sessions {
-            if !entry.provider.lists_sessions() || !wanted(&entry.id) {
+            if !entry.provider.has(provider::ProviderTrait::NativeSessionList) || !wanted(&entry.id) {
                 continue;
             }
             // The adoption may have changed under the row: re-resolve every
@@ -930,12 +932,12 @@ impl SessionList {
         // A deleted record that anchored a chain still needs the collapse:
         // its row leaves, the chain re-sums without it.
         let removed_linked = self.sessions.iter().any(|entry| {
-            !entry.provider.lists_sessions()
+            !entry.provider.has(provider::ProviderTrait::NativeSessionList)
                 && !self.provider_sessions.contains_key(&entry.id)
                 && sidebar::needs_collapse(&entry.id, &self.overrides)
         });
         let records = &self.provider_sessions;
-        self.sessions.retain(|entry| entry.provider.lists_sessions() || records.contains_key(&entry.id));
+        self.sessions.retain(|entry| entry.provider.has(provider::ProviderTrait::NativeSessionList) || records.contains_key(&entry.id));
         if self.provider_sessions.is_empty() {
             return false;
         }
@@ -946,17 +948,19 @@ impl SessionList {
         let mut records: Vec<crate::provider_sessions::ProviderSessionRecord> = self
             .provider_sessions
             .values()
-            .filter(|record| !ProviderId::parse_known(&record.provider).is_some_and(|id| id.lists_sessions()))
+            .filter(|record| !ProviderId::parse_known(&record.provider).is_some_and(|id| id.has(provider::ProviderTrait::NativeSessionList)))
             .cloned()
             .collect();
         records.sort_by(|a, b| a.session_id.cmp(&b.session_id));
         for record in &records {
             touched_link |= sidebar::needs_collapse(&record.session_id, &self.overrides);
-            let mut row = sidebar::SessionEntry::provider_row(
+            let Some(mut row) = sidebar::SessionEntry::provider_row(
                 record,
                 self.overrides.get(&record.session_id),
                 &self.projects,
-            );
+            ) else {
+                continue;
+            };
             // The row's live facts survive the rebuild: a running turn,
             // pending words and the title-pending flag belong to the view
             // and the titler, not the store.
@@ -1001,7 +1005,10 @@ impl SessionList {
                 })
                 .map(|(id, _)| id.clone())
                 .collect();
-            if !missing.is_empty() {
+            // These rows are the session-listing provider's: a member of
+            // any other provider has a record, which is its row.
+            let listing = ProviderId::with(provider::ProviderTrait::NativeSessionList);
+            if let (false, Some(listing)) = (missing.is_empty(), listing) {
                 let now = crate::clock::now_local();
                 for id in missing {
                     let meta = self.overrides.get(&id);
@@ -1022,7 +1029,7 @@ impl SessionList {
                         archived: meta.is_some_and(|m| m.archived),
                         description: String::new(),
                         replayed: false,
-                        provider: ProviderId::Muse,
+                        provider: listing,
                         named,
                         needs_title: false,
                         side_marker: false,

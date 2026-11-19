@@ -3053,19 +3053,9 @@ mod tests {
             "the isolated Harness does not serve the recomputed production name"
         );
         assert_eq!(
-            crate::providers::terminal_socket_path(&socket),
+            crate::providers::terminal_relay(&socket).socket,
             socket,
-            "the relay seam carries the bound socket through"
-        );
-        assert_eq!(
-            crate::providers::claude_terminal_relay(&socket).socket,
-            socket,
-            "the Claude Code relay points at the bound socket"
-        );
-        assert_eq!(
-            crate::providers::codex_terminal_relay(&socket).socket,
-            socket,
-            "the Codex relay points at the bound socket"
+            "every lane's relay (each adapter's, through its spawn) points at the bound socket"
         );
     }
 

@@ -84,7 +84,12 @@ pub fn complete_onboarding() {
 /// The connect screen's row order (the D5 board): Claude Code, Codex, Muse.
 /// The footer picker lists Connected providers in this order too, and the
 /// first of them is the default when the person has not picked one.
-pub const CONNECT_ORDER: [ProviderId; 3] = [ProviderId::ClaudeCode, ProviderId::Codex, ProviderId::Muse];
+pub fn connect_order() -> Vec<ProviderId> {
+    // The per-lane CLIs first, in registration order; a shared child last.
+    let mut order = ProviderId::all().to_vec();
+    order.sort_by_key(|id| id.has(provider::ProviderTrait::SharedChild));
+    order
+}
 
 /// The connect row's headline: the status headline, except a provider that
 /// has not reported yet this launch (no probe result and no cache) always
@@ -206,11 +211,7 @@ pub fn primary_action(status: &ProviderStatus) -> Option<ProviderActionDef> {
 }
 
 fn aui_provider(id: ProviderId) -> AuiProvider {
-    match id {
-        ProviderId::Muse => AuiProvider::Muse,
-        ProviderId::ClaudeCode => AuiProvider::Claude,
-        ProviderId::Codex => AuiProvider::Codex,
-    }
+    crate::providers::ProviderMark::icon(id)
 }
 
 /// Whether `status` counts as Connected on the connect screen: signed in,
@@ -219,12 +220,12 @@ pub fn row_connected(status: &ProviderStatus) -> bool {
     headline_for(status) == AuiHeadline::Connected && too_old(status).is_none()
 }
 
-/// The three connect rows in [`CONNECT_ORDER`]. Codex's row follows its
+/// The three connect rows in [`connect_order`]. Codex's row follows its
 /// sign-in while one runs (`codex`): a spinner and Cancel while waiting,
 /// the failure reason when it failed.
 pub fn build_rows(statuses: &[ProviderStatus], codex: &CodexLogin) -> Vec<ConnectRowData> {
     let by_id: HashMap<ProviderId, &ProviderStatus> = statuses.iter().map(|s| (s.provider, s)).collect();
-    CONNECT_ORDER
+    connect_order()
         .into_iter()
         .map(|id| {
             let status = by_id
@@ -287,7 +288,7 @@ pub fn codex_assist_runs(state: &CodexLogin) -> Vec<aui::screens::AssistRun> {
 }
 
 /// The provider new sessions start in, as the footer shows it: `current`
-/// while it is Connected, else the first Connected in [`CONNECT_ORDER`];
+/// while it is Connected, else the first Connected in [`connect_order`];
 /// `None` when nothing is Connected (the footer reads "Nothing is ready").
 pub fn connect_default(statuses: &[ProviderStatus], current: ProviderId) -> Option<ProviderId> {
     let connected: Vec<ProviderId> = connected_choices(statuses);
@@ -312,10 +313,10 @@ pub fn default_picker_for(
     })
 }
 
-/// The Connected providers, in [`CONNECT_ORDER`]: what the footer picker
+/// The Connected providers, in [`connect_order`]: what the footer picker
 /// lists.
 pub fn connected_choices(statuses: &[ProviderStatus]) -> Vec<ProviderId> {
-    CONNECT_ORDER
+    connect_order()
         .into_iter()
         .filter(|id| statuses.iter().any(|s| s.provider == *id && s.enabled && row_connected(s)))
         .collect()
@@ -789,7 +790,10 @@ impl ConnectScreen {
             // The root redraws for the two that reach it.
             ConnectIntent::Provider(ProviderIntent { id, action }) => {
                 self.set_menu(false, cx);
-                cx.emit(ConnectEvent::ProviderAction { id: ProviderId::parse(&id), action });
+                // An id no registered provider answers to does nothing.
+                if let Ok(id) = ProviderId::resolve(&id) {
+                    cx.emit(ConnectEvent::ProviderAction { id, action });
+                }
             }
             ConnectIntent::ToggleDefaultMenu => {
                 let open = !self.menu_open(cx);
@@ -800,7 +804,9 @@ impl ConnectScreen {
             }
             ConnectIntent::SetDefault(provider) => {
                 self.set_menu(false, cx);
-                cx.emit(ConnectEvent::SetDefault(crate::providers::provider_from_icon(provider)));
+                if let Some(id) = crate::providers::provider_from_icon(provider) {
+                    cx.emit(ConnectEvent::SetDefault(id));
+                }
             }
             ConnectIntent::Assist(key) if key.as_ref() == crate::import_ui::IMPORT_ASSIST_KEY => {
                 cx.emit(ConnectEvent::OpenImportSheet);
@@ -842,7 +848,8 @@ impl Render for ConnectScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.model.read(cx);
         let rows = build_rows(&model.statuses, &model.codex_login);
-        let current = self.facts.new_provider.unwrap_or(ProviderId::Muse);
+        // With no pick, the first registered stands (as at boot).
+        let current = self.facts.new_provider.unwrap_or(ProviderId::all()[0]);
         let picker = default_picker_for(&model.statuses, current, self.menu_open(cx));
         // Codex's sign-in owns the line while it runs; otherwise the P7
         // offer may stand there (first run only).
@@ -866,7 +873,7 @@ impl Harness {
 
     /// What the connect screen needs from the root now (see [`ConnectFacts`]).
     pub(crate) fn connect_facts(&self, cx: &App) -> ConnectFacts {
-        ConnectFacts { new_provider: Some(ProviderId::parse(&self.new_provider)), import_assist: self.import_connect_assist(cx) }
+        ConnectFacts { new_provider: self.new_provider_id(), import_assist: self.import_connect_assist(cx) }
     }
 
     /// The connect screen for this frame — facts pushed, then its view
@@ -974,13 +981,13 @@ impl Harness {
         // New sessions start where the footer said: the stored pick while it
         // is Connected, else the first Connected in the board's order.
         let statuses = crate::provider_status::live_statuses();
-        let current = ProviderId::parse(&self.new_provider);
-        if let Some(id) = connect_default(&statuses, current) {
-            if id != current {
+        let current = self.new_provider_id();
+        if let Some(id) = current.and_then(|current| connect_default(&statuses, current)) {
+            if Some(id) != current {
                 self.new_provider = id.as_str().to_owned();
                 crate::providers::write_last_provider(id);
             }
-        } else if !crate::settings_providers::usable_provider(&statuses, current) {
+        } else if !current.is_some_and(|current| crate::settings_providers::usable_provider(&statuses, current)) {
             let id = crate::settings_providers::live_default_new_provider();
             self.new_provider = id.as_str().to_owned();
             crate::providers::write_last_provider(id);
@@ -1028,13 +1035,15 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         match action {
-            ProviderAction::SignIn => match id {
-                ProviderId::Muse => {
+            ProviderAction::SignIn => {
+                if id.has(provider::ProviderTrait::AccountOnConnection) {
                     self.open_muse_sheet(cx);
+                } else if id.has(provider::ProviderTrait::DeviceCodeSignIn) {
+                    self.provider_model.update(cx, |model, cx| model.begin_codex_signin(cx));
+                } else {
+                    self.open_setup_sheet(id, SetupKind::SignIn, window, cx);
                 }
-                ProviderId::Codex => self.provider_model.update(cx, |model, cx| model.begin_codex_signin(cx)),
-                ProviderId::ClaudeCode => self.open_setup_sheet(id, SetupKind::SignIn, window, cx),
-            },
+            }
             ProviderAction::Install => self.open_setup_sheet(id, SetupKind::Install, window, cx),
             ProviderAction::Docs => {
                 let _ = crate::auth::open_in_browser(docs_url(id));
@@ -1152,12 +1161,10 @@ impl Harness {
         // banner goes (the next probe that reads Connected).
         self.provider_model.update(cx, |model, _| model.release_typed_signed_out(id));
         let action = ProviderAction::SignIn;
-        match id {
-            ProviderId::Muse => {
-                self.open_muse_sheet(cx);
-            }
-            ProviderId::Codex => self.connect_provider_action(id, action, window, cx),
-            ProviderId::ClaudeCode => self.connect_provider_action(id, action, window, cx),
+        if id.has(provider::ProviderTrait::AccountOnConnection) {
+            self.open_muse_sheet(cx);
+        } else {
+            self.connect_provider_action(id, action, window, cx);
         }
     }
 }

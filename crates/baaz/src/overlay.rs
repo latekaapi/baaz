@@ -769,7 +769,7 @@ impl Harness {
     fn line_view(&self, cx: &App) -> Option<(aui::browse::agent_window::LineState, Option<String>)> {
         if let Some(session) = self.line_session(cx) {
             if let Some(activity) = self.terminal_service.agent_activity(&session) {
-                let name = self.session_lane_provider(&session, cx).label();
+                let name = self.session_lane_provider(&session, cx).map_or("", |provider| provider.label());
                 let host = self.terminal_service.page_host(&session, cx).unwrap_or_default();
                 return Some((Self::agent_line_state(&activity, name, &host), Some(session)));
             }
@@ -954,7 +954,7 @@ impl Harness {
         }
         let state = self.existing_browser(cx)?;
         let page = state.read(cx);
-        let agent = self.active.as_ref().map(|v| v.read(cx).rt(cx).session_id.clone()).map(|id| self.session_lane_provider(&id, cx));
+        let agent = self.active.as_ref().map(|v| v.read(cx).rt(cx).session_id.clone()).and_then(|id| self.session_lane_provider(&id, cx));
         let name = agent.map(|p| p.label()).unwrap_or("Muse");
         let menu_open = {
             let pane = self.right_pane.read(cx);

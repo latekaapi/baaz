@@ -567,7 +567,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
                 .filter(|dialog| dialog.action == crate::overlays::DialogAction::ProviderSignOut)
                 .and_then(|dialog| dialog.archive_target.clone());
             let wire = target.ok_or("no sign-out confirm is open")?;
-            this.confirm_provider_signout(crate::providers::ProviderId::parse(&wire), window, cx);
+            let id = crate::providers::ProviderId::parse_known(&wire).ok_or_else(|| format!("no provider `{wire}`"))?;
+            this.confirm_provider_signout(id, window, cx);
             Ok(())
         },
     },
@@ -629,7 +630,7 @@ impl Harness {
             "signout" => ProviderAction::SignOut,
             other => return Err(format!("no provider action `{other}`")),
         };
-        if crate::providers::ProviderId::parse(wire).as_str() != wire {
+        if crate::providers::ProviderId::parse_known(wire).is_none() {
             return Err(format!("no provider `{wire}`"));
         }
         self.handle_provider_intent(ProviderIntent { id: wire.to_owned().into(), action }, window, cx);

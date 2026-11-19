@@ -127,13 +127,13 @@ impl ProjectDefaults {
     /// This provider's stored model, if any. Empty spellings read as no
     /// default, so no `--model` flag is ever implied by one.
     pub fn model_for(&self, provider: &str) -> Option<String> {
-        let key = crate::providers::ProviderId::parse(provider).defaults_key();
+        let key = crate::providers::ProviderId::resolve(provider).ok()?.defaults_key();
         self.models.get(key).filter(|id| !id.is_empty()).cloned()
     }
 
     /// This provider's stored effort, if any.
     pub fn effort_for(&self, provider: &str) -> Option<String> {
-        let key = crate::providers::ProviderId::parse(provider).defaults_key();
+        let key = crate::providers::ProviderId::resolve(provider).ok()?.defaults_key();
         self.efforts.get(key).filter(|id| !id.is_empty()).cloned()
     }
 
@@ -143,14 +143,17 @@ impl ProjectDefaults {
         if model_id.is_empty() {
             return;
         }
-        let key = crate::providers::ProviderId::parse(provider).defaults_key();
+        // An unknown provider stores nothing: never another lane's default.
+        let Ok(id) = crate::providers::ProviderId::resolve(provider) else { return };
+        let key = id.defaults_key();
         self.models.insert(key.to_owned(), model_id.to_owned());
     }
 
     /// Record an effort pick under the view's provider. `None` (`Default`)
     /// clears the entry rather than storing a blank.
     pub fn note_effort(&mut self, provider: &str, effort: Option<String>) {
-        let key = crate::providers::ProviderId::parse(provider).defaults_key();
+        let Ok(id) = crate::providers::ProviderId::resolve(provider) else { return };
+        let key = id.defaults_key();
         match effort.map(|id| id.trim().to_owned()).filter(|id| !id.is_empty()) {
             Some(effort) => {
                 self.efforts.insert(key.to_owned(), effort);

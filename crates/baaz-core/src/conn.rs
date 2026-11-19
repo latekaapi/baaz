@@ -1,11 +1,13 @@
-//! The `muse serve` connection and how its events reach the UI thread.
+//! The shared child's connection and how provider events reach the UI
+//! thread.
 //!
-//! [`connect`] spawns the child and shakes hands through
-//! [`provider_muse::establish`], and bridges the hub's connection stream onto
-//! a `futures` channel a gpui foreground task can await: crossbeam receivers
-//! are competing consumers no foreground task can await, so one small
-//! forwarding thread per stream moves every event across. Sessions ride the
-//! hub as [`Provider`] lanes, each behind the enforced gate.
+//! [`connect`] starts the child a shared-child provider's sessions ride
+//! ([`SharedChild::start`]: spawn and handshake), and bridges its
+//! connection stream onto a `futures` channel a gpui foreground task can
+//! await: crossbeam receivers are competing consumers no foreground task
+//! can await, so one small forwarding thread per stream moves every event
+//! across. Sessions ride the child as [`Provider`] lanes, each behind the
+//! enforced gate.
 //!
 //! Commands are the other direction and they *do* block (a request waits up to
 //! three minutes), so every one of them runs on gpui's background executor and
@@ -15,10 +17,10 @@
 //! **Durable, always** — the spawn must never set `--no-session-log`: it
 //! accepts a turn and then emits no view events at all
 //! (`docs/01-transport.md` §4), so an app that wants a transcript may never
-//! set it. That flag lives in [`provider_muse::spawn`].
+//! set it. That flag lives in the adapter's own spawn (`provider-muse`).
 
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
-use provider::{ConnectInfo, Provider, ProviderError, ProviderEvent};
+use provider::{ConnectInfo, Provider, ProviderError, ProviderEvent, SharedChild};
 #[cfg(test)]
 use provider::ProviderAdapter;
 
@@ -33,13 +35,10 @@ pub const CLIENT_NAME: &str = "baaz";
 /// inside `provider-muse`.
 pub const REQUESTED_CAPABILITIES: &[&str] = &["userShell", "sessionMcp"];
 
-/// A live connection: the hub and its connection stream.
+/// A live shared child: its connection stream and what the handshake said.
 pub struct Connected {
-    /// The one `muse serve` child as a hub: a [`Provider`] lane per
-    /// session, every command through the lane's gate.
-    pub hub: provider_muse::MuseHub,
-    /// The hub's connection stream (row facts, account and usage,
-    /// connection loss), bridged onto a channel a gpui task can await.
+    /// The connection stream (row facts, account and usage, connection
+    /// loss), bridged onto a channel a gpui task can await.
     pub events: UnboundedReceiver<ProviderEvent>,
     /// Who answered: the agent's own name for itself.
     pub agent_name: String,
@@ -49,10 +48,6 @@ pub struct Connected {
     /// mismatch is additive evolution, never a failure: log it and carry
     /// on. `None` when the fingerprints agreed.
     pub warning: Option<String>,
-    /// Whether `initialize` granted `sessionMcp` (muse ≥ 1.3): the
-    /// terminal relay's route. `false` means no route — sessions open
-    /// exactly as they always did.
-    pub session_mcp: bool,
 }
 
 /// A one-line title for a connection failure, for the reconnect dialog.
@@ -79,26 +74,24 @@ pub fn connect_info() -> ConnectInfo {
     }
 }
 
-/// Spawn `muse serve`, `initialize`, and bridge the connection stream.
+/// Start the shared child (`program`), `initialize`, point its terminal
+/// relay at `mcp`, and bridge the connection stream.
 ///
 /// Blocking: run it on the background executor.
-pub fn connect(program: &str) -> Result<Connected, ProviderError> {
-    let established = provider_muse::establish(program, &connect_info())?;
-    let events = bridge_events(established.hub.connection_events());
+pub fn connect(shared: &dyn SharedChild, program: &str, mcp: provider::McpServer) -> Result<Connected, ProviderError> {
+    let started = shared.start(program, &connect_info(), Some(mcp))?;
     Ok(Connected {
-        hub: established.hub,
-        events,
-        agent_name: established.handshake.agent_name,
-        agent_version: established.handshake.agent_version,
-        warning: established.warning,
-        session_mcp: established.session_mcp,
+        events: bridge_events(started.events),
+        agent_name: started.agent_name,
+        agent_version: started.agent_version,
+        warning: started.warning,
     })
 }
 
 /// Drive the connection path with any adapter: wrap it behind the
 /// [`Provider`] gate, shake hands, and bridge its event stream. Test-only:
 /// production connects through [`connect`], whose adapter is already
-/// connected inside [`provider_muse::establish`]. Here the adapter is
+/// connected inside [`SharedChild::start`]. Here the adapter is
 /// [`ScriptedProvider`](provider::scripted::ScriptedProvider) or any other
 /// non-muse implementation. What the test exercises is what the app holds:
 /// gated dispatch plus the bridged event stream.

@@ -1,62 +1,67 @@
-//! The provider registry: the backends a new session can start on.
+//! The provider registry: the backends a new session can start on
+//! (docs/82 5.4, docs/81 B §c.1).
 //!
-//! Three entries — `muse` (existing), `claude-code`, `codex`. Each entry
-//! exposes its capability map read live from the adapter crate that owns
-//! the evidence (`provider-muse`, `provider-claude-code` and `provider-codex`
-//! `caps.rs`): this registry never re-probes and keeps no hand-copied
-//! table, so a fixture that upgrades a cell upgrades the UI with it —
-//! the drift `docs/20` names is unrepresentable here.
+//! Each backend is an adapter crate's registration: a
+//! [`ProviderDescriptor`](provider::ProviderDescriptor) declaring the facts
+//! (label, binaries, install and update commands, docs, version floor,
+//! modes, and the traits that name what it offers beyond the seam) and a
+//! [`ProviderFactory`](provider::ProviderFactory) that opens its lanes.
+//! [`ProviderId`] is the app's handle on one registration; this module is
+//! the one place that names the adapter crates' registrations
+//! ([`ProviderId::descriptor`], [`Registry::for_window`]), and the rest of
+//! the app asks the registry — a trait, a label, a factory — never "is this
+//! provider X?".
+//!
+//! Capability maps are read live from the adapter that owns the evidence
+//! (its descriptor's `capabilities`): this registry never re-probes and
+//! keeps no hand-copied table, so a fixture that upgrades a cell upgrades
+//! the UI with it.
 //!
 //! # One session, one serving lane
 //!
-//! Two state machines read one event stream today: the legacy pump in
-//! `conn.rs` and the app's `wire::ProviderCall`. Wiring a
-//! session view to both would give two writers to one on-screen state —
-//! random-looking UI corruption no unit test can catch. So a session is
-//! served by exactly one of them, decided at session creation from the
-//! app's `session::SessionHost`'s provider id and then
-//! never changed:
-//!
-//! * `muse` sessions ride the legacy pump (the transitional bundle, until
-//!   the last view moves lane by lane).
-//! * `claude-code` and `codex` sessions ride the provider lane: neutral
-//!   [`Command`](provider::Command)s through the capability gate.
-//!
-//! There is deliberately no way to switch a live session's provider: the
-//! id lives in a private field on the view with no setter, set once from
-//! the host at construction. [`check_single_lane`] is the loud detector
-//! for the day both lanes claim one session — it returns the violation as
-//! text instead of corrupting silently.
+//! A session is served by exactly one lane, decided at session creation
+//! from the app's `session::SessionHost`'s provider id and then never
+//! changed: there is deliberately no way to switch a live session's
+//! provider — the id lives in a private field on the view with no setter,
+//! set once from the host at construction. A provider whose sessions share
+//! one child ([`provider::ProviderTrait::SharedChild`]) hands out lanes on
+//! it; the others spawn a child per lane.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use provider::{Capability, CapabilityState, Provider, ProviderError};
+use provider::{
+    Capability, CapabilityState, Provider, ProviderDescriptor, ProviderError, ProviderRegistry, ProviderTrait,
+    SharedChild, UnknownProvider,
+};
 
-/// Which backend a session belongs to. Fixed at session creation; a live
-/// session never changes lanes.
+/// Which backend a session belongs to: the app's handle on one registry
+/// entry. Fixed at session creation; a live session never changes lanes.
 ///
 /// Serialized kebab-case (`muse`, `claude-code`, `codex`) for the
-/// provider-status cache, matching [`ProviderId::as_str`].
+/// provider-status cache, matching each descriptor's key
+/// ([`ProviderId::as_str`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderId {
-    /// The existing backend, served by the legacy pump.
+    /// The `provider-muse` registration.
     Muse,
-    /// Claude Code, served over the provider lane.
+    /// The `provider-claude-code` registration.
     ClaudeCode,
-    /// Codex, served over the provider lane.
+    /// The `provider-codex` registration.
     Codex,
 }
 
 impl ProviderId {
-    /// Whether the provider keeps its own session list (Muse's
-    /// `session/list`), which Baaz reads and merges; the others' sessions
-    /// are Baaz's own records (their rows in `baaz.db`), which survive any
-    /// listing.
-    pub fn lists_sessions(self) -> bool {
-        matches!(self, ProviderId::Muse)
+    /// The declaration each handle stands for: the registration, and the
+    /// one place the app names a provider.
+    pub fn descriptor(self) -> &'static ProviderDescriptor {
+        match self {
+            ProviderId::Muse => &provider_muse::registry::DESCRIPTOR,
+            ProviderId::ClaudeCode => &provider_claude_code::registry::DESCRIPTOR,
+            ProviderId::Codex => &provider_codex::registry::DESCRIPTOR,
+        }
     }
 
     /// Every entry in the registry, in switcher order.
@@ -64,30 +69,36 @@ impl ProviderId {
         [ProviderId::Muse, ProviderId::ClaudeCode, ProviderId::Codex]
     }
 
-    /// The wire id: what the session host and the CLI flag carry.
+    /// Whether this provider declares `trait_`.
+    pub fn has(self, trait_: ProviderTrait) -> bool {
+        self.descriptor().has(trait_)
+    }
+
+    /// The first registered provider declaring `trait_`: how the app
+    /// reaches "the provider with a billing tier" without naming it.
+    pub fn with(trait_: ProviderTrait) -> Option<ProviderId> {
+        ProviderId::all().into_iter().find(|id| id.has(trait_))
+    }
+
+    /// The wire id: what the session host, records and the CLI flag carry.
     pub fn as_str(self) -> &'static str {
-        match self {
-            ProviderId::Muse => "muse",
-            ProviderId::ClaudeCode => "claude-code",
-            ProviderId::Codex => "codex",
-        }
+        self.descriptor().key
     }
 
-    /// Parse a wire id back. Unknown ids fall back to `muse`, the lane
-    /// every existing session already rides — a mistyped flag still opens
-    /// a working session rather than nothing.
-    pub fn parse(raw: &str) -> ProviderId {
-        match raw {
-            "claude-code" => ProviderId::ClaudeCode,
-            "codex" => ProviderId::Codex,
-            _ => ProviderId::Muse,
-        }
+    /// The provider `raw` names — a registered key, or a model-vendor
+    /// route a provider declares (`--provider echo`). Anything else is an
+    /// error, never a fallback to some provider: a record written by a
+    /// build that knows a provider this one does not stays unopened.
+    pub fn resolve(raw: &str) -> Result<ProviderId, UnknownProvider> {
+        ProviderId::all()
+            .into_iter()
+            .find(|id| id.descriptor().answers_to(raw))
+            .ok_or_else(|| UnknownProvider(raw.to_owned()))
     }
 
-    /// Parse a wire id strictly: `None` for an id no registry entry owns.
-    /// What a stored record's provider is read with — a record naming a
-    /// provider this build does not know is refused as unknown, never
-    /// reopened on [`ProviderId::parse`]'s Muse fallback.
+    /// Parse a stored key strictly: `None` for a key no registry entry
+    /// owns (a route is not a stored key). What a stored record's provider
+    /// is read with.
     pub fn parse_known(raw: &str) -> Option<ProviderId> {
         ProviderId::all().into_iter().find(|id| id.as_str() == raw)
     }
@@ -102,11 +113,7 @@ impl ProviderId {
 
     /// The switcher label: a human name, never the wire id.
     pub fn label(self) -> &'static str {
-        match self {
-            ProviderId::Muse => "Muse",
-            ProviderId::ClaudeCode => "Claude Code",
-            ProviderId::Codex => "Codex",
-        }
+        self.descriptor().label
     }
 
     /// The composer placeholder for a session on this provider: the person
@@ -125,33 +132,11 @@ impl ProviderId {
 /// The capability map for one registry entry, read from the adapter crate
 /// that owns the evidence — never a hand-copied table. A fixture that
 /// upgrades a cell there upgrades this answer with it; the human reasons
-/// ride along from the source, verbatim.
+/// ride along from the source, verbatim. Read at the declared floor: Baaz
+/// does not keep the connected CLI's version, so a provider whose table
+/// varies by version answers at the newest floor the seam supports.
 pub fn capability_state(id: ProviderId, capability: Capability) -> CapabilityState {
-    match id {
-        ProviderId::Muse => muse_capability_state(muse_table_version(), capability),
-        ProviderId::ClaudeCode => {
-            provider_claude_code::caps::capabilities().state(capability).clone()
-        }
-        ProviderId::Codex => provider_codex::caps::capabilities().state(capability).clone(),
-    }
-}
-
-/// The muse version the registry reads the adapter table at. Baaz never
-/// observes the connected muse's version — the handshake's `agent_version`
-/// is logged, never stored — so the table reads at the newest floor the
-/// seam supports ([`MUSE_MCP_VERSION_FLOOR`](provider_muse::MUSE_MCP_VERSION_FLOOR)):
-/// client tools granted, everything else as declared. That is exactly
-/// today's answer, now derived instead of repeated.
-fn muse_table_version() -> &'static str {
-    provider_muse::MUSE_MCP_VERSION_FLOOR
-}
-
-/// muse's declared state for one agent version, straight from the owning
-/// crate. The versioned entry point the registry's fixed answer above
-/// goes through — and what a caller that *does* know its server's version
-/// reads instead.
-pub fn muse_capability_state(version: &str, capability: Capability) -> CapabilityState {
-    provider_muse::capabilities_for_version(version).state(capability).clone()
+    (id.descriptor().capabilities)(None).state(capability).clone()
 }
 
 /// Whether a control that sends a command needing `capability` is offered
@@ -176,121 +161,16 @@ pub fn gate(id: ProviderId, capability: Capability) -> Option<String> {
 }
 
 /// The mode picker's detail line for `mode` on `id`'s sessions: the
-/// protocol's own sentence, plus — on Read-only — what the provider still
-/// lets through, so the picker never claims more than the backend enforces.
-///
-/// Read-only reaches the owner's own MCP tools differently per provider.
-/// Claude Code denies every tool not annotated `readOnlyHint` (and every
-/// server whose tools are not known yet) on its deny layer, which beats
-/// any allow rule — nothing to add. Codex declines every MCP approval
-/// prompt, but a tool its own config sets to `approval_mode = "approve"`
-/// never prompts. Muse refuses an unmatched MCP call, but a tool the owner
-/// "always allowed" matches a persistent allow rule, and its protocol lets
-/// a client select a profile, never add a session deny.
+/// adapter's own words for what the mode lets through, so the picker never
+/// claims more than the backend enforces; the protocol's sentence for a
+/// mode the adapter does not declare.
 pub fn mode_description(id: ProviderId, mode: aui_protocol::PermissionMode) -> &'static str {
-    match (id, mode) {
-        (ProviderId::Codex, aui_protocol::PermissionMode::DenyUnmatched) => {
-            "Anything without a matching rule is refused. MCP tools your Codex config auto-approves still run."
-        }
-        (ProviderId::Muse, aui_protocol::PermissionMode::DenyUnmatched) => {
-            "Anything without a matching rule is refused. MCP tools you always allowed in Muse still run."
-        }
-        _ => mode.description(),
-    }
+    id.descriptor().mode(mode).map_or_else(|| mode.description(), |declared| declared.description)
 }
 
-/// What a provider's sessions offer beyond the seam's common ground — the
-/// registry's own words, so no view asks for a provider by name.
+/// The approval kind and its decision shape (docs/81 B S-7: a typed kind
+/// on the request is 5.5's; until then the registry reads it off the id).
 impl ProviderId {
-    /// The login's plan decides what a turn costs, so its sessions carry
-    /// the billing banner and its send guard (Muse's tier).
-    pub fn has_billing_tier(self) -> bool {
-        matches!(self, ProviderId::Muse)
-    }
-
-    /// The provider reports the context window as it moves; the others'
-    /// meters read the settled turns' totals instead.
-    pub fn meters_context_live(self) -> bool {
-        matches!(self, ProviderId::Muse)
-    }
-
-    /// A turn can stay open past its whole reply on the provider's own
-    /// bookkeeping (Muse's memory-reminder tail): the turn reads finished —
-    /// a sendable composer, a quiet "saving memories" note — while it stays
-    /// open until its `turn/completed`.
-    pub fn has_reminder_tail(self) -> bool {
-        matches!(self, ProviderId::Muse)
-    }
-
-    /// The provider's one catalog flags the session's effective model and
-    /// labels it, and is shared across its sessions (Muse's `model/list`):
-    /// the chip reads the catalog's label, and a new session's stored
-    /// default is checked against it.
-    pub fn catalog_flags_session_model(self) -> bool {
-        matches!(self, ProviderId::Muse)
-    }
-
-    /// The provider announces each turn's start and end as events
-    /// (`TurnRunning` / `TurnSettled`, from its live stream and its resume
-    /// answer), so a view never infers a running turn from the transcript —
-    /// history can hold a turn that never finished. The others' turns are
-    /// read off the transcript's own start and finish.
-    pub fn reports_turn_lifecycle(self) -> bool {
-        matches!(self, ProviderId::Muse)
-    }
-
-    /// A model can rule a mode out (Claude Code and Codex models that
-    /// cannot run Auto): a mode left unsupported by a model change steps
-    /// down to Ask.
-    pub fn models_limit_modes(self) -> bool {
-        !matches!(self, ProviderId::Muse)
-    }
-
-    /// Its sessions are lanes on one child the window starts and keeps
-    /// (Muse's `muse serve` hub), not a child per session: an open or a
-    /// reopen asks the window to start it first, a lost connection comes
-    /// back for every lane (so a lane never hangs it up), the window's own
-    /// reconnect banner speaks for its sessions, and the resume's terminal
-    /// bridge can be refused once per run (the hub's memo).
-    pub fn shares_one_child(self) -> bool {
-        matches!(self, ProviderId::Muse)
-    }
-
-    /// In scripted chrome (`--no-connect` / `--replay`) its new session is
-    /// a local view rather than a scripted lane: the capture baselines were
-    /// drawn with Muse's local draft, like the app's `ProviderMark::row_mark`.
-    pub fn scripted_draft_is_local(self) -> bool {
-        matches!(self, ProviderId::Muse)
-    }
-
-    /// The open names the model vendor its requests route to
-    /// (`OpenSession.model_provider`: `meta`, or `echo` in a scripted run)
-    /// and carries the approval mode only when one was picked — with no
-    /// pick the host's default posture stands. The others always carry the
-    /// mode the chip stands on and route nothing.
-    pub fn open_routes_model_vendor(self) -> bool {
-        matches!(self, ProviderId::Muse)
-    }
-
-    /// Utility completions (titles, bylines, commit and PR drafts) run as
-    /// a hidden side session on the provider's shared connection, never
-    /// through the one-shot CLI completer ([`crate::utility::supports`]).
-    pub fn completes_in_side_session(self) -> bool {
-        matches!(self, ProviderId::Muse)
-    }
-
-    /// The catalog rows carry the provider's own effort tiers, default and
-    /// notes, and the effort menu reads them off the row.
-    pub fn catalog_rows_carry_efforts(self) -> bool {
-        matches!(self, ProviderId::Muse)
-    }
-
-    /// The provider has a `/create-skill` command: "Ask Muse to write one"
-    /// opens a session on it with that draft.
-    pub fn writes_skills_by_prompt(self) -> bool {
-        matches!(self, ProviderId::Muse)
-    }
-
     /// Which kind an approval this provider raised is, by its id: the
     /// decision travels back on the provider's own wire shape.
     pub fn external_approval_kind(self, approval_id: &str) -> ExternalApprovalKind {
@@ -306,91 +186,58 @@ impl ProviderId {
 }
 
 /// How a person gets, updates and reads about each provider's CLI — one
-/// table for the connect screen and Settings (docs/65 §3.1 #9). Commands
-/// are typed into a terminal for the person to run, never run by Baaz.
+/// table for the connect screen and Settings (docs/65 §3.1 #9), declared by
+/// each adapter. Commands are typed into a terminal for the person to run,
+/// never run by Baaz.
 impl ProviderId {
-    /// The vendor install command. Muse has none: no installer is
-    /// published, so its missing row links to [`Self::docs_url`] instead.
+    /// The vendor install command; `None` when no installer is published,
+    /// so the missing row links to [`Self::docs_url`] instead.
     pub fn install_command(self) -> Option<&'static str> {
-        match self {
-            ProviderId::ClaudeCode => Some("curl -fsSL https://claude.ai/install.sh | bash"),
-            // The vendor's own installer (owner 2026-10-25): no Node needed,
-            // lands in ~/.local/bin, updates itself. npm left new users
-            // without Node at a dead end.
-            ProviderId::Codex => Some("curl -fsSL https://chatgpt.com/codex/install.sh | sh"),
-            ProviderId::Muse => None,
-        }
+        self.descriptor().install_command
     }
 
     /// The CLI's own update command, offered beside a too-old advisory.
-    /// Muse's launcher updates itself.
     pub fn update_command(self) -> Option<&'static str> {
-        match self {
-            ProviderId::ClaudeCode => Some("claude update"),
-            // The CLI's own updater, whichever way it was installed.
-            ProviderId::Codex => Some("codex update"),
-            ProviderId::Muse => None,
-        }
+        self.descriptor().update_command
     }
 
     /// The oldest CLI Baaz supports, as data: below it the status carries a
-    /// too-old advisory (never a block). Muse's is the seam's floor; Claude
-    /// Code's and Codex's are the versions their adapters were probed and
-    /// verified against (docs/23, docs/65 §3.1 #5).
+    /// too-old advisory (never a block).
     pub fn version_floor(self) -> &'static str {
-        match self {
-            ProviderId::Muse => provider_muse::MUSE_VERSION_FLOOR,
-            ProviderId::ClaudeCode => "2.1.276",
-            ProviderId::Codex => "0.144.6",
-        }
+        self.descriptor().version_floor
     }
 
-    /// The vendor docs behind every Docs button — for Muse, the page a
-    /// person gets it from (the owner's link, 2026-10-23).
+    /// The vendor docs behind every Docs button.
     pub fn docs_url(self) -> &'static str {
-        match self {
-            ProviderId::ClaudeCode => "https://docs.anthropic.com/en/docs/claude-code",
-            ProviderId::Codex => "https://developers.openai.com/codex",
-            ProviderId::Muse => "https://dev.meta.ai/lp/muse-code",
-        }
+        self.descriptor().docs_url
     }
 }
 
 // ------------------------------------------------- finding the CLIs
 
-/// The binary a provider lane spawns: `None` for muse, which rides the
-/// legacy pump and never spawns through here.
+/// The binary a lane spawns: the descriptor's first; `None` for a provider
+/// whose sessions share one child the window starts instead.
 fn binary_name(id: ProviderId) -> Option<&'static str> {
-    match id {
-        ProviderId::Muse => None,
-        ProviderId::ClaudeCode => Some("claude"),
-        ProviderId::Codex => Some("codex"),
+    if id.has(ProviderTrait::SharedChild) {
+        return None;
     }
+    id.descriptor().binaries.first().copied()
 }
 
-/// Whether a provider re-attaches a stored session without its history and
-/// pages it in afterwards (`Command::PageTranscript`): Muse does, so a long
-/// transcript draws page by page. The others replay it with the resume.
-pub fn pages_history(id: ProviderId) -> bool {
-    id == ProviderId::Muse
-}
-
-/// The env override naming the binary, when the provider has one.
+/// The env override naming the binary, when the provider has one and its
+/// lanes spawn through [`resolve_program`].
 fn env_override(id: ProviderId) -> Option<&'static str> {
-    match id {
-        ProviderId::Muse => None,
-        ProviderId::ClaudeCode => Some("BAAZ_CLAUDE"),
-        ProviderId::Codex => Some("BAAZ_CODEX"),
-    }
+    binary_name(id).and_then(|_| id.descriptor().env_overrides.first().copied())
 }
 
-/// Where the `claude` / `codex` binary comes from, in order: the env
-/// override (`BAAZ_CLAUDE` / `BAAZ_CODEX`), else the login-shell `PATH`
-/// (which already carries the fixed fallbacks). The login `PATH` matters
-/// because the app also launches from the Dock with a minimal `PATH` that
-/// names almost nothing.
+/// Where a per-lane CLI's binary comes from, in order: the env override
+/// (`BAAZ_CLAUDE` / `BAAZ_CODEX`), else the login-shell `PATH` (which
+/// already carries the fixed fallbacks). The login `PATH` matters because
+/// the app also launches from the Dock with a minimal `PATH` that names
+/// almost nothing.
 ///
-/// `None` for muse (no binary) and when nothing on the search path exists.
+/// `None` for a shared-child provider (no binary per lane) and when nothing
+/// on the search path exists.
 pub fn resolve_program(id: ProviderId) -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     // The login `PATH` first (it already ends in the install dirs), then
@@ -460,77 +307,176 @@ fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
-/// How a window's session lanes connect (the runtime's
-/// [`crate::runtime::ProviderSource`] made concrete for one window): every
-/// open — new, reopen, fork, a disabled provider's lane — goes through one,
-/// so a scripted run takes the same open path as a real one with a scripted
-/// factory in it, and tests inject theirs the same way.
+/// The window's registry: every adapter's factory as registered, and how
+/// this run opens lanes through them (the runtime's
+/// [`crate::runtime::ProviderSource`] made concrete for one window). Every
+/// open — new, reopen, fork, a disabled provider's lane — goes through
+/// one, so a scripted run takes the same open path as a real one with the
+/// scripted stand-in registered in front, and tests register theirs the
+/// same way.
 ///
 /// The open itself blocks — resolving, spawning and shaking hands — so the
-/// open path runs it on the background executor; a factory whose opens
-/// [land inline](Self::lands_inline) (the scripted stand-in: no child,
-/// nothing that blocks) runs it on the spot instead, so a scripted open
-/// lands in the same update as its click.
+/// open path runs it on the background executor; an open that
+/// [lands inline](Self::lands_inline) (the scripted stand-in: no child,
+/// nothing that blocks) runs on the spot instead, so a scripted open lands
+/// in the same update as its click.
 #[derive(Clone)]
-pub struct ProviderFactory {
-    open: Arc<dyn Fn(ProviderId) -> Result<Provider, ProviderError> + Send + Sync>,
-    kind: FactoryKind,
+pub struct Registry {
+    /// The adapters' factories. The shared-child provider's factory is also
+    /// its child's slot, so it lives here for the window's life whatever
+    /// opens lanes.
+    providers: ProviderRegistry,
+    opens: Opens,
+    /// This window's terminal socket: what each lane's relay bridge is
+    /// pointed at.
+    socket: PathBuf,
+    /// The shared-child factory itself, for tests that put a stand-in's hub
+    /// in its slot.
+    #[cfg(any(test, feature = "test-support"))]
+    muse: Arc<provider_muse::registry::MuseFactory>,
 }
 
+/// What a test registers in front of the adapters: one open for every key.
+type TestOpen = Arc<dyn Fn(ProviderId) -> Result<Provider, ProviderError> + Send + Sync>;
+
 #[derive(Clone)]
-enum FactoryKind {
-    /// Opens spawn (or wait for) a child: off the UI thread.
-    Spawn,
+enum Opens {
+    /// Through each adapter's factory, off the UI thread.
+    Factories,
     /// The scripted stand-in, always (a disabled provider's lane).
-    Scripted,
-    /// The scripted stand-in until this Muse slot is up, then the spawning
-    /// factory: a `--no-connect` / `--replay` window. Tests that install a
-    /// Muse client keep reaching the real lane path.
-    ScriptedUntil(MuseSlot),
+    StandIn,
+    /// The scripted stand-in until the shared child is up, then the
+    /// factories: a `--no-connect` / `--replay` window. Tests that start a
+    /// shared child keep reaching the real lane path.
+    StandInUntilShared,
+    /// A test's registration, off the UI thread.
+    Test(TestOpen),
 }
 
-impl ProviderFactory {
-    /// A factory that opens through `open`, off the UI thread.
-    pub fn new(open: impl Fn(ProviderId) -> Result<Provider, ProviderError> + Send + Sync + 'static) -> Self {
-        Self { open: Arc::new(open), kind: FactoryKind::Spawn }
-    }
-
-    /// The window's factory for `lanes`, around its terminal socket and its
-    /// Muse slot.
-    pub fn for_window(lanes: crate::runtime::Lanes, socket: PathBuf, muse: MuseSlot) -> Self {
-        let spawn = default_provider_factory(socket, muse.clone());
-        match lanes {
-            crate::runtime::Lanes::Spawn => spawn,
-            crate::runtime::Lanes::Scripted => {
-                let slot = muse.clone();
-                Self {
-                    open: Arc::new(move |id| if slot.is_ready() { spawn.open(id) } else { scripted_lane() }),
-                    kind: FactoryKind::ScriptedUntil(muse),
-                }
-            }
+impl Registry {
+    /// The window's registry for `lanes`, around its terminal socket: each
+    /// adapter crate's factory, registered here and nowhere else.
+    pub fn for_window(lanes: crate::runtime::Lanes, socket: PathBuf) -> Self {
+        let muse = Arc::new(provider_muse::registry::MuseFactory::new(crate::conn::connect_info()));
+        let providers = ProviderRegistry::new()
+            .register(muse.clone())
+            .register(Arc::new(provider_claude_code::registry::ClaudeCodeFactory))
+            .register(Arc::new(provider_codex::registry::CodexFactory));
+        let opens = match lanes {
+            crate::runtime::Lanes::Spawn => Opens::Factories,
+            crate::runtime::Lanes::Scripted => Opens::StandInUntilShared,
+        };
+        #[cfg(not(any(test, feature = "test-support")))]
+        drop(muse);
+        Self {
+            providers,
+            opens,
+            socket,
+            #[cfg(any(test, feature = "test-support"))]
+            muse,
         }
     }
 
-    /// The scripted stand-in alone: what a disabled provider's lane opens
-    /// over — readable, resumable, and sending nothing anywhere.
-    pub fn scripted() -> Self {
-        Self { open: Arc::new(|_| scripted_lane()), kind: FactoryKind::Scripted }
+    /// A spawning window registry with `open` registered in front of every
+    /// adapter: a test's stand-in.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test(open: impl Fn(ProviderId) -> Result<Provider, ProviderError> + Send + Sync + 'static) -> Self {
+        Self::for_window(crate::runtime::Lanes::Spawn, PathBuf::new()).with_test_open(open)
     }
 
-    /// Connect a provider for `id`. Blocking unless [`Self::lands_inline`].
+    /// This registry opening the way `other` opens, its own slots kept: how
+    /// a test swaps a window's opens without losing a hub it started.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_opens_of(&self, other: &Registry) -> Self {
+        Self { opens: other.opens.clone(), ..self.clone() }
+    }
+
+    /// Put a started hub in the shared child's slot, up (tests drive a
+    /// stand-in `muse serve`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_test_hub(&self, hub: provider_muse::MuseHub) {
+        self.muse.install(hub);
+    }
+
+    /// This registry with `open` registered in front of every adapter (a
+    /// test's stand-in): the shared child's slot is kept.
+    pub fn with_test_open(&self, open: impl Fn(ProviderId) -> Result<Provider, ProviderError> + Send + Sync + 'static) -> Self {
+        Self { opens: Opens::Test(Arc::new(open)), ..self.clone() }
+    }
+
+    /// This registry with the scripted stand-in in front: what a disabled
+    /// provider's lane opens over — readable, resumable, and sending
+    /// nothing anywhere.
+    pub fn stand_in(&self) -> Self {
+        Self { opens: Opens::StandIn, ..self.clone() }
+    }
+
+    /// The child a shared-child provider's sessions ride, when one is
+    /// registered.
+    pub fn shared(&self) -> Option<&dyn SharedChild> {
+        self.providers.shared_child()
+    }
+
+    /// Whether the shared child is up right now.
+    pub fn shared_ready(&self) -> bool {
+        self.shared().is_some_and(|shared| shared.is_ready())
+    }
+
+    /// The provider whose sessions share one child, when one is registered.
+    pub fn shared_id() -> Option<ProviderId> {
+        ProviderId::with(ProviderTrait::SharedChild)
+    }
+
+    /// A lane on the shared child for connection-level commands (account,
+    /// usage, the session list) when it is up now, never waiting.
+    pub fn control(&self) -> Result<Provider, ProviderError> {
+        match self.shared() {
+            Some(shared) => shared.control(),
+            None => Err(ProviderError::Unavailable { reason: "no provider shares a child".into() }),
+        }
+    }
+
+    /// Connect a lane for `id`. Blocking unless [`Self::lands_inline`].
     pub fn open(&self, id: ProviderId) -> Result<Provider, ProviderError> {
-        (self.open)(id)
+        match &self.opens {
+            Opens::StandIn => scripted_lane(),
+            Opens::StandInUntilShared if !self.shared_ready() => scripted_lane(),
+            Opens::Test(open) => open(id),
+            Opens::Factories | Opens::StandInUntilShared => self.open_through_factory(id),
+        }
     }
 
-    /// Whether an open through this factory runs on the UI thread now: the
-    /// scripted stand-in (a window's own scripted factory only while Muse
-    /// is not up). Such an open spawns nothing and never blocks.
+    /// Whether an open through this registry runs on the UI thread now: the
+    /// scripted stand-in (a window's own scripted registry only while the
+    /// shared child is not up). Such an open spawns nothing and never
+    /// blocks.
     pub fn lands_inline(&self) -> bool {
-        match &self.kind {
-            FactoryKind::Spawn => false,
-            FactoryKind::Scripted => true,
-            FactoryKind::ScriptedUntil(muse) => !muse.is_ready(),
+        match &self.opens {
+            Opens::Factories | Opens::Test(_) => false,
+            Opens::StandIn => true,
+            Opens::StandInUntilShared => !self.shared_ready(),
         }
+    }
+
+    /// Resolve, wrap, and connect one lane through `id`'s factory. `Err`
+    /// when the binary is missing or the handshake fails — the caller
+    /// surfaces it with the provider's name and opens nothing, never a
+    /// fallback to another provider.
+    fn open_through_factory(&self, id: ProviderId) -> Result<Provider, ProviderError> {
+        let factory = self.providers.get(id.as_str()).map_err(|error| ProviderError::Unavailable { reason: error.to_string() })?;
+        // Z5: the inherit-owner-servers opt-ins, read once per session
+        // open — a flip applies to sessions started after it, never live
+        // ones.
+        let use_own = crate::layout::read().use_own_mcp;
+        let spawn = provider::SessionSpawn {
+            client: crate::conn::connect_info(),
+            program: resolve_program(id),
+            state_dir: crate::store::support_dir(),
+            owner_home: std::env::var_os("HOME").map(PathBuf::from),
+            mcp_servers: vec![terminal_relay(&self.socket)],
+            inherit_owner_mcp: use_own.inherits(id),
+        };
+        factory.open(&spawn)
     }
 }
 
@@ -547,235 +493,13 @@ fn scripted_lane() -> Result<Provider, ProviderError> {
     Ok(Provider::new(adapter))
 }
 
-/// The production factory: resolve the CLI, hold its adapter behind the
-/// gate, and shake hands. The session itself opens later, with
-/// `Command::OpenSession` on the same background turn.
-pub fn default_provider_factory(socket: PathBuf, muse: MuseSlot) -> ProviderFactory {
-    ProviderFactory::new(move |id| match id {
-        ProviderId::Muse => muse.lane(),
-        other => open_provider(other, &socket),
-    })
-}
-
-/// How long a Muse open waits for `muse serve` to come up before it fails.
-const MUSE_START_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
-
-/// Where Muse's one shared child stands, for the open path: Muse sessions
-/// are lanes on one hub, not a child each, so the factory hands out a lane
-/// of whatever hub the window connected — waiting while it starts.
-#[derive(Clone, Default)]
-pub struct MuseSlot {
-    state: Arc<(std::sync::Mutex<MuseState>, std::sync::Condvar)>,
-}
-
-#[derive(Clone, Default)]
-enum MuseState {
-    /// Not up yet: an open waits (the caller asked for it to start).
-    #[default]
-    Starting,
-    /// Connected: lanes ride this hub.
-    Ready(provider_muse::MuseHub),
-    /// It could not start, and why.
-    Down(String),
-}
-
-impl MuseSlot {
-    /// The hub is up.
-    pub fn set_ready(&self, hub: provider_muse::MuseHub) {
-        self.set(MuseState::Ready(hub));
-    }
-
-    /// It is (re)starting: opens wait.
-    pub fn set_starting(&self) {
-        self.set(MuseState::Starting);
-    }
-
-    /// It could not start: opens fail with `reason`.
-    pub fn set_down(&self, reason: String) {
-        self.set(MuseState::Down(reason));
-    }
-
-    fn set(&self, state: MuseState) {
-        let (lock, ready) = &*self.state;
-        *lock.lock().expect("muse slot") = state;
-        ready.notify_all();
-    }
-
-    /// The hub, when it is up right now.
-    pub fn hub(&self) -> Option<provider_muse::MuseHub> {
-        match &*self.state.0.lock().expect("muse slot") {
-            MuseState::Ready(hub) => Some(hub.clone()),
-            _ => None,
-        }
-    }
-
-    /// Whether the hub is up right now.
-    pub fn is_ready(&self) -> bool {
-        matches!(*self.state.0.lock().expect("muse slot"), MuseState::Ready(_))
-    }
-
-    /// A lane for connection-level commands (account, usage, the session
-    /// list) when the hub is up now, never waiting: a sign-in screen asks
-    /// and answers at once. Blocking only for the lane's own handshake
-    /// report, which sends nothing on a hub that is up.
-    pub fn control(&self) -> Result<Provider, ProviderError> {
-        use provider::ProviderAdapter as _;
-        let hub = match &*self.state.0.lock().expect("muse slot") {
-            MuseState::Ready(hub) => hub.clone(),
-            MuseState::Down(reason) => return Err(ProviderError::Unavailable { reason: reason.clone() }),
-            MuseState::Starting => return Err(ProviderError::Unavailable { reason: "Muse is starting".into() }),
-        };
-        let mut lane = hub.lane();
-        lane.connect(&crate::conn::connect_info())?;
-        Ok(Provider::new(lane))
-    }
-
-    /// A connected lane on the hub, waiting up to [`MUSE_START_WAIT`] while
-    /// it starts. Blocking: the open path runs it on the background
-    /// executor.
-    fn lane(&self) -> Result<Provider, ProviderError> {
-        use provider::ProviderAdapter as _;
-        let (lock, ready) = &*self.state;
-        let state = lock.lock().expect("muse slot");
-        let (state, _) = ready
-            .wait_timeout_while(state, MUSE_START_WAIT, |state| matches!(state, MuseState::Starting))
-            .expect("muse slot");
-        match &*state {
-            MuseState::Ready(hub) => {
-                let mut lane = hub.lane();
-                lane.connect(&crate::conn::connect_info())?;
-                Ok(Provider::new(lane))
-            }
-            MuseState::Down(reason) => Err(ProviderError::Unavailable { reason: reason.clone() }),
-            MuseState::Starting => Err(ProviderError::Unavailable {
-                reason: format!("Muse did not start within {}s", MUSE_START_WAIT.as_secs()),
-            }),
-        }
-    }
-}
-
-/// This window's terminal socket — what the relay's bridge is pointed at:
-/// the service's actual socket path (the app's `TerminalService::socket_path`),
-/// threaded through from the Harness (or would-be, when a second window owns
-/// the name — then the bridge answers that the terminal is unavailable rather
-/// than failing). Never recomputed here: recomputing from the support dir and
-/// pid drifts from the bound fallback path and from test Harnesses' isolated
-/// sockets.
-pub fn terminal_socket_path(socket: &Path) -> PathBuf {
-    socket.to_path_buf()
-}
-
-/// Resolve, wrap, and connect one provider lane's child. `Err` when the
-/// binary is missing or the handshake fails — the caller surfaces it with
-/// the provider's name and opens nothing, never a silent muse fallback.
-fn open_provider(id: ProviderId, socket: &Path) -> Result<Provider, ProviderError> {
-    let program = resolve_program(id).ok_or_else(|| match binary_name(id) {
-        Some(binary) => ProviderError::launch_refusal(
-            provider::RefusalHint::NotInstalled,
-            format!("{} isn't installed", id.label()),
-            format!(
-                "{binary} was not found on PATH or in the usual install locations ({} for an override)",
-                env_override(id).unwrap_or("BAAZ_CLAUDE")
-            ),
-        ),
-        None => ProviderError::Unavailable { reason: "muse sessions ride the legacy pump, never a spawned child".into() },
-    })?;
-    let program = program.to_string_lossy().into_owned();
-    // Z5: the inherit-owner-servers opt-ins, read once per session open —
-    // a flip applies to sessions started after it, never live ones.
-    let use_own_mcp = crate::layout::read().use_own_mcp;
-    let mut provider = match id {
-        ProviderId::ClaudeCode => {
-            // The terminal relay's route (T2): the bridge beside this
-            // binary, pointed at this window's socket, with per-session
-            // configs under the support dir. Per-session only — the
-            // operator's own connectors stay out via `--strict-mcp-config`
-            // unless the switch below opted in.
-            let adapter = provider_claude_code::ClaudeCodeAdapter::new(&program);
-            adapter.set_terminal_relay(claude_terminal_relay(socket));
-            adapter.set_use_own_mcp(use_own_mcp.claude_code);
-            // The Baaz-owned Claude home: ensured here, pinned on the
-            // adapter, so every child this adapter spawns writes to
-            // `<state>/claude-home` (never the owner's `~/.claude`) and
-            // history resolves through the same dir. Best-effort: on
-            // failure the adapter still resolves to the same path, and
-            // the spawn reports an unusable home honestly.
-            pin_claude_home(&adapter);
-            Provider::new(adapter)
-        }
-        ProviderId::Codex => {
-            // The terminal relay's route (T2): the bridge as a per-session
-            // MCP server through process-scoped `-c` overrides — the
-            // owner's `~/.codex/config.toml` is never touched — with the
-            // inherit-nothing disables unless the switch opted in.
-            let adapter = provider_codex::CodexAdapter::new(&program);
-            adapter.set_terminal_relay(codex_terminal_relay(socket));
-            adapter.set_use_own_mcp(use_own_mcp.codex);
-            // The Baaz-owned Codex home: ensured here, pinned on the
-            // adapter, so every app-server this adapter spawns runs with
-            // `CODEX_HOME=<state>/codex-home`. The rotating `auth.json`
-            // link is re-checked before each spawn by the adapter itself.
-            pin_codex_home(&adapter);
-            Provider::new(adapter)
-        }
-        ProviderId::Muse => {
-            return Err(ProviderError::Unavailable {
-                reason: "muse sessions ride the legacy pump, never a spawned child".into(),
-            });
-        }
-    };
-    provider.connect(&crate::conn::connect_info())?;
-    Ok(provider)
-}
-
-/// The Claude Code relay for this window's socket: the bridge beside this
-/// binary, pointed at the socket the service actually bound, with per-session
-/// configs under the support dir.
-pub fn claude_terminal_relay(socket: &Path) -> provider_claude_code::TerminalRelay {
-    provider_claude_code::TerminalRelay {
-        bridge: crate::terminal_relay::bridge_path(),
-        socket: terminal_socket_path(socket),
-        config_dir: crate::terminal_relay::claude_config_dir(&crate::store::support_dir()),
-    }
-}
-
-/// The Codex relay for this window's socket: the bridge as a per-session MCP
-/// server, pointed at the socket the service actually bound.
-pub fn codex_terminal_relay(socket: &Path) -> provider_codex::TerminalRelay {
-    provider_codex::TerminalRelay {
-        bridge: crate::terminal_relay::bridge_path(),
-        socket: terminal_socket_path(socket),
-    }
-}
-
-/// Ensure the Baaz-owned Claude home and pin it on `adapter`, so its
-/// children and its history resolve through `<state>/claude-home` even
-/// when this process's own env names another config dir. Best-effort: a
-/// failure is logged and the adapter keeps its default resolution (the
-/// same path), so the open still proceeds.
-fn pin_claude_home(adapter: &provider_claude_code::ClaudeCodeAdapter) {
-    // Adapter setup runs on the startup path: capture the launched-under-
-    // a-desktop-agent fact before any provider thread spawns, so every
-    // later per-`Command` scrub replays the launch value.
-    provider::child_env::capture_startup_entrypoint();
-    let state = crate::store::support_dir();
-    let Some(owner) = std::env::var_os("HOME").map(PathBuf::from) else { return };
-    match provider_claude_code::home::ensure_home(&owner, &state) {
-        Ok(home) => adapter.set_config_dir(home),
-        Err(error) => eprintln!("baaz: could not prepare the Baaz Claude home: {error}"),
-    }
-}
-
-/// Ensure the Baaz-owned Codex home and pin its state dir on `adapter`,
-/// so its app-servers run with `CODEX_HOME=<state>/codex-home`. Same
-/// best-effort rule as [`pin_claude_home`].
-fn pin_codex_home(adapter: &provider_codex::CodexAdapter) {
-    let state = crate::store::support_dir();
-    let Some(owner) = std::env::var_os("HOME").map(PathBuf::from) else { return };
-    match provider_codex::home::ensure_home(&owner, &state) {
-        Ok(_) => adapter.set_state_dir(state),
-        Err(error) => eprintln!("baaz: could not prepare the Baaz Codex home: {error}"),
-    }
+/// The terminal relay every lane gets: the bridge beside this binary,
+/// pointed at the socket this window's service actually bound — threaded
+/// through from the Harness, never recomputed from the support dir and pid
+/// (that drifts from the bound fallback path and from test Harnesses'
+/// isolated sockets).
+pub fn terminal_relay(socket: &Path) -> provider::McpServer {
+    provider::McpServer { command: crate::terminal_relay::bridge_path(), socket: socket.to_path_buf() }
 }
 
 // ------------------------------------------------- the supplied model lists
@@ -1206,12 +930,7 @@ static LAST_PROVIDER: crate::store::JsonStore<LastProvider> = crate::store::Json
 /// the command line.
 pub fn read_last_provider() -> Option<ProviderId> {
     let stored: LastProvider = LAST_PROVIDER.read();
-    match stored.provider.as_str() {
-        "muse" => Some(ProviderId::Muse),
-        "claude-code" => Some(ProviderId::ClaudeCode),
-        "codex" => Some(ProviderId::Codex),
-        _ => None,
-    }
+    ProviderId::parse_known(&stored.provider)
 }
 
 /// Remember the backend new sessions start on. Best-effort: a store that
@@ -1462,7 +1181,7 @@ mod tests {
             );
             assert_eq!(
                 capability_state(ProviderId::Muse, capability),
-                *provider_muse::capabilities_for_version(muse_table_version()).state(capability),
+                *provider_muse::capabilities_for_version(provider_muse::MUSE_MCP_VERSION_FLOOR).state(capability),
                 "muse {:?} drifted from its adapter",
                 capability
             );
@@ -1476,15 +1195,14 @@ mod tests {
         assert_eq!(ids, vec!["muse", "claude-code", "codex"]);
     }
 
-    /// The terminal relays carry the threaded socket through: whatever the
+    /// The terminal relay carries the threaded socket through: whatever the
     /// Harness's service actually bound (a fallback or an isolated test
-    /// socket) is what the bridge is pointed at — never a recompute.
+    /// socket) is what every lane's bridge is pointed at — never a
+    /// recompute.
     #[test]
     fn terminal_relays_carry_the_threaded_socket() {
         let socket = PathBuf::from("/tmp/bh-1-2/run/terminal-1000000.sock");
-        assert_eq!(terminal_socket_path(&socket), socket);
-        assert_eq!(claude_terminal_relay(&socket).socket, socket);
-        assert_eq!(codex_terminal_relay(&socket).socket, socket);
+        assert_eq!(terminal_relay(&socket).socket, socket);
     }
 
     #[test]
@@ -1618,12 +1336,49 @@ mod tests {
         );
     }
 
+    /// docs/81 B S-2: an id no registered provider answers to is an
+    /// error, never Muse — a record or flag naming a provider this build
+    /// does not know opens nothing. Keys and declared routes resolve.
     #[test]
-    fn unknown_ids_open_a_working_muse_session() {
-        assert_eq!(ProviderId::parse(""), ProviderId::Muse);
-        assert_eq!(ProviderId::parse("echo"), ProviderId::Muse);
-        assert_eq!(ProviderId::parse("claude-code"), ProviderId::ClaudeCode);
-        assert_eq!(ProviderId::parse("codex"), ProviderId::Codex);
+    fn an_unknown_id_is_an_error_never_a_fallback() {
+        for raw in ["", "acp", "Muse", "claude"] {
+            assert_eq!(ProviderId::resolve(raw), Err(provider::UnknownProvider(raw.to_owned())), "{raw:?}");
+            assert_eq!(ProviderId::parse_known(raw), None, "{raw:?}");
+        }
+        assert_eq!(ProviderId::resolve("echo"), Ok(ProviderId::Muse), "a route the descriptor declares");
+        assert_eq!(ProviderId::parse_known("echo"), None, "a route is not a stored key");
+        for id in ProviderId::all() {
+            assert_eq!(ProviderId::resolve(id.as_str()), Ok(id));
+            assert_eq!(ProviderId::parse_known(id.as_str()), Some(id));
+        }
+    }
+
+    /// Every fact the app shows about a provider is its adapter's
+    /// declaration, and every behaviour difference is a declared trait:
+    /// the registry holds no table of its own.
+    #[test]
+    fn the_registry_reads_each_adapters_declaration() {
+        for id in ProviderId::all() {
+            let declared = id.descriptor();
+            assert_eq!(id.as_str(), declared.key);
+            assert_eq!(id.label(), declared.label);
+            assert_eq!(id.install_command(), declared.install_command);
+            assert_eq!(id.update_command(), declared.update_command);
+            assert_eq!(id.docs_url(), declared.docs_url);
+            assert_eq!(id.version_floor(), declared.version_floor);
+            for mode in declared.modes {
+                assert_eq!(mode_description(id, mode.id), mode.description);
+            }
+        }
+        // One shared-child provider, and it is the one the window starts.
+        let shared: Vec<ProviderId> =
+            ProviderId::all().into_iter().filter(|id| id.has(ProviderTrait::SharedChild)).collect();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(Registry::shared_id(), shared.first().copied());
+        // A per-lane CLI spawns a binary; the shared child never does here.
+        for id in ProviderId::all() {
+            assert_eq!(binary_name(id).is_none(), id.has(ProviderTrait::SharedChild), "{id:?}");
+        }
     }
 
     #[test]

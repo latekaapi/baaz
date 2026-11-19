@@ -218,7 +218,7 @@ impl Harness {
             .filter(|pack| {
                 crate::handoff::should_model_summary(
                     crate::layout::Layout::get(cx).handoff_model_summary,
-                    self.utility_available(self.session_lane_provider(&source, cx)),
+                    self.session_lane_provider(&source, cx).is_some_and(|provider| self.utility_available(provider)),
                     pack,
                 )
             })
@@ -676,7 +676,9 @@ impl Harness {
             (view.rt(cx).session_id.clone(), view.rt(cx).provider_kind())
         };
         if let Some(snapshot) = crate::handoff_snapshot::read_snapshot(&session_id) {
-            let from = ProviderId::parse(&snapshot.from);
+            // A snapshot naming a provider this build does not register
+            // draws no prefix: never another provider's origin.
+            let Ok(from) = ProviderId::resolve(&snapshot.from) else { return };
             let origin = crate::handoff::HandoffOrigin {
                 source_session: snapshot.source.clone(),
                 from,
@@ -704,7 +706,14 @@ impl Harness {
             meta.handoff_from.clone().map(|source| (source, meta.handoff_from_provider.clone()))
         });
         let Some((source, from_wire)) = linked else { return };
-        let from = ProviderId::parse(from_wire.as_deref().unwrap_or("muse"));
+        // A link recorded before links named their source provider is
+        // one the provider that lists its own sessions made (the only one
+        // then); a named provider this build does not register draws none.
+        let from = match from_wire.as_deref() {
+            Some(wire) => ProviderId::resolve(wire).ok(),
+            None => ProviderId::with(provider::ProviderTrait::NativeSessionList),
+        };
+        let Some(from) = from else { return };
         let origin = crate::handoff::HandoffOrigin {
             source_session: source,
             from,

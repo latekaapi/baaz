@@ -199,24 +199,7 @@ pub(crate) fn docs_url(id: ProviderId) -> &'static str {
 /// detail names the real command — a CLI sign-out signs the CLI out on
 /// this Mac, not just Baaz out of it.
 pub(crate) fn signout_confirm(id: ProviderId) -> (String, String) {
-    let (title, detail) = match id {
-        ProviderId::ClaudeCode => (
-            format!("Sign out of {}?", id.label()),
-            "This runs `claude auth logout` — Claude Code will be signed out on this Mac, not just in Baaz."
-                .to_owned(),
-        ),
-        ProviderId::Codex => (
-            format!("Sign out of {}?", id.label()),
-            "This runs Codex `account/logout` — Codex will be signed out on this Mac, not just in Baaz."
-                .to_owned(),
-        ),
-        ProviderId::Muse => (
-            format!("Sign out of {}?", id.label()),
-            "This runs Muse `account/logout` — Muse will be signed out on this Mac, not just in Baaz."
-                .to_owned(),
-        ),
-    };
-    (title, detail)
+    (format!("Sign out of {}?", id.label()), id.descriptor().sign_out_note.to_owned())
 }
 
 /// The sign-out surface behind [`run_sign_out`]: scripted in tests, real
@@ -263,13 +246,16 @@ pub(crate) fn signout_steps(
             .map(|program| program.to_string_lossy().into_owned())
             .unwrap_or_else(|| name.into())
     };
-    match id {
-        ProviderId::ClaudeCode => vec![SignOutStep::Shell {
-            program: program("claude"),
-            args: vec!["auth".into(), "logout".into()],
-        }],
-        ProviderId::Codex => vec![SignOutStep::CodexLogout { program: program("codex") }],
-        ProviderId::Muse => vec![SignOutStep::MuseLogout],
+    // Over its own connection; over its own child's wire; else the
+    // CLI's sign-out command.
+    let binary = id.descriptor().binaries.first().copied().unwrap_or_default();
+    if id.has(provider::ProviderTrait::AccountOnConnection) {
+        vec![SignOutStep::MuseLogout]
+    } else if id.has(provider::ProviderTrait::DeviceCodeSignIn) {
+        vec![SignOutStep::CodexLogout { program: program(binary) }]
+    } else {
+        let args = id.descriptor().sign_out_args.unwrap_or_default();
+        vec![SignOutStep::Shell { program: program(binary), args: args.iter().map(|arg| (*arg).into()).collect() }]
     }
 }
 
@@ -394,10 +380,12 @@ pub enum SignInPlan {
 
 /// The sign-in start for `id`. Pure, so tests drive it.
 pub(crate) fn signin_plan(id: ProviderId) -> SignInPlan {
-    match id {
-        ProviderId::Muse => SignInPlan::MuseSheet,
-        ProviderId::ClaudeCode => SignInPlan::ClaudeSheet,
-        ProviderId::Codex => SignInPlan::CodexBrowser,
+    if id.has(provider::ProviderTrait::AccountOnConnection) {
+        SignInPlan::MuseSheet
+    } else if id.has(provider::ProviderTrait::DeviceCodeSignIn) {
+        SignInPlan::CodexBrowser
+    } else {
+        SignInPlan::ClaudeSheet
     }
 }
 
@@ -436,16 +424,16 @@ pub(crate) fn providers_section() -> SettingsSection {
 /// it names. Pure, so tests drive it without a window.
 pub(crate) fn parse_enabled_row(id: &str) -> Option<ProviderId> {
     let wire = id.strip_prefix("provider-enabled:")?;
-    let parsed = ProviderId::parse(wire);
-    // `parse` falls back to Muse: only accept the wire id round-trip.
-    (parsed.as_str() == wire).then_some(parsed)
+    ProviderId::parse_known(wire)
 }
 
 /// The providers whose sessions Baaz scopes down to its own tools — the
-/// only cards that gain a "Use my own MCP servers" switch (Z5). Muse
-/// rides the legacy pump and never spawns through the scoped argv.
-pub(crate) fn own_mcp_providers() -> [ProviderId; 2] {
-    [ProviderId::ClaudeCode, ProviderId::Codex]
+/// only cards that gain a "Use my own MCP servers" switch (Z5): each one
+/// whose adapter declares the switch's line. A provider whose sessions
+/// ride a shared child never spawns through a scoped argv and declares
+/// none.
+pub(crate) fn own_mcp_providers() -> Vec<ProviderId> {
+    ProviderId::all().into_iter().filter(|id| id.descriptor().own_mcp_note.is_some()).collect()
 }
 
 /// The switch label, identical on both cards.
@@ -457,23 +445,13 @@ pub(crate) fn use_own_mcp_label() -> &'static str {
 /// sessions-started-after-the-change sentence the task requires the row
 /// to carry. Pure, so tests drive it without a window.
 pub(crate) fn use_own_mcp_detail(id: ProviderId) -> &'static str {
-    match id {
-        ProviderId::Codex => "Off: sessions see only Baaz's tools. On: your ~/.codex/config.toml \
-            servers and plugins load too. Applies to sessions started after this change.",
-        ProviderId::ClaudeCode => "Off: sessions see only Baaz's tools. On: your Claude Code MCP \
-            servers and connectors load too. Applies to sessions started after this change.",
-        ProviderId::Muse => "Muse sessions always ride the legacy pump.",
-    }
+    id.descriptor().own_mcp_note.unwrap_or_default()
 }
 
-/// The switch state for `id` in `layout`. Muse has no switch (see
-/// [`own_mcp_providers`]) and reads false.
+/// The switch state for `id` in `layout`. A provider with no switch (see
+/// [`own_mcp_providers`]) reads false.
 pub(crate) fn use_own_mcp_state(layout: &crate::layout::Layout, id: ProviderId) -> bool {
-    match id {
-        ProviderId::Codex => layout.use_own_mcp.codex,
-        ProviderId::ClaudeCode => layout.use_own_mcp.claude_code,
-        ProviderId::Muse => false,
-    }
+    layout.use_own_mcp.inherits(id)
 }
 
 /// The Settings provider pages' own rows: the MCP switch and the move
@@ -483,11 +461,7 @@ impl SettingsPage {
     /// started after the flip build their argv with (on) or without (off)
     /// Baaz's scoping; live sessions keep the argv they spawned with.
     pub(crate) fn flip_use_own_mcp(&mut self, id: ProviderId, on: bool, cx: &mut Context<Self>) {
-        match id {
-            ProviderId::Codex => crate::layout::Layout::update(cx, |layout| layout.use_own_mcp.codex = on),
-            ProviderId::ClaudeCode => crate::layout::Layout::update(cx, |layout| layout.use_own_mcp.claude_code = on),
-            ProviderId::Muse => {}
-        }
+        crate::layout::Layout::update(cx, |layout| layout.use_own_mcp.set(id, on));
     }
 
     /// The "Use my own MCP servers" row under the Claude Code / Codex
@@ -614,7 +588,8 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let id = ProviderId::parse(intent.id.as_ref());
+        // An id no registered provider answers to does nothing.
+        let Some(id) = ProviderId::parse_known(intent.id.as_ref()) else { return };
         match intent.action {
             ProviderAction::SetEnabled(on) => self.flip_provider_enabled(id, on, cx),
             ProviderAction::Recheck => self.recheck_with_feedback(id, false, cx),
@@ -711,8 +686,8 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         self.close_dialog(cx);
-        if id == ProviderId::Muse {
-            // Muse's logout path: `account/logout` on the existing
+        if id.has(provider::ProviderTrait::AccountOnConnection) {
+            // Its logout path: `account/logout` on the existing
             // connection, applied like any other sign-out.
             self.logout(cx);
             crate::provider_status::refresh_muse_status();
@@ -1104,7 +1079,7 @@ mod tests {
     #[test]
     fn the_own_mcp_switch_belongs_to_both_scoped_providers_only() {
         // Z5: Claude Code and Codex cards gain the row; Muse never does.
-        assert_eq!(own_mcp_providers(), [ProviderId::ClaudeCode, ProviderId::Codex]);
+        assert_eq!(own_mcp_providers(), vec![ProviderId::ClaudeCode, ProviderId::Codex]);
         assert_eq!(use_own_mcp_label(), "Use my own MCP servers");
         // The detail names the off/on contract per provider plus the
         // sessions-started-after-the-change sentence.

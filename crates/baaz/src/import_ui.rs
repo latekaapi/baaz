@@ -746,7 +746,8 @@ impl Harness {
         let provider = match id {
             ProviderId::ClaudeCode => CLAUDE,
             ProviderId::Codex => CODEX,
-            ProviderId::Muse => return None,
+            // A provider whose transcripts the import does not read.
+            _ => return None,
         };
         let plan = self.import.plan()?;
         let live = live_tally(plan, provider, &self.session_list.read(cx).provider_sessions);

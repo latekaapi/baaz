@@ -334,10 +334,15 @@ impl SessionRuntime {
     /// [`Self::effort_options`] for `model` instead of the session's own —
     /// a model row's nested submenu in the model picker (D4).
     pub(super) fn effort_options_for(&self, model: Option<&str>) -> EffortOptions {
+        // A catalog that carries its own tiers is read off the row; the
+        // others from their CLI's own effort source (5.5 moves these into
+        // the adapters' declarations).
+        if self.provider_kind().has(provider::ProviderTrait::CatalogEfforts) {
+            return self.muse_effort_options(model);
+        }
         match self.provider_kind() {
-            ProviderId::Muse => self.muse_effort_options(model),
             ProviderId::ClaudeCode => self.claude_code_efforts(model),
-            ProviderId::Codex => self.codex_effort_options(model),
+            _ => self.codex_effort_options(model),
         }
     }
 
@@ -801,7 +806,11 @@ impl SessionView {
     /// other backend instead.
     pub(super) fn pick_provider(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(rest) = id.strip_prefix("handoff:") {
-            let picked = ProviderId::parse(rest);
+            // A row naming no registered provider does nothing.
+            let Some(picked) = ProviderId::parse_known(rest) else {
+                self.close_menu(cx);
+                return;
+            };
             if picked == self.runtime.read(cx).provider_kind() {
                 self.close_menu(cx);
                 return;
@@ -810,7 +819,10 @@ impl SessionView {
             self.close_menu(cx);
             return;
         }
-        let picked = ProviderId::parse(id);
+        let Some(picked) = ProviderId::parse_known(id) else {
+            self.close_menu(cx);
+            return;
+        };
         if picked == self.runtime.read(cx).provider_kind() {
             self.close_menu(cx);
             return;

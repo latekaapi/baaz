@@ -307,10 +307,10 @@ impl Harness {
     /// Everything lands on the one background task behind this
     /// [`crate::wire::WireCall`].
     pub(crate) fn load_sessions(&mut self, cx: &mut Context<Self>) {
-        if !self.muse_slot.is_ready() {
+        if !self.providers.shared_ready() {
             return;
         }
-        let slot = self.muse_slot.clone();
+        let slot = self.providers.clone();
         if self.session_list.read(cx).fetch.in_flight {
             // A fetch is already running — at boot the probe answer's fetch
             // is still out when the boot session's `session/start` lands and

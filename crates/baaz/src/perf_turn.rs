@@ -97,7 +97,9 @@ pub(crate) fn sidebar_fixture() -> (Vec<SessionEntry>, HashMap<String, IndexEntr
             archived: false,
             description: String::new(),
             replayed: false,
-            provider: crate::providers::ProviderId::Muse,
+            // The first registered provider's rows, as the budget was
+            // measured (unmarked).
+            provider: crate::providers::ProviderId::all()[0],
             named: false,
             needs_title: false,
             side_marker: false,

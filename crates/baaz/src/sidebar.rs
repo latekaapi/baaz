@@ -1559,7 +1559,7 @@ pub(crate) mod tests {
     fn provider_rows_wear_their_providers_mark() {
         let projects = Projects::default();
         let now = Local::now();
-        let claude = SessionEntry::provider_row(&provider_record(), None, &projects);
+        let claude = SessionEntry::provider_row(&provider_record(), None, &projects).expect("a registered provider");
         assert_eq!(claude.label, UNNAMED);
         assert!(!claude.needs_title, "no session/read may spend itself on a provider id");
         let summary = claude.summary(now);
@@ -1570,7 +1570,7 @@ pub(crate) mod tests {
         );
         let mut codex = provider_record();
         codex.provider = "codex".into();
-        let row = SessionEntry::provider_row(&codex, None, &projects);
+        let row = SessionEntry::provider_row(&codex, None, &projects).expect("a registered provider");
         assert!(row.summary(now).providers.contains(&aui_icons::Provider::Codex));
         let muse = SessionEntry::join(&wire_session(), None, None, &projects);
         assert!(muse.summary(now).providers.is_empty(), "a muse row wears no mark");

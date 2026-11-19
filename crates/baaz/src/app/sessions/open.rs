@@ -185,12 +185,13 @@ impl Harness {
                     // A draft serves only the lane it was created on: a muse
                     // draft under a provider pick (or the reverse) is stale,
                     // dropped below, and started fresh on the pick.
-                    let wanted = ProviderId::parse(&self.new_provider);
+                    let wanted = self.new_provider_id();
                     // The Ask rides only this reused draft: key it before
                     // the view lands, so `activate` takes it here — and
                     // only here.
                     self.browser.update(cx, |browser, _| browser.key_pending_ask(&draft_id));
-                    if self.draft_serves(&draft_id, wanted, cx) && self.open_draft(&draft_id, window, cx)
+                    if wanted.is_some_and(|wanted| self.draft_serves(&draft_id, wanted, cx))
+                        && self.open_draft(&draft_id, window, cx)
                     {
                         return;
                     }
@@ -208,11 +209,14 @@ impl Harness {
         }
         // The switcher's pick is not muse: the session opens on the provider
         // lane, and `session/start` to muse never fires for it.
-        let wanted = ProviderId::parse(&self.new_provider);
+        let Some(wanted) = self.new_provider_id() else {
+            crate::baaz_log!("new session refused: no provider `{}` is registered", self.new_provider);
+            return;
+        };
         // Every provider opens on its lane; Muse too, live — its lane rides
         // the shared child, which the open waits for while it starts. Only
         // a window on the scripted stand-in keeps Muse's local draft.
-        if !(wanted.scripted_draft_is_local() && self.provider_factory.lands_inline()) {
+        if !(wanted.has(provider::ProviderTrait::LocalScriptedDraft) && self.providers.lands_inline()) {
             let root = current
                 .as_deref()
                 .and_then(|id| self.session_list.read(cx).projects.find_available(id))
@@ -273,8 +277,11 @@ impl Harness {
         let root = root.to_path_buf();
         // Same lane branch as `new_session_in`: an unadopted root on a
         // provider pick opens on the provider lane, never as `session/start`.
-        let wanted = ProviderId::parse(&self.new_provider);
-        if !(wanted.scripted_draft_is_local() && self.provider_factory.lands_inline()) {
+        let Some(wanted) = self.new_provider_id() else {
+            crate::baaz_log!("new session refused: no provider `{}` is registered", self.new_provider);
+            return;
+        };
+        if !(wanted.has(provider::ProviderTrait::LocalScriptedDraft) && self.providers.lands_inline()) {
             self.ensure_provider_started(wanted, cx);
             self.open_new_on_provider(wanted, None, root.to_string_lossy().into_owned(), switch, window, cx);
             return;
@@ -316,7 +323,7 @@ impl Harness {
         let Some(view) = self.find_view(draft_id, cx) else { return false };
         // A local Muse draft stood in while Muse was not running; once it
         // runs, the draft cannot send, so a new session starts a real one.
-        if is_local_draft(draft_id) && self.muse_slot.is_ready() {
+        if is_local_draft(draft_id) && self.providers.shared_ready() {
             return false;
         }
         view.read(cx).rt(cx).provider_kind() == wanted
@@ -395,8 +402,8 @@ impl Harness {
         view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.load_history(cx)));
         // Live, Muse is starting under this draft: the chip and the model
         // menu say so (the promotion replaces the view once it is up).
-        let starting = !self.provider_factory.lands_inline()
-            && !self.muse_slot.is_ready()
+        let starting = !self.providers.lands_inline()
+            && !self.providers.shared_ready()
             && matches!(self.wire, crate::app::Wire::Connecting | crate::app::Wire::Reconnecting);
         view.read(cx).runtime().clone().update(cx, |rt, cx| rt.set_muse_starting(starting, cx));
         // The Ask's session is this draft: key the draft to it before the
@@ -631,8 +638,8 @@ impl Harness {
         let known = self.session_list.read(cx).provider_sessions.get(session_id).map(|record| record.provider.clone());
         let row = self.session_list.read(cx).sessions.iter().find(|entry| entry.id == session_id && !entry.replayed);
         let provider = match (row, known.as_deref()) {
-            (Some(row), _) if row.provider.lists_sessions() => row.provider,
-            (None, None) => match ProviderId::all().into_iter().find(|id| id.lists_sessions()) {
+            (Some(row), _) if row.provider.has(provider::ProviderTrait::NativeSessionList) => row.provider,
+            (None, None) => match ProviderId::all().into_iter().find(|id| id.has(provider::ProviderTrait::NativeSessionList)) {
                 Some(id) => id,
                 None => return,
             },
@@ -697,7 +704,7 @@ impl Harness {
         if record.turns > 0 || self.first_prompt_sent(&record.session_id, cx) {
             return false;
         }
-        let listed = ProviderId::parse_known(&record.provider).is_some_and(|id| id.lists_sessions());
+        let listed = ProviderId::parse_known(&record.provider).is_some_and(|id| id.has(provider::ProviderTrait::NativeSessionList));
         !listed
             || self
                 .session_list.read(cx).sessions
@@ -709,7 +716,7 @@ impl Harness {
     /// bridge first: its shared child refused the resume's bridge once
     /// this run (the hub's memo), so the relay would answer for nothing.
     pub(super) fn resume_bridge_refused(&self, provider_id: ProviderId) -> bool {
-        provider_id.shares_one_child() && self.muse_hub.as_ref().is_some_and(|hub| hub.refuses_resume_bridge())
+        provider_id.has(provider::ProviderTrait::SharedChild) && self.providers.shared().is_some_and(|shared| shared.refuses_resume_bridge())
     }
 
     /// The root a session of this id runs in: its own row's workspace when
@@ -766,10 +773,13 @@ impl Harness {
         // Scripted chrome's row (`--no-connect` / `--replay`): it opens
         // read-only, with no lane — which is what lets a capture drive
         // drafts and switching. A live reopen goes through
-        // `reopen_provider` for every provider (docs/70). Always Muse —
-        // never the new-session default, which read "Codex" or "Claude
-        // Code" on a reopened Muse session.
-        let (provider, workspace) = (ProviderId::Muse.as_str().to_owned(), self.session_workspace(&session_id, cx));
+        // `reopen_provider` for every provider (docs/70). Always the
+        // provider whose scripted rows are local views
+        // ([`provider::ProviderTrait::LocalScriptedDraft`]) — never the
+        // new-session default, which read "Codex" or "Claude Code" on a
+        // reopened row of that provider.
+        let Some(local) = ProviderId::with(provider::ProviderTrait::LocalScriptedDraft) else { return };
+        let (provider, workspace) = (local.as_str().to_owned(), self.session_workspace(&session_id, cx));
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         let overlays = self.overlays.clone();
         let host = SessionHost { provider_id: provider, workspace, overlays, capture: self.capture.clone(), terminal_host: Some(self.terminal_host(cx)) };
@@ -812,9 +822,9 @@ impl Harness {
         // answered, failed, went dark, or is older than about five
         // minutes. The wire only — never the pty scrape on every open.
         // The tier is the billing-tier provider's reading (Muse's).
-        let tier_due = due.iter().copied().find(|id| id.has_billing_tier());
+        let tier_due = due.iter().copied().find(|id| id.has(provider::ProviderTrait::BillingTier));
         let muse_async = tier_due.is_some()
-            && self.muse_slot.is_ready()
+            && self.providers.shared_ready()
             && crate::tier::muse_menu_refresh_due(self.tier.as_ref());
         let mut lanes: Vec<(ProviderId, provider::UsageReport)> = Vec::new();
         let views = self.registry.live(self.active.as_ref());
@@ -1044,7 +1054,7 @@ impl Harness {
         self.registry.resubscribe(Some(&view), cx);
         let titles: HashMap<String, String> =
             self.session_list.read(cx).sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
-        if view.read(cx).rt(cx).provider_kind().has_billing_tier() {
+        if view.read(cx).rt(cx).provider_kind().has(provider::ProviderTrait::BillingTier) {
             self.tier_probe_on_muse_lane(cx);
         }
         let tier_banner = self.tier_banner();
@@ -1070,7 +1080,7 @@ impl Harness {
         // `/create-skill ` draft and the composer focused. Never sent. The
         // arm survives a non-muse activation untouched — the draft is a muse
         // skill prompt, so it waits for a muse session.
-        if view.read(cx).rt(cx).provider_kind().writes_skills_by_prompt() && self.skills_page.update(cx, |page, _| page.take_create_draft()) {
+        if view.read(cx).rt(cx).provider_kind().has(provider::ProviderTrait::ManagedSkills) && self.skills_page.update(cx, |page, _| page.take_create_draft()) {
             let draft = crate::skills_page::create_skill_draft().to_owned();
             view.update(cx, |view, cx| {
                 view.set_draft(draft, window, cx);

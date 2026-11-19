@@ -39,9 +39,10 @@ pub fn api_key_notice(status: &ProviderStatus) -> Vec<AssistRun> {
             "Codex is signed in with an API key: every turn is billed to that key, not a ChatGPT plan. Sign out and sign in with ChatGPT to use your plan."
                 .into(),
         )],
-        ProviderId::Muse => vec![AssistRun::Text(
-            "Muse is signed in with an API key: every turn is billed to that key, not your Muse subscription.".into(),
-        )],
+        other => vec![AssistRun::Text(format!(
+            "{label} is signed in with an API key: every turn is billed to that key, not your {label} subscription.",
+            label = other.label()
+        ).into())],
     }
 }
 

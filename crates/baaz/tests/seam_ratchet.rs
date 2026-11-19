@@ -361,3 +361,185 @@ fn after() { if p == ProviderId::Muse {} }
     assert!(hits.iter().all(|hit| !hit.contains("as_str") && !hit.contains("factory(")));
     assert!(hits.last().is_some_and(|hit| hit.contains("fn after")), "code after a test module is scanned");
 }
+
+// ------------------------------------------------------------------ 5.4
+
+/// Whether a source file is test-only by its path: a `tests.rs` module or
+/// anything under a `tests/` directory (each declared
+/// `#[cfg(test)] mod tests;` by its parent).
+fn is_test_path(relative: &str) -> bool {
+    relative.ends_with("/tests.rs") || relative == "tests.rs" || relative.starts_with("tests/") || relative.contains("/tests/")
+}
+
+/// `text` without test modules and without `//` comments: the code a
+/// shipped build compiles.
+fn shipped_code(text: &str) -> String {
+    strip_test_modules(text).lines().map(|line| line.split("//").next().unwrap_or(line)).collect::<Vec<_>>().join("\n")
+}
+
+/// Every shipped (non-test) `.rs` file under `root`, as `(relative path,
+/// shipped code)`.
+fn shipped_files(root: &Path) -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    rust_files(root, &mut files);
+    let mut out: Vec<(String, String)> = files
+        .into_iter()
+        .filter_map(|path| {
+            let relative = path.strip_prefix(root).unwrap_or(&path).display().to_string();
+            if is_test_path(&relative) {
+                return None;
+            }
+            fs::read_to_string(&path).ok().map(|text| (relative, shipped_code(&text)))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// How often `needle` appears in `code` as a whole path segment
+/// (`ProviderId::Muse` but not `ProviderId::MuseFoo`).
+fn whole_count(code: &str, needle: &str) -> usize {
+    code.match_indices(needle)
+        .filter(|(at, _)| {
+            let end = at + needle.len();
+            let before_ok = *at == 0 || !code[..*at].ends_with(|c: char| c.is_alphanumeric() || c == '_');
+            let after_ok = !code[end..].starts_with(|c: char| c.is_alphanumeric() || c == '_');
+            before_ok && after_ok
+        })
+        .count()
+}
+
+/// docs/82 5.4: the app names no provider by its variant outside tests.
+/// What a provider is (label, binaries, commands, modes) is its adapter's
+/// declaration and what it does differently is a declared trait, read
+/// through the registry (`crate::providers`); constructing a row for "the
+/// provider that lists its own sessions" asks for that trait.
+#[test]
+fn the_app_names_muse_only_in_its_tests() {
+    let hits: Vec<String> = shipped_files(&source_root())
+        .into_iter()
+        .filter(|(_, code)| whole_count(code, "ProviderId::Muse") > 0)
+        .map(|(file, code)| format!("{file} ({})", whole_count(&code, "ProviderId::Muse")))
+        .collect();
+    assert!(
+        hits.is_empty(),
+        "`ProviderId::Muse` in shipped crates/baaz code: ask the registry for a trait instead.\n  {}",
+        hits.join("\n  "),
+    );
+}
+
+/// The window-free core still names the variant where listed — each with
+/// a count that may only fall. The registry itself (`providers.rs`) is
+/// where the variant is defined and registered, so it is not counted.
+const CORE_MUSE_NAMES: [(&str, usize, &str); 4] = [
+    ("handoff.rs", 1, "the pack's token estimate is measured against one provider's header"),
+    ("projects.rs", 4, "the Muse-era defaults file migrates its single model/effort onto Muse's key"),
+    ("provider_status.rs", 12, "the shared child's live account and usage (docs/82 5.4: the probe is not yet a factory method)"),
+    ("sidebar.rs", 4, "rows built from that provider's own session list, captures and local drafts"),
+];
+
+#[test]
+fn the_core_names_muse_only_where_listed_and_never_more() {
+    let core = Path::new(env!("CARGO_MANIFEST_DIR")).join("../baaz-core/src");
+    let mut problems = Vec::new();
+    for (file, code) in shipped_files(&core) {
+        if file == "providers.rs" {
+            continue;
+        }
+        let count = whole_count(&code, "ProviderId::Muse");
+        match CORE_MUSE_NAMES.iter().find(|(listed, _, _)| *listed == file) {
+            None if count > 0 => problems.push(format!("{file}: {count} new — ask the registry for a trait")),
+            Some((_, allowed, _)) if count > *allowed => problems.push(format!("{file}: {count} > {allowed}")),
+            Some((_, allowed, _)) if count < *allowed => {
+                problems.push(format!("{file}: {count} < {allowed} — lower the ratchet in CORE_MUSE_NAMES"))
+            }
+            _ => {}
+        }
+    }
+    assert!(problems.is_empty(), "the core's `ProviderId::Muse` ratchet:\n  {}", problems.join("\n  "));
+}
+
+/// The adapter crates, one per wire: Muse's (`provider-muse` over
+/// `muse-client`), Claude Code's and Codex's.
+const ADAPTER_CRATES: [&str; 3] = ["provider_muse", "provider_codex", "provider_claude_code"];
+
+/// The registry: the one file that names the adapter crates'
+/// registrations (descriptors and factories).
+const REGISTRY: &str = "baaz-core/providers.rs";
+
+/// What still reaches an adapter crate past the registry, file by file,
+/// each with why. The list may only shrink: a file that stops naming an
+/// adapter must leave it, and a file not listed may not start.
+const WIRE_EXCEPTIONS: [(&str, &str); 18] = [
+    ("app.rs", "a `--replay` capture is Muse's own session-log format (provider_muse::replay)"),
+    ("bench.rs", "the bench drives a Muse-format capture"),
+    ("perf_turn.rs", "the perf budget folds a Muse-format capture"),
+    ("session.rs", "the read-only replay lane and capture loading (provider_muse::replay)"),
+    ("session/runtime.rs", "the capture folder and Codex's per-model effort table (5.5 declares efforts)"),
+    ("session/composer.rs", "Claude Code's effort levels and model-id normalising (5.5 declares efforts)"),
+    ("session/commands.rs", "Claude Code's and Codex's effort tables (5.5 declares efforts)"),
+    ("session/lane.rs", "Claude Code's control-refusal card kinds (a typed notice is 5.5's)"),
+    ("transcript.rs", "each adapter's child-exited card kind (a typed notice is 5.5's)"),
+    ("settings_providers.rs", "Codex's device-code sign-in drives its child from the app"),
+    ("app/sessions/provider_open.rs", "the transcript Trash reads each CLI home"),
+    ("baaz-core/import.rs", "the import scan reads each CLI's stored transcripts"),
+    ("baaz-core/provider_search.rs", "search reads each CLI's stored transcripts"),
+    ("baaz-core/provider_status.rs", "the install and sign-in probes (not yet a factory method)"),
+    ("baaz-core/session_migration.rs", "the legacy-home migration moves each CLI's files"),
+    ("baaz-core/sessions.rs", "forget finds each CLI's transcript files"),
+    ("baaz-core/tier.rs", "Muse's billing tier reads its usage shapes (moves behind provider-muse)"),
+    ("baaz-core/utility.rs", "the one-shot CLI completer pins each CLI's home"),
+];
+
+/// Every shipped file under the app and the core crates that names an
+/// adapter crate in code, as prefixed paths.
+fn files_reaching_an_adapter() -> Vec<String> {
+    let mut hits = Vec::new();
+    for (root, prefix) in source_roots() {
+        for (file, code) in shipped_files(&root) {
+            if ADAPTER_CRATES.iter().any(|krate| whole_count(&code, krate) > 0) {
+                hits.push(format!("{prefix}{file}"));
+            }
+        }
+    }
+    hits
+}
+
+/// docs/82 5.4: the seam ratchet covers all three wires. No app code
+/// reaches into an adapter crate — Muse's, Claude Code's or Codex's —
+/// except through the registry, or where [`WIRE_EXCEPTIONS`] says why.
+#[test]
+fn no_app_code_reaches_an_adapter_except_through_the_registry() {
+    let hits = files_reaching_an_adapter();
+    let unlisted: Vec<&String> = hits
+        .iter()
+        .filter(|file| file.as_str() != REGISTRY && !WIRE_EXCEPTIONS.iter().any(|(listed, _)| listed == file))
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "these files reach an adapter crate past the registry (`crate::providers`): {unlisted:?}"
+    );
+    let stale: Vec<&str> =
+        WIRE_EXCEPTIONS.iter().map(|(file, _)| *file).filter(|file| !hits.iter().any(|hit| hit == file)).collect();
+    assert!(stale.is_empty(), "these no longer reach an adapter: take them off WIRE_EXCEPTIONS: {stale:?}");
+    assert!(hits.iter().any(|file| file == REGISTRY), "the registry registers the adapters");
+}
+
+#[test]
+fn the_wire_ratchet_sees_code_and_not_prose_or_tests() {
+    let sample = "\
+use provider_codex::fold; // provider_muse in a comment is prose
+/// [`provider_claude_code::home`] in a doc is prose
+fn a() { let x = provider_claude_codex; }
+#[cfg(test)]
+mod tests {
+    fn t() { provider_muse::replay::Folder::new(); }
+}
+";
+    let code = shipped_code(sample);
+    assert_eq!(whole_count(&code, "provider_codex"), 1);
+    assert_eq!(whole_count(&code, "provider_muse"), 0, "comments and test modules are not shipped");
+    assert_eq!(whole_count(&code, "provider_claude_code"), 0, "a longer name is another name");
+    assert!(is_test_path("app/sessions/tests/support.rs") && is_test_path("db/tests.rs"));
+    assert!(!is_test_path("app/sessions/open.rs"));
+}

@@ -38,16 +38,14 @@ pub struct ModelChoice {
 /// tier; Codex reports no prices, so it offers its own default (the
 /// auto-titles rule runs it at low effort); Muse names its utility model.
 pub fn model_choices(provider: ProviderId) -> Vec<ModelChoice> {
-    let c = |model, label, cheapest| ModelChoice { provider, model, label, cheapest };
-    match provider {
-        ProviderId::ClaudeCode => vec![
-            c(crate::utility::CLAUDE_UTILITY_MODEL, "Claude Haiku", true),
-            c("sonnet", "Claude Sonnet", false),
-            c("opus", "Claude Opus", false),
-        ],
-        ProviderId::Codex => vec![c("", "Codex default", true)],
-        ProviderId::Muse => vec![c(provider_muse::oneshot::UTILITY_MODEL_ID, "Muse Spark 1.3", true), c("", "Muse default", false)],
-    }
+    // Each adapter declares its own, cheapest first.
+    provider
+        .descriptor()
+        .utility_models
+        .iter()
+        .enumerate()
+        .map(|(at, &(model, label))| ModelChoice { provider, model, label, cheapest: at == 0 })
+        .collect()
 }
 
 /// The provider and model a new browser chat starts with now, from the

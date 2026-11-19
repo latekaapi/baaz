@@ -75,7 +75,7 @@ impl Harness {
         // while the probe runs.
         self.push_tier(cx);
         let program = self.args.program.clone();
-        let slot = self.muse_slot.clone();
+        let slot = self.providers.clone();
         self.wire_call(
             cx,
             move || {
@@ -251,7 +251,7 @@ impl Harness {
     /// this clears it and repaints either way, so the "Refreshing…" row
     /// always settles.
     pub(crate) fn refresh_muse_usage(&mut self, cx: &mut Context<Self>) {
-        let slot = self.muse_slot.clone();
+        let slot = self.providers.clone();
         let held = self.tier.clone();
         self.wire_call(
             cx,
@@ -289,7 +289,8 @@ impl Harness {
                     // it) — either way the row settles.
                     _ => crate::provider_status::note_muse_unavailable_now(),
                 }
-                this.set_usage_refreshing(&[crate::providers::ProviderId::Muse], false, cx);
+                let billed: Vec<_> = crate::providers::ProviderId::with(provider::ProviderTrait::BillingTier).into_iter().collect();
+                this.set_usage_refreshing(&billed, false, cx);
             },
         );
     }
@@ -313,7 +314,7 @@ fn run_probe(program: &str) -> Result<Tier, String> {
 /// not up, the read failed, or the host has observed nothing yet. Blocking:
 /// call it on a background thread. A failed read never stops the app and
 /// never becomes [`Tier::Unavailable`] directly.
-fn read_usage(slot: &crate::providers::MuseSlot) -> Option<provider::UsageReport> {
+fn read_usage(slot: &crate::providers::Registry) -> Option<provider::UsageReport> {
     match slot.control().and_then(|lane| lane.send(provider::Command::ReadUsage)) {
         Ok(provider::Ack::Usage { report }) => {
             crate::baaz_log!("usage read → {}", if report.is_some() { "a reading" } else { "nothing observed yet" });

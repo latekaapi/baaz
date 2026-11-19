@@ -118,11 +118,20 @@ The adapter crates:
 | `session-store` | `SessionStore`: one session's transcript folded from neutral deltas, plus its side facts. Pure; every `SessionRuntime` holds one |
 | `mcp-bridge` | a stdio MCP server exposing Baaz's terminal and browser tools to an agent, forwarding to the app's socket |
 
-`crates/baaz/src/providers.rs` builds providers through a `ProviderFactory`:
-Muse resolves to a lane on the shared hub held in `MuseSlot`; Claude Code
-and Codex spawn an adapter with the terminal relay and their Baaz-owned home
-pinned, then `connect`. `crates/baaz/tests/seam_ratchet.rs` keeps
-`muse-client` out of the app crate.
+Each adapter crate registers itself (docs/82 5.4): a `ProviderDescriptor`
+(key, label, icon, binaries and env override, install and update commands,
+docs, version floor, account label, declared modes and traits) and a
+`ProviderFactory` that opens lanes from a `SessionSpawn` (state dir, owner
+home, MCP servers, owner-MCP opt-in). `crates/baaz-core/src/providers.rs` is
+the registry: `ProviderId::descriptor` names each registration, and the
+window's `Registry` holds the factories — Muse's is also its hub's slot
+(`SharedChild`), so a Muse open waits for the hub while Claude Code and
+Codex spawn a child with the terminal relay and their Baaz-owned home
+pinned. The app asks for traits (`ProviderTrait`), never "is it Muse"; an
+unknown provider key is an error. `crates/baaz/tests/seam_ratchet.rs` keeps
+`muse-client` out of the app crate, `ProviderId::Muse` out of shipped
+`crates/baaz` code, and every adapter crate behind the registry (listed
+exceptions only).
 
 ## 4. Entities and ownership
 
@@ -144,7 +153,7 @@ entities `RightPane` (`right_pane.rs`), `TerminalDock`
 
 | group | examples |
 |---|---|
-| providers, sign-in, onboarding | `muse_hub`, `muse_slot`, `provider_factory`, `wire`, `auth`, `tier`; `login` (the `Login` entity, `login.rs`, task 4.9c: the sign-in flow's state and the API-key field, drawn by the Muse sheet, which redraws on its notify — the root only drives the `account/*` lane); `provider_model` (`ProviderStatusModel`, `provider_model.rs`, task 4.4: the statuses, the sign-out banners, the cards waiting on a press and the Codex sign-in, read and observed by every surface that shows them); `connect_screen` (a region entity, `connect.rs`) and `setup` (the setup sheet's entity, `setup.rs`) |
+| providers, sign-in, onboarding | `providers` (the window's `Registry`: factories and the shared child's slot, docs/82 5.4), `wire`, `auth`, `tier`; `login` (the `Login` entity, `login.rs`, task 4.9c: the sign-in flow's state and the API-key field, drawn by the Muse sheet, which redraws on its notify — the root only drives the `account/*` lane); `provider_model` (`ProviderStatusModel`, `provider_model.rs`, task 4.4: the statuses, the sign-out banners, the cards waiting on a press and the Codex sign-in, read and observed by every surface that shows them); `connect_screen` (a region entity, `connect.rs`) and `setup` (the setup sheet's entity, `setup.rs`) |
 | session list | `session_list`: the `SessionList` model entity (`session_list.rs`, task 4.7) holding the rows, the stores they are joined from (`index`, `overrides`, `provider_sessions`, `projects`, `branches`), the list filters, the fetch state, the title bookkeeping and the caches (visible rows, grouping, chain index); a change emits `SessionListEvent` and notifies the list, never the root. `Harness` drives the fetch and the joins and reads through `session_list.read(cx)` |
 | live session views | `active`, `registry`, `pending_id`, `drafts`, `unsent`, `starts_in_flight`, the switch/replace epochs and claims |
 | handoff | `handoffs`, `handoff_epoch`, `pending_handoff`, `handoff_confirm` |

@@ -420,9 +420,9 @@ impl SessionView {
             // wire is refused by `wire_client` with a banner that says why.
             cards: Some(self.card_intents(window, cx)),
             // A provider session's approval cards ask in the provider's
-            // name ("Allow Claude Code to write this file?"); the muse
-            // lane keeps its own title.
-            approval_host: (self.runtime.read(cx).provider_kind() != ProviderId::Muse)
+            // name ("Allow Claude Code to write this file?"); a provider
+            // whose own cards carry their choices keeps its own title.
+            approval_host: (!self.runtime.read(cx).provider_kind().has(provider::ProviderTrait::InlineApprovals))
                 .then(|| self.runtime.read(cx).provider_kind().label().to_owned()),
             titles: Rc::clone(&self.titles),
             at_rest: self.at_rest,
@@ -2148,7 +2148,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// way through; an unknown plan is a quiet `Info` line that blocks nothing.
     pub(super) fn render_tier_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Muse-account surface: never drawn on another provider's session.
-        if !self.runtime.read(cx).provider_kind().has_billing_tier() {
+        if !self.runtime.read(cx).provider_kind().has(provider::ProviderTrait::BillingTier) {
             return None;
         }
         let guard = self.runtime.read(cx).tier_banner.clone()?;
@@ -2865,8 +2865,12 @@ fn provider_picker_rows(current: ProviderId, has_turns: bool) -> Vec<PickerRow> 
     )
     .into_iter()
     .map(|row| {
-        let mark = ProviderId::parse(&row.id).icon();
-        PickerRow::new(row.id, row.label, row.detail).mark(mark)
+        let mark = ProviderId::parse_known(&row.id).map(|id| id.icon());
+        let row_ = PickerRow::new(row.id, row.label, row.detail);
+        match mark {
+            Some(mark) => row_.mark(mark),
+            None => row_,
+        }
     })
     .collect()
 }

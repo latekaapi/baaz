@@ -279,7 +279,7 @@ impl RightPane {
         let Some(provider) = provider else { return };
         ui.message.clear();
         ui.drafted_for = Some(key);
-        if !crate::utility::supports(provider) && !provider.completes_in_side_session() {
+        if !crate::utility::supports(provider) && !provider.has(provider::ProviderTrait::SideSessionCompletions) {
             return;
         }
         ui.drafting = true;
@@ -516,7 +516,7 @@ impl RightPane {
             let r = root_buf.clone();
             let (commits, stat) = cx.background_executor().spawn(async move { git_ops::branch_summary(&r, &base_for_summary) }).await;
             let prompt = pr_prompt(label.as_deref(), &commits, &stat, &files);
-            if provider.is_some_and(|provider| provider.completes_in_side_session()) {
+            if provider.is_some_and(|provider| provider.has(provider::ProviderTrait::SideSessionCompletions)) {
                 let (root, prompt) = (root_buf.clone(), prompt.clone());
                 let _ = this.update(cx, |_, cx| cx.emit(RightPaneEvent::DraftOnSide { root, kind: DraftKind::PrBody, prompt }));
             }
@@ -648,7 +648,7 @@ impl Harness {
         let session = self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone());
         let draft = PrDraftFacts {
             label: session.as_ref().and_then(|id| self.collapsed_head_label(&self.chain_head(id, cx), cx)),
-            provider: session.as_ref().map(|id| self.session_lane_provider(id, cx)),
+            provider: session.as_ref().and_then(|id| self.session_lane_provider(id, cx)),
             model: session.as_ref().and_then(|id| self.utility_model(id, cx)),
         };
         self.with_right_pane(cx, |pane, cx| pane.open_pr_form_with(root, draft, window, cx));
@@ -660,11 +660,11 @@ impl Harness {
     /// a hidden side session for a provider that completes there — landing
     /// in the pane ([`RightPane::land_draft`]).
     pub(crate) fn draft_commit_for_pane(&mut self, root: &Path, files: &[FileChange], cx: &mut Context<Self>) {
-        let Some(session) = self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone()) else {
+        let session = self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone());
+        let Some((session, provider)) = session.and_then(|id| self.session_lane_provider(&id, cx).map(|provider| (id, provider))) else {
             self.right_pane.update(cx, |pane, cx| pane.land_draft(root, DraftKind::Commit, None, cx));
             return;
         };
-        let provider = self.session_lane_provider(&session, cx);
         let title = self.collapsed_head_label(&self.chain_head(&session, cx), cx);
         let prompt = commit_prompt(title.as_deref(), files);
         if !crate::utility::supports(provider) {

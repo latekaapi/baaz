@@ -67,12 +67,7 @@ pub enum Found {
 
 /// The env override that names `id`'s binary, when set and non-empty.
 fn env_override_set(id: ProviderId) -> Option<&'static str> {
-    let names: &[&'static str] = match id {
-        ProviderId::ClaudeCode => &["BAAZ_CLAUDE"],
-        ProviderId::Codex => &["BAAZ_CODEX"],
-        ProviderId::Muse => &["BAAZ_MUSE", "MUSE_BIN"],
-    };
-    names.iter().copied().find(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+    id.descriptor().env_overrides.iter().copied().find(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
 }
 
 /// How `path` was found for `id`.
@@ -163,11 +158,7 @@ pub fn collect(id: ProviderId, status: &ProviderStatus) -> String {
     ));
     out.push_str(&format!("Login PATH: {login}\n"));
     out.push_str(&format!("Inherited PATH: {}\n", std::env::var("PATH").unwrap_or_default()));
-    let binary = match id {
-        ProviderId::ClaudeCode => "claude",
-        ProviderId::Codex => "codex",
-        ProviderId::Muse => "muse",
-    };
+    let binary = id.descriptor().binaries.first().copied().unwrap_or_default();
     let matches: Vec<String> = std::env::split_paths(&login)
         .map(|dir| dir.join(binary))
         .filter(|candidate| candidate.is_file())
@@ -187,10 +178,9 @@ pub fn collect(id: ProviderId, status: &ProviderStatus) -> String {
             out.push('\n');
             out.push_str(&run_for_diagnostics(path, &["--version"]));
             out.push('\n');
-            match id {
-                ProviderId::ClaudeCode => out.push_str(&run_for_diagnostics(path, &["auth", "status", "--json"])),
-                ProviderId::Codex => out.push_str(&run_for_diagnostics(path, &["login", "status"])),
-                ProviderId::Muse => out.push_str(&format!("Auth: from the live connection — {}\n", signed_in_words(status))),
+            match id.descriptor().auth_status_args {
+                Some(args) => out.push_str(&run_for_diagnostics(path, args)),
+                None => out.push_str(&format!("Auth: from the live connection — {}\n", signed_in_words(status))),
             }
         }
         None => out.push_str("Resolved: (not found)\n"),
@@ -223,11 +213,7 @@ pub fn signed_in_words(status: &ProviderStatus) -> String {
             None => "API key · billed per token".to_owned(),
         };
     }
-    let via = match status.provider {
-        ProviderId::ClaudeCode => "claude.ai",
-        ProviderId::Codex => "ChatGPT",
-        ProviderId::Muse => "Meta account",
-    };
+    let via = status.provider.descriptor().account_label;
     let mut parts = vec![via.to_owned()];
     parts.extend(email.iter().chain(plan.iter()).map(|part| part.trim().to_owned()).filter(|part| !part.is_empty()));
     parts.join(" · ")

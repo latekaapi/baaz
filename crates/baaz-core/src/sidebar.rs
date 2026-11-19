@@ -126,7 +126,7 @@ pub struct SessionEntry {
     /// Which provider serves this session. The app's `SessionRow::summary` turns it into
     /// the row's provider mark, and the list merge keeps the rows of
     /// providers that keep no list of their own
-    /// ([`ProviderId::lists_sessions`]) — a listing never names them.
+    /// ([`provider::ProviderTrait::NativeSessionList`]) — a listing never names them.
     pub provider: ProviderId,
     /// Named with `/name` or the row's pencil. A named session with no turns
     /// is somebody's draft, not noise, so the empty filter leaves it alone.
@@ -574,7 +574,10 @@ impl SessionEntry {
         record: &crate::provider_sessions::ProviderSessionRecord,
         meta: Option<&SessionMeta>,
         projects: &crate::projects::Projects,
-    ) -> Self {
+    ) -> Option<Self> {
+        // A record naming a provider this build does not register is not
+        // listed — never shown as some other provider's session.
+        let provider = ProviderId::parse_known(&record.provider)?;
         let name = meta.and_then(|m| m.name.as_deref()).map(str::trim).filter(|s| !s.is_empty());
         let label = meta.and_then(SessionMeta::title);
         let user_named = name.is_some();
@@ -587,7 +590,7 @@ impl SessionEntry {
         let resolved = projects.resolve_available(record.workspace.as_deref(), stored_project);
         let project = resolved.as_ref().map(|p| p.id.clone());
         let project_name = resolved.as_ref().map(|p| p.name.clone());
-        Self {
+        Some(Self {
             id: record.session_id.clone(),
             label: one_line(text),
             updated,
@@ -613,7 +616,7 @@ impl SessionEntry {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
             replayed: false,
-            provider: ProviderId::parse(&record.provider),
+            provider,
             named: name.is_some(),
             needs_title: false,
             side_marker: false,
@@ -636,7 +639,7 @@ impl SessionEntry {
             unread: meta.is_some_and(|m| m.unread),
             branch: None,
             terminals_running: 0,
-        }
+        })
     }
 
     #[cfg(feature = "probe")]
@@ -1018,7 +1021,7 @@ pub fn merge_session_list(wire: Vec<SessionEntry>, existing: &[SessionEntry]) ->
     merged.extend(
         existing
             .iter()
-            .filter(|entry| (entry.local || !entry.provider.lists_sessions()) && !listed.contains(&entry.id))
+            .filter(|entry| (entry.local || !entry.provider.has(provider::ProviderTrait::NativeSessionList)) && !listed.contains(&entry.id))
             .cloned(),
     );
     merged
@@ -1034,7 +1037,7 @@ pub fn list_apply_unchanged(existing: &[SessionEntry], wire: &[SessionEntry]) ->
     // Provider-lane rows are the window's own, like locals: the wire never
     // lists them, so they never count toward (or against) a match.
     let listed: Vec<&SessionEntry> =
-        existing.iter().filter(|entry| !entry.local && entry.provider.lists_sessions()).collect();
+        existing.iter().filter(|entry| !entry.local && entry.provider.has(provider::ProviderTrait::NativeSessionList)).collect();
     listed.len() == wire.len() && listed.iter().zip(wire.iter()).all(|(a, b)| a == &b)
 }
 
@@ -1502,11 +1505,12 @@ pub fn elapsed_at(at: DateTime<Local>, now: DateTime<Local>) -> String {
 /// meta speaks for the row. The row's own cap bounds whatever is shown.
 /// A handoff destination row's byline origin: "from <Provider>", joined
 /// onto whatever the row already says — or the whole byline when it says
-/// nothing. `provider` is the source session's wire id; unknown ids fall
-/// back to the registry default the same way every other parse does.
+/// nothing. `provider` is the source session's wire id; an id no
+/// registered provider answers to names no origin.
 pub fn with_handoff_origin(base: String, provider: Option<&str>) -> String {
     let Some(wire) = provider.map(str::trim).filter(|s| !s.is_empty()) else { return base };
-    let from = format!("from {}", crate::providers::ProviderId::parse(wire).label());
+    let Ok(from) = crate::providers::ProviderId::resolve(wire) else { return base };
+    let from = format!("from {}", from.label());
     if base.trim().is_empty() { from } else { format!("{base} · {from}") }
 }
 
@@ -2616,10 +2620,10 @@ pub mod tests {
             first_prompt: Some("Fix the header".into()),
             ..SessionMeta::default()
         };
-        let row = SessionEntry::provider_row(&record, Some(&facts), &projects);
+        let row = SessionEntry::provider_row(&record, Some(&facts), &projects).expect("a registered provider");
         assert_eq!(row.label, "Ack title");
         facts.provider_title = None;
-        let row = SessionEntry::provider_row(&record, Some(&facts), &projects);
+        let row = SessionEntry::provider_row(&record, Some(&facts), &projects).expect("a registered provider");
         assert_eq!(row.label, "Fix the header");
         let meta = SessionMeta {
             first_prompt: Some("Fix the header".into()),
@@ -2628,11 +2632,11 @@ pub mod tests {
             last_summary: Some("Fixed it".into()),
             ..SessionMeta::default()
         };
-        let row = SessionEntry::provider_row(&record, Some(&meta), &projects);
+        let row = SessionEntry::provider_row(&record, Some(&meta), &projects).expect("a registered provider");
         assert_eq!(row.label, "Shiny generated", "the auto-title outranks the first prompt");
         assert_eq!(row.last_ask.as_deref(), Some("Fix the header"), "the byline ask rides along");
         let named = SessionMeta { name: Some("Mine".into()), ..SessionMeta::default() };
-        let row = SessionEntry::provider_row(&record, Some(&named), &projects);
+        let row = SessionEntry::provider_row(&record, Some(&named), &projects).expect("a registered provider");
         assert_eq!(row.label, "Mine", "a user-given name outranks everything");
     }
 
@@ -2641,7 +2645,7 @@ pub mod tests {
     #[test]
     fn the_list_merge_keeps_provider_rows_past_every_reply() {
         let projects = Projects::default();
-        let provider = SessionEntry::provider_row(&provider_record(), None, &projects);
+        let provider = SessionEntry::provider_row(&provider_record(), None, &projects).expect("a registered provider");
         let merged = merge_session_list(Vec::new(), std::slice::from_ref(&provider));
         assert_eq!(merged.len(), 1, "the provider row survives an empty reply");
         assert_eq!(merged[0].provider, ProviderId::ClaudeCode);
@@ -2722,9 +2726,9 @@ pub mod tests {
         overrides: &crate::sessions::Overrides,
     ) -> Vec<SessionEntry> {
         let projects = Projects::default();
-        let mut row_a = SessionEntry::provider_row(&provider["chain-a"], overrides.get("chain-a"), &projects);
+        let mut row_a = SessionEntry::provider_row(&provider["chain-a"], overrides.get("chain-a"), &projects).expect("a registered provider");
         row_a.updated = Local::now() - chrono::Duration::days(2);
-        let mut row_b = SessionEntry::provider_row(&provider["chain-b"], overrides.get("chain-b"), &projects);
+        let mut row_b = SessionEntry::provider_row(&provider["chain-b"], overrides.get("chain-b"), &projects).expect("a registered provider");
         row_b.updated = Local::now() - chrono::Duration::days(1);
         let mut row_c = entry("chain-c");
         row_c.label = "Later words".into();
@@ -2799,8 +2803,8 @@ pub mod tests {
         }
         let projects = Projects::default();
         let mut rows = vec![
-            SessionEntry::provider_row(&provider["chain-a"], overrides.get("chain-a"), &projects),
-            SessionEntry::provider_row(&provider["chain-b"], overrides.get("chain-b"), &projects),
+            SessionEntry::provider_row(&provider["chain-a"], overrides.get("chain-a"), &projects).expect("a registered provider"),
+            SessionEntry::provider_row(&provider["chain-b"], overrides.get("chain-b"), &projects).expect("a registered provider"),
         ];
         let mut head = entry("chain-c");
         head.archived = true;
@@ -2883,10 +2887,10 @@ pub mod tests {
             handoff_title: Some("Chart the Greyport ferry routes".into()),
             ..SessionMeta::default()
         };
-        let row = SessionEntry::provider_row(&record, Some(&meta), &projects);
+        let row = SessionEntry::provider_row(&record, Some(&meta), &projects).expect("a registered provider");
         assert_eq!(row.label, "Chart the Greyport ferry routes");
         meta.handoff_title = None;
-        let row = SessionEntry::provider_row(&record, Some(&meta), &projects);
+        let row = SessionEntry::provider_row(&record, Some(&meta), &projects).expect("a registered provider");
         assert_eq!(row.label, "Handed off from Muse: Fix it", "without a chain title the ladder is untouched");
     }
 
@@ -3001,7 +3005,7 @@ pub mod tests {
         );
         let projects = Projects::default();
         let rows = vec![
-            SessionEntry::provider_row(&provider["dangling"], overrides.get("dangling"), &projects),
+            SessionEntry::provider_row(&provider["dangling"], overrides.get("dangling"), &projects).expect("a registered provider"),
             entry("plain"),
         ];
         assert_eq!(chain_head("dangling", &provider, &overrides, &rows), "dangling");
@@ -3073,8 +3077,8 @@ pub mod tests {
         );
         let projects = Projects::default();
         let rows = vec![
-            SessionEntry::provider_row(&provider["loop-a"], overrides.get("loop-a"), &projects),
-            SessionEntry::provider_row(&provider["loop-b"], overrides.get("loop-b"), &projects),
+            SessionEntry::provider_row(&provider["loop-a"], overrides.get("loop-a"), &projects).expect("a registered provider"),
+            SessionEntry::provider_row(&provider["loop-b"], overrides.get("loop-b"), &projects).expect("a registered provider"),
         ];
         let collapsed = collapse_handoff_chains(rows, &provider, &overrides);
         assert_eq!(collapsed.len(), 2, "a cycle is two singletons, never a hang");

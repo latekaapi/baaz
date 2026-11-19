@@ -66,11 +66,11 @@ pub(in crate::app) fn lane_restore(
     drop(guard);
 }
 
-/// A connected scripted provider through the [`crate::providers::ProviderFactory`]
+/// A connected scripted provider through the [`crate::providers::Registry`]
 /// seam: what the lane tests drive without spawning a child.
-pub(super) fn scripted_factory() -> crate::providers::ProviderFactory {
+pub(super) fn scripted_factory() -> crate::providers::Registry {
     use provider::ProviderAdapter as _;
-    crate::providers::ProviderFactory::new(|_: ProviderId| {
+    crate::providers::Registry::test(|_: ProviderId| {
         let mut adapter = provider::scripted::ScriptedProvider::new();
         adapter.connect(&conn::connect_info())?;
         Ok(provider::Provider::new(adapter))
@@ -79,7 +79,7 @@ pub(super) fn scripted_factory() -> crate::providers::ProviderFactory {
 
 /// A factory whose provider answers `ResumeSession` by echoing the
 /// session: what the forked-open path drives without spawning a child.
-pub(super) fn resumable_factory() -> crate::providers::ProviderFactory {
+pub(super) fn resumable_factory() -> crate::providers::Registry {
     use provider::ProviderAdapter as _;
     struct Resumable {
         rx: crossbeam_channel::Receiver<provider::ProviderEvent>,
@@ -151,7 +151,7 @@ pub(super) fn resumable_factory() -> crate::providers::ProviderFactory {
         }
         fn shutdown(&mut self) {}
     }
-    crate::providers::ProviderFactory::new(|_: ProviderId| {
+    crate::providers::Registry::test(|_: ProviderId| {
         let (_, rx) = crossbeam_channel::unbounded::<provider::ProviderEvent>();
         let mut adapter = Resumable { rx, connected: false };
         adapter.connect(&conn::connect_info())?;
@@ -160,9 +160,9 @@ pub(super) fn resumable_factory() -> crate::providers::ProviderFactory {
 }
 
 /// A factory that never connects: the failed-open path.
-pub(super) fn failing_factory(reason: &str) -> crate::providers::ProviderFactory {
+pub(super) fn failing_factory(reason: &str) -> crate::providers::Registry {
     let reason = reason.to_owned();
-    crate::providers::ProviderFactory::new(move |_: ProviderId| {
+    crate::providers::Registry::test(move |_: ProviderId| {
         Err(provider::ProviderError::Unavailable { reason: reason.clone() })
     })
 }
@@ -174,8 +174,7 @@ pub(super) fn failing_factory(reason: &str) -> crate::providers::ProviderFactory
 /// view.
 pub(super) fn mark_muse_up(harness: &mut Harness) {
     let hub = provider_muse::MuseHub::spawn_stand_in("true", Vec::new()).expect("a throwaway child spawns");
-    harness.muse_slot.set_ready(hub.clone());
-    harness.muse_hub = Some(hub);
+    harness.providers.install_test_hub(hub);
 }
 
 pub(super) fn lane_harness(
@@ -203,8 +202,7 @@ pub(super) fn install_fake_muse(
     use provider::ProviderAdapter as _;
     let hub = starting_client_answering(dir, root, log, answer);
     hub.lane().connect(&crate::conn::connect_info()).expect("the fake child shakes hands");
-    harness.muse_slot.set_ready(hub.clone());
-    harness.muse_hub = Some(hub);
+    harness.providers.install_test_hub(hub);
 }
 
 /// Adopt `dir` as the current project and pick muse for new sessions.
@@ -221,11 +219,11 @@ pub(super) fn adopt_for_muse(harness: &mut Harness, dir: &std::path::Path, cx: &
 /// A factory that counts every child it spawns, around the scripted
 /// stand-in: the W6 tests measure provider opens with it instead of
 /// grepping stderr.
-pub(super) fn counting_factory() -> (crate::providers::ProviderFactory, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+pub(super) fn counting_factory() -> (crate::providers::Registry, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
     use provider::ProviderAdapter as _;
     let opens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let factory_opens = opens.clone();
-    let factory: crate::providers::ProviderFactory = crate::providers::ProviderFactory::new(move |_: ProviderId| {
+    let factory: crate::providers::Registry = crate::providers::Registry::test(move |_: ProviderId| {
         factory_opens.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut adapter = provider::scripted::ScriptedProvider::new();
         adapter.connect(&conn::connect_info())?;
@@ -244,7 +242,7 @@ pub(super) fn opens_of(opens: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -
 pub(super) fn provider_draft_window<'a>(
     cx: &'a mut gpui::TestAppContext,
     dir: &std::path::Path,
-    factory: crate::providers::ProviderFactory,
+    factory: crate::providers::Registry,
 ) -> (gpui::Entity<Harness>, &'a mut gpui::VisualTestContext, String) {
     cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
     cx.update(crate::app::bind_keys);
@@ -256,7 +254,7 @@ pub(super) fn provider_draft_window<'a>(
     vc.run_until_parked();
     let project = vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
             let project = adopt_for_muse(harness, dir, cx);
             harness.new_provider = ProviderId::Codex.as_str().to_owned();
@@ -270,7 +268,7 @@ pub(super) fn provider_draft_window<'a>(
 /// adapter that answers the open-time pulls and admits decisions. The
 /// scripted double mints one fixed id, so a second open would replace
 /// the first instead of parking it.
-pub(super) fn parking_factory() -> crate::providers::ProviderFactory {
+pub(super) fn parking_factory() -> crate::providers::Registry {
     use provider::ProviderAdapter as _;
     struct Quiet {
         rx: crossbeam_channel::Receiver<provider::ProviderEvent>,
@@ -343,7 +341,7 @@ pub(super) fn parking_factory() -> crate::providers::ProviderFactory {
         fn shutdown(&mut self) {}
     }
     let next = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
-    crate::providers::ProviderFactory::new(move |_: ProviderId| {
+    crate::providers::Registry::test(move |_: ProviderId| {
         let (_, rx) = crossbeam_channel::unbounded::<provider::ProviderEvent>();
         let mut adapter = Quiet { rx, connected: false, next: next.clone() };
         adapter.connect(&conn::connect_info())?;
@@ -391,13 +389,13 @@ pub(super) fn z4_seed_stored_codex(harness: &mut Harness, cx: &mut Context<Harne
 /// The replayed user turn plus its finished assistant turn is what a
 /// real adapter replays from its backend store.
 pub(super) fn recording_resumable_factory() -> (
-    crate::providers::ProviderFactory,
+    crate::providers::Registry,
     std::sync::Arc<std::sync::Mutex<Vec<provider::Command>>>,
 ) {
     recording_resumable_factory_replying(Some("The header is restored"))
 }
 
-pub(super) fn y2b2_factory() -> (crate::providers::ProviderFactory, Y2b2Shared) {
+pub(super) fn y2b2_factory() -> (crate::providers::Registry, Y2b2Shared) {
     use provider::ProviderAdapter as _;
     let shared = Y2b2Shared {
         inner: std::sync::Arc::new(std::sync::Mutex::new(Y2b2State {
@@ -408,7 +406,7 @@ pub(super) fn y2b2_factory() -> (crate::providers::ProviderFactory, Y2b2Shared) 
         })),
     };
     let factory_shared = shared.clone();
-    let factory = crate::providers::ProviderFactory::new(move |_: ProviderId| {
+    let factory = crate::providers::Registry::test(move |_: ProviderId| {
         let (_, rx) = crossbeam_channel::unbounded::<provider::ProviderEvent>();
         let mut adapter = Y2b2Adapter {
             rx,
@@ -544,7 +542,7 @@ done
 pub(super) fn recording_resumable_factory_replying(
     reply: Option<&'static str>,
 ) -> (
-    crate::providers::ProviderFactory,
+    crate::providers::Registry,
     std::sync::Arc<std::sync::Mutex<Vec<provider::Command>>>,
 ) {
     use provider::ProviderAdapter as _;
@@ -667,7 +665,7 @@ pub(super) fn recording_resumable_factory_replying(
     }
     let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let factory_commands = commands.clone();
-    let factory = crate::providers::ProviderFactory::new(move |_: ProviderId| {
+    let factory = crate::providers::Registry::test(move |_: ProviderId| {
         let (tx, rx) = crossbeam_channel::unbounded::<provider::ProviderEvent>();
         let mut adapter = RecordingResumable {
             tx,

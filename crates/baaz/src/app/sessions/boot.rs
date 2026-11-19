@@ -80,7 +80,7 @@ impl Harness {
             active: self.active.is_some(),
             switch_pending: self.open_state.switch_pending,
             attempted: self.open_state.boot_session_attempted,
-            connected: self.muse_slot.is_ready(),
+            connected: self.providers.shared_ready(),
             session_arg: self.args.session.as_deref(),
             send: self.args.send.is_some(),
             steps_pending: self.boot_steps_pending(),

@@ -623,7 +623,7 @@ impl SessionRuntime {
     /// which models lack Auto), and the provider reporting Auto (a launch
     /// or resume in Auto on a remembered model).
     pub(super) fn leave_auto_if_unsupported(&mut self, cx: &mut Context<Self>) {
-        if !self.provider_kind().models_limit_modes()
+        if !self.provider_kind().has(provider::ProviderTrait::ModelsLimitModes)
             || self.mode() != PermissionMode::OnRequest
             || self.mode_unavailable(PermissionMode::OnRequest).is_none()
         {
@@ -706,7 +706,7 @@ impl SessionRuntime {
             .filter(|row| !row.unavailable_modes.is_empty())
             .map(|row| (row.id.clone(), row.unavailable_modes.clone()))
             .collect();
-        let muse = self.provider_kind().catalog_rows_carry_efforts();
+        let muse = self.provider_kind().has(provider::ProviderTrait::CatalogEfforts);
         self.models = rows
             .into_iter()
             .map(|row| ModelCatalogEntry {
@@ -902,7 +902,7 @@ impl SessionRuntime {
         }
         // A provider whose one catalog is shared across its sessions lists
         // over its own connection, whatever the view holds.
-        if self.provider_kind().catalog_flags_session_model() {
+        if self.provider_kind().has(provider::ProviderTrait::CatalogFlagsSessionModel) {
             // The catalog is the session's: an open picker fills when
             // the start lands rather than staying silently empty.
             if let Some(queue) = self.start_queue() {

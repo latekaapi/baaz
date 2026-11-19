@@ -72,7 +72,9 @@ fn usage_rows_with(
             rows.push(refreshing_row(status));
             continue;
         }
-        if id == ProviderId::Muse {
+        // The billing-tier provider's card reads its tier feed.
+        let billed = id.has(provider::ProviderTrait::BillingTier);
+        if billed {
             if let Some(feed) = muse.as_ref() {
                 rows.push(muse_row(status, feed, now, muse_stale));
                 continue;
@@ -82,7 +84,7 @@ fn usage_rows_with(
             rows.push(unavailable_row(status));
             continue;
         }
-        rows.push(connected_row(status, now, id == ProviderId::Muse && muse_stale));
+        rows.push(connected_row(status, now, billed && muse_stale));
     }
     rows
 }
@@ -343,11 +345,7 @@ pub fn not_connected_reason(status: &ProviderStatus) -> String {
 
 /// Why a connected provider with no usable reading shows no bar.
 fn no_reading_reason(id: ProviderId) -> &'static str {
-    match id {
-        ProviderId::Muse => "No reading yet — appears after your first Muse turn",
-        ProviderId::ClaudeCode => "No reading yet — appears after a Claude Code turn",
-        ProviderId::Codex => "No reading yet",
-    }
+    id.descriptor().usage_hint
 }
 
 /// A reading's age footnote: just the age (`just now`, `2m ago`) — the

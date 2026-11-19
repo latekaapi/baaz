@@ -3211,7 +3211,8 @@ pub(crate) fn footer_identity(
         if let ProviderAuth::SignedIn { email, plan, .. } = &status.auth {
             let name = email.clone().unwrap_or_else(|| status.provider.label().to_owned());
             let initial = name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
-            let plan = if status.provider == ProviderId::Muse {
+            // The billing-tier provider's plan reads its tier card first.
+            let plan = if status.provider.has(provider::ProviderTrait::BillingTier) {
                 Some(muse_plan()).filter(|label| !label.is_empty()).or_else(|| plan.clone())
             } else {
                 plan.clone()

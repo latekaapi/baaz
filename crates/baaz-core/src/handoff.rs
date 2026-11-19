@@ -412,11 +412,7 @@ pub fn is_same_provider(from: ProviderId, to: ProviderId) -> bool {
 /// Map Baaz's lane id onto the wire provider the [`Block::Handoff`] card
 /// carries.
 pub fn wire_provider(id: ProviderId) -> aui_protocol::Provider {
-    match id {
-        ProviderId::Muse => aui_protocol::Provider::Muse,
-        ProviderId::ClaudeCode => aui_protocol::Provider::Claude,
-        ProviderId::Codex => aui_protocol::Provider::Codex,
-    }
+    id.descriptor().icon
 }
 
 /// Where a destination session came from: the quiet marker's facts and the

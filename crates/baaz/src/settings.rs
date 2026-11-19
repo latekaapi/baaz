@@ -180,8 +180,7 @@ pub(crate) fn is_provider_subpage(section: &str) -> bool {
 /// without a window.
 pub(crate) fn provider_subpage_id(section: &str) -> Option<ProviderId> {
     let wire = section.strip_prefix("providers/")?;
-    let parsed = ProviderId::parse(wire);
-    (parsed.as_str() == wire).then_some(parsed)
+    ProviderId::parse_known(wire)
 }
 
 /// Normalize a `settings:<target>` payload to a page id. Handles `""`
@@ -797,7 +796,9 @@ impl SettingsPage {
             ConnectIntent::CloseDefaultMenu => self.set_default_menu(false, cx),
             ConnectIntent::SetDefault(provider) => {
                 self.set_default_menu(false, cx);
-                cx.emit(SettingsEvent::SetDefaultProvider(crate::providers::provider_from_icon(provider)));
+                if let Some(id) = crate::providers::provider_from_icon(provider) {
+                    cx.emit(SettingsEvent::SetDefaultProvider(id));
+                }
             }
             _ => {}
         }
@@ -807,7 +808,7 @@ impl SettingsPage {
     /// (switch, re-check, sign in/out, install, docs, path) is the root's.
     fn provider_intent(&mut self, intent: aui::screens::ProviderIntent, cx: &mut Context<Self>) {
         if intent.action == aui::screens::ProviderAction::ToggleDetails {
-            let id = ProviderId::parse(intent.id.as_ref());
+            let Some(id) = ProviderId::parse_known(intent.id.as_ref()) else { return };
             if !self.details_open.remove(&id) {
                 self.details_open.insert(id);
             }
@@ -1835,7 +1836,8 @@ impl SettingsPage {
         statuses: &[crate::provider_status::ProviderStatus],
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let current = self.facts.new_provider.unwrap_or(ProviderId::Muse);
+        // With no pick, the first registered stands (as at boot).
+        let current = self.facts.new_provider.unwrap_or(ProviderId::all()[0]);
         let row: AnyElement = match crate::connect::default_picker_for(statuses, current, self.default_menu_open(cx)) {
             Some(picker) => {
                 let weak = cx.entity().downgrade();
@@ -2400,7 +2402,7 @@ impl Harness {
         }
         let section = page.state.section.as_str();
         let mut facts = SettingsFacts {
-            new_provider: Some(ProviderId::parse(&self.new_provider)),
+            new_provider: self.new_provider_id(),
             ..SettingsFacts::default()
         };
         match section {

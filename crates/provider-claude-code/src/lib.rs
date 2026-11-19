@@ -24,6 +24,7 @@ pub mod fold;
 pub mod frame;
 pub mod history;
 pub mod home;
+pub mod registry;
 pub mod terminal;
 
 use std::path::PathBuf;

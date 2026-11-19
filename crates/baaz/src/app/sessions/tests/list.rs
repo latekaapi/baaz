@@ -499,7 +499,7 @@ fn muse_never_gates_the_other_providers_rows(cx: &mut gpui::TestAppContext) {
             harness.session_list.update(cx, |list, _| list.sessions_loaded = false);
             harness.session_list.update(cx, |list, _| list.sessions.clear());
             z4_seed_stored_codex(harness, cx);
-            harness.session_list.update(cx, |list, _| list.sessions.retain(|entry| !entry.provider.lists_sessions()));
+            harness.session_list.update(cx, |list, _| list.sessions.retain(|entry| !entry.provider.has(provider::ProviderTrait::NativeSessionList)));
             harness.session_list.update(cx, |list, _| list.sessions_loaded = false);
             harness.muse_unavailable(crate::connect::MUSE_OFF.into(), cx);
             assert!(harness.session_list.read(cx).sessions_loaded, "the sidebar settles without a Muse list");

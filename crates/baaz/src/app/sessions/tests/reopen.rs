@@ -17,7 +17,7 @@ fn z4_a_failed_reopen_lands_inline_on_the_clicked_session(cx: &mut gpui::TestApp
     let (factory, _) = y2b2_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
             // A tier that banners every session view it touches — the
             // failure state must show none of it.
@@ -31,7 +31,7 @@ fn z4_a_failed_reopen_lands_inline_on_the_clicked_session(cx: &mut gpui::TestApp
     // Codex cannot start now.
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = failing_factory("no child here");
+            harness.providers = harness.providers.with_opens_of(&failing_factory("no child here"));
         });
     });
     // The click on the stored session.
@@ -104,7 +104,7 @@ fn z4_retry_after_a_failed_reopen_opens_the_real_session(cx: &mut gpui::TestAppC
     let (factory, _) = y2b2_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -114,7 +114,7 @@ fn z4_retry_after_a_failed_reopen_opens_the_real_session(cx: &mut gpui::TestAppC
     });
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = failing_factory("no child here");
+            harness.providers = harness.providers.with_opens_of(&failing_factory("no child here"));
         });
     });
     vc.update(|window, cx| {
@@ -131,7 +131,7 @@ fn z4_retry_after_a_failed_reopen_opens_the_real_session(cx: &mut gpui::TestAppC
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
             let (factory, _) = recording_resumable_factory();
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
         });
     });
     vc.update(|window, cx| {
@@ -206,7 +206,7 @@ fn a_replayed_reopen_asks_no_model_for_anything(cx: &mut gpui::TestAppContext) {
     let (factory, commands) = recording_resumable_factory_replying(None);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
             z4_seed_stored_codex(harness, cx);
             // The record already counted the one exchange the replay
@@ -331,7 +331,7 @@ fn a_reopen_that_replays_more_than_the_record_counted_keeps_the_rows_time(cx: &m
     let (factory, _commands) = recording_resumable_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
             z4_seed_stored_codex(harness, cx);
             harness.session_list.update(cx, |list, _| {
@@ -379,7 +379,7 @@ fn a_provider_session_reopens_with_its_history_after_a_restart(cx: &mut gpui::Te
     let (factory, commands) = recording_resumable_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -513,7 +513,7 @@ enum MuseResume {
 /// child, no server (docs/70 §6).
 fn muse_resume_factory(
     answer: MuseResume,
-) -> (crate::providers::ProviderFactory, std::sync::Arc<std::sync::Mutex<Vec<provider::Command>>>) {
+) -> (crate::providers::Registry, std::sync::Arc<std::sync::Mutex<Vec<provider::Command>>>) {
     use provider::ProviderAdapter as _;
     struct MuseDouble {
         rx: crossbeam_channel::Receiver<provider::ProviderEvent>,
@@ -588,8 +588,8 @@ fn muse_resume_factory(
     }
     let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let factory_commands = commands.clone();
-    let factory: crate::providers::ProviderFactory = crate::providers::ProviderFactory::new(move |id: ProviderId| {
-        assert!(id.lists_sessions(), "only the listing provider is asked for a lane here");
+    let factory: crate::providers::Registry = crate::providers::Registry::test(move |id: ProviderId| {
+        assert!(id.has(provider::ProviderTrait::NativeSessionList), "only the listing provider is asked for a lane here");
         let (_, rx) = crossbeam_channel::unbounded::<provider::ProviderEvent>();
         let mut adapter = MuseDouble { rx, answer, commands: factory_commands.clone() };
         adapter.connect(&conn::connect_info())?;
@@ -613,7 +613,7 @@ fn p4b_harness(
         baaz.update(cx, |harness, cx| {
             harness.args.offline = false;
             mark_muse_up(harness);
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             harness.session_list.update(cx, |list, _| list.sessions.clear());
             let mut row = chain_muse_entry("s-muse-old", "Chart the ferry routes", 3);
             row.workspace = Some(workspace);
@@ -968,8 +968,7 @@ fn a_record_never_conjures_rows_for_chain_members_it_does_not_hold(cx: &mut gpui
 }
 
 /// An unknown provider id in a record is refused as unknown — never
-/// reopened on `ProviderId::parse`'s Muse fallback — while a Muse
-/// record parses as Muse.
+/// reopened as some other provider — while a Muse record parses as Muse.
 #[test]
 fn a_records_provider_parses_strictly() {
     assert_eq!(ProviderId::parse_known("muse"), Some(ProviderId::Muse));
@@ -977,5 +976,10 @@ fn a_records_provider_parses_strictly() {
     assert_eq!(ProviderId::parse_known("claude-code"), Some(ProviderId::ClaudeCode));
     assert_eq!(ProviderId::parse_known("echo"), None);
     assert_eq!(ProviderId::parse_known(""), None);
-    assert_eq!(ProviderId::parse("echo"), ProviderId::Muse, "the flag's fallback is unchanged");
+    // A route a provider declares names it; anything else is an error,
+    // never a fallback (docs/82 5.4).
+    assert_eq!(ProviderId::resolve("echo"), Ok(ProviderId::Muse), "a declared route names its provider");
+    assert_eq!(ProviderId::resolve("meta"), Ok(ProviderId::Muse));
+    assert!(ProviderId::resolve("acp").is_err(), "an unknown id is an error, not Muse");
+    assert!(ProviderId::resolve("").is_err());
 }

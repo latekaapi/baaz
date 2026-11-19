@@ -334,7 +334,7 @@ fn an_unfiled_session_never_starts_in_the_launch_directory(cx: &mut gpui::TestAp
         let baaz = lane_harness(vc, &state.2);
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.provider_factory = parking_factory();
+                harness.providers = harness.providers.with_opens_of(&parking_factory());
                 mark_muse_up(harness);
                 // A Finder launch: no `--workspace`, cwd `/`.
                 harness.args.workspace = std::path::PathBuf::from("/");
@@ -512,7 +512,7 @@ fn new_after_open_lands_a_draft(cx: &mut gpui::TestAppContext, name: &str, provi
     let (factory, _) = recording_resumable_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             install_fake_muse(harness, &state.2, &state.2, &log, None);
             let project = adopt_for_muse(harness, &state.2, cx);
             harness.new_provider = provider.as_str().to_owned();
@@ -753,7 +753,7 @@ fn escape_closes_the_composer_provider_menu(cx: &mut gpui::TestAppContext) {
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = scripted_factory();
+            harness.providers = harness.providers.with_opens_of(&scripted_factory());
             mark_muse_up(harness);
             harness.auth = Auth::SignedIn(crate::auth::Identity {
                 lane: provider::AccountLane::AccountLogin,
@@ -800,7 +800,7 @@ fn escape_closes_the_composer_plus_menu(cx: &mut gpui::TestAppContext) {
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = scripted_factory();
+            harness.providers = harness.providers.with_opens_of(&scripted_factory());
             mark_muse_up(harness);
             harness.auth = Auth::SignedIn(crate::auth::Identity {
                 lane: provider::AccountLane::AccountLogin,
@@ -919,7 +919,7 @@ fn a_provider_draft_requests_the_projects_remembered_model(cx: &mut gpui::TestAp
     b2fix_project(vc, &baaz, "claude-code", &[("claude-code", "opus[1m]")], &[]);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
             harness.active = None;
         });
@@ -959,7 +959,7 @@ fn a_pick_in_one_project_starts_the_next_session_in_another(cx: &mut gpui::TestA
     std::fs::create_dir_all(&other_root).expect("second root");
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
             harness.active = None;
             harness.current_project = Some(first.clone());
@@ -1016,7 +1016,7 @@ fn a_draft_on_a_remembered_haiku_opens_in_ask(cx: &mut gpui::TestAppContext) {
                 let adopted = list.projects.projects.iter_mut().find(|p| p.id == project).expect("adopted");
                 adopted.defaults.approval_mode = Some(aui_protocol::PermissionMode::OnRequest);
             });
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
             harness.active = None;
         });
@@ -1055,7 +1055,7 @@ fn a_codex_default_survives_a_loaded_muse_catalog(cx: &mut gpui::TestAppContext)
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let params =
-                harness.start_model(ProviderId::parse(&harness.new_provider), Some(project.as_str()), cx);
+                harness.start_model(harness.new_provider_id().expect("a registered provider"), Some(project.as_str()), cx);
             assert_eq!(
                 params.as_deref(),
                 Some("gpt-6-astra"),
@@ -1078,7 +1078,7 @@ fn a_claude_code_default_survives_a_loaded_muse_catalog(cx: &mut gpui::TestAppCo
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let params =
-                harness.start_model(ProviderId::parse(&harness.new_provider), Some(project.as_str()), cx);
+                harness.start_model(harness.new_provider_id().expect("a registered provider"), Some(project.as_str()), cx);
             assert_eq!(
                 params.as_deref(),
                 Some("claude-opus-4"),
@@ -1109,7 +1109,7 @@ fn a_handoff_destination_to_muse_drops_a_foreign_default(cx: &mut gpui::TestAppC
                 prefix: Vec::new(),
             });
             let params =
-                harness.start_model(ProviderId::parse(&harness.new_provider), Some(project.as_str()), cx);
+                harness.start_model(harness.new_provider_id().expect("a registered provider"), Some(project.as_str()), cx);
             assert_eq!(
                 params, None,
                 "a foreign default never rides a muse handoff destination"
@@ -1131,7 +1131,7 @@ fn a_muse_start_keeps_a_listed_model(cx: &mut gpui::TestAppContext) {
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             let params =
-                harness.start_model(ProviderId::parse(&harness.new_provider), Some(project.as_str()), cx);
+                harness.start_model(harness.new_provider_id().expect("a registered provider"), Some(project.as_str()), cx);
             assert_eq!(
                 params.as_deref(),
                 Some("muse-spark-1.3"),
@@ -1151,7 +1151,7 @@ fn a_second_new_while_a_switch_is_in_flight_starts_nothing(cx: &mut gpui::TestAp
     let (factory, opens) = counting_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
             harness.new_provider = ProviderId::Codex.as_str().to_owned();
         });

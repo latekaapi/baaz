@@ -373,7 +373,7 @@ pub(crate) struct SkillsFacts {
     pub project_name: String,
     /// The lane the page speaks for: the open session's, else the pick new
     /// sessions start on.
-    pub lane: crate::providers::ProviderId,
+    pub lane: Option<crate::providers::ProviderId>,
 }
 
 /// What the page asks of the root (see the module doc).
@@ -478,7 +478,7 @@ impl SkillsPage {
             pending_create: false,
             program,
             overlays,
-            facts: SkillsFacts { root, project_name: "Unfiled".to_owned(), lane: crate::providers::ProviderId::Muse },
+            facts: SkillsFacts { root, project_name: "Unfiled".to_owned(), lane: crate::providers::ProviderId::with(provider::ProviderTrait::ManagedSkills) },
             tasks: Vec::new(),
         }
     }
@@ -623,13 +623,14 @@ pub fn meter_text(catalog: &SkillsCatalog) -> (String, String) {
     (total, caption)
 }
 
-/// Whether the page's provider line shows: skills load into **muse**
-/// sessions, while Claude Code and Codex read their own skill folders.
-pub(crate) fn skills_provider_line(lane: crate::providers::ProviderId) -> Option<&'static str> {
-    match lane {
-        crate::providers::ProviderId::Muse => None,
-        _ => Some("These are the skills Muse loads. Claude Code and Codex read their own skill folders."),
-    }
+/// Whether the page's provider line shows: the skills listed load into
+/// the sessions of the provider whose skills the page manages
+/// ([`provider::ProviderTrait::ManagedSkills`]), while the others read
+/// their own skill folders. No line without a lane.
+pub(crate) fn skills_provider_line(lane: Option<crate::providers::ProviderId>) -> Option<&'static str> {
+    let lane = lane?;
+    (!lane.has(provider::ProviderTrait::ManagedSkills))
+        .then_some("These are the skills Muse loads. Claude Code and Codex read their own skill folders.")
 }
 
 #[cfg(feature = "probe")]
@@ -1908,7 +1909,8 @@ impl SkillsPage {
         // (docs/83 rule 14) and shows only while Muse is connected (rule
         // 13) — the Import rows name the CLI whose folder they read.
         let muse_connected = crate::connect::connected_choices(&crate::provider_status::live_statuses())
-            .contains(&crate::providers::ProviderId::Muse);
+            .iter()
+            .any(|id| id.has(provider::ProviderTrait::ManagedSkills));
         let card = v_flex()
                     .id("skills-add-menu")
                     .w_full()
@@ -2681,7 +2683,7 @@ impl Harness {
                 .active
                 .as_ref()
                 .map(|view| view.read(cx).rt(cx).provider_kind())
-                .unwrap_or_else(|| crate::providers::ProviderId::parse(&self.new_provider)),
+                .or_else(|| self.new_provider_id()),
         }
     }
 
@@ -2746,9 +2748,11 @@ impl Harness {
     ) {
         match event {
             SkillsPageEvent::OpenProjectMenu => self.open_project_menu(self.current_project.clone(), true, cx),
-            // Always on the **muse** lane, whatever the remembered provider.
+            // Always on the lane of the provider whose skills the page
+            // manages, whatever the remembered provider.
             SkillsPageEvent::AskMuseToWrite => {
-                self.new_provider = crate::providers::ProviderId::Muse.as_str().to_owned();
+                let Some(id) = crate::providers::ProviderId::with(provider::ProviderTrait::ManagedSkills) else { return };
+                self.new_provider = id.as_str().to_owned();
                 self.new_session(window, cx);
             }
         }
@@ -2882,12 +2886,13 @@ mod tests {
     #[test]
     fn provider_lanes_get_the_line() {
         use crate::providers::ProviderId;
-        assert_eq!(skills_provider_line(ProviderId::Muse), None);
+        assert_eq!(skills_provider_line(Some(ProviderId::Muse)), None);
+        assert_eq!(skills_provider_line(None), None);
         assert_eq!(
-            skills_provider_line(ProviderId::ClaudeCode),
+            skills_provider_line(Some(ProviderId::ClaudeCode)),
             Some("These are the skills Muse loads. Claude Code and Codex read their own skill folders.")
         );
-        assert!(skills_provider_line(ProviderId::Codex).is_some());
+        assert!(skills_provider_line(Some(ProviderId::Codex)).is_some());
     }
 
     #[test]

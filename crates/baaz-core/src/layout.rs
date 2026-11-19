@@ -316,6 +316,27 @@ pub struct UseOwnMcp {
     pub claude_code: bool,
 }
 
+impl UseOwnMcp {
+    /// Whether `id`'s sessions inherit the owner's own servers: the switch
+    /// for that provider, off for one that has none.
+    pub fn inherits(&self, id: crate::providers::ProviderId) -> bool {
+        match id {
+            crate::providers::ProviderId::ClaudeCode => self.claude_code,
+            crate::providers::ProviderId::Codex => self.codex,
+            _ => false,
+        }
+    }
+
+    /// Set `id`'s switch; a provider with no switch has nothing to set.
+    pub fn set(&mut self, id: crate::providers::ProviderId, on: bool) {
+        match id {
+            crate::providers::ProviderId::ClaudeCode => self.claude_code = on,
+            crate::providers::ProviderId::Codex => self.codex = on,
+            _ => {}
+        }
+    }
+}
+
 /// What the person asked to hear about (Settings › Notifications, task
 /// 3.5). Every event on, the badge on, the sound off by default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

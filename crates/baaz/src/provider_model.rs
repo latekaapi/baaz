@@ -188,14 +188,16 @@ impl ProviderStatusModel {
     /// counts as seen, so a later sign-out earns the banner, not a gate.
     /// (The root, which draws the banner, redraws after.)
     pub(crate) fn muse_signed_in(&mut self) {
-        self.banners.remove(&ProviderId::Muse);
-        self.seen_connected.insert(ProviderId::Muse);
+        let Some(id) = ProviderId::with(provider::ProviderTrait::AccountOnConnection) else { return };
+        self.banners.remove(&id);
+        self.seen_connected.insert(id);
     }
 
     /// Muse signed out in the shell: its quiet banner (the root redraws).
     pub(crate) fn muse_signed_out(&mut self) {
-        self.seen_connected.insert(ProviderId::Muse);
-        self.banners.insert(ProviderId::Muse, signed_out_banner_text(ProviderId::Muse));
+        let Some(id) = ProviderId::with(provider::ProviderTrait::AccountOnConnection) else { return };
+        self.seen_connected.insert(id);
+        self.banners.insert(id, signed_out_banner_text(id));
     }
 
     // ── presses that wait on a probe ──────────────────────────────────

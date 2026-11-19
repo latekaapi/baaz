@@ -510,6 +510,12 @@ fn parse_args() -> Args {
         );
         out.provider = "echo".into();
     }
+    // A provider no registered adapter answers to (its key or a route it
+    // declares) is a mistake on the command line, never a reason to run
+    // some other provider.
+    if let Err(error) = crate::providers::ProviderId::resolve(&out.provider) {
+        usage(&format!("--provider / BAAZ_PROVIDER: {error}"));
+    }
     out.provider_explicit = provider_explicit;
     out
 }

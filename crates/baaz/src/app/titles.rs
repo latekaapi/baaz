@@ -81,7 +81,7 @@ impl Harness {
         let turns = entry.map(|e| e.turns).unwrap_or(0);
         let eligible = titles::should_title(
             crate::layout::Layout::get(cx).auto_title,
-            self.utility_available(self.session_lane_provider(session_id, cx)),
+            self.session_lane_provider(session_id, cx).is_some_and(|provider| self.utility_available(provider)),
             self.session_list.read(cx).overrides.get(session_id),
             turns,
             self.is_side_session(session_id, cx),
@@ -127,7 +127,7 @@ impl Harness {
         if !self.session_list.read(cx).titles_pending.contains(&real_id) {
             return;
         }
-        let provider = self.session_lane_provider(&real_id, cx);
+        let Some(provider) = self.session_lane_provider(&real_id, cx) else { return };
         let prompt = titles::title_prompt(&first_message);
         let model = self.utility_model(&real_id, cx);
         let muse = self.muse_side(provider, "baaz auto-title", cx);
@@ -171,33 +171,34 @@ impl Harness {
         provider: crate::providers::ProviderId,
         label: &'static str,
         cx: &mut Context<Self>,
-    ) -> Option<crate::utility::MuseSide> {
-        if !provider.completes_in_side_session() {
+    ) -> Option<crate::utility::SideSession> {
+        if !provider.has(provider::ProviderTrait::SideSessionCompletions) || !self.providers.shared_ready() {
             return None;
         }
-        let hub = self.muse_slot.hub()?;
         let side_id = titles::side_session_id();
         self.remember_side_session(&side_id, cx);
-        Some(crate::utility::MuseSide { hub, side_id, label })
+        Some(crate::utility::SideSession { providers: self.providers.clone(), side_id, label })
     }
 
-    /// The provider whose lane `session_id` rides: its provider record's,
-    /// else Muse.
-    pub(crate) fn session_lane_provider(&self, session_id: &str, cx: &gpui::App) -> crate::providers::ProviderId {
-        self.session_list.read(cx).provider_sessions
-            .get(session_id)
-            .map(|record| crate::providers::ProviderId::parse(&record.provider))
-            .unwrap_or(crate::providers::ProviderId::Muse)
+    /// The provider whose lane `session_id` rides: its provider record's;
+    /// a session with no record is one a provider listed itself, so it
+    /// rides that provider's. `None` for a record naming a provider this
+    /// build does not register — never some other provider's lane.
+    pub(crate) fn session_lane_provider(&self, session_id: &str, cx: &gpui::App) -> Option<crate::providers::ProviderId> {
+        match self.session_list.read(cx).provider_sessions.get(session_id) {
+            Some(record) => crate::providers::ProviderId::parse_known(&record.provider),
+            None => crate::providers::ProviderId::with(provider::ProviderTrait::NativeSessionList),
+        }
     }
 
     /// Whether `provider` can write a title, byline or summary now: Muse
     /// through its connection, the others through their CLIs while enabled
     /// — never while the window's lanes are the scripted stand-in.
     pub(crate) fn utility_available(&self, provider: crate::providers::ProviderId) -> bool {
-        if provider.completes_in_side_session() {
-            return self.muse_slot.is_ready();
+        if provider.has(provider::ProviderTrait::SideSessionCompletions) {
+            return self.providers.shared_ready();
         }
-        !self.provider_factory.lands_inline()
+        !self.providers.lands_inline()
             && crate::utility::supports(provider)
             && crate::provider_status::provider_enabled(provider)
     }
@@ -372,8 +373,11 @@ impl Harness {
         // that lands after the watchdog settled finds no waiting run.
         self.arm_handoff_summary_timeout(source.clone(), epoch, cx);
         let model = self.utility_model(&source, cx);
-        let muse = self.muse_side(provider, "baaz handoff summary", cx);
-        let work = move || crate::utility::complete(provider, model.as_deref(), &prompt, muse);
+        let muse = provider.and_then(|provider| self.muse_side(provider, "baaz handoff summary", cx));
+        let work = move || match provider {
+            Some(provider) => crate::utility::complete(provider, model.as_deref(), &prompt, muse),
+            None => Err("the session's provider is not registered in this build".to_owned()),
+        };
         self.wire_call(cx, work, move |this, reply, cx| {
             let summary = match reply {
                 Ok(text) => titles::clean_summary(&text),
@@ -520,7 +524,7 @@ impl Harness {
         }
         let session_id = runtime.read(cx).session_id.clone();
         // The session's own provider rewrites its byline (docs/50 P2).
-        if !self.utility_available(self.session_lane_provider(&session_id, cx)) {
+        if !self.session_lane_provider(&session_id, cx).is_some_and(|provider| self.utility_available(provider)) {
             return;
         }
         if self.is_side_session(&session_id, cx) {
@@ -583,7 +587,7 @@ impl Harness {
         tries: u8,
         cx: &mut Context<Self>,
     ) {
-        let provider = self.session_lane_provider(&real_id, cx);
+        let Some(provider) = self.session_lane_provider(&real_id, cx) else { return };
         let prompt = byline::rewrite_prompt(&ask, &result);
         let model = self.utility_model(&real_id, cx);
         let muse = self.muse_side(provider, "baaz auto-summary", cx);
@@ -655,8 +659,8 @@ impl Harness {
     /// lands in the right pane ([`crate::right_pane::RightPane::land_draft`])
     /// where the person has not typed.
     pub(crate) fn draft_on_muse(&mut self, root: &std::path::Path, kind: crate::right_changes::DraftKind, prompt: String, cx: &mut Context<Self>) {
-        let muse_id = crate::providers::ProviderId::Muse;
-        let Some(muse) = self.muse_side(muse_id, "baaz draft", cx) else {
+        let side = crate::providers::ProviderId::with(provider::ProviderTrait::SideSessionCompletions);
+        let Some((muse_id, muse)) = side.and_then(|id| self.muse_side(id, "baaz draft", cx).map(|muse| (id, muse))) else {
             self.right_pane.update(cx, |pane, cx| pane.land_draft(root, kind, None, cx));
             return;
         };

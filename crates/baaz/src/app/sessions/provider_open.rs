@@ -42,7 +42,7 @@ struct ProviderOpen {
 /// [`Harness::run_open`].
 #[allow(clippy::too_many_arguments)]
 fn provider_open_work(
-    factory: crate::providers::ProviderFactory,
+    factory: crate::providers::Registry,
     provider_id: ProviderId,
     request_id: String,
     workspace_bg: String,
@@ -142,7 +142,7 @@ impl Harness {
     pub(crate) fn start_model(&self, provider_id: ProviderId, project: Option<&str>, cx: &gpui::App) -> Option<String> {
         let picks = self.session_list.read(cx).projects.picks(project.and_then(|id| self.session_list.read(cx).projects.find(id)));
         let remembered = picks.model_for(provider_id.as_str());
-        if provider_id.catalog_flags_session_model() {
+        if provider_id.has(provider::ProviderTrait::CatalogFlagsSessionModel) {
             return projects::muse_start_model(remembered, &self.muse_catalog_ids(cx));
         }
         remembered
@@ -150,7 +150,7 @@ impl Harness {
 
     /// What an open on `provider_id` carries beyond its workspace
     /// ([`OpenExtras`]). A provider that routes a model vendor through the
-    /// open ([`ProviderId::open_routes_model_vendor`]) names it — the
+    /// open ([`provider::ProviderTrait::RoutesModelVendor`]) names it — the
     /// new-session pick's own spelling when it is this provider (`echo` in
     /// a scripted run), else the provider's id — and starts in the host's
     /// default posture unless a mode was picked; every other provider
@@ -161,10 +161,10 @@ impl Harness {
         mode: aui_protocol::PermissionMode,
         workspace: Option<&str>,
         project: Option<&str>, cx: &gpui::App) -> OpenExtras {
-        if !provider_id.open_routes_model_vendor() {
+        if !provider_id.has(provider::ProviderTrait::RoutesModelVendor) {
             return OpenExtras { model_provider: None, mode: Some(mode) };
         }
-        let model_provider = if ProviderId::parse(&self.new_provider) == provider_id {
+        let model_provider = if self.new_provider_id() == Some(provider_id) {
             self.new_provider.clone()
         } else {
             provider_id.as_str().to_owned()
@@ -267,18 +267,18 @@ impl Harness {
     /// The factory an open on `provider_id` runs through: the window's, or
     /// — for a provider switched off in Settings — the scripted stand-in,
     /// with the quiet banner noted for the landing view.
-    fn lane_factory(&mut self, provider_id: ProviderId) -> crate::providers::ProviderFactory {
+    fn lane_factory(&mut self, provider_id: ProviderId) -> crate::providers::Registry {
         if crate::provider_status::provider_enabled(provider_id) {
-            return self.provider_factory.clone();
+            return self.providers.clone();
         }
         self.open_state.pending_disabled_notice = Some(provider_id);
-        crate::providers::ProviderFactory::scripted()
+        self.providers.stand_in()
     }
 
     /// Run an open's `work` and land its result in `then`. Off the UI
     /// thread (`wire_call_in`): every open spawns or waits for a child and
     /// blocks. Inline, in this update, when the factory
-    /// [lands inline](crate::providers::ProviderFactory::lands_inline): the
+    /// [lands inline](crate::providers::Registry::lands_inline): the
     /// scripted stand-in never blocks, and a scripted open has always landed
     /// in the same update as its click — the same work, the same landing.
     fn run_open<T, W, F>(&mut self, inline: bool, work: W, then: F, window: &mut Window, cx: &mut Context<Self>)
@@ -366,7 +366,7 @@ impl Harness {
         self.record_provider_open(provider_id, &session_id, project, workspace, title, cx);
         // A provider that pages its history (Muse) attached without it: an
         // existing session's turns page in now.
-        if !fresh && crate::providers::pages_history(provider_id) {
+        if !fresh && provider_id.has(provider::ProviderTrait::PagesHistory) {
             view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.backfill_lane(cx)));
         }
         // Another window holds the session: it still opens, read-only under
@@ -436,7 +436,7 @@ impl Harness {
         // the record never builds one. Its row goes in now from what the
         // open knows — zero turns, so out of view until the first send
         // titles it — and no `session/list` round trip is spent on one row.
-        if provider_id.lists_sessions() {
+        if provider_id.has(provider::ProviderTrait::NativeSessionList) {
             self.ensure_listed_row(session_id, project, workspace, cx);
             return;
         }
@@ -495,7 +495,7 @@ impl Harness {
         let switching = switch.is_some_and(|epoch| self.open_state.replaces_under(epoch));
         let early = (switching || (switch.is_none() && !self.open_state.is_replacing()))
             && self.handoff_state.pending.is_none()
-            && !self.provider_factory.lands_inline()
+            && !self.providers.lands_inline()
             && crate::provider_status::provider_enabled(provider_id);
         if !early {
             self.open_on_provider(provider_id, project, workspace, window, cx);
@@ -576,7 +576,7 @@ impl Harness {
         mode: aui_protocol::PermissionMode,
         cx: &mut Context<Self>,
     ) {
-        let factory = self.provider_factory.clone();
+        let factory = self.providers.clone();
         let workspace_bg = workspace.clone();
         let opened = request_id.clone();
         let epoch = self.open_state.open_epoch();
@@ -908,7 +908,7 @@ impl Harness {
         // mid-switch), so typing lands nowhere until the destination opens.
         self.window_sync.focus_composer = false;
         // A record naming no provider this build knows is refused — never
-        // reopened on `ProviderId::parse`'s Muse fallback.
+        // reopened as some other provider.
         let Some(provider_id) = ProviderId::parse_known(&record.provider) else {
             crate::baaz_log!("provider reopen refused: unknown provider {:?}", record.provider);
             self.abandon_switch(cx);
@@ -1241,7 +1241,7 @@ impl Harness {
         // stand-in answers `OpenSession` but no resume — the fork still
         // goes through `ResumeSession`, the same work as a live one, so the
         // failure is the honest one.
-        let factory = self.provider_factory.clone();
+        let factory = self.providers.clone();
         let inline = factory.lands_inline();
         let workspace_bg = workspace.clone();
         // The terminal relay's route: the fork's bridge answers for the

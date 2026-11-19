@@ -9,7 +9,6 @@
 pub mod dock;
 pub mod host;
 pub mod intents;
-pub use baaz_core::terminal_relay as relay;
 pub mod run;
 pub mod service;
 

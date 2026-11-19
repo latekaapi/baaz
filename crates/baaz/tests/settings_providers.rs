@@ -154,13 +154,20 @@ fn own_mcp_switch_rides_under_both_cards_and_reaches_argv() {
     pin(&module, "use_own_mcp_row", "row under each card");
     pin(&module, "flip_use_own_mcp", "switch flip");
     pin(&module, "Applies to sessions started after this change", "row says when it applies");
-    pin(&module, "~/.codex/config.toml servers and plugins load too", "codex detail");
-    pin(&module, "Claude Code MCP servers and connectors load too", "claude detail");
+    // The switch's line is each adapter's own declaration (docs/82 5.4).
+    pin(&module, "own_mcp_note", "detail read from the descriptor");
+    let codex_registry = read_repo("crates/provider-codex/src/registry.rs");
+    pin(&codex_registry, "servers and plugins load too", "codex detail");
+    let claude_registry = read_repo("crates/provider-claude-code/src/registry.rs");
+    pin(&claude_registry, "servers and connectors load too", "claude detail");
     let layout = read_repo("crates/baaz-core/src/layout.rs");
     pin(&layout, "use_own_mcp", "layout switch state");
     pin(&layout, "struct UseOwnMcp", "per-provider switch");
+    // The open reads the switch into the spawn; each factory applies it.
     let providers = read_repo("crates/baaz-core/src/providers.rs");
-    pin(&providers, "set_use_own_mcp", "argv wiring reads the switch");
+    pin(&providers, "inherit_owner_mcp: use_own.inherits(id)", "argv wiring reads the switch");
+    pin(&codex_registry, "set_use_own_mcp(spawn.inherit_owner_mcp)", "codex factory applies it");
+    pin(&claude_registry, "set_use_own_mcp(spawn.inherit_owner_mcp)", "claude factory applies it");
     let codex = read_repo("crates/provider-codex/src/lib.rs");
     pin(&codex, "set_use_own_mcp", "codex opt-in");
     let claude = read_repo("crates/provider-claude-code/src/lib.rs");

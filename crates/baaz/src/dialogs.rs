@@ -844,7 +844,7 @@ impl Harness {
         // The provider wire id rode the dialog: confirming signs that
         // provider out for real, then re-probes so its card follows.
         if action == DialogAction::ProviderSignOut {
-            let id = target.as_deref().map(crate::providers::ProviderId::parse);
+            let id = target.as_deref().and_then(crate::providers::ProviderId::parse_known);
             if let Some(id) = id {
                 self.confirm_provider_signout(id, window, cx);
             } else {
@@ -908,8 +908,8 @@ impl Harness {
             DialogAction::Reconnect => {
                 // A person asked: the crash count starts afresh, so a hub
                 // that gave up respawns again (docs/81 B PM-7).
-                if let Some(hub) = &self.muse_hub {
-                    hub.forgive_crashes();
+                if let Some(shared) = self.providers.shared() {
+                    shared.forgive_crashes();
                 }
                 self.wire = Wire::Reconnecting;
                 self.reconnect(cx);

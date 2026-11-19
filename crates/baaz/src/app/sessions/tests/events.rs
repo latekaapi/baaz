@@ -16,7 +16,7 @@ fn a_lane_lost_twice_keeps_its_transcript_and_grows_the_banner(cx: &mut gpui::Te
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = scripted_factory();
+            harness.providers = harness.providers.with_opens_of(&scripted_factory());
             mark_muse_up(harness);
         });
     });
@@ -67,7 +67,7 @@ fn a_lane_turn_outcome_moves_the_rows_failed_state(cx: &mut gpui::TestAppContext
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = scripted_factory();
+            harness.providers = harness.providers.with_opens_of(&scripted_factory());
             mark_muse_up(harness);
         });
     });
@@ -111,7 +111,7 @@ fn unread_is_set_by_an_unseen_finish_and_cleared_by_reading(cx: &mut gpui::TestA
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = scripted_factory();
+            harness.providers = harness.providers.with_opens_of(&scripted_factory());
             mark_muse_up(harness);
         });
     });
@@ -167,7 +167,7 @@ fn a_background_session_needing_you_posts_and_badges(cx: &mut gpui::TestAppConte
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = scripted_factory();
+            harness.providers = harness.providers.with_opens_of(&scripted_factory());
             mark_muse_up(harness);
         });
     });
@@ -227,7 +227,7 @@ fn jump_to_next_waiting_cycles_in_order(cx: &mut gpui::TestAppContext) {
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            harness.provider_factory = scripted_factory();
+            harness.providers = harness.providers.with_opens_of(&scripted_factory());
             mark_muse_up(harness);
             let now = chrono::Local::now();
             for (id, minutes, waiting) in [("w-new", 1, true), ("idle", 2, false), ("w-old", 3, true)] {
@@ -287,7 +287,7 @@ fn a_provider_draft_with_no_turns_opens_fresh_instead_of_resuming(
     let (factory, commands) = recording_resumable_factory();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
         });
     });
@@ -370,7 +370,7 @@ fn a_generated_title_lands_on_a_provider_row(cx: &mut gpui::TestAppContext) {
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = scripted_factory();
+            harness.providers = harness.providers.with_opens_of(&scripted_factory());
             mark_muse_up(harness);
         });
     });
@@ -412,7 +412,7 @@ fn a_finished_provider_turn_counts_and_moves_the_record(cx: &mut gpui::TestAppCo
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = scripted_factory();
+            harness.providers = harness.providers.with_opens_of(&scripted_factory());
             mark_muse_up(harness);
         });
     });
@@ -467,7 +467,7 @@ fn a_retried_first_send_keeps_the_generated_title(cx: &mut gpui::TestAppContext)
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = scripted_factory();
+            harness.providers = harness.providers.with_opens_of(&scripted_factory());
             mark_muse_up(harness);
         });
     });
@@ -533,7 +533,7 @@ fn a_parked_session_finishing_its_turn_settles_its_row(cx: &mut gpui::TestAppCon
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = parking_factory();
+            harness.providers = harness.providers.with_opens_of(&parking_factory());
             mark_muse_up(harness);
         });
     });
@@ -815,7 +815,7 @@ fn a_parked_finish_records_its_own_byline(cx: &mut gpui::TestAppContext) {
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = parking_factory();
+            harness.providers = harness.providers.with_opens_of(&parking_factory());
             mark_muse_up(harness);
         });
     });
@@ -897,7 +897,7 @@ fn field_subscriptions_survive_opening_a_session(cx: &mut gpui::TestAppContext) 
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = parking_factory();
+            harness.providers = harness.providers.with_opens_of(&parking_factory());
             mark_muse_up(harness);
         });
     });
@@ -948,7 +948,7 @@ fn a_parked_cancelled_approval_stops_reading_needs_approval(cx: &mut gpui::TestA
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = parking_factory();
+            harness.providers = harness.providers.with_opens_of(&parking_factory());
             mark_muse_up(harness);
         });
     });
@@ -1268,7 +1268,7 @@ fn deleting_a_provider_session_forgets_it_entirely(cx: &mut gpui::TestAppContext
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = scripted_factory();
+            harness.providers = harness.providers.with_opens_of(&scripted_factory());
             mark_muse_up(harness);
         });
     });
@@ -1449,7 +1449,7 @@ fn a_session_runs_to_completion_with_no_view(cx: &mut gpui::TestAppContext) {
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = parking_factory();
+            harness.providers = harness.providers.with_opens_of(&parking_factory());
             mark_muse_up(harness);
         });
     });
@@ -1541,7 +1541,7 @@ fn reopening_n_turns_emits_one_history_replayed_and_settles_once(cx: &mut gpui::
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = parking_factory();
+            harness.providers = harness.providers.with_opens_of(&parking_factory());
             mark_muse_up(harness);
         });
     });
@@ -1613,7 +1613,7 @@ fn a_streamed_entry_redraws_its_view_and_never_the_root(cx: &mut gpui::TestAppCo
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = parking_factory();
+            harness.providers = harness.providers.with_opens_of(&parking_factory());
             mark_muse_up(harness);
         });
     });

@@ -19,6 +19,7 @@ mod hub;
 pub mod oneshot;
 pub mod modes;
 pub mod output;
+pub mod registry;
 pub mod replay;
 pub mod terminal;
 mod translate;

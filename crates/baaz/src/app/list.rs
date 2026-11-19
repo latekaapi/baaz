@@ -355,7 +355,7 @@ impl Harness {
         if was_active {
             if let Some(window) = window {
                 let next = self.visible_sessions(cx).first().map(|e| e.id.clone());
-                if self.muse_slot.is_ready() {
+                if self.providers.shared_ready() {
                     if let Some(id) = next {
                         self.resume(id, window, cx);
                     }
@@ -637,7 +637,7 @@ impl Harness {
                 !entry.hidden
                     && !entry.archived
                     && !entry.provisional
-                    && entry.provider.lists_sessions()
+                    && entry.provider.has(provider::ProviderTrait::NativeSessionList)
                     && entry.is_empty()
                     && !active.as_deref().is_some_and(|id| id == entry.id)
             })
@@ -704,10 +704,10 @@ impl Harness {
     /// line, never a dialog, and the session stays untitled-marked so a later
     /// pass retries once the sidecar has regenerated under a lease.
     pub(super) fn derive_titles(&mut self, cx: &mut Context<Self>) {
-        if !self.muse_slot.is_ready() {
+        if !self.providers.shared_ready() {
             return;
         }
-        let slot = self.muse_slot.clone();
+        let slot = self.providers.clone();
         let wanted: Vec<String> = self
             .session_list.read(cx).sessions
             .iter()

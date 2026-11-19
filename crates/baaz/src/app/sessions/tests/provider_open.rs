@@ -71,7 +71,7 @@ fn picking_a_non_muse_provider_opens_a_lane_and_starts_no_muse_session(
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = scripted_factory();
+            harness.providers = harness.providers.with_opens_of(&scripted_factory());
             mark_muse_up(harness);
         });
     });
@@ -121,13 +121,13 @@ fn a_missing_cli_fails_the_open_typed_not_installed(cx: &mut gpui::TestAppContex
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = crate::providers::ProviderFactory::new(|id: ProviderId| {
+            harness.providers = harness.providers.with_opens_of(&crate::providers::Registry::test(|id: ProviderId| {
                 Err(provider::ProviderError::launch_refusal(
                     provider::RefusalHint::NotInstalled,
                     format!("{} isn't installed", id.label()),
                     "codex was not found on PATH",
                 ))
-            });
+            }));
             mark_muse_up(harness);
         });
     });
@@ -155,7 +155,7 @@ fn a_failed_provider_connect_surfaces_an_error_and_opens_no_view(cx: &mut gpui::
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = failing_factory("no child here");
+            harness.providers = harness.providers.with_opens_of(&failing_factory("no child here"));
             mark_muse_up(harness);
         });
     });
@@ -298,7 +298,7 @@ fn a_failed_provider_open_lands_the_typed_failure_and_retry_keeps_the_send(cx: &
     let (factory, _commands) = recording_resumable_factory();
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
-            harness.provider_factory = factory;
+            harness.providers = harness.providers.with_opens_of(&factory);
             harness.retry_provider_open(window, cx);
             assert!(harness.open_state.provider_open_error.is_none(), "the failure view leaves on Retry");
             let view = harness.active.clone().expect("a new draft opens on the click");
@@ -495,7 +495,7 @@ fn opening_a_fork_resumes_it_on_a_new_lane_of_the_same_provider(cx: &mut gpui::T
     let baaz = lane_harness(vc, &state.2);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, _| {
-            harness.provider_factory = resumable_factory();
+            harness.providers = harness.providers.with_opens_of(&resumable_factory());
             mark_muse_up(harness);
         });
     });

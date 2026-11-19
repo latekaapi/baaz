@@ -540,16 +540,18 @@ impl Probes {
     }
 }
 
-/// The production resolver: the provider lane's search for `claude` /
-/// `codex`, and the `muse` binary for `muse`, which rides the legacy pump
-/// and has no lane binary. The `muse` search is the env override, then
+/// The production resolver: the lane binary's search for a per-lane CLI
+/// ([`crate::providers::resolve_program`]), and the shared child's binary
+/// for the provider whose sessions share one, which has no lane binary.
+/// The shared child's search is the env override, then
 /// `PATH`, then the shared login-shell `PATH` (which already ends in the
 /// Dock fallbacks). A Dock launch still finds a home install the minimal
 /// `PATH` never names.
 fn default_resolve(id: ProviderId) -> Option<PathBuf> {
-    match id {
-        ProviderId::Muse => resolve_muse(provider::env_path::find_program),
-        ProviderId::ClaudeCode | ProviderId::Codex => crate::providers::resolve_program(id),
+    if id.has(provider::ProviderTrait::SharedChild) {
+        resolve_shared(id, provider::env_path::find_program)
+    } else {
+        crate::providers::resolve_program(id)
     }
 }
 
@@ -558,37 +560,35 @@ pub fn resolve_for_diagnostics(id: ProviderId) -> Option<PathBuf> {
     default_resolve(id)
 }
 
-/// Muse's resolution ladder — `BAAZ_MUSE`, `MUSE_BIN`, `PATH`, then the
-/// login `PATH` through `find_login` (the cached lookup in production).
-fn resolve_muse(find_login: fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
-    if let Some(program) = std::env::var_os("BAAZ_MUSE") {
-        let candidate = PathBuf::from(&program);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    // The override Muse sessions honour too (`MUSE_BIN`), so the
-    // Providers page never disagrees with a session that works —
-    // named here rather than called through the muse wire crate, which the
-    // seam ratchet keeps out of this file.
-    if let Some(program) = std::env::var_os("MUSE_BIN") {
-        let candidate = PathBuf::from(&program);
-        if candidate.is_file() {
-            return Some(candidate);
+/// A shared child's resolution ladder — its declared env overrides
+/// (Muse's `BAAZ_MUSE`, `MUSE_BIN`), the path set in Settings, `PATH`, then
+/// the login `PATH` through `find_login` (the cached lookup in production).
+fn resolve_shared(id: ProviderId, find_login: fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
+    let declared = id.descriptor();
+    // Its env overrides, in declared order (`BAAZ_MUSE`, then the
+    // `MUSE_BIN` its sessions honour too, so the Providers page never
+    // disagrees with a session that works).
+    for name in declared.env_overrides {
+        if let Some(program) = std::env::var_os(name) {
+            let candidate = PathBuf::from(&program);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
     // The path the person set in Settings (D5 B4), after the env overrides.
-    if let Some(chosen) = crate::details::path_override(ProviderId::Muse) {
+    if let Some(chosen) = crate::details::path_override(id) {
         return chosen.is_file().then_some(chosen);
     }
+    let binary = declared.binaries.first()?;
     if let Some(program) = std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).map(|dir| dir.join("muse")).find(|candidate| {
+        std::env::split_paths(&paths).map(|dir| dir.join(binary)).find(|candidate| {
             candidate.is_file()
         })
     }) {
         return Some(program);
     }
-    find_login("muse")
+    find_login(binary)
 }
 
 /// Resolve one provider's binary the way the probes do. Used for the
@@ -970,7 +970,9 @@ impl Service {
     /// the stored reading changed: an identical snapshot is kept as-is, so
     /// the caller can skip its cache write.
     pub fn record_usage(&mut self, snapshot: UsageSnapshot) -> bool {
-        let id = ProviderId::parse(&snapshot.provider);
+        let Ok(id) = ProviderId::resolve(&snapshot.provider) else {
+            return false;
+        };
         let Some(status) = self.statuses.get_mut(&id) else {
             return false;
         };
@@ -2631,7 +2633,7 @@ mod tests {
         std::env::remove_var(provider::env_path::LOGIN_PATH_ENV);
         // The uncached login PATH: the process-wide one may already hold
         // the real HOME from an earlier test.
-        let resolved = resolve_muse(provider::env_path::find_program_uncached);
+        let resolved = resolve_shared(ProviderId::Muse, provider::env_path::find_program_uncached);
         match &old_path {
             Some(value) => std::env::set_var("PATH", value),
             None => std::env::remove_var("PATH"),

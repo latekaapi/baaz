@@ -202,14 +202,14 @@ impl Harness {
                 Candidate { target, row, words: vec![e.label.clone(), project] }
             })
             .collect();
-        let provider = crate::providers::ProviderId::parse(&self.new_provider);
+        let provider = self.new_provider_id().map_or("", |provider| provider.label());
         let projects = self
             .session_list.read(cx).projects
             .sorted_available()
             .into_iter()
             .map(|p| {
                 let target = HandoffTarget::Project(p.id.clone());
-                let row = HandoffRow { id: target.row_id().into(), title: p.name.clone().into(), meta: provider.label().into(), provider: None };
+                let row = HandoffRow { id: target.row_id().into(), title: p.name.clone().into(), meta: provider.into(), provider: None };
                 Candidate { target, row, words: vec![p.name.clone()] }
             })
             .collect();
