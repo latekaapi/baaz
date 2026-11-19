@@ -152,7 +152,7 @@ pub fn setup_note(kind: SetupKind, status: &ProviderStatus) -> String {
             format!("{name} is ready. New sessions can start in it.")
         } else {
             match status.provider {
-                ProviderId::Codex => "Codex is installed. Sign in next: it opens your browser.".to_owned(),
+                ProviderId::Codex => format!("{name} is installed. Sign in next: it opens your browser."),
                 _ => format!("{name} is installed. Sign in from its row next."),
             }
         };
@@ -429,7 +429,7 @@ impl SetupHost {
                 this.close(cx);
                 this.model.update(cx, |model, cx| model.begin_codex_signin(cx));
             });
-            body = body.next_step("Sign in to Codex", move |window, cx| sign_in(&(), window, cx));
+            body = body.next_step(format!("Sign in to {}", id.label()), move |window, cx| sign_in(&(), window, cx));
         }
         Some(
             gpui::div()

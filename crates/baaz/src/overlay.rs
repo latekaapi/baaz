@@ -955,7 +955,7 @@ impl Harness {
         let state = self.existing_browser(cx)?;
         let page = state.read(cx);
         let agent = self.active.as_ref().map(|v| v.read(cx).rt(cx).session_id.clone()).and_then(|id| self.session_lane_provider(&id, cx));
-        let name = agent.map(|p| p.label()).unwrap_or("Muse");
+        let name = agent.map_or(crate::providers::THE_AGENT, |p| p.label());
         let menu_open = {
             let pane = self.right_pane.read(cx);
             pane.page_menu_open(cx) && !pane.page_covered(page)

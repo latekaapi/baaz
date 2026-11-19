@@ -710,17 +710,43 @@ pub fn prompt_title(n_claude: usize, n_codex: usize) -> String {
 /// deleted), and the file count behind the collapsed list — never the
 /// paths inline (those live under Settings → Providers).
 pub fn prompt_detail(moves: &[PlannedMove]) -> String {
-    let mut detail = String::from(
-        "Sessions you started in Baaz before this update are stored in your Claude and Codex \
-         folders, so Claude for Mac and Codex for Mac list them. Moving them keeps them resumable \
+    let mut detail = format!(
+        "Sessions you started in Baaz before this update are stored in the {} \
+         folders, so their desktop apps list them. Moving them keeps them resumable \
          here and takes them out of those apps. Nothing is deleted.",
+        migrating_names(),
     );
     detail.push_str(&format!(
         "\n\n{} files in all — the list is under Settings → Providers. \
-         Codex for Mac may keep listing moved threads until you archive them there.",
-        moves.len()
+         {}'s desktop app may keep listing moved threads until you archive them there.",
+        moves.len(),
+        label_of(CODEX_PROVIDER),
     ));
     detail
+}
+
+/// The Settings → Providers row's caption for the same move: what moves,
+/// why, and the two honest notes, shorter than the prompt.
+pub fn row_caption() -> String {
+    format!(
+        "Sessions you started in Baaz before this update still sit in the {} \
+         folders, so their desktop apps list them. Moving them keeps them \
+         resumable here; nothing is deleted. {}'s desktop app may keep stale entries until you \
+         archive them there.",
+        migrating_names(),
+        label_of(CODEX_PROVIDER),
+    )
+}
+
+/// A provider key's label, from its descriptor (docs/82 5.6, rule 14: the
+/// copy names the providers whose sessions move, never by a literal).
+fn label_of(key: &str) -> &str {
+    crate::providers::ProviderId::parse_known(key).map_or(key, |id| id.label())
+}
+
+/// "Claude Code and Codex": the providers whose Baaz sessions move.
+fn migrating_names() -> String {
+    format!("{} and {}", label_of(CLAUDE_PROVIDER), label_of(CODEX_PROVIDER))
 }
 
 /// Every planned target for the Providers row's expandable list, sorted

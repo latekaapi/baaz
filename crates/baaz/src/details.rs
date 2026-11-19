@@ -15,11 +15,14 @@ use crate::providers::ProviderId;
 
 /// The advisory box under an API-key login (owner 2026-10-23: say it,
 /// don't block). The Claude Code text is the board's; Codex says the same
-/// for its own key.
+/// for its own key. On the provider's own card, so it names the provider —
+/// by its descriptor's label and account, never a literal (rule 14).
 pub fn api_key_notice(status: &ProviderStatus) -> Vec<AssistRun> {
     if !crate::details::api_key_login(status) {
         return Vec::new();
     }
+    let label = status.provider.label();
+    let account = status.provider.descriptor().account_label;
     match status.provider {
         ProviderId::ClaudeCode => {
             let source = match &status.auth {
@@ -30,18 +33,21 @@ pub fn api_key_notice(status: &ProviderStatus) -> Vec<AssistRun> {
                 AssistRun::Text("An ".into()),
                 AssistRun::Code(source.into()),
                 AssistRun::Text(
-                    " in your shell signs Claude Code in: every turn is billed to that key, not a subscription. Remove it from your shell profile to use your Claude plan."
-                        .into(),
+                    format!(
+                        " in your shell signs {label} in: every turn is billed to that key, not a subscription. Remove it from your shell profile to use your plan."
+                    )
+                    .into(),
                 ),
             ]
         }
         ProviderId::Codex => vec![AssistRun::Text(
-            "Codex is signed in with an API key: every turn is billed to that key, not a ChatGPT plan. Sign out and sign in with ChatGPT to use your plan."
-                .into(),
+            format!(
+                "{label} is signed in with an API key: every turn is billed to that key, not a {account} plan. Sign out and sign in with {account} to use your plan."
+            )
+            .into(),
         )],
-        other => vec![AssistRun::Text(format!(
-            "{label} is signed in with an API key: every turn is billed to that key, not your {label} subscription.",
-            label = other.label()
+        _ => vec![AssistRun::Text(format!(
+            "{label} is signed in with an API key: every turn is billed to that key, not your {label} subscription."
         ).into())],
     }
 }

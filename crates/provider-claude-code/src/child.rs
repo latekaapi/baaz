@@ -52,11 +52,16 @@ fn exit_card_text(lines: &[String]) -> Option<String> {
     (!said.is_empty()).then(|| said.join(" "))
 }
 
+/// How every end-of-stream reason opens: the app's failure sentence
+/// already says the process exited, so it strips this lead (baaz-core
+/// `provider_status::failure_detail`) rather than naming the CLI itself.
+pub const EXITED: &str = "the Claude Code process exited";
+
 /// The end-of-stream reason for a child whose stderr said `stderr`: the
 /// CLI's own words lead, and the resume hint follows.
 pub(crate) fn exit_reason(stderr: Option<&str>) -> String {
     match stderr {
-        Some(said) => format!("the Claude Code process exited: {said}; send again to resume the session"),
+        Some(said) => format!("{EXITED}: {said}; send again to resume the session"),
         None => CHILD_EXITED_REASON.to_owned(),
     }
 }
@@ -327,6 +332,15 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+
+    /// Every end-of-stream reason opens with [`EXITED`], the lead the
+    /// app's failure detail strips.
+    #[test]
+    fn every_exit_reason_opens_with_the_exited_lead() {
+        assert!(CHILD_EXITED_REASON.starts_with(EXITED));
+        assert!(exit_reason(Some("boom")).starts_with(EXITED));
+        assert!(exit_reason(None).starts_with(EXITED));
+    }
 
     /// A child's stdout that says when it has been read to the end.
     struct DrainedStdout {

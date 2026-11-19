@@ -359,7 +359,7 @@ impl FailureKind {
 /// the child printed itself are in the well. `None` when nothing is left.
 pub fn failure_detail(message: &str, sentence: &str, stderr: &[String]) -> Option<String> {
     const PREFIXES: [&str; 2] = ["provider unavailable:", "provider refused the command:"];
-    const EXITS: [&str; 2] = ["the agent process exited", "the Claude Code process exited"];
+    const EXITS: [&str; 2] = ["the agent process exited", provider_claude_code::child::EXITED];
     const HINTS: [&str; 1] = ["; send again to resume the session"];
     let mut text = message.trim();
     for prefix in PREFIXES {

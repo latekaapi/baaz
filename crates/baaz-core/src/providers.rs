@@ -129,6 +129,20 @@ impl ProviderId {
     }
 }
 
+/// What app copy calls an agent when no one provider is meant: no
+/// session, a tab no session owns, a sentence about every provider
+/// (docs/82 5.6, standing rule 14: no provider name in app copy except on
+/// that provider's own row). Lower case, for mid-sentence use.
+pub const THE_AGENT: &str = "the agent";
+
+/// The label of the provider whose sessions share one child, for copy
+/// about that connection (starting it, losing it, signing in over it):
+/// its own words, read from its descriptor. "The agent" when no provider
+/// shares a child.
+pub fn shared_label() -> &'static str {
+    Registry::shared_id().map_or("The agent", ProviderId::label)
+}
+
 /// The capability map for one registry entry, read from the adapter crate
 /// that owns the evidence — never a hand-copied table. A fixture that
 /// upgrades a cell there upgrades this answer with it; the human reasons

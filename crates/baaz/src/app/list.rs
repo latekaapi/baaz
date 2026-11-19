@@ -239,7 +239,7 @@ impl Harness {
         self.hide_batch(
             vec![session_id],
             "Session hidden".to_owned(),
-            "It is still on disk; Muse keeps its own list.",
+            "It is still on disk.",
             cx,
         );
     }
@@ -651,7 +651,7 @@ impl Harness {
         self.hide_batch(
             cleared,
             format!("{n} empty session{} hidden", if n == 1 { "" } else { "s" }),
-            "They are still on disk; Muse keeps its own list.",
+            "They are still on disk.",
             cx,
         );
     }

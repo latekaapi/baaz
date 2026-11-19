@@ -633,11 +633,12 @@ impl ImportSource {
         }
     }
 
-    /// The menu and dialog label.
+    /// The menu and dialog label: the provider's own, from its
+    /// descriptor (docs/82 5.6, rule 14).
     pub fn label(&self) -> &'static str {
         match self {
-            ImportSource::ClaudeCode => "Claude Code",
-            ImportSource::Codex => "Codex",
+            ImportSource::ClaudeCode => crate::providers::ProviderId::ClaudeCode.label(),
+            ImportSource::Codex => crate::providers::ProviderId::Codex.label(),
         }
     }
 }

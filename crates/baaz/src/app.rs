@@ -1199,7 +1199,7 @@ impl Harness {
         if crate::provider_status::muse_wanted() {
             this.connect(cx);
         } else {
-            this.muse_unavailable(crate::connect::MUSE_OFF.into(), cx);
+            this.muse_unavailable(crate::connect::shared_off(), cx);
         }
         this.load_index(cx);
         // Only when a project is current. With none — a first launch, or a
@@ -1420,7 +1420,7 @@ impl Harness {
                 // a provider this person does not use.
                 if crate::provider_status::muse_known_installed() {
                     this.set_dialog(cx, Dialog {
-                        title: "Muse could not be started".into(),
+                        title: format!("{} could not be started", crate::providers::shared_label()),
                         detail: error.to_string(),
                         kind: DialogKind::Error,
                         primary: "Try again",
@@ -3105,10 +3105,13 @@ impl Harness {
         if !muse_session {
             return None;
         }
+        // The banner names the connection's own provider, read from its
+        // descriptor (rule 14): it only ever draws on that provider's session.
+        let name = crate::providers::shared_label();
         let (kind, text) = match &self.wire {
-            Wire::Reconnecting => (BannerKind::Waiting, "Muse disconnected, reconnecting\u{2026}".to_owned()),
-            Wire::Connecting => (BannerKind::Waiting, "Starting Muse\u{2026}".to_owned()),
-            Wire::Down(reason) => (BannerKind::Error, format!("Muse is not running: {reason}")),
+            Wire::Reconnecting => (BannerKind::Waiting, format!("{name} disconnected, reconnecting\u{2026}")),
+            Wire::Connecting => (BannerKind::Waiting, format!("Starting {name}\u{2026}")),
+            Wire::Down(reason) => (BannerKind::Error, format!("{name} is not running: {reason}")),
             Wire::Ready => return None,
         };
         Some(

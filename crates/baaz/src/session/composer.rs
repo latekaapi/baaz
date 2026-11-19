@@ -381,16 +381,16 @@ impl SessionRuntime {
     }
 
     /// The muted note the effort menu shows when the session's model names
-    /// no catalog row: the levels are the catalog's union, offered so the
-    /// person can steer, and the server validates the pick per turn.
-    const CODEX_OFF_CATALOG_NOTE: &str = "Not in Codex's model list — Codex validates the level";
-
-    /// The Claude Code twin of [`Self::CODEX_OFF_CATALOG_NOTE`]: a model
-    /// no catalog row matches, even after normalising, still offers the
-    /// levels every row supports (the intersection), with the muted note
-    /// saying whose validation the levels carry.
-    const CLAUDE_OFF_CATALOG_NOTE: &str =
-        "Not in Claude Code's model list — Claude Code validates the level";
+    /// no catalog row. On Codex the levels are the catalog's union, offered
+    /// so the person can steer, and the server validates the pick per turn;
+    /// on Claude Code a model no row matches, even after normalising, still
+    /// offers the levels every row supports (the intersection). Either way
+    /// the note says whose validation the levels carry, by the provider's
+    /// own label (rule 14).
+    fn off_catalog_note(provider: ProviderId) -> String {
+        let label = provider.label();
+        format!("Not in {label}'s model list — {label} validates the level")
+    }
 
     /// What the Claude Code effort menu says before any catalog folds: the
     /// picker component has no disabled row, so the menu offers only
@@ -439,7 +439,7 @@ impl SessionRuntime {
             }));
             return EffortOptions::AvailableWithNote {
                 options,
-                note: Self::CODEX_OFF_CATALOG_NOTE.to_owned(),
+                note: Self::off_catalog_note(ProviderId::Codex),
             };
         };
         let mut options = vec![EffortOption { effort: None, detail: effort_detail(None).to_owned() }];
@@ -573,7 +573,7 @@ impl SessionRuntime {
         }
         EffortOptions::AvailableWithNote {
             options: Self::claude_level_options(&Self::claude_intersection_levels(&self.claude_efforts)),
-            note: Self::CLAUDE_OFF_CATALOG_NOTE.to_owned(),
+            note: Self::off_catalog_note(ProviderId::ClaudeCode),
         }
     }
 

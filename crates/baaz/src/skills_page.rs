@@ -335,7 +335,7 @@ pub fn fixture_import_rows() -> Vec<ImportDialogRow> {
         },
         ImportDialogRow {
             name: "relay".to_owned(),
-            description: "Plan work, hand the implementation to Muse Code, verify it.".to_owned(),
+            description: "Plan work, hand the implementation to an implementor, verify it.".to_owned(),
             tokens: 1120,
             source_path: "/tmp/k3-fixture/relay/SKILL.md".to_owned(),
             status: skills::ImportStatus::Replaces,
@@ -627,10 +627,24 @@ pub fn meter_text(catalog: &SkillsCatalog) -> (String, String) {
 /// the sessions of the provider whose skills the page manages
 /// ([`provider::ProviderTrait::ManagedSkills`]), while the others read
 /// their own skill folders. No line without a lane.
-pub(crate) fn skills_provider_line(lane: Option<crate::providers::ProviderId>) -> Option<&'static str> {
+pub(crate) fn skills_provider_line(lane: Option<crate::providers::ProviderId>) -> Option<String> {
     let lane = lane?;
-    (!lane.has(provider::ProviderTrait::ManagedSkills))
-        .then_some("These are the skills Muse loads. Claude Code and Codex read their own skill folders.")
+    if lane.has(provider::ProviderTrait::ManagedSkills) {
+        return None;
+    }
+    // Every name from the registry (rule 14): the manager, then the rest.
+    let others: Vec<&str> = crate::providers::ProviderId::all()
+        .into_iter()
+        .filter(|id| !id.has(provider::ProviderTrait::ManagedSkills))
+        .map(crate::providers::ProviderId::label)
+        .collect();
+    Some(format!("These are the skills {} loads. {} read their own skill folders.", managed_skills_label(), others.join(" and ")))
+}
+
+/// The name of the provider whose skills the page manages
+/// ([`provider::ProviderTrait::ManagedSkills`]), from its descriptor.
+fn managed_skills_label() -> &'static str {
+    crate::providers::ProviderId::with(provider::ProviderTrait::ManagedSkills).map_or("The agent", crate::providers::ProviderId::label)
 }
 
 #[cfg(feature = "probe")]
@@ -1650,7 +1664,7 @@ impl SkillsPage {
                     .pt(px(scale::SP_2))
                     .role_in(TextRole::Caption, cx)
                     .text_color(p.fg_muted)
-                    .child(line.to_owned()),
+                    .child(line),
             );
         }
 
@@ -1941,7 +1955,7 @@ impl SkillsPage {
                         menu_row_two_line(
                             "skills-add-import-claude",
                             IconName::Copy,
-                            "Import from Claude Code",
+                            format!("Import from {}", skills::ImportSource::ClaudeCode.label()),
                             "~/.claude/skills",
                         )
                         .key("import-claude")
@@ -1953,7 +1967,7 @@ impl SkillsPage {
                         menu_row_two_line(
                             "skills-add-import-codex",
                             IconName::Copy,
-                            "Import from Codex",
+                            format!("Import from {}", skills::ImportSource::Codex.label()),
                             "~/.codex/skills",
                         )
                         .key("import-codex")
@@ -1966,8 +1980,8 @@ impl SkillsPage {
                             menu_row_two_line(
                                 "skills-add-ask",
                                 IconName::Sparkle,
-                                "Ask Muse to write one",
-                                "Drafts /create-skill in a new Muse session",
+                                format!("Ask {} to write one", managed_skills_label()),
+                                format!("Drafts /create-skill in a new {} session", managed_skills_label()),
                             )
                             .key("ask")
                             .trailing("uses a turn")
@@ -2889,7 +2903,7 @@ mod tests {
         assert_eq!(skills_provider_line(Some(ProviderId::Muse)), None);
         assert_eq!(skills_provider_line(None), None);
         assert_eq!(
-            skills_provider_line(Some(ProviderId::ClaudeCode)),
+            skills_provider_line(Some(ProviderId::ClaudeCode)).as_deref(),
             Some("These are the skills Muse loads. Claude Code and Codex read their own skill folders.")
         );
         assert!(skills_provider_line(Some(ProviderId::Codex)).is_some());

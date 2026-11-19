@@ -43,6 +43,15 @@ use crate::sessions::Overrides;
 pub const CLAUDE: &str = "claude-code";
 /// The registry wire id for Codex sessions.
 pub const CODEX: &str = "codex";
+/// The providers whose earlier sessions the import reads, as copy names
+/// them ("Claude Code and Codex"): each label from its descriptor, never a
+/// literal (docs/82 5.6, rule 14).
+pub fn source_names() -> String {
+    let labels: Vec<&str> =
+        [CLAUDE, CODEX].iter().map(|key| crate::providers::ProviderId::parse_known(key).map_or(*key, crate::providers::ProviderId::label)).collect();
+    labels.join(" and ")
+}
+
 /// Bytes of a file's head the scan reads at most: the facts it wants sit in
 /// the first few lines, but Codex opens with its whole instructions block.
 const HEAD_BYTES: u64 = 512 * 1024;

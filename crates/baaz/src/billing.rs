@@ -192,10 +192,15 @@ impl Harness {
         match self.tier.as_ref()? {
             Tier::Subscription { .. } => None,
             Tier::PayAsYouGo => Some(payg_banner(self.send_anyway, self.tier_probing)),
+            // Only the provider that declares a billing tier has one: the
+            // banner names it from its descriptor (rule 14).
             Tier::Unavailable(_) => Some(TierBanner {
-                text: "Muse did not say which plan this login is on, so Baaz cannot tell \
-                       whether turns bill API usage."
-                    .to_owned(),
+                text: format!(
+                    "{} did not say which plan this login is on, so Baaz cannot tell \
+                     whether turns bill API usage.",
+                    crate::providers::ProviderId::with(provider::ProviderTrait::BillingTier)
+                        .map_or("The agent", crate::providers::ProviderId::label),
+                ),
                 blocking: false,
                 checking: self.tier_probing,
             }),

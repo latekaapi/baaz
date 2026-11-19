@@ -25,8 +25,9 @@ files beside it, a terminal, and a browser the agents can work in.
   into readable cards, per-turn usage, Stop, and steering a running turn
   where the provider supports it. A control appears only on a provider that
   can do it.
-- **Approvals and questions as real UI**, with the choices each provider
-  actually offers; the sidebar row says when a session is waiting on you.
+- **Approvals and questions as real UI**, in one set of choices — Once,
+  This session, Always here, Deny — showing only the ones the session's
+  provider can keep; the sidebar row says when a session is waiting on you.
 - **The session's workspace on the right:** its changes against git (commit
   what this session touched, push, open a PR), the project's files with a
   preview, and the pages it opened.
@@ -38,8 +39,8 @@ files beside it, a terminal, and a browser the agents can work in.
 - **Projects and sessions:** one window over several folders, grouped by
   project, with per-project defaults; resume, rename, fork, archive;
   full-text search; import of earlier Claude Code and Codex sessions.
-- Skills, a command palette, light and dark themes, and a keyboard-first
-  keymap.
+- Each provider's own skills in the `/` list, a command palette, light and
+  dark themes, and a keyboard-first keymap.
 
 ## Using it
 
@@ -74,8 +75,8 @@ files beside it, a terminal, and a browser the agents can work in.
 ```sh
 git clone https://github.com/latekaapi/baaz
 cd baaz
-cargo run -p baaz                                # workspace = $PWD
-cargo run -p baaz -- --workspace ~/code/thing    # somewhere else
+cargo run -p baaz                                # sessions with no project start in ~/baaz-sessions
+cargo run -p baaz -- --workspace ~/code/thing    # or in this folder
 ```
 
 A distributable `.app` bundle:
@@ -88,9 +89,10 @@ open target/bundle/Baaz.app
 ## Cost — read this first
 
 **Every real turn spends on the provider's account.** Baaz sends what you
-type to the agent you picked, on that agent's own plan or key. On Muse a
-pay-as-you-go login bills every turn as API usage, so Baaz checks the plan
-and warns before sending on that lane.
+type to the agent you picked, on that agent's own plan or key. A sign-in
+that bills each turn as API usage — an API key in Claude Code or Codex, a
+pay-as-you-go Muse login — says so on that provider's card in Settings, and
+on Muse Baaz checks the plan and asks before sending.
 
 What costs nothing:
 
@@ -107,13 +109,23 @@ cargo test --workspace                                                # never st
 ## How it is put together
 
 ```
-crates/provider               the provider seam: commands, events, capabilities
+crates/provider               the provider seam: commands, events, capabilities,
+                              and the registry each adapter declares itself in
+crates/provider-runtime       the process runtime under every adapter
+crates/transcript-core        one transcript builder under every provider's fold
 crates/provider-claude-code   Claude Code over stream-json stdio
 crates/provider-codex         Codex over `codex app-server` (JSON-RPC)
 crates/provider-muse          Muse Code over MSP, on muse-client + muse-adapter
+crates/muse-client            the `muse serve` transport
+crates/muse-adapter           folds Muse's view events into the session model
 crates/session-store          the transcript model the app renders
 crates/mcp-bridge             Baaz's own tools (terminal, browser) for the agents
+crates/baaz-core              the engine with no window: sessions, providers,
+                              projects, search, import, usage, git
+crates/baaz-browser-core      the browser with no window: tabs, Spaces,
+                              history, bookmarks, the agents' page tools
 crates/baaz                   the gpui application
+crates/baaz-cef-helper        the Chromium helper process the bundle embeds
 fixtures/                     checked-in wire captures for every provider
 ```
 

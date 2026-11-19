@@ -951,8 +951,8 @@ impl Harness {
         use crate::overlays::{Dialog, DialogAction};
         let dialog = match rest.trim().to_lowercase().as_str() {
             "offline" => Dialog {
-                title: "Muse disconnected".into(),
-                detail: "The connection to `muse serve` dropped before the turn finished. \
+                title: crate::conn::provider_title(&provider::ProviderError::Unavailable { reason: String::new() }),
+                detail: "The connection to the agent dropped before the turn finished. \
                     Reconnect and the open session resumes where it stopped."
                     .into(),
                 kind: DialogKind::Error,
@@ -971,8 +971,8 @@ impl Harness {
                 archive_target: None,
             },
             "" | "sorry" => Dialog {
-                title: "Muse hit an internal error".into(),
-                detail: "The turn failed inside `muse serve` before producing anything. \
+                title: format!("{} hit an internal error", crate::providers::shared_label()),
+                detail: "The turn failed inside the agent before producing anything. \
                     Nothing was billed for the attempt; retry the turn or start a new session."
                     .into(),
                 kind: DialogKind::Error,
@@ -993,7 +993,7 @@ impl Harness {
             Dialog {
                 title: "About Baaz".into(),
                 detail: format!(
-                    "Baaz {} \u{2014} a macOS chat interface to Muse Code.\n\nKeys: docs/08-keymap.md. App: docs/02-app.md.",
+                    "Baaz {} \u{2014} a native macOS workspace for the coding agents you already use.\n\nKeys: docs/08-keymap.md. App: docs/02-app.md.",
                     env!("CARGO_PKG_VERSION")
                 ),
                 kind: DialogKind::Info,

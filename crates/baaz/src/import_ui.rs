@@ -211,7 +211,8 @@ pub(crate) fn card_line(
     imported: (usize, Option<i64>),
 ) -> Option<CardLine> {
     let tally = *tally;
-    let label = if provider == CODEX { "Codex" } else { "Claude Code" };
+    // The provider's own card: its name from its descriptor (rule 14).
+    let label = ProviderId::parse_known(provider).map_or(provider, |id| id.label());
     let (count, when) = imported;
     if count > 0 {
         let date = when.map(short_date).unwrap_or_default();
@@ -1015,10 +1016,11 @@ impl ImportSheetView {
                 .pt(px(scale::SP_4))
                 .role_in(TextRole::Caption, cx)
                 .text_color(p.fg_muted)
-                .child(
-                    "Earlier Claude Code and Codex sessions, by the folder they ran in. Folders that are Baaz \
+                .child(format!(
+                    "Earlier {} sessions, by the folder they ran in. Folders that are Baaz \
                      projects are ticked.",
-                )
+                    import::source_names(),
+                ))
                 .into_any_element(),
         );
         let (listed, rest) = (&choose.listed, &choose.rest);
@@ -1134,10 +1136,11 @@ impl ImportSheetView {
                 .pt(px(scale::SP_3))
                 .role_in(TextRole::Caption, cx)
                 .text_color(p.ink_4)
-                .child(
-                    "They stay where they are: nothing is copied or moved, and Claude Code and Codex keep using \
+                .child(format!(
+                    "They stay where they are: nothing is copied or moved, and {} keep using \
                      them. Continuing one in Baaz adds to the same session.",
-                )
+                    import::source_names(),
+                ))
                 .into_any_element(),
         );
         let n = choose.chosen;

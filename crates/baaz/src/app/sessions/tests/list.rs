@@ -501,7 +501,7 @@ fn muse_never_gates_the_other_providers_rows(cx: &mut gpui::TestAppContext) {
             z4_seed_stored_codex(harness, cx);
             harness.session_list.update(cx, |list, _| list.sessions.retain(|entry| !entry.provider.has(provider::ProviderTrait::NativeSessionList)));
             harness.session_list.update(cx, |list, _| list.sessions_loaded = false);
-            harness.muse_unavailable(crate::connect::MUSE_OFF.into(), cx);
+            harness.muse_unavailable(crate::connect::shared_off(), cx);
             assert!(harness.session_list.read(cx).sessions_loaded, "the sidebar settles without a Muse list");
             assert!(harness.session_list.read(cx).sessions.iter().any(|e| e.id == "s-codex-old"), "the Codex row shows");
             assert!(!matches!(harness.wire, crate::app::Wire::Ready));

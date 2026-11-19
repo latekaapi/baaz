@@ -1802,15 +1802,18 @@ fn generic_card(key: &str, id: ElementId, kind: &str, status: &str, text: &str, 
 /// identifier (`codex-child-exited` / `claude-child-exited`, status
 /// `error`): it showed verbatim as "✕ codex-child-exited error" (QA
 /// 2026-10-30). Those read as the lost banner reads — "Codex stopped
-/// unexpectedly" — with no raw status beside them; every other card keeps
-/// its provider's own kind and status.
-pub(crate) fn generic_header<'a>(kind: &'a str, status: &'a str) -> (&'a str, &'a str) {
+/// unexpectedly", the provider named from its descriptor (rule 14) — with
+/// no raw status beside them; every other card keeps its provider's own
+/// kind and status.
+pub(crate) fn generic_header<'a>(kind: &'a str, status: &'a str) -> (std::borrow::Cow<'a, str>, &'a str) {
+    use crate::providers::ProviderId;
+    let stopped = |id: ProviderId| std::borrow::Cow::Owned(format!("{} stopped unexpectedly", id.label()));
     if kind == provider_codex::fold::CHILD_EXITED_CARD {
-        ("Codex stopped unexpectedly", "")
+        (stopped(ProviderId::Codex), "")
     } else if kind == provider_claude_code::CHILD_EXITED_CARD {
-        ("Claude Code stopped unexpectedly", "")
+        (stopped(ProviderId::ClaudeCode), "")
     } else {
-        (kind, status)
+        (std::borrow::Cow::Borrowed(kind), status)
     }
 }
 
@@ -1883,7 +1886,7 @@ fn block(
         }
         Block::Generic { kind, status, text } => {
             let (kind, status) = generic_header(kind, status);
-            generic_card(key, id, kind, status, text, folds)
+            generic_card(key, id, &kind, status, text, folds)
         }
         Block::Marker { kind, text } => marker(id, kind, text, folds, cx),
         Block::Handoff { .. } => handoff_block_card(id, block, folds),
@@ -3486,14 +3489,14 @@ mod tests {
     fn a_dead_childs_card_reads_in_words_not_identifiers() {
         assert_eq!(
             generic_header(provider_codex::fold::CHILD_EXITED_CARD, "error"),
-            ("Codex stopped unexpectedly", ""),
+            ("Codex stopped unexpectedly".into(), ""),
             "no codex-child-exited / error in the transcript"
         );
         assert_eq!(
             generic_header(provider_claude_code::CHILD_EXITED_CARD, "error"),
-            ("Claude Code stopped unexpectedly", "")
+            ("Claude Code stopped unexpectedly".into(), "")
         );
-        assert_eq!(generic_header("webSearch", "completed"), ("webSearch", "completed"), "other cards keep theirs");
+        assert_eq!(generic_header("webSearch", "completed"), ("webSearch".into(), "completed"), "other cards keep theirs");
     }
 
     #[test]

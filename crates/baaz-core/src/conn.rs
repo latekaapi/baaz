@@ -53,10 +53,11 @@ pub struct Connected {
 /// A one-line title for a connection failure, for the reconnect dialog.
 ///
 /// A refusal carries its own title; anything else keeps only the shape of
-/// the failure: gone versus refused.
+/// the failure: gone versus refused. The connection is the shared child's,
+/// so a lost one names that provider, from its descriptor (rule 14).
 pub fn provider_title(error: &ProviderError) -> String {
     match error {
-        ProviderError::Unavailable { .. } => "Muse disconnected".into(),
+        ProviderError::Unavailable { .. } => format!("{} disconnected", crate::providers::shared_label()),
         ProviderError::Refused(refusal) => refusal.title.clone(),
         ProviderError::Rejected { .. } | ProviderError::Unsupported { .. } => {
             "Something went wrong".into()

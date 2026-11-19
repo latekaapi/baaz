@@ -354,7 +354,7 @@ impl Harness {
         self.login.update(cx, |login, _| login.method = Some(LoginMethod::Account));
         if !self.providers.shared_ready() {
             self.set_login_state(
-                LoginState::Error { message: "Muse is not running.".into(), method: Some(LoginMethod::Account) },
+                LoginState::Error { message: format!("{} is not running.", crate::providers::shared_label()).into(), method: Some(LoginMethod::Account) },
                 cx,
             );
             return;
@@ -427,7 +427,7 @@ impl Harness {
             self.set_login_state(
                 LoginState::ApiKey {
                     can_submit: false,
-                    error: Some("Muse is not running.".into()),
+                    error: Some(format!("{} is not running.", crate::providers::shared_label()).into()),
                 },
                 cx,
             );
@@ -814,10 +814,16 @@ impl Render for MuseSheetView {
             toggle.update(cx, |state, cx| state.set_masked(next, window, cx));
             flow.update(cx, |login, _| login.revealed = next);
         });
+        // The sheet signs in over the shared connection: that provider's
+        // own sheet, named and marked from its descriptor (rule 14).
+        let (product, mark) = match crate::providers::Registry::shared_id() {
+            Some(id) => (id.label(), crate::providers::ProviderMark::icon(id)),
+            None => (crate::providers::shared_label(), aui_icons::Provider::Muse),
+        };
         let card = login("login", state)
-            .product("Muse")
-            .headline("Sign in to Muse")
-            .provider(aui_icons::Provider::Muse)
+            .product(product)
+            .headline(format!("Sign in to {product}"))
+            .provider(mark)
             .api_key_field(field)
             .on_intent(intent)
             .sheet();

@@ -491,7 +491,7 @@ pub fn drive_codex_login(
             } else if Instant::now() >= deadline {
                 *state = CodexLogin::Failed { reason: "The sign-in timed out.".into() };
             } else {
-                *state = CodexLogin::Failed { reason: "The Codex helper exited.".into() };
+                *state = CodexLogin::Failed { reason: "The sign-in helper exited.".into() };
             }
             return state.clone();
         };
@@ -583,11 +583,11 @@ pub fn run_codex_login(
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {
-            return CodexLogin::Failed { reason: format!("Could not start Codex: {error}") };
+            return CodexLogin::Failed { reason: format!("Could not start the sign-in: {error}") };
         }
     };
     let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-        return CodexLogin::Failed { reason: "Could not talk to Codex.".into() };
+        return CodexLogin::Failed { reason: "Could not talk to the sign-in helper.".into() };
     };
     let mut io = PipeIo { stdin, lines: std::io::BufReader::new(stdout).lines() };
     let deadline = Instant::now() + CODEX_LOGIN_TIMEOUT;
@@ -672,10 +672,13 @@ pub(crate) fn status_stamp() -> StatusStamp {
     (mtime, crate::provider_status::status_generation())
 }
 
-/// Why Muse was not started at launch: the person has it off, or the last
-/// probe found it missing. [`Harness::start_muse_once_available`] starts it
-/// when that stops being true.
-pub(crate) const MUSE_OFF: &str = "Muse is off or not installed";
+/// Why the shared child's provider (Muse) was not started at launch: the
+/// person has it off, or the last probe found it missing.
+/// [`Harness::start_muse_once_available`] starts it when that stops being
+/// true. Named from its descriptor (rule 14).
+pub(crate) fn shared_off() -> String {
+    format!("{} is off or not installed", crate::providers::shared_label())
+}
 
 /// What [`ProviderStatusModel::sync`] compares: the cache file's mtime
 /// (writes from usage readings and the Enabled switch) and the live
@@ -1105,7 +1108,7 @@ impl Harness {
         if self.args.offline || self.args.replay.is_some() {
             return;
         }
-        let parked = matches!(&self.wire, crate::app::Wire::Down(reason) if reason == MUSE_OFF);
+        let parked = matches!(&self.wire, crate::app::Wire::Down(reason) if *reason == shared_off());
         if parked
             && crate::provider_status::muse_wanted()
             && crate::provider_status::muse_known_installed()

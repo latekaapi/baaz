@@ -646,12 +646,6 @@ pub enum SessionEvent {
     OpenImage(PathBuf),
 }
 
-/// The model chip while Muse starts under a draft.
-pub(crate) const MUSE_STARTING: &str = "Starting Muse…";
-/// The model menu's reason row while Muse starts under a draft.
-pub(crate) const MUSE_STARTING_MENU: &str = "Muse is starting — its models list in a moment…";
-/// The model menu's reason row when Muse did not come up under a draft.
-pub(crate) const MUSE_DOWN_MENU: &str = "Muse is not running, so it has no models to list";
 
 /// The billing guard's banner over the composer, as the
 /// application decided it.
@@ -1605,7 +1599,7 @@ impl SessionRuntime {
         // Nothing names a model yet while Muse (or this draft's session on
         // it) is still starting: say so, never the bare lane name "Muse".
         if self.muse_starting || (matches!(self.start, StartState::Starting(_)) && id == self.provider_id) {
-            return MUSE_STARTING.to_owned();
+            return format!("Starting {}\u{2026}", self.provider_kind().label());
         }
         if let Some(label) =
             self.models.iter().find(|m| m.model_id == id).map(|m| m.display_label.clone())
@@ -1632,9 +1626,6 @@ impl SessionRuntime {
     pub(crate) fn set_muse_starting(&mut self, starting: bool, cx: &mut Context<Self>) {
         if self.muse_starting != starting {
             self.muse_starting = starting;
-            if !starting && self.models_error.as_deref() == Some(MUSE_STARTING_MENU) {
-                self.models_error = Some(MUSE_DOWN_MENU.to_owned());
-            }
             cx.emit(RuntimeEvent::MenusStale);
         }
     }

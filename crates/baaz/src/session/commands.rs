@@ -951,11 +951,11 @@ impl SessionRuntime {
                     self.models_unavailable(Some("Models list once the session has started…".to_owned()), false, cx);
                     return;
                 }
-                self.models_unavailable(Some(
-                    "Codex lists models from its own session child, and this view holds none: \
-                     open the session to list them"
-                        .to_owned(),
-                ), false, cx);
+                self.models_unavailable(Some(format!(
+                    "{} lists models from its own session child, and this view holds none: \
+                     open the session to list them",
+                    self.provider_kind().label(),
+                )), false, cx);
             }
         }
     }

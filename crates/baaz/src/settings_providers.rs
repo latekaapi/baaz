@@ -502,12 +502,7 @@ impl SettingsPage {
         let mut text = v_flex().flex_1().min_w_0().child(
             gpui::div().text_color(p.ink).ui(TextRole::Body).semibold().child(SharedString::from(title)),
         ).child(
-            gpui::div().text_color(p.fg_muted).ui(TextRole::Caption).child(
-                "Sessions you started in Baaz before this update still sit in your Claude and Codex \
-                 folders, so Claude for Mac and Codex for Mac list them. Moving them keeps them \
-                 resumable here; nothing is deleted. Codex for Mac may keep stale entries until you \
-                 archive them there.",
-            ),
+            gpui::div().text_color(p.fg_muted).ui(TextRole::Caption).child(crate::session_migration::row_caption()),
         );
         if self.migration_paths_expanded {
             let mut list = v_flex().gap(px(scale::SP_1)).pt(px(scale::SP_1));

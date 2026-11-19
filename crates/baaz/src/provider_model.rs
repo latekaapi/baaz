@@ -347,7 +347,7 @@ impl ProviderStatusModel {
         let program = crate::providers::resolve_program(ProviderId::Codex)
             .map(|program| program.to_string_lossy().into_owned());
         let Some(program) = program else {
-            self.set_codex_login(CodexLogin::Failed { reason: "Codex is not installed — Install first.".into() }, cx);
+            self.set_codex_login(CodexLogin::Failed { reason: "Not installed — Install first.".into() }, cx);
             return;
         };
         // A running flow is abandoned: its thread sees the old flag.

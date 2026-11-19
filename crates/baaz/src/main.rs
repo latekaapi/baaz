@@ -1,7 +1,7 @@
 //! # baaz
 //!
-//! A macOS chat interface to Meta's Muse Code agent, built on the `aui`
-//! component library.
+//! A native macOS workspace for coding agents — Claude Code, Codex and Muse
+//! Code, each through its own CLI — built on the `aui` component library.
 //!
 //! ```bash
 //! cargo run -p baaz -- --workspace ~/code/thing

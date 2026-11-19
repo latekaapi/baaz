@@ -103,7 +103,7 @@ or the wire answers `approvalRequirementStale`.
 | `.badges(ApprovalBadges)` | "Protected write" and "Judge escalated" pills in the header, warning-tinted, only when set. |
 | `.resolved_by(Option<ResolvedBy>)` | see §1.5 |
 | `.feedback_open(..)` + `.feedback_slot(..)` | see §1.4 |
-| `.title(..)` | the pending question. The library's default is "Allow this command?"; the app passes "Allow Muse to run this command?" — the card never names a provider it does not know. |
+| `.title(..)` | the pending question. The library's default is "Allow this command?"; the app passes the question by what is asked ("Run this command?", "Write this file?") and names no provider, on any provider (docs/82 5.5; rule 14). |
 
 An empty `choices` list falls back to the built-in allow / always / deny triad
 and `on_decide`, which is what the pre-phase-4 path still uses.

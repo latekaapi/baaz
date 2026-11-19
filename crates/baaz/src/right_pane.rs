@@ -93,7 +93,7 @@ pub(crate) struct RightFacts {
 impl RightFacts {
     /// The agent's name the Page and the commit box speak of.
     pub(crate) fn agent(&self) -> &'static str {
-        self.provider.map(|provider| provider.label()).unwrap_or("Muse")
+        self.provider.map_or(crate::providers::THE_AGENT, |provider| provider.label())
     }
 }
 
@@ -606,7 +606,7 @@ impl Render for RightPane {
                 right::BrowserPane { state: None, window: &mut *window },
                 right_open,
                 width,
-                "Muse",
+                self.facts.agent(),
                 self.base_menu_open(cx),
                 cx,
             );

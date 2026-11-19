@@ -149,15 +149,15 @@ impl TerminalDock {
     }
 
     /// The dock header's hint for the active tab's agent: whose session the
-    /// person shares the terminal with (D43). Muse keeps the exact string
-    /// the baselines hold; other lanes name their own agent; a tab no
-    /// session owns names none, rather than wearing Muse's name.
+    /// person shares the terminal with (D43). Each lane names its own agent
+    /// by the label of the provider wearing that mark, read from the
+    /// registry (rule 14); a tab no session owns names none, rather than
+    /// wearing Muse's name.
     pub(crate) fn hint_name(provider: Option<Provider>) -> String {
-        match provider {
-            Some(Provider::Muse) => "Muse can type here".to_owned(),
-            Some(Provider::Claude) => "Claude Code can type here".to_owned(),
-            Some(Provider::Codex) => "Codex can type here".to_owned(),
-            _ => "The agent can type here".to_owned(),
+        use crate::providers::{ProviderId, ProviderMark as _};
+        match provider.and_then(|mark| ProviderId::all().into_iter().find(|id| id.icon() == mark)) {
+            Some(id) => format!("{} can type here", id.label()),
+            None => "The agent can type here".to_owned(),
         }
     }
 
