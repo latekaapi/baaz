@@ -100,6 +100,7 @@ pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
         "auto_summary" => layout.auto_summary = on,
         "handoff_model_summary" => layout.handoff_model_summary = on,
         "fold_finished_turns" => layout.fold_finished_turns = on,
+        "archive_on_merge" => layout.archive_on_merge = on,
         "notify_needs_you" => layout.set_notify(|n| n.needs_you = on),
         "notify_done" => layout.set_notify(|n| n.done = on),
         "notify_failed" => layout.set_notify(|n| n.failed = on),
@@ -299,7 +300,7 @@ pub(crate) fn settings_crumb_target(section: &str, index: usize) -> Option<&'sta
 /// actually carries ([`shortcut_row_id`]); both live on Shortcuts.
 pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
     match id {
-        "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns" => Some("general"),
+        "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns" | "archive_on_merge" => Some("general"),
         "theme" | "summary_line" => Some("appearance"),
         "group_branch" => Some("sidebar"),
         "notify_needs_you" | "notify_done" | "notify_failed" | "notify_sound" | "notify_badge" => Some("notifications"),
@@ -350,8 +351,19 @@ pub(crate) fn general_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
             )),
             on: layout.fold_finished_turns,
         },
+        SettingsRow::Switch {
+            id: SharedString::from("archive_on_merge"),
+            label: SharedString::from(ARCHIVE_ON_MERGE_LABEL),
+            detail: Some(SharedString::from(ARCHIVE_ON_MERGE_DETAIL)),
+            on: layout.archive_on_merge,
+        },
     ]
 }
+
+/// Settings › General's pull-request switch (docs/82 7.3), shared by the
+/// row model and the page.
+const ARCHIVE_ON_MERGE_LABEL: &str = "Archive a session when its pull request merges";
+const ARCHIVE_ON_MERGE_DETAIL: &str = "Once the pull request of a session's branch reads merged, the session is archived; a session in its own worktree keeps its work. Never while a turn runs.";
 
 /// Settings › Appearance's summary-line switch (docs/83 §4; moved from
 /// Sidebar in task 2.9), shared by the row model and the page so the two
@@ -1297,7 +1309,8 @@ impl SettingsPage {
     }
 
     /// General: the three model-spending switches under "Model
-    /// housekeeping", the transcript's fold, and the worktree branch prefix.
+    /// housekeeping", the transcript's fold, the worktree branch prefix,
+    /// and archiving a session when its pull request merges.
     fn settings_general_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let rows = vec![
             self.settings_switch_row(
@@ -1329,10 +1342,18 @@ impl SettingsPage {
             crate::layout::Layout::get(cx).fold_finished_turns,
             cx,
         )];
+        let pull_requests = vec![self.settings_switch_row(
+            "archive_on_merge",
+            ARCHIVE_ON_MERGE_LABEL,
+            ARCHIVE_ON_MERGE_DETAIL,
+            crate::layout::Layout::get(cx).archive_on_merge,
+            cx,
+        )];
         settings_sections_stack()
             .child(self.settings_group("Model housekeeping", rows, cx))
             .child(self.settings_group("Transcript", transcript, cx))
             .child(self.settings_worktrees_group(window, cx))
+            .child(self.settings_group("Pull requests", pull_requests, cx))
             .into_any_element()
     }
 
@@ -3337,6 +3358,7 @@ mod tests {
             "auto_summary",
             "handoff_model_summary",
             "fold_finished_turns",
+            "archive_on_merge",
             "summary_line",
             "group_branch",
         ] {

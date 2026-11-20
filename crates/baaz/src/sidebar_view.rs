@@ -1494,6 +1494,7 @@ mod tests {
                     unread: false,
                     branch: None,
                     tasks_running: 0,
+                    pull_request: None,
                 })
             })
             .collect();
@@ -1639,6 +1640,7 @@ mod tests {
             unread: false,
             branch: None,
             tasks_running: 0,
+            pull_request: None,
         }
     }
 
@@ -2571,6 +2573,7 @@ mod tests {
                 unread: false,
                 branch: None,
                 tasks_running: 0,
+                pull_request: None,
             }
         }
         // The open session, with no turns yet: the muse 1.3.0 shape, where
@@ -2799,6 +2802,7 @@ mod tests {
             unread: false,
             branch: None,
             tasks_running: 0,
+            pull_request: None,
         }
     }
 

@@ -20,7 +20,7 @@ use aui::interact::{dropdown, row_list, DropdownItem, LIST_INSET};
 use aui::protocol::{ChangeKind, Diff, FileChange};
 use aui::workbench::{
     ahead_behind, base_and_head, base_picker, branch_label, change_row, changes_caption, diff_fold, commit_foot, commit_frame,
-    commit_message_view, diff_body, draft_checkbox, form_field, hook_failed_note, pr_card, primary_action, pushed_row, skeleton_bar,
+    commit_message_view, diff_body, draft_checkbox, form_field, hook_failed_note, primary_action, pushed_row, skeleton_bar,
     state_block, text_action, unchanged_between, well_input,
 };
 use aui_icons::IconName;
@@ -92,6 +92,9 @@ pub(crate) struct ChangesUi {
     pub pr: Option<Option<PullRequest>>,
     pub pr_read_at: Option<Instant>,
     pub pr_reading: bool,
+    /// Details stands open over Changes: the PR's checks and review
+    /// comments (docs/82 7.3, [`crate::right_pr`]).
+    pub pr_details: bool,
     /// `origin/HEAD`'s branch, read once per root.
     pub default_branch: Option<String>,
     /// Commits the remote lacks when the branch has no upstream.
@@ -122,6 +125,10 @@ pub(crate) struct ChangesUi {
     /// real tree).
     #[cfg(feature = "probe")]
     pub fixture_branch: Option<String>,
+    /// A probe step made a recorded `gh` answer this tree's PR: the tree
+    /// reads clean so the foot is the card (`pr-fixture:`).
+    #[cfg(feature = "probe")]
+    pub fixture_pr: Option<PullRequest>,
     /// Each open row's top inside the scroll content, for the sticky row.
     pub row_tops: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, (f32, f32)>>>,
 }
@@ -139,16 +146,6 @@ const FLASH: Duration = Duration::from_millis(900);
 const CHECKS_POLL: Duration = Duration::from_secs(15);
 /// Otherwise the PR is read at most this often.
 const PR_POLL: Duration = Duration::from_secs(60);
-
-/// The PR card's state for a pull request's ([`git_ops::PrState`]).
-fn pr_state(state: git_ops::PrState) -> aui::workbench::PrState {
-    match state {
-        git_ops::PrState::Open => aui::workbench::PrState::Open,
-        git_ops::PrState::Draft => aui::workbench::PrState::Draft,
-        git_ops::PrState::Merged => aui::workbench::PrState::Merged,
-        git_ops::PrState::Closed => aui::workbench::PrState::Closed,
-    }
-}
 
 /// A stable hash of the change set (paths and counts): one draft per set.
 fn change_set_key(files: &[FileChange]) -> u64 {
@@ -299,7 +296,11 @@ impl RightPane {
         let need_unpushed = tree.upstream.is_none() && tree.files.is_empty();
         let checks_running = matches!(&ui.pr, Some(Some(pr)) if pr.checks.is_some_and(|c| c.2));
         let poll = if checks_running { CHECKS_POLL } else { PR_POLL };
-        let need_pr = tree.files.is_empty() && !ui.pr_reading && ui.pr_read_at.is_none_or(|at| at.elapsed() >= poll) && tree.upstream.is_some();
+        // A capture reads no PR (a probe step loads a recorded one).
+        let need_pr = !captures && tree.files.is_empty() && !ui.pr_reading && ui.pr_read_at.is_none_or(|at| at.elapsed() >= poll) && tree.upstream.is_some();
+        // The rows hear of a feature branch's PR (docs/82 7.3): never the
+        // default branch's.
+        let pr_branch = (need_pr && !on_default(&tree, ui)).then(|| tree.branch.clone());
         if need_pr {
             ui.pr_reading = true;
         }
@@ -317,6 +318,7 @@ impl RightPane {
                         (default, remote, unpushed, pr, amendable)
                     })
                     .await;
+                let read = pr.clone().zip(pr_branch);
                 let _ = this.update(cx, |this: &mut Self, cx| {
                     this.update_changes(
                         &root_buf,
@@ -342,6 +344,9 @@ impl RightPane {
                         },
                         cx,
                     );
+                    if let Some((pr, branch)) = read {
+                        cx.emit(RightPaneEvent::PullRequestRead { root: root_buf.clone(), branch, pr });
+                    }
                 });
             })
             .detach();
@@ -724,7 +729,11 @@ impl RightPane {
     /// `name`, tracking `origin/<name>` and level with it.
     fn apply_fixture_branch(&mut self, root: &Path) {
         let Some(branch) = self.changes_ui(root).fixture_branch.clone() else { return };
+        let clean = self.changes_ui(root).fixture_pr.is_some();
         if let Some(Some(tree)) = self.cache.git.as_mut().filter(|slot| slot.root == root).map(|slot| &mut slot.value) {
+            if clean {
+                tree.files.clear();
+            }
             tree.upstream = Some(format!("origin/{branch}"));
             tree.branch = branch;
             tree.ahead = 0;
@@ -1186,6 +1195,9 @@ pub(crate) fn changes_screen(
     if ui.form.is_some() {
         return pr_form_view(ui, &root_buf, &tree, base_menu, window, cx);
     }
+    if let (true, Some(Some(pr))) = (ui.pr_details, &ui.pr) {
+        return crate::right_pr::pr_detail_view(pr, &root_buf, cache.line_select.can_quote, window, cx);
+    }
     let expanded = cache.changes_expanded_for(root);
     let p = cx.aui().colors;
     // The scope row (docs/82 6.3): shown only over the open session's
@@ -1418,7 +1430,7 @@ pub(crate) fn changes_screen(
     // The commit box, Push and the PR act on the working tree: All changes
     // only (rule 13).
     let n_ticked = ticked.as_ref().map_or(0, |t| t.len());
-    let foot_el = scoped.is_none().then(|| foot_element(ui, &root_buf, &tree, n_ticked, foot, agent, window, cx));
+    let foot_el = scoped.is_none().then(|| foot_element(ui, &root_buf, &tree, n_ticked, foot, agent, cache.line_select.can_quote, window, cx));
     let clean = match scoped {
         Some(list) => list.files.is_empty(),
         None => tree.files.is_empty(),
@@ -1550,7 +1562,7 @@ fn loading_body(cx: &Context<RightPane>) -> gpui::Div {
 /// how many files Commit takes. The branch line carries New branch… on the
 /// default branch, Fetch and Pull where a remote exists (docs/82 7.2).
 #[allow(clippy::too_many_arguments)]
-fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, ticked: usize, foot: Foot, agent: &str, window: &mut Window, cx: &mut Context<RightPane>) -> AnyElement {
+fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, ticked: usize, foot: Foot, agent: &str, can_act: bool, window: &mut Window, cx: &mut Context<RightPane>) -> AnyElement {
     let busy = ui.busy;
     let hook = ui.hook_failure.clone();
     let editor = ui.editor.clone();
@@ -1644,11 +1656,7 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, ticked: usize, foot
             commit_frame(false, cx).child(branch_line(ui, &root_buf, tree, level, false, Some(create.into_any_element()), window, cx)).into_any_element()
         }
         Foot::Level => commit_frame(false, cx).child(branch_line(ui, &root_buf, tree, level, default, None, window, cx)).into_any_element(),
-        Foot::Pr(pr) => {
-            let url = pr.url.clone();
-            let view = text_action("right-pr-view", "View", Some(IconName::External), scale::H_SM, cx).on_click(cx.listener(move |_, _, _, cx| cx.emit(RightPaneEvent::ViewPullRequest(url.clone()))));
-            pr_card("right-pr", pr.title.clone(), pr.number, pr_state(pr.state), pr.checks, view, cx).into_any_element()
-        }
+        Foot::Pr(pr) => crate::right_pr::pr_card_element(&pr, root, false, can_act, cx),
     }
 }
 
@@ -1929,7 +1937,7 @@ mod tests {
         assert_eq!(foot_for(&tree(vec![], "f", Some("origin/f"), 2), &ui), Foot::Push { ahead: 2 });
         assert_eq!(foot_for(&tree(vec![], "f", Some("origin/f"), 0), &ui), Foot::CreatePr);
         assert_eq!(foot_for(&tree(vec![], "main", Some("origin/main"), 0), &ui), Foot::Level);
-        ui.pr = Some(Some(PullRequest { number: 7, title: "t".into(), url: "u".into(), state: git_ops::PrState::Open, checks: None }));
+        ui.pr = Some(Some(git_ops::pr_fixture("passing").expect("recorded")));
         assert!(matches!(foot_for(&tree(vec![], "f", Some("origin/f"), 0), &ui), Foot::Pr(_)));
         // A branch never pushed: Push, counted against the default branch.
         let fresh = ChangesUi { default_branch: Some("main".into()), unpushed_without_upstream: Some(3), ..ChangesUi::default() };

@@ -146,7 +146,7 @@ impl SessionRow for SessionEntry {
             reply: (!self.description.trim().is_empty()).then(|| self.description.clone().into()),
             status: Some(status),
             project: self.project_name.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_owned().into()),
-            branch: shown_branch(self).map(Into::into),
+            branch: branch_with_pr(self).map(Into::into),
             turns: Some(usize::try_from(self.turns).unwrap_or(usize::MAX)),
             updated: Some(if elapsed == "now" { "now".into() } else { format!("{elapsed} ago").into() }),
             workspace: self.workspace.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_owned().into()),
@@ -160,7 +160,7 @@ impl SessionRow for SessionEntry {
     /// sidebar row (docs/83 §4) does not draw it — only the library's
     /// compact row shows marks, in its meta line.
     fn summary(&self, now: DateTime<Local>) -> SessionSummary {
-        let branch = shown_branch(self);
+        let branch = branch_with_pr(self);
         let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed_at(self.updated, now))
             .provider(self.provider.row_mark());
         // Option B's context priority: the live approval/question override
@@ -237,8 +237,21 @@ fn worktree_branch(entry: &SessionEntry) -> Option<String> {
 }
 
 /// The branch a row names: its worktree's, else the index's derived one.
-fn shown_branch(entry: &SessionEntry) -> Option<String> {
+pub(crate) fn shown_branch(entry: &SessionEntry) -> Option<String> {
     worktree_branch(entry).or_else(|| entry.branch.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned))
+}
+
+/// The branch as a row draws it: with its pull request riding after it
+/// (`fix-checkout · PR #12 open`, docs/82 7.3) wherever the row names its
+/// branch — the hover card's meta row and the summary line's `project ·
+/// branch`. The flat row (docs/83 §4) has no other place for it: no
+/// leading glyph, and the trailing slot holds the row's one state.
+fn branch_with_pr(entry: &SessionEntry) -> Option<String> {
+    let branch = shown_branch(entry)?;
+    Some(match &entry.pull_request {
+        Some(pr) => format!("{branch} · {}", pr.label()),
+        None => branch,
+    })
 }
 
 /// Group the entries by calendar day, newest first, against an explicit
@@ -1043,6 +1056,7 @@ pub(crate) mod tests {
             unread: false,
             branch: None,
             tasks_running: 0,
+            pull_request: None,
         }
     }
 
@@ -1058,6 +1072,35 @@ pub(crate) mod tests {
         let row = busy.summary(now);
         assert_eq!(row.running_tasks, 3);
         assert!(row.meta.is_empty(), "the old meta hint is gone: {:?}", row.meta);
+    }
+
+    /// docs/82 7.3: a row's pull request rides its branch — on the hover
+    /// card's meta row and the summary line's `project · branch` — in the
+    /// words of its state; no branch, nowhere to ride; the trailing slot
+    /// and the meta items stay as they were.
+    #[test]
+    fn a_rows_pull_request_rides_its_branch() {
+        use baaz_core::git_ops::{PrState, RowPr};
+        let now = Local::now();
+        let mut row = entry("pr");
+        row.branch = Some("fix-checkout".into());
+        row.project_name = Some("acme-web".into());
+        for (state, failing, words) in [
+            (PrState::Open, 0, "fix-checkout · PR #12 open"),
+            (PrState::Draft, 0, "fix-checkout · PR #12 draft"),
+            (PrState::Open, 1, "fix-checkout · PR #12 · 1 check failing"),
+            (PrState::Merged, 1, "fix-checkout · PR #12 merged"),
+            (PrState::Closed, 0, "fix-checkout · PR #12 closed"),
+        ] {
+            row.pull_request = Some(RowPr { number: 12, state, failing });
+            assert_eq!(row.detail_data(now).branch.as_deref(), Some(words));
+            let summary = row.summary(now);
+            assert_eq!(summary.branch.as_deref(), Some(words));
+            assert!(summary.meta.is_empty());
+            assert_eq!(aui::nav::project_branch_text(&summary).as_deref(), Some(format!("acme-web · {words}").as_str()));
+        }
+        row.branch = None;
+        assert_eq!(row.detail_data(now).branch, None, "no branch: the PR has nothing to ride");
     }
 
     /// The grouping tests' roots on disk: availability hides a missing root,

@@ -131,8 +131,14 @@ pub(crate) enum RightPaneEvent {
     OpenPrForm(PathBuf),
     /// A draft goes through a hidden side session (Muse).
     DraftOnSide { root: PathBuf, kind: crate::right_changes::DraftKind, prompt: String },
-    /// The PR card's View: the PR in Browse.
+    /// The PR card's View (or a check's page): the URL in Browse.
     ViewPullRequest(String),
+    /// A PR read landed for `root` on the feature branch `branch` (docs/82
+    /// 7.3): the rows' book takes it, and a merged one may settle the
+    /// session.
+    PullRequestRead { root: PathBuf, branch: String, pr: Option<crate::git_ops::PullRequest> },
+    /// The merged card's Archive this session: the open session.
+    ArchiveSession,
     /// The tab row's ＋: the views menu.
     OpenViewsMenu,
     /// A Tasks row: open the dock on the tab its command runs in.
@@ -799,6 +805,8 @@ impl Harness {
             RightPaneEvent::OpenPrForm(root) => self.open_pr_form(root, window, cx),
             RightPaneEvent::DraftOnSide { root, kind, prompt } => self.draft_on_muse(root, *kind, prompt.clone(), cx),
             RightPaneEvent::ViewPullRequest(url) => self.view_pull_request(url.clone(), window, cx),
+            RightPaneEvent::PullRequestRead { root, branch, pr } => self.pull_request_read(root, branch, pr.clone(), window, cx),
+            RightPaneEvent::ArchiveSession => self.archive_open_session(window, cx),
             RightPaneEvent::OpenViewsMenu => self.open_menu(crate::overlays::MenuKind::RightViews, cx),
             RightPaneEvent::OpenTerminalTab(tab) => {
                 if !self.settings_open(cx) {

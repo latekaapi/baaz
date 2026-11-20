@@ -1,0 +1,14 @@
+{
+  "comments": [],
+  "headRefName": "fix-checkout",
+  "isDraft": false,
+  "number": 12,
+  "reviews": [],
+  "state": "MERGED",
+  "statusCheckRollup": [
+    {"__typename": "CheckRun", "completedAt": "2026-11-20T10:52:00Z", "conclusion": "SUCCESS", "detailsUrl": "https://github.com/acme/acme-web/actions/runs/102/job/211", "name": "build", "startedAt": "2026-11-20T10:50:00Z", "status": "COMPLETED", "workflowName": "CI"},
+    {"__typename": "CheckRun", "completedAt": "2026-11-20T10:55:00Z", "conclusion": "SUCCESS", "detailsUrl": "https://github.com/acme/acme-web/actions/runs/102/job/212", "name": "test", "startedAt": "2026-11-20T10:50:00Z", "status": "COMPLETED", "workflowName": "CI"}
+  ],
+  "title": "Round cents in the checkout total",
+  "url": "https://github.com/acme/acme-web/pull/12"
+}

@@ -347,7 +347,7 @@ impl Harness {
     /// (docs/82 6.2: work preserved, folder removed, branch kept); while any
     /// such member has a turn running, nothing is archived and a toast says
     /// why.
-    pub(super) fn archive_session(&mut self, session_id: String, window: Option<&mut Window>, cx: &mut Context<Self>) {
+    pub(crate) fn archive_session(&mut self, session_id: String, window: Option<&mut Window>, cx: &mut Context<Self>) {
         // The whole chain, head included: archiving names the head, the
         // expansion covers the members.
         let members = self.chain_members(&session_id, cx);

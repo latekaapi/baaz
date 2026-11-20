@@ -100,6 +100,7 @@ mod right;
 mod right_changes;
 mod right_files;
 mod right_page;
+mod right_pr;
 mod right_pane;
 mod right_quote;
 mod right_scopes;

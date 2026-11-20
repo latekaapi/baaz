@@ -8441,6 +8441,7 @@ mod tests {
                 last_ask: None,
                 branch: None,
                 tasks_running: 0,
+                pull_request: None,
                 local: false,
                 provisional: false,
                 turns_unknown: false,

@@ -562,6 +562,10 @@ pub struct Layout {
     /// [`Layout::worktree_branch_prefix`].
     #[serde(rename = "worktreeBranchPrefix", default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch_prefix: Option<String>,
+    /// Settings › General: archive a session when the pull request of its
+    /// branch reads merged (docs/82 7.3). Off by default.
+    #[serde(rename = "archiveOnMerge", default)]
+    pub archive_on_merge: bool,
 }
 
 impl Layout {
@@ -715,6 +719,7 @@ impl Default for Layout {
             agents: Default::default(),
             adblock: Default::default(),
             worktree_branch_prefix: None,
+            archive_on_merge: false,
         }
     }
 }

@@ -372,6 +372,10 @@ pub(crate) enum QuoteSide {
     DiffNew,
     /// A diff's removed lines only, numbered in the old file.
     DiffOld,
+    /// A pull request's review comment on a line (docs/82 7.3): the quote
+    /// is the comment, the location the line it is on — in the old file's
+    /// numbering (`old`) for a comment on a removed line.
+    Review { old: bool },
 }
 
 /// Where lines quoted from the right pane came from (docs/82 7.1): the path
@@ -398,7 +402,7 @@ impl QuoteLocation {
     /// `src/a.rs:40–42 (removed)` for removed lines (old numbering).
     pub(crate) fn label(&self) -> String {
         match self.side {
-            QuoteSide::DiffOld => format!("{}:{} (removed)", self.path, self.lines()),
+            QuoteSide::DiffOld | QuoteSide::Review { old: true } => format!("{}:{} (removed)", self.path, self.lines()),
             _ => format!("{}:{}", self.path, self.lines()),
         }
     }
@@ -411,6 +415,8 @@ impl QuoteLocation {
             QuoteSide::File => format!("From {}, {n} {}:", self.path, self.lines()),
             QuoteSide::DiffNew => format!("From the diff of {}, {n} {}:", self.path, self.lines()),
             QuoteSide::DiffOld => format!("From the diff of {}, removed {n} {} (old numbering):", self.path, self.lines()),
+            QuoteSide::Review { old: false } => format!("A review comment on {}, {n} {}:", self.path, self.lines()),
+            QuoteSide::Review { old: true } => format!("A review comment on {}, removed {n} {} (old numbering):", self.path, self.lines()),
         }
     }
 }

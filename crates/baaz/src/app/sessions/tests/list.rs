@@ -617,3 +617,81 @@ fn a_muse_sessions_title_rides_a_recorded_hidden_side_session(cx: &mut gpui::Tes
     });
     lane_restore(state);
 }
+
+/// docs/82 7.3: a merged read archives the PR's sessions only with
+/// Settings › General's switch on, and once per PR — a session put back
+/// afterwards stays put on the next read. The book feeds the rows either
+/// way: the row on that folder and branch wears the PR, others do not.
+#[gpui::test]
+fn a_merged_pr_archives_its_session_once_and_only_when_asked(cx: &mut gpui::TestAppContext) {
+    use crate::layout::LayoutGlobal as _;
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("pr-merge-archive");
+    let folder = std::fs::canonicalize(&state.2).expect("state dir").join("acme");
+    std::fs::create_dir_all(&folder).expect("folder");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    let merged = crate::git_ops::pr_fixture("merged").expect("recorded");
+    let open = crate::git_ops::pr_fixture("failing").expect("recorded");
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, cx| {
+            for (id, branch) in [("s-pr", "fix-checkout"), ("s-other", "main")] {
+                let mut entry = chain_muse_entry(id, id, 2);
+                entry.workspace = Some(folder.to_string_lossy().into_owned());
+                entry.branch = Some(branch.to_owned());
+                harness.session_list.update(cx, |list, _| list.sessions.push(entry));
+            }
+            harness.invalidate_list(cx);
+        });
+    });
+    let archived = |vc: &mut gpui::VisualTestContext, id: &str| {
+        vc.update(|_, cx| baaz.read(cx).session_list.read(cx).overrides.get(id).is_some_and(|meta| meta.archived))
+    };
+    let read = |vc: &mut gpui::VisualTestContext, pr: &crate::git_ops::PullRequest| {
+        let pr = pr.clone();
+        let root = folder.clone();
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.pull_request_read(&root, "fix-checkout", Some(pr), window, cx)));
+    };
+    // An open PR with a failing check: the row shows it, nothing settles.
+    read(vc, &open);
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, cx| {
+            let rows = harness.visible_sessions(cx);
+            let pr = |id: &str| rows.iter().find(|e| e.id == id).and_then(|e| e.pull_request).map(|p| p.label());
+            assert_eq!(pr("s-pr").as_deref(), Some("PR #12 · 1 check failing"));
+            assert_eq!(pr("s-other"), None, "another branch's row shows no PR");
+        });
+    });
+    // Merged with the switch off (the default): offered, not done.
+    read(vc, &merged);
+    assert!(!archived(vc, "s-pr"), "off: the merged read archives nothing");
+    vc.update(|_, cx| {
+        let rows = baaz.update(cx, |harness, cx| harness.visible_sessions(cx));
+        assert_eq!(rows.iter().find(|e| e.id == "s-pr").and_then(|e| e.pull_request).map(|p| p.label()).as_deref(), Some("PR #12 merged"));
+        crate::layout::Layout::update(cx, |layout| layout.archive_on_merge = true);
+    });
+    // On, but mid-turn: left for the next read, not settled.
+    let set_running = |vc: &mut gpui::VisualTestContext, on: bool| {
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| {
+            harness.session_list.update(cx, |list, _| {
+                if let Some(e) = list.sessions.iter_mut().find(|e| e.id == "s-pr") {
+                    e.running = on;
+                }
+            });
+        }));
+    };
+    set_running(vc, true);
+    read(vc, &merged);
+    assert!(!archived(vc, "s-pr"), "never under a running turn");
+    set_running(vc, false);
+    // The next merged read archives that row's session, and only it.
+    read(vc, &merged);
+    assert!(archived(vc, "s-pr"), "on: the merged read archives the PR's session");
+    assert!(!archived(vc, "s-other"));
+    // Put back by hand, it stays put: once per PR.
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.unarchive_session("s-pr".into(), cx)));
+    assert!(!archived(vc, "s-pr"));
+    read(vc, &merged);
+    assert!(!archived(vc, "s-pr"), "a PR settles its session once");
+    lane_restore(state);
+}

@@ -3753,6 +3753,43 @@ mod tests {
         });
     }
 
+    /// docs/82 7.3: the quotes become the composer's drafts and the model's prompt the
+    /// way 7.1's do: the line comment with its location above the fence.
+    #[gpui::test]
+    fn sent_quotes_land_as_drafts_with_their_location(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = vc.update(|window, cx| {
+            let host = crate::session::SessionHost {
+                provider_id: "echo".to_owned(),
+                workspace: std::env::temp_dir().to_string_lossy().into_owned(),
+                overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                capture: crate::runtime::CaptureToken::default(),
+                terminal_host: None,
+            };
+            cx.new(|cx| crate::session::SessionView::new("s-pr".to_owned(), host, window, cx))
+        });
+        let pr = crate::git_ops::pr_fixture("failing").expect("recorded");
+        let check = crate::right_pr::check_quote(&pr.check_list[0]);
+        let line = crate::right_pr::comment_quote(pr.comments.iter().find(|c| matches!(c.kind, crate::git_ops::CommentKind::Line { old_side: false, .. })).expect("line"));
+        vc.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                for q in [check.clone(), line.clone()] {
+                    // Exactly what the root does with the pane's Quote event.
+                    view.add_quote(q.text, None, Some((q.lang, q.lines)), q.location, window, cx);
+                }
+            });
+            let quotes = view.read(cx).rt(cx).quotes.clone();
+            assert_eq!(quotes.len(), 2);
+            assert_eq!((quotes[0].location.clone(), quotes[0].code.clone()), (None, Some(("text".into(), 2))));
+            assert_eq!(quotes[1].location, line.location);
+            let prompt = super::super::commands::quoted_prompt(&quotes, "Fix these.");
+            assert!(prompt.contains("```text\nCheck `test` failed (FAILURE)"), "{prompt}");
+            assert!(prompt.contains("A review comment on src/lib.rs, line 7:\n```text\nada commented:"), "{prompt}");
+            assert!(prompt.ends_with("Fix these."));
+        });
+    }
+
     /// B9: a plain URL click emits an in-app open, never the system
     /// browser; a ⌘-click (and a `mailto:` link) stays external.
     #[gpui::test]

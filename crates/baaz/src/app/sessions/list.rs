@@ -74,6 +74,10 @@ pub(super) struct FixtureSession {
     /// `codex`, `muse`); absent or unknown keeps what the join resolved.
     #[serde(default)]
     provider: Option<String>,
+    /// The row's branch, standing in for the index's derived one: what a
+    /// pull request read is matched on (docs/82 7.3, `sidebar-pr`).
+    #[serde(default)]
+    branch: Option<String>,
 }
 
 #[cfg(feature = "probe")]
@@ -129,6 +133,9 @@ pub(super) fn fixture_entry(row: &FixtureSession, launch: &std::path::Path, proj
         entry.last_error = Some(error.to_owned());
     }
     entry.unread = row.unread;
+    if let Some(branch) = row.branch.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+        entry.branch = Some(branch.to_owned());
+    }
     if let Some(provider) = row.provider.as_deref().and_then(crate::providers::ProviderId::parse_known) {
         entry.provider = provider;
     }

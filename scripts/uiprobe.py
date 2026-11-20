@@ -1031,6 +1031,12 @@ def _populated(steps=None, replay=False, theme=None, workspace=None, sidebar=Tru
 
 _PROJECTS = _ADOPT + ";group-by:project"
 
+
+def _with_sidebar(entry, name):
+    """A populated entry over another sidebar fixture (fixtures/sidebar/<name>)."""
+    entry["shot"] = [_p6_sidebar_fixture(name) if a == _POPULATED_SIDEBAR[1] else a for a in entry["shot"]]
+    return entry
+
 ENTRIES.update({
     "shell-populated":         _populated(replay=True),
     "shell-populated-light":   _populated(replay=True, theme="light"),
@@ -1088,6 +1094,19 @@ ENTRIES.update({
                                           "select-lines:src/lib.rs:5-8", replay=True, workspace=_REPO_ACME),
     "composer-quote-lines":    _populated("right-width:440;right:changes;changes-open:crates/baaz/src/right.rs;wait:800;"
                                           "select-lines:crates/baaz/src/right.rs:old:2823-2824;quote-lines", replay=True),
+    # Task 7.3: the PR from recorded `gh` output (fixtures/gh; a capture
+    # runs no gh). `pr-details:` makes the recorded PR the fixture tree's
+    # (clean, on its branch) and opens Details: the failing check first
+    # with Send to agent, the review asking for changes, the line comment
+    # at src/lib.rs:7. `pr-fixture:merged`: the merged card offering
+    # Archive this session. The replay is the open session both act on.
+    # No baselines yet.
+    "right-pr-details":        _populated("right-width:440;pr-details:failing", replay=True),
+    "right-pr-merged":         _populated("right-width:440;pr-fixture:merged", replay=True),
+    # The row: p-int-2 (Audit log export) sits on fix-checkout in
+    # acme-internal, the pane's project; its summary line and hover card
+    # carry the PR after the branch.
+    "sidebar-pr":              _with_sidebar(_populated("settings-set:summary-line=on;pr-fixture:failing;row-detail:p-int-2", replay=True), "pr.json"),
     "right-page":              _populated("right-width:440;right:browser;browse:https://example.com", replay=True),
     "terminal-dock":           _populated("terminal-dock:zsh", replay=True),
     "settings-sidebar":        _populated("settings:sidebar"),

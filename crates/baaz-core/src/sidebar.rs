@@ -163,6 +163,12 @@ pub struct SessionEntry {
     /// wire — and read by the app's `SessionEntry::summary` for the row's
     /// "N running".
     pub tasks_running: u32,
+    /// The pull request of this row's branch (docs/82 7.3), when the
+    /// Changes pane has read one for the row's folder and branch. Stamped
+    /// by the window from the session list's PR book on every list build
+    /// — never stored, never on the wire — and read by the app's
+    /// `SessionEntry::summary`, where it rides the branch.
+    pub pull_request: Option<crate::git_ops::RowPr>,
     /// Placed locally at `session/start`: the wire lists a session only
     /// after its log flushes on `turn/completed`, so the window holds this
     /// row meanwhile. [`merge_session_list`] keeps it until the wire lists
@@ -457,6 +463,7 @@ impl SessionEntry {
             unread: meta.is_some_and(|m| m.unread),
             branch: session.branch.clone(),
             tasks_running: 0,
+            pull_request: None,
         }
     }
 
@@ -554,6 +561,7 @@ impl SessionEntry {
             unread: meta.is_some_and(|m| m.unread),
             branch: None,
             tasks_running: 0,
+            pull_request: None,
         })
     }
 
@@ -640,6 +648,7 @@ impl SessionEntry {
             unread: meta.is_some_and(|m| m.unread),
             branch: None,
             tasks_running: 0,
+            pull_request: None,
         })
     }
 
@@ -695,6 +704,7 @@ impl SessionEntry {
             unread: false,
             branch: None,
             tasks_running: 0,
+            pull_request: None,
         }
     }
 
@@ -889,6 +899,7 @@ pub fn local_started_row(
         unread: false,
         branch: None,
         tasks_running: 0,
+        pull_request: None,
     }
 }
 
@@ -2139,6 +2150,7 @@ pub mod tests {
             unread: false,
             branch: None,
             tasks_running: 0,
+            pull_request: None,
         }
     }
 

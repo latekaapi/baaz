@@ -1,0 +1,241 @@
+[
+  {
+    "sessionId": "p-web-1",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Rewrite the router",
+    "provider": "claude-code",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 14,
+    "status": "running",
+    "ask": "Move the routes into one table",
+    "summary": "Routes moved; updating the tests"
+  },
+  {
+    "sessionId": "p-web-2",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Checkout totals off by a cent",
+    "provider": "codex",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 6,
+    "status": "idle",
+    "attention": [
+      "approvalPending"
+    ],
+    "approval": "cargo test -p checkout"
+  },
+  {
+    "sessionId": "p-web-3",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Header spacing",
+    "unread": true,
+    "provider": "muse",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 4,
+    "status": "idle",
+    "ask": "Tighten the header",
+    "summary": "Header is 44 pt with one line under it"
+  },
+  {
+    "sessionId": "p-web-4",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Sidebar grouping by project",
+    "provider": "claude-code",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 9,
+    "status": "idle",
+    "attention": [
+      "inputPending"
+    ],
+    "question": "Group archived sessions too?"
+  },
+  {
+    "sessionId": "p-web-5",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Search scopes",
+    "provider": "codex",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 5,
+    "status": "idle",
+    "error": "modelError: the model was overloaded"
+  },
+  {
+    "sessionId": "p-web-6",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Empty states",
+    "provider": "muse",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 3,
+    "status": "idle"
+  },
+  {
+    "sessionId": "p-web-7",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Dark mode contrast pass",
+    "provider": "claude-code",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 11,
+    "status": "idle"
+  },
+  {
+    "sessionId": "p-web-8",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Image upload limits",
+    "provider": "codex",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 7,
+    "status": "idle"
+  },
+  {
+    "sessionId": "p-web-9",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Flaky login test",
+    "provider": "claude-code",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 2,
+    "status": "idle",
+    "error": "the agent process exited before answering"
+  },
+  {
+    "sessionId": "p-web-10",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Paginate the order list",
+    "provider": "muse",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 8,
+    "status": "idle"
+  },
+  {
+    "sessionId": "p-web-11",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Webhook retries",
+    "provider": "codex",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 12,
+    "status": "idle"
+  },
+  {
+    "sessionId": "p-web-12",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Bump dependencies",
+    "provider": "claude-code",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 1,
+    "status": "idle"
+  },
+  {
+    "sessionId": "p-web-13",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Price formatting by locale",
+    "provider": "muse",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 6,
+    "status": "idle"
+  },
+  {
+    "sessionId": "p-web-14",
+    "workspaceRoot": "fixtures/ws/acme-web",
+    "label": "Old deploy notes",
+    "provider": "codex",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 1,
+    "status": "idle"
+  },
+  {
+    "sessionId": "p-int-1",
+    "workspaceRoot": "fixtures/ws/acme-internal",
+    "label": "Rotate the API keys",
+    "provider": "codex",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 5,
+    "status": "running",
+    "ask": "Rotate the staging keys",
+    "summary": "Staging rotated; production next"
+  },
+  {
+    "sessionId": "p-int-2",
+    "workspaceRoot": "fixtures/ws/acme-internal",
+    "label": "Audit log export",
+    "provider": "claude-code",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 10,
+    "status": "idle",
+    "branch": "fix-checkout"
+  },
+  {
+    "sessionId": "p-int-3",
+    "workspaceRoot": "fixtures/ws/acme-internal",
+    "label": "Slow query on dashboards",
+    "provider": "muse",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 7,
+    "status": "idle",
+    "attention": [
+      "approvalPending"
+    ],
+    "approval": "psql -c 'EXPLAIN ANALYZE …'"
+  },
+  {
+    "sessionId": "p-int-4",
+    "workspaceRoot": "fixtures/ws/acme-internal",
+    "label": "Migrate the billing table",
+    "unread": true,
+    "provider": "claude-code",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 13,
+    "status": "idle"
+  },
+  {
+    "sessionId": "p-int-5",
+    "workspaceRoot": "fixtures/ws/acme-internal",
+    "label": "On-call runbook",
+    "provider": "codex",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 4,
+    "status": "idle"
+  },
+  {
+    "sessionId": "p-int-6",
+    "workspaceRoot": "fixtures/ws/acme-internal",
+    "label": "Weekly report script",
+    "provider": "muse",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 3,
+    "status": "idle"
+  },
+  {
+    "sessionId": "p-int-7",
+    "workspaceRoot": "fixtures/ws/acme-internal",
+    "label": "Backfill missing invoices",
+    "provider": "claude-code",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 6,
+    "status": "idle"
+  },
+  {
+    "sessionId": "p-int-8",
+    "workspaceRoot": "fixtures/ws/acme-internal",
+    "label": "Cron drift",
+    "provider": "codex",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 2,
+    "status": "idle"
+  },
+  {
+    "sessionId": "p-int-9",
+    "workspaceRoot": "fixtures/ws/acme-internal",
+    "label": "Feature flag cleanup",
+    "provider": "muse",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 5,
+    "status": "idle"
+  },
+  {
+    "sessionId": "p-int-10",
+    "workspaceRoot": "fixtures/ws/acme-internal",
+    "label": "Scratch pad",
+    "provider": "claude-code",
+    "updatedAt": "2026-11-01T10:00:00Z",
+    "turnCount": 1,
+    "status": "idle"
+  }
+]

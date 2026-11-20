@@ -646,7 +646,8 @@ pub enum PrState {
     Closed,
 }
 
-/// The branch's pull request, as the PR card shows it.
+/// The branch's pull request, as the PR card shows it: its state, its
+/// checks and its review comments (docs/82 7.3).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PullRequest {
     pub number: u64,
@@ -655,9 +656,152 @@ pub struct PullRequest {
     pub state: PrState,
     /// (passed, total, still running).
     pub checks: Option<(u32, u32, bool)>,
+    /// The PR's head branch (`headRefName`); empty when gh did not say.
+    pub branch: String,
+    /// Every check, failing first, then running, passed, skipped.
+    pub check_list: Vec<PrCheck>,
+    /// Reviews with words (or asking for changes), top-level comments and
+    /// line comments: a review asking for changes first, then by time.
+    pub comments: Vec<PrComment>,
 }
 
-/// `gh pr view --json …` into a [`PullRequest`].
+/// Where a check stands. The order is the card's: failing first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CheckState {
+    Failing,
+    Running,
+    Passed,
+    /// Neutral or skipped: counted as passed.
+    Skipped,
+}
+
+/// One check of a PR: a check run or a commit status
+/// (`statusCheckRollup`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrCheck {
+    pub name: String,
+    pub state: CheckState,
+    /// gh's own word: the conclusion (`FAILURE`, `TIMED_OUT`, …), a
+    /// status's state, or the run's status while it runs.
+    pub conclusion: String,
+    /// The check's page (`detailsUrl` / `targetUrl`); may be empty.
+    pub link: String,
+    /// A commit status's description, when gh gave one.
+    pub summary: Option<String>,
+}
+
+/// What a review said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewVerdict {
+    ChangesRequested,
+    Approved,
+    Commented,
+}
+
+/// Which kind of comment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommentKind {
+    /// A review's own words.
+    Review(ReviewVerdict),
+    /// A top-level comment on the PR.
+    Comment,
+    /// A comment on one line of a file: the new file's numbering, or the
+    /// old one's (`old_side`) for a comment on a removed line.
+    Line { path: String, line: u32, old_side: bool },
+}
+
+/// One review comment, as the PR card lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrComment {
+    pub author: String,
+    pub body: String,
+    /// Its page; may be empty (gh gives reviews none).
+    pub url: String,
+    /// When it was written (RFC 3339, so it sorts as text).
+    pub at: String,
+    pub kind: CommentKind,
+}
+
+impl PullRequest {
+    /// How many checks fail.
+    pub fn failing(&self) -> u32 {
+        self.check_list.iter().filter(|c| c.state == CheckState::Failing).count() as u32
+    }
+
+    /// What a sidebar row shows of it ([`RowPr`]).
+    pub fn row(&self) -> RowPr {
+        RowPr { number: self.number, state: self.state, failing: self.failing() }
+    }
+}
+
+/// A PR as a session row shows it: its number, state and failing checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowPr {
+    pub number: u64,
+    pub state: PrState,
+    pub failing: u32,
+}
+
+impl RowPr {
+    /// `PR #12 open` / `draft` / `merged` / `closed`, or — while it is
+    /// open or a draft and a check fails — `PR #12 · 1 check failing`.
+    pub fn label(&self) -> String {
+        let n = self.number;
+        match self.state {
+            PrState::Open | PrState::Draft if self.failing > 0 => {
+                format!("PR #{n} · {} check{} failing", self.failing, if self.failing == 1 { "" } else { "s" })
+            }
+            PrState::Open => format!("PR #{n} open"),
+            PrState::Draft => format!("PR #{n} draft"),
+            PrState::Merged => format!("PR #{n} merged"),
+            PrState::Closed => format!("PR #{n} closed"),
+        }
+    }
+}
+
+fn text_of(v: &serde_json::Value, key: &str) -> String {
+    v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
+fn login_of(v: &serde_json::Value, key: &str) -> String {
+    v.get(key).and_then(|a| a.get("login")).and_then(|l| l.as_str()).unwrap_or("someone").to_string()
+}
+
+/// One `statusCheckRollup` item: a `CheckRun` (name, status, conclusion,
+/// detailsUrl) or a `StatusContext` (context, state, targetUrl,
+/// description).
+fn parse_check(c: &serde_json::Value) -> PrCheck {
+    let conclusion = text_of(c, "conclusion");
+    let status = c.get("status").and_then(|x| x.as_str()).unwrap_or("COMPLETED");
+    let context_state = text_of(c, "state");
+    let is_status = c.get("context").is_some() || (!context_state.is_empty() && c.get("conclusion").is_none());
+    let (state, word) = if is_status {
+        let state = match context_state.as_str() {
+            "SUCCESS" => CheckState::Passed,
+            "PENDING" | "EXPECTED" => CheckState::Running,
+            _ => CheckState::Failing,
+        };
+        (state, context_state.clone())
+    } else if status != "COMPLETED" {
+        (CheckState::Running, status.to_string())
+    } else {
+        let state = match conclusion.as_str() {
+            "SUCCESS" => CheckState::Passed,
+            "NEUTRAL" | "SKIPPED" => CheckState::Skipped,
+            _ => CheckState::Failing,
+        };
+        (state, conclusion.clone())
+    };
+    let name = [text_of(c, "name"), text_of(c, "context")].into_iter().find(|n| !n.is_empty()).unwrap_or_else(|| "check".into());
+    let link = [text_of(c, "detailsUrl"), text_of(c, "targetUrl"), text_of(c, "link")].into_iter().find(|n| !n.is_empty()).unwrap_or_default();
+    let summary = c.get("description").and_then(|d| d.as_str()).map(str::trim).filter(|d| !d.is_empty()).map(str::to_string);
+    PrCheck { name, state, conclusion: word, link, summary }
+}
+
+/// `gh pr view --json …` into a [`PullRequest`]: the checks from
+/// `statusCheckRollup`, the reviews that say something (or ask for
+/// changes) and the top-level comments. Line comments come from another
+/// call ([`parse_line_comments`]).
 pub fn parse_pr_view(raw: &str) -> Option<PullRequest> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     let number = v.get("number")?.as_u64()?;
@@ -667,35 +811,90 @@ pub fn parse_pr_view(raw: &str) -> Option<PullRequest> {
         (_, Some(true)) => PrState::Draft,
         _ => PrState::Open,
     };
-    let checks = v.get("statusCheckRollup").and_then(|r| r.as_array()).filter(|a| !a.is_empty()).map(|rollup| {
-        let mut passed = 0;
-        let mut running = false;
-        for c in rollup {
-            let conclusion = c.get("conclusion").and_then(|x| x.as_str()).unwrap_or("");
-            let status = c.get("status").and_then(|x| x.as_str()).unwrap_or("COMPLETED");
-            let state = c.get("state").and_then(|x| x.as_str()).unwrap_or("");
-            if matches!(conclusion, "SUCCESS" | "NEUTRAL" | "SKIPPED") || state == "SUCCESS" {
-                passed += 1;
-            }
-            if status != "COMPLETED" || state == "PENDING" {
-                running = true;
-            }
-        }
-        (passed, rollup.len() as u32, running)
+    let mut check_list: Vec<PrCheck> = v.get("statusCheckRollup").and_then(|r| r.as_array()).map(|a| a.iter().map(parse_check).collect()).unwrap_or_default();
+    check_list.sort_by_key(|c| c.state);
+    let checks = (!check_list.is_empty()).then(|| {
+        let passed = check_list.iter().filter(|c| matches!(c.state, CheckState::Passed | CheckState::Skipped)).count() as u32;
+        (passed, check_list.len() as u32, check_list.iter().any(|c| c.state == CheckState::Running))
     });
-    Some(PullRequest {
+    let mut comments = Vec::new();
+    for r in v.get("reviews").and_then(|r| r.as_array()).into_iter().flatten() {
+        let verdict = match r.get("state").and_then(|s| s.as_str()) {
+            Some("CHANGES_REQUESTED") => ReviewVerdict::ChangesRequested,
+            Some("APPROVED") => ReviewVerdict::Approved,
+            _ => ReviewVerdict::Commented,
+        };
+        let body = text_of(r, "body").trim().to_string();
+        if body.is_empty() && verdict != ReviewVerdict::ChangesRequested {
+            continue;
+        }
+        comments.push(PrComment { author: login_of(r, "author"), body, url: text_of(r, "url"), at: text_of(r, "submittedAt"), kind: CommentKind::Review(verdict) });
+    }
+    for c in v.get("comments").and_then(|r| r.as_array()).into_iter().flatten() {
+        let body = text_of(c, "body").trim().to_string();
+        if body.is_empty() || c.get("isMinimized").and_then(|m| m.as_bool()) == Some(true) {
+            continue;
+        }
+        comments.push(PrComment { author: login_of(c, "author"), body, url: text_of(c, "url"), at: text_of(c, "createdAt"), kind: CommentKind::Comment });
+    }
+    let mut pr = PullRequest {
         number,
-        title: v.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-        url: v.get("url").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+        title: text_of(&v, "title"),
+        url: text_of(&v, "url"),
         state,
         checks,
-    })
+        branch: text_of(&v, "headRefName"),
+        check_list,
+        comments,
+    };
+    sort_comments(&mut pr.comments);
+    Some(pr)
 }
 
-const PR_FIELDS: &str = "number,title,url,state,isDraft,statusCheckRollup";
+/// A review asking for changes first, then the rest by time.
+fn sort_comments(comments: &mut [PrComment]) {
+    comments.sort_by(|a, b| {
+        let asks = |c: &PrComment| !matches!(c.kind, CommentKind::Review(ReviewVerdict::ChangesRequested));
+        (asks(a), &a.at).cmp(&(asks(b), &b.at))
+    });
+}
 
-/// The open (or last) PR for the checked-out branch, through `gh`. Never
-/// runs under test.
+/// `gh api repos/{owner}/{repo}/pulls/<n>/comments` (the REST list) into
+/// line comments: path, line (`line`, else `original_line` for an outdated
+/// one), side, body, author and link.
+pub fn parse_line_comments(raw: &str) -> Vec<PrComment> {
+    let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(raw) else { return Vec::new() };
+    items
+        .iter()
+        .filter_map(|c| {
+            let path = c.get("path")?.as_str()?.to_string();
+            let line = c.get("line").and_then(|l| l.as_u64()).or_else(|| c.get("original_line").and_then(|l| l.as_u64()))? as u32;
+            let body = text_of(c, "body").trim().to_string();
+            (!body.is_empty()).then(|| PrComment {
+                author: login_of(c, "user"),
+                body,
+                url: text_of(c, "html_url"),
+                at: text_of(c, "created_at"),
+                kind: CommentKind::Line { path, line, old_side: c.get("side").and_then(|s| s.as_str()) == Some("LEFT") },
+            })
+        })
+        .collect()
+}
+
+/// A view and its line comments together.
+pub fn pr_with_line_comments(view: &str, line_comments: Option<&str>) -> Option<PullRequest> {
+    let mut pr = parse_pr_view(view)?;
+    if let Some(raw) = line_comments {
+        pr.comments.extend(parse_line_comments(raw));
+        sort_comments(&mut pr.comments);
+    }
+    Some(pr)
+}
+
+const PR_FIELDS: &str = "number,title,url,state,isDraft,statusCheckRollup,headRefName,reviews,comments";
+
+/// The open (or last) PR for the checked-out branch, through `gh`: the
+/// view, then its line comments. Never runs under test or in a capture.
 pub fn pr_for_branch(root: &Path) -> Option<PullRequest> {
     if cfg!(any(test, feature = "test-support")) || crate::runtime::captures() {
         return None;
@@ -705,7 +904,28 @@ pub fn pr_for_branch(root: &Path) -> Option<PullRequest> {
     if !out.ok {
         return None;
     }
-    parse_pr_view(&out.text)
+    let number = parse_pr_view(&out.text)?.number;
+    let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments?per_page=100");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let lines = spawn("gh", root, &["api", &endpoint], None, false).and_then(|j| j.finish(deadline)).filter(|f| f.ok).map(|f| f.text);
+    pr_with_line_comments(&out.text, lines.as_deref())
+}
+
+/// A recorded `gh` answer by name, for tests and the probe's
+/// `pr-fixture:` (docs/82 7.3): `passing`, `failing` (with line
+/// comments), `merged`, `closed`, `draft`. Never a real call.
+#[cfg(any(test, feature = "probe"))]
+pub fn pr_fixture(name: &str) -> Option<PullRequest> {
+    let view = match name {
+        "passing" => include_str!("../../../fixtures/gh/pr-passing.json"),
+        "failing" => include_str!("../../../fixtures/gh/pr-failing.json"),
+        "merged" => include_str!("../../../fixtures/gh/pr-merged.json"),
+        "closed" => include_str!("../../../fixtures/gh/pr-closed.json"),
+        "draft" => include_str!("../../../fixtures/gh/pr-draft.json"),
+        _ => return None,
+    };
+    let lines = (name == "failing").then_some(include_str!("../../../fixtures/gh/pr-line-comments.json"));
+    pr_with_line_comments(view, lines)
 }
 
 /// `gh pr create`, then the PR it made. Never runs under test.
@@ -828,6 +1048,102 @@ mod tests {
         assert_eq!(pr.number, 128);
         assert_eq!(pr.state, PrState::Open);
         assert_eq!(pr.checks, Some((3, 4, true)));
+    }
+
+    // docs/82 7.3: every recorded `gh` answer (fixtures/gh, written in
+    // the shape `gh pr view --json` and `gh api …/pulls/N/comments`
+    // print) parses into what the card and the row show.
+
+    #[test]
+    fn a_pr_with_every_check_passing() {
+        let pr = pr_fixture("passing").expect("parses");
+        assert_eq!((pr.number, pr.state, pr.branch.as_str()), (12, PrState::Open, "fix-checkout"));
+        // A skipped check and a commit status count as passed.
+        assert_eq!(pr.checks, Some((4, 4, false)));
+        assert_eq!(pr.failing(), 0);
+        let coverage = pr.check_list.iter().find(|c| c.name == "ci/coverage").expect("the commit status is a check");
+        assert_eq!((coverage.state, coverage.summary.as_deref(), coverage.link.as_str()), (CheckState::Passed, Some("Coverage 84%"), "https://coverage.example.com/acme-web/12"));
+        assert_eq!(pr.check_list.iter().find(|c| c.name == "deploy-preview").map(|c| c.state), Some(CheckState::Skipped));
+        // An approval with no words is not a comment.
+        assert!(pr.comments.is_empty());
+        assert_eq!(pr.row().label(), "PR #12 open");
+    }
+
+    #[test]
+    fn a_failing_check_comes_first_and_a_running_one_spins() {
+        let pr = parse_pr_view(include_str!("../../../fixtures/gh/pr-failing.json")).expect("parses");
+        let order: Vec<(&str, CheckState, &str)> = pr.check_list.iter().map(|c| (c.name.as_str(), c.state, c.conclusion.as_str())).collect();
+        assert_eq!(
+            order,
+            vec![("test", CheckState::Failing, "FAILURE"), ("lint", CheckState::Running, "IN_PROGRESS"), ("build", CheckState::Passed, "SUCCESS")]
+        );
+        assert_eq!(pr.check_list[0].link, "https://github.com/acme/acme-web/actions/runs/101/job/202");
+        assert_eq!(pr.checks, Some((1, 3, true)));
+        assert_eq!(pr.row().label(), "PR #12 · 1 check failing");
+    }
+
+    #[test]
+    fn reviews_asking_for_changes_lead_the_comments() {
+        let pr = parse_pr_view(include_str!("../../../fixtures/gh/pr-failing.json")).expect("parses");
+        // The empty COMMENTED review says nothing and is left out.
+        assert_eq!(pr.comments.len(), 2);
+        assert_eq!(pr.comments[0].kind, CommentKind::Review(ReviewVerdict::ChangesRequested));
+        assert_eq!(pr.comments[0].author, "ada");
+        assert!(pr.comments[0].body.starts_with("The total still truncates"));
+        assert_eq!((pr.comments[1].kind.clone(), pr.comments[1].author.as_str()), (CommentKind::Comment, "lin"));
+        assert_eq!(pr.comments[1].url, "https://github.com/acme/acme-web/pull/12#issuecomment-1");
+    }
+
+    #[test]
+    fn line_comments_name_their_file_line_and_side() {
+        let lines = parse_line_comments(include_str!("../../../fixtures/gh/pr-line-comments.json"));
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].kind, CommentKind::Line { path: "src/lib.rs".into(), line: 7, old_side: false });
+        assert_eq!((lines[0].author.as_str(), lines[0].url.as_str()), ("ada", "https://github.com/acme/acme-web/pull/12#discussion_r9001"));
+        // Outdated (`line` null): the original line, on the old side.
+        assert_eq!(lines[1].kind, CommentKind::Line { path: "src/lib.rs".into(), line: 2, old_side: true });
+        // Joined with the view: the review asking for changes still leads,
+        // the rest by time.
+        let pr = pr_fixture("failing").expect("parses");
+        let kinds: Vec<&str> = pr.comments.iter().map(|c| match c.kind {
+            CommentKind::Review(_) => "review",
+            CommentKind::Comment => "comment",
+            CommentKind::Line { .. } => "line",
+        }).collect();
+        assert_eq!(kinds, vec!["review", "line", "line", "comment"]);
+        assert!(parse_line_comments("not json").is_empty());
+    }
+
+    #[test]
+    fn a_merged_pr_and_a_closed_one() {
+        let merged = pr_fixture("merged").expect("parses");
+        assert_eq!((merged.state, merged.checks), (PrState::Merged, Some((2, 2, false))));
+        assert_eq!(merged.row().label(), "PR #12 merged");
+        let closed = pr_fixture("closed").expect("parses");
+        assert_eq!((closed.state, closed.number, closed.checks), (PrState::Closed, 11, None));
+        assert_eq!(closed.comments.len(), 1);
+        assert_eq!(closed.row().label(), "PR #11 closed");
+    }
+
+    #[test]
+    fn a_draft_with_a_failing_status() {
+        let draft = pr_fixture("draft").expect("parses");
+        assert_eq!((draft.state, draft.branch.as_str()), (PrState::Draft, "wip-router"));
+        // A commit status in ERROR fails; one PENDING runs.
+        assert_eq!(draft.check_list.iter().map(|c| (c.name.as_str(), c.state)).collect::<Vec<_>>(), vec![("ci/lint", CheckState::Failing), ("ci/build", CheckState::Running)]);
+        assert_eq!(draft.check_list[0].summary.as_deref(), Some("2 lint errors"));
+        assert_eq!(draft.row().label(), "PR #15 · 1 check failing");
+        assert_eq!(RowPr { failing: 0, ..draft.row() }.label(), "PR #15 draft");
+        assert_eq!(RowPr { failing: 2, ..draft.row() }.label(), "PR #15 · 2 checks failing");
+        // Merged or closed, a failing check is no longer the news.
+        assert_eq!(RowPr { number: 1, state: PrState::Merged, failing: 1 }.label(), "PR #1 merged");
+    }
+
+    #[test]
+    fn gh_is_never_run_under_test() {
+        assert!(pr_for_branch(Path::new(".")).is_none());
+        assert!(create_pr(Path::new("."), "main", "x", "t", "b", true).is_err());
+        assert!(pr_fixture("nope").is_none());
     }
 
     /// A temp directory removed on drop (no `tempfile` in this crate).

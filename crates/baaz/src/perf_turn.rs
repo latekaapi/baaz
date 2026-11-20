@@ -119,6 +119,7 @@ pub(crate) fn sidebar_fixture() -> (Vec<SessionEntry>, HashMap<String, IndexEntr
             unread: false,
             branch: None,
             tasks_running: 0,
+            pull_request: None,
         });
         index.insert(
             id,

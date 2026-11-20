@@ -194,6 +194,9 @@ pub(crate) struct SessionList {
     /// a batch of everything it hid; one archive confirm is a batch of one
     /// archived session. One Undo restores the whole batch.
     pub(crate) undo_stack: Vec<UndoBatch>,
+    /// What each pull request read said, by folder and branch (docs/82
+    /// 7.3): the rows look theirs up when the visible list is built.
+    pub(crate) pull_requests: crate::right_pr::PrBook,
 }
 
 impl EventEmitter<SessionListEvent> for SessionList {}
@@ -225,6 +228,7 @@ impl SessionList {
             byline_last_start: HashMap::new(),
             titled: HashSet::new(),
             undo_stack: Vec::new(),
+            pull_requests: crate::right_pr::PrBook::default(),
         }
     }
 
@@ -235,6 +239,15 @@ impl SessionList {
     pub(crate) fn invalidate(&mut self, cx: &mut Context<Self>) {
         self.epoch = self.epoch.wrapping_add(1);
         Self::say(SessionListEvent::Changed, cx);
+    }
+
+    /// A pull request read for `folder` on `branch` (`None`: none there):
+    /// the book takes it and, when that changed what a row shows, the
+    /// list is rebuilt (docs/82 7.3).
+    pub(crate) fn set_pull_request(&mut self, folder: &str, branch: &str, pr: Option<baaz_core::git_ops::RowPr>, cx: &mut Context<Self>) {
+        if self.pull_requests.set(folder, branch, pr) {
+            self.invalidate(cx);
+        }
     }
 
     /// Say what changed: the event for the list's subscribers (the sidebar
@@ -288,6 +301,7 @@ impl SessionList {
                 };
                 let mut row = after;
                 row.tasks_running = visible[at].tasks_running;
+                row.pull_request = visible[at].pull_request;
                 if row.updated == visible[at].updated {
                     visible[at] = row;
                 } else {
@@ -410,6 +424,14 @@ impl SessionList {
                 if let Some((_, count)) = tasks.iter().find(|(id, _)| *id == row.id) {
                     row.tasks_running = *count;
                 }
+            }
+        }
+        // Each row's pull request (docs/82 7.3), from the book the Changes
+        // pane's reads fill: the rows of that folder on that branch. A
+        // book change invalidates the list ([`Self::set_pull_request`]).
+        if !self.pull_requests.is_empty() {
+            for row in &mut rows {
+                row.pull_request = self.pull_requests.lookup(row.workspace.as_deref(), sidebar::shown_branch(row).as_deref());
             }
         }
         cache.key = Some((self.epoch, active, pending, group_by, closed, expanded, tasks));
@@ -1050,6 +1072,7 @@ impl SessionList {
                         unread: false,
                         branch: None,
                         tasks_running: 0,
+                        pull_request: None,
                     });
                     changed = true;
                 }

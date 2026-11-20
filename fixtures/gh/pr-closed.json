@@ -1,0 +1,13 @@
+{
+  "comments": [
+    {"author": {"login": "ada"}, "authorAssociation": "MEMBER", "body": "Superseded by #14.", "createdAt": "2026-11-19T09:00:00Z", "id": "IC_9", "includesCreatedEdit": false, "isMinimized": false, "minimizedReason": "", "reactionGroups": [], "url": "https://github.com/acme/acme-web/pull/11#issuecomment-9", "viewerDidAuthor": false}
+  ],
+  "headRefName": "old-checkout",
+  "isDraft": false,
+  "number": 11,
+  "reviews": [],
+  "state": "CLOSED",
+  "statusCheckRollup": [],
+  "title": "Truncate cents in the checkout total",
+  "url": "https://github.com/acme/acme-web/pull/11"
+}

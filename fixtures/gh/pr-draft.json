@@ -1,0 +1,14 @@
+{
+  "comments": [],
+  "headRefName": "wip-router",
+  "isDraft": true,
+  "number": 15,
+  "reviews": [],
+  "state": "OPEN",
+  "statusCheckRollup": [
+    {"__typename": "StatusContext", "context": "ci/build", "description": "Waiting for a runner", "startedAt": "2026-11-21T08:00:00Z", "state": "PENDING", "targetUrl": "https://ci.example.com/acme-web/15"},
+    {"__typename": "StatusContext", "context": "ci/lint", "description": "2 lint errors", "startedAt": "2026-11-21T08:00:00Z", "state": "ERROR", "targetUrl": "https://ci.example.com/acme-web/15/lint"}
+  ],
+  "title": "Route the storefront through one table",
+  "url": "https://github.com/acme/acme-web/pull/15"
+}

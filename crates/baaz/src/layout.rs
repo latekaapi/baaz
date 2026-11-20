@@ -265,6 +265,7 @@ mod tests {
             agents: Default::default(),
             adblock: Default::default(),
             worktree_branch_prefix: Some("lk/".into()),
+            archive_on_merge: true,
         };
         let text = serde_json::to_string(&stored).unwrap();
         assert!(text.contains("\"worktreeBranchPrefix\":\"lk/\""));
@@ -288,7 +289,9 @@ mod tests {
         assert!(text.contains("\"sessionsPane\":{\"open\":true,\"kind\":\"files\"}"));
         assert!(text.contains("\"searchEngine\":\"kagi\""));
         assert!(text.contains("\"downloadDir\":\"/tmp/baaz-downloads\""));
+        assert!(text.contains("\"archiveOnMerge\":true"));
         let back: Layout = serde_json::from_str(&text).unwrap();
+        assert!(back.archive_on_merge);
         assert_eq!(back.group_by, Some(GroupBy::Project));
         assert_eq!(back.closed_groups, vec!["other".to_owned()]);
         assert_eq!(back.expanded_groups, vec!["p-baaz".to_owned()]);

@@ -1,0 +1,79 @@
+{
+  "comments": [
+    {
+      "author": {"id": "U_2", "is_bot": false, "login": "lin", "name": "Lin"},
+      "authorAssociation": "MEMBER",
+      "body": "Could we add a test for a total of 0.005?\nThe rounding edge is where this broke last time.",
+      "createdAt": "2026-11-20T10:12:00Z",
+      "id": "IC_1",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/acme/acme-web/pull/12#issuecomment-1",
+      "viewerDidAuthor": false
+    }
+  ],
+  "headRefName": "fix-checkout",
+  "isDraft": false,
+  "number": 12,
+  "reviews": [
+    {
+      "author": {"login": "ada"},
+      "authorAssociation": "MEMBER",
+      "body": "The total still truncates odd cents. Please round instead of dividing.",
+      "commit": {"oid": "4f1c2d0"},
+      "id": "PRR_1",
+      "includesCreatedEdit": false,
+      "reactionGroups": [],
+      "state": "CHANGES_REQUESTED",
+      "submittedAt": "2026-11-20T10:05:00Z"
+    },
+    {
+      "author": {"login": "lin"},
+      "authorAssociation": "MEMBER",
+      "body": "",
+      "commit": {"oid": "4f1c2d0"},
+      "id": "PRR_2",
+      "includesCreatedEdit": false,
+      "reactionGroups": [],
+      "state": "COMMENTED",
+      "submittedAt": "2026-11-20T10:06:00Z"
+    }
+  ],
+  "state": "OPEN",
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-11-20T10:02:00Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/acme/acme-web/actions/runs/101/job/201",
+      "name": "build",
+      "startedAt": "2026-11-20T10:00:00Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-11-20T10:04:00Z",
+      "conclusion": "FAILURE",
+      "detailsUrl": "https://github.com/acme/acme-web/actions/runs/101/job/202",
+      "name": "test",
+      "startedAt": "2026-11-20T10:00:00Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "0001-01-01T00:00:00Z",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/acme/acme-web/actions/runs/101/job/203",
+      "name": "lint",
+      "startedAt": "2026-11-20T10:00:00Z",
+      "status": "IN_PROGRESS",
+      "workflowName": "CI"
+    }
+  ],
+  "title": "Round cents in the checkout total",
+  "url": "https://github.com/acme/acme-web/pull/12"
+}

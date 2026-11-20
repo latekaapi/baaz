@@ -134,6 +134,8 @@
 //! | `tick:<path>` | tick that changed file for the commit in All changes (docs/82 7.2; a setter, never a toggle); no tree read or no such changed row fails the step, free |
 //! | `untick:<path>` | untick it (the same setter, off); the same failures, free |
 //! | `changes-branch:<name>` | capture aid: the capture's fixture tree on that branch, tracking `origin/<name>` and level with it (so `main` is the default branch); outside a capture, or empty, fails the step, free |
+//! | `pr-fixture:<name>` | capture aid (docs/82 7.3): a recorded `gh` answer (`passing`, `failing`, `merged`, `closed`, `draft`; fixtures/gh) as the PR of the pane's root — the fixture tree clean on the PR's branch, the card at the Changes foot, and the rows' book on that root and branch. Never runs `gh`; outside a capture, with no root, or an unknown name fails the step, free |
+//! | `pr-details:<name>` | capture aid: `pr-fixture:<name>` with Details open over Changes (the checks and review comments), free |
 //! | `new-branch` | open New branch…'s name field on the Changes foot (docs/82 7.2; idempotent); not on the default branch, or a foot without the branch line, fails the step, free |
 //! | `amend:<on\|off>` | set "Amend last commit" in the commit box (docs/82 7.2; a setter); no changes, or Amend not offered (HEAD on a remote), fails the step, free |
 //! | `changes-scope:<all\|session\|last>` | the Changes pane on that scope (docs/82 6.3): a capture loads the fixture checkpoint index (two finished turns over the fixture tree) — no refs are read or written; no open session or an unknown word fails the step, free |
@@ -433,6 +435,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "tick", run: |this, rest, _, cx| this.step_changes_tick(rest, true, cx) },
     WindowVerb { verb: "untick", run: |this, rest, _, cx| this.step_changes_tick(rest, false, cx) },
     WindowVerb { verb: "changes-branch", run: |this, rest, _, cx| this.step_changes_branch(rest, cx) },
+    WindowVerb { verb: "pr-fixture", run: |this, rest, _, cx| this.step_pr_fixture(rest, false, cx) },
+    WindowVerb { verb: "pr-details", run: |this, rest, _, cx| this.step_pr_fixture(rest, true, cx) },
     WindowVerb { verb: "new-branch", run: |this, _, window, cx| this.step_new_branch(window, cx) },
     WindowVerb { verb: "amend", run: |this, rest, _, cx| this.step_changes_amend(rest, cx) },
     WindowVerb { verb: "tasks-fixture", run: |this, rest, _, cx| this.step_tasks_fixture(rest, cx) },
