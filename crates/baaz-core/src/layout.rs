@@ -549,6 +549,37 @@ pub struct Layout {
     /// Settings › Browser › Ad blocking (R4): on/off and the allowed sites.
     #[serde(rename = "adblock", default, skip_serializing_if = "crate::layout::is_default_adblock")]
     pub adblock: crate::browser_prefs::AdblockPrefs,
+    /// Settings › General › Worktrees (docs/82 6.1): what a session's
+    /// worktree branch starts with. `None` is
+    /// [`crate::worktrees::DEFAULT_BRANCH_PREFIX`]; read it through
+    /// [`Layout::worktree_branch_prefix`].
+    #[serde(rename = "worktreeBranchPrefix", default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch_prefix: Option<String>,
+}
+
+impl Layout {
+    /// The branch prefix a new worktree's branch takes: the stored one, else
+    /// [`crate::worktrees::DEFAULT_BRANCH_PREFIX`].
+    pub fn worktree_branch_prefix(&self) -> String {
+        self.worktree_branch_prefix
+            .as_deref()
+            .and_then(normalize_branch_prefix)
+            .unwrap_or_else(|| crate::worktrees::DEFAULT_BRANCH_PREFIX.to_owned())
+    }
+}
+
+/// A branch prefix as typed, made safe for `git branch`: trimmed, spaces
+/// to `-`, only ascii letters, digits and `/ - _ .`; `None` when nothing
+/// usable is left (the default then stands).
+pub fn normalize_branch_prefix(typed: &str) -> Option<String> {
+    let cleaned: String = typed
+        .trim()
+        .chars()
+        .map(|c| if c.is_whitespace() { '-' } else { c })
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+        .collect();
+    let cleaned = cleaned.trim_start_matches(['/', '-', '.']).replace("..", ".").replace("//", "/");
+    (!cleaned.is_empty()).then_some(cleaned)
 }
 
 /// Whether ad blocking is at its defaults (nothing stored).
@@ -676,6 +707,7 @@ impl Default for Layout {
             assistant: Default::default(),
             agents: Default::default(),
             adblock: Default::default(),
+            worktree_branch_prefix: None,
         }
     }
 }

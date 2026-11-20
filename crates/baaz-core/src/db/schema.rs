@@ -15,7 +15,10 @@
 //! * `provider`: the three providers, for the foreign keys.
 //! * `account`: who paid. Empty until something records an account per
 //!   turn; `turn.account_id` points here.
-//! * `worktree`: a session's worktree. Empty until 6.1 creates them.
+//! * `worktree`: a session's worktree (docs/82 6.1, [`crate::worktrees`]):
+//!   its folder, branch, the commit it was cut from, the project root it
+//!   belongs to, its block of ten ports (unique among rows) and when its
+//!   setup script ran. `session.worktree_id` points here.
 //! * `session`: one row per session, keyed `(provider_key,
 //!   provider_session_id)`: the same id under two providers is two rows
 //!   (D-10). `id` is Baaz's own uuid, what every child row points at.
@@ -51,7 +54,7 @@
 use rusqlite::{params, Connection, Transaction};
 
 /// The schema this build writes.
-pub const VERSION: i32 = 1;
+pub const VERSION: i32 = 2;
 
 /// Step 1: every table.
 const V1: &str = "
@@ -174,6 +177,18 @@ INSERT INTO provider(key, label) VALUES
     ('muse', 'Muse'), ('claude-code', 'Claude Code'), ('codex', 'Codex');
 ";
 
+/// Step 2 (docs/82 6.1): what a worktree row needs beyond its path and
+/// branch. `port` is the first of the worktree's block of ten; two live
+/// rows never share one.
+const V2: &str = "
+ALTER TABLE worktree ADD COLUMN project_root TEXT;
+ALTER TABLE worktree ADD COLUMN base TEXT;
+ALTER TABLE worktree ADD COLUMN port INTEGER;
+ALTER TABLE worktree ADD COLUMN created_at INTEGER;
+ALTER TABLE worktree ADD COLUMN setup_at INTEGER;
+CREATE UNIQUE INDEX worktree_by_port ON worktree(port);
+";
+
 /// Bring `conn` to [`VERSION`]: the ledger's own versions first, then every
 /// step this file has not run, each in its own transaction.
 pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
@@ -198,6 +213,12 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
             copy_ledger(&tx)?;
         }
         tx.pragma_update(None, "user_version", 1)?;
+        tx.commit()?;
+    }
+    if version < 2 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V2)?;
+        tx.pragma_update(None, "user_version", 2)?;
         tx.commit()?;
     }
     Ok(())

@@ -51,3 +51,4 @@ pub mod tier;
 pub mod titles;
 pub mod usage;
 pub mod utility;
+pub mod worktrees;

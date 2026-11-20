@@ -39,6 +39,7 @@ pub mod json_import;
 pub mod schema;
 pub mod sessions;
 pub mod turns;
+pub mod worktrees;
 
 thread_local! {
     /// Set on the thread that runs the window: the UI thread

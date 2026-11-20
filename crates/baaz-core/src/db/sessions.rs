@@ -101,11 +101,17 @@ fn any_row(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
 }
 
 /// Move everything `from` holds onto `into` and delete `from`: the
-/// window's facts (when `into` has none), its turns and its attachments.
+/// window's facts (when `into` has none), its worktree (likewise), its
+/// turns and its attachments.
 fn absorb(conn: &Connection, from: &str, into: &str) -> rusqlite::Result<()> {
     if from == into {
         return Ok(());
     }
+    conn.execute(
+        "UPDATE session SET worktree_id = (SELECT worktree_id FROM session WHERE id = ?2)
+         WHERE id = ?1 AND worktree_id IS NULL",
+        params![into, from],
+    )?;
     let into_has_meta: bool =
         conn.query_row("SELECT has_meta FROM session WHERE id = ?1", params![into], |row| row.get(0))?;
     if !into_has_meta {

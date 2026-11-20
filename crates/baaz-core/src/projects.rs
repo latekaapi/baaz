@@ -27,8 +27,9 @@ fn default_version() -> u32 {
 }
 
 /// The per-project defaults a new session starts with (decision D35): the
-/// last-used model, effort and approval mode. `--approval-mode` still wins
-/// over the stored mode for the session it starts.
+/// last-used model, effort and approval mode, and whether it starts in a
+/// worktree (docs/82 6.1). `--approval-mode` still wins over the stored
+/// mode for the session it starts.
 ///
 /// All three are keyed by provider wire id (`"muse"`, `"claude-code"`,
 /// `"codex"`): a pick on one lane never becomes another lane's start model,
@@ -52,6 +53,10 @@ pub struct ProjectDefaults {
     /// The approval mode per provider, as [`mode_name`] spells it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub modes: std::collections::BTreeMap<String, String>,
+    /// Whether a new session here starts in its own worktree (docs/82
+    /// 6.1). The project's own setting, never a last pick.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worktree: bool,
 }
 
 /// An approval mode from its stored name (`allowAll`, `onRequest`,
@@ -92,6 +97,8 @@ struct RawProjectDefaults {
     modes: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     approval_mode: Option<String>,
+    #[serde(default)]
+    worktree: bool,
 }
 
 impl<'de> Deserialize<'de> for ProjectDefaults {
@@ -126,7 +133,7 @@ impl<'de> Deserialize<'de> for ProjectDefaults {
                 }
             }
         }
-        Ok(Self { models, efforts, modes })
+        Ok(Self { models, efforts, modes, worktree: raw.worktree })
     }
 }
 
