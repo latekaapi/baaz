@@ -497,7 +497,7 @@ pub(super) fn chain_muse_entry(id: &str, label: &str, turns: u64) -> crate::side
         last_error: None,
         unread: false,
         branch: None,
-        terminals_running: 0,
+        tasks_running: 0,
     }
 }
 

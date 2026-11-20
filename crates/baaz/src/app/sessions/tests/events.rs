@@ -1666,3 +1666,56 @@ fn a_streamed_entry_redraws_its_view_and_never_the_root(cx: &mut gpui::TestAppCo
     });
     lane_restore(state);
 }
+
+/// docs/82 6.5: a session whose agent's terminal task still runs carries
+/// the count on its row, and the row's "N running" opens that session with
+/// the right pane on its Tasks.
+#[gpui::test]
+fn a_rows_running_tasks_open_that_session_on_its_tasks(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("tasks-row");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, _| {
+            harness.providers = harness.providers.with_opens_of(&parking_factory());
+            mark_muse_up(harness);
+        });
+    });
+    let (first, _, _) = open_quiet_lane(vc, &baaz);
+    // A session that has talked (an unsent draft goes when another opens).
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, cx| {
+            harness.session_list.update(cx, |list, _| list.provider_sessions.get_mut(&first).expect("the record").turns = 1);
+            harness.merge_provider_rows(cx);
+        });
+    });
+    let (second, _, _) = open_quiet_lane(vc, &baaz);
+    assert_ne!(first, second);
+    // The first session's agent left a dev server running.
+    vc.update(|_, cx| {
+        let host = baaz.read(cx).terminal_host(cx);
+        host.update(cx, |host, _| {
+            host.tasks.record(&first, "pnpm dev", "t9", 0);
+        });
+    });
+    vc.update(|_, cx| {
+        let rows = baaz.read(cx).visible_sessions(cx);
+        let count = |id: &str| rows.iter().find(|entry| entry.id == id).map(|entry| entry.tasks_running);
+        assert_eq!(count(&first), Some(1), "the row counts its running task");
+        assert_eq!(count(&second).unwrap_or(0), 0, "the other row says nothing");
+    });
+    vc.update(|window, cx| {
+        baaz.update(cx, |harness, cx| {
+            harness.sidebar_intent(aui::screens::sidebar::SidebarIntent::RowAction(first.clone().into(), aui::nav::RowAction::Tasks), window, cx)
+        })
+    });
+    vc.run_until_parked();
+    vc.update(|_, cx| {
+        assert_eq!(baaz.read(cx).active_id(cx).as_deref(), Some(first.as_str()), "the click opens its session");
+        let layout = crate::layout::Layout::get(cx);
+        assert!(layout.right_open, "the pane opens");
+        assert_eq!(layout.right_kind, Some(crate::layout::RightKind::Tasks), "on Tasks");
+    });
+    lane_restore(state);
+}

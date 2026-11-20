@@ -3,8 +3,10 @@
 //! One [`TerminalHost`] lives on [`Harness`][crate::app::Harness] as a gpui
 //! entity. Each tab holds an [`aui_terminal::TerminalSession`]
 //! over the library's pty backend (`$SHELL -l -i`, cwd the project root,
-//! shell integration carrying a per-tab nonce), plus a title, an owner and
-//! the session the tab was opened from, if any.
+//! shell integration carrying a per-tab nonce), plus a title, an owner,
+//! the session the tab was opened from, if any, and the shell's pid. The
+//! host also keeps the task book: what each session's agent started in
+//! these tabs ([`super::tasks`], docs/82 6.5).
 //!
 //! Tabs belong to the project and outlive session switches (D43). Nothing
 //! persists across app restarts.
@@ -12,8 +14,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use std::time::Instant;
+
 use aui_terminal::{ScriptChunk, TermEvent, TerminalBackend, TerminalSession};
 use gpui::{App, AppContext as _, Context, Entity};
+
+use super::tasks::{listening_ports, Seen, TaskBook, TaskRow, POLL_EVERY, PORTS_EVERY, QUIT_GRACE, STOP_GRACE};
 
 /// A session id, as [`SessionView`][crate::session::SessionView] spells it.
 pub type SessionId = String;
@@ -45,6 +51,9 @@ pub struct TerminalTab {
     pub origin_session: Option<SessionId>,
     /// The emulator behind the tab.
     pub session: Entity<TerminalSession>,
+    /// The tab's shell, when it is a real pty: the session leader whose
+    /// foreground group a task's Stop ends (docs/82 6.5).
+    pub shell_pid: Option<u32>,
 }
 
 /// The pure facts [`pick_tab`] decides on: one row per tab the host holds.
@@ -193,12 +202,16 @@ pub struct TerminalHost {
     tabs: Vec<TerminalTab>,
     next_id: u64,
     active: HashMap<PathBuf, String>,
+    /// What each session's agent started in these tabs (docs/82 6.5).
+    pub(crate) tasks: TaskBook,
+    /// The task poll is running ([`Self::ensure_task_poll`]).
+    task_polling: bool,
 }
 
 impl TerminalHost {
     /// An empty host: no tabs anywhere.
     pub fn new() -> Self {
-        Self { tabs: Vec::new(), next_id: 1, active: HashMap::new() }
+        Self { tabs: Vec::new(), next_id: 1, active: HashMap::new(), tasks: TaskBook::default(), task_polling: false }
     }
 
     /// Every tab of one project, in open order.
@@ -278,24 +291,6 @@ impl TerminalHost {
             .collect()
     }
 
-    /// How many busy tabs each origin session holds, oldest session first:
-    /// what stamps the sidebar hint (D52). Tabs opened with no session
-    /// (or idle ones) count nowhere.
-    pub fn busy_counts(&self, cx: &App) -> Vec<(SessionId, u32)> {
-        let mut counts: HashMap<&SessionId, u32> = HashMap::new();
-        for tab in &self.tabs {
-            let Some(origin) = tab.origin_session.as_ref() else { continue };
-            let session = tab.session.read(cx);
-            if session.alt_screen() || session.blocks().iter().any(|block| block.running()) {
-                *counts.entry(origin).or_default() += 1;
-            }
-        }
-        let mut counts: Vec<(SessionId, u32)> =
-            counts.into_iter().map(|(origin, count)| (origin.clone(), count)).collect();
-        counts.sort_by(|a, b| a.0.cmp(&b.0));
-        counts
-    }
-
     /// Open a tab on the project's root: `$SHELL -l -i` with shell
     /// integration carrying a per-tab nonce (D45). A shell that fails to
     /// spawn still opens its tab; its grid reports the exit.
@@ -342,8 +337,9 @@ impl TerminalHost {
         let nonce = config.nonce().to_owned();
         let mut pty = aui_terminal::Pty::new();
         let _ = pty.spawn_config(&config);
+        let shell_pid = pty.child_pid();
         let session = TerminalSession::new(Box::new(pty), 100, 32).with_nonce(&nonce);
-        self.push(project_root, cwd, title, owner, origin_session, session, cx)
+        self.push(project_root, cwd, title, owner, origin_session, session, shell_pid, cx)
     }
 
     #[cfg(feature = "probe")]
@@ -368,7 +364,7 @@ impl TerminalHost {
         cx: &mut Context<Self>,
     ) -> String {
         let session = TerminalSession::new(Box::new(ScriptBackend::new(script)), 100, 32).with_nonce(nonce);
-        self.push(project_root, project_root, title, owner, origin_session, session, cx)
+        self.push(project_root, project_root, title, owner, origin_session, session, None, cx)
     }
 
     /// Open a tab over an already-built session: the service tests' route
@@ -387,7 +383,26 @@ impl TerminalHost {
         session: TerminalSession,
         cx: &mut Context<Self>,
     ) -> String {
-        self.push(project_root, project_root, title, owner, origin_session, session, cx)
+        self.push(project_root, project_root, title, owner, origin_session, session, None, cx)
+    }
+
+    /// Open a tab over a real pty spawned from `config`: the task tests'
+    /// route to a shell with no rc files of the owner's, whose foreground
+    /// group a Stop can end. Test-only, like [`open_session`](Self::open_session).
+    #[cfg(test)]
+    pub fn open_config(
+        &mut self,
+        project_root: &Path,
+        config: &aui_terminal::PtyConfig,
+        owner: TabOwner,
+        origin_session: Option<SessionId>,
+        cx: &mut Context<Self>,
+    ) -> String {
+        let mut pty = aui_terminal::Pty::new();
+        let _ = pty.spawn_config(config);
+        let shell_pid = pty.child_pid();
+        let session = TerminalSession::new(Box::new(pty), 100, 32).with_nonce(config.nonce());
+        self.push(project_root, project_root, "shell".to_owned(), owner, origin_session, session, shell_pid, cx)
     }
 
     #[cfg(feature = "probe")]
@@ -408,8 +423,9 @@ impl TerminalHost {
     }
 
     /// Close a tab. Dropping the session ends its reader thread and kills
-    /// its shell.
-    pub fn close(&mut self, id: &str) {
+    /// its shell; a task still running there ends with it. Notifies (the
+    /// dock and the Tasks view draw the tab list).
+    pub fn close(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(at) = self.tabs.iter().position(|tab| tab.id == id) {
             let tab = self.tabs.remove(at);
             if self.active.get(&tab.project_root).is_some_and(|active| active == id) {
@@ -423,13 +439,15 @@ impl TerminalHost {
                     }
                 }
             }
+            self.publish(true, cx);
         }
     }
 
-    /// Point the project's active tab at `id`.
-    pub fn activate(&mut self, id: &str) {
+    /// Point the project's active tab at `id`, and notify the dock.
+    pub fn activate(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(tab) = self.get(id) {
             self.active.insert(tab.project_root.clone(), id.to_owned());
+            self.publish(true, cx);
         }
     }
 
@@ -442,6 +460,7 @@ impl TerminalHost {
         owner: TabOwner,
         origin_session: Option<SessionId>,
         session: TerminalSession,
+        shell_pid: Option<u32>,
         cx: &mut Context<Self>,
     ) -> String {
         let id = format!("t{}", self.next_id);
@@ -455,9 +474,167 @@ impl TerminalHost {
             owner,
             origin_session,
             session: entity,
+            shell_pid,
         });
         self.active.insert(project_root.to_owned(), id.clone());
         id
+    }
+}
+
+// ── tasks (docs/82 6.5) ─────────────────────────────────────────────────
+
+impl TerminalHost {
+    /// Record a command `session`'s agent started in `tab` (its block will
+    /// be `block`) and make sure the poll follows it.
+    pub fn record_task(&mut self, session: &str, command: &str, tab: &str, block: usize, cx: &mut Context<Self>) {
+        self.tasks.record(session, command, tab, block);
+        self.ensure_task_poll(cx);
+    }
+
+    /// The foreground process group of `tab`'s shell — the command running
+    /// at its prompt — when the tab is a real pty and something runs there.
+    fn foreground_group(&self, tab: &str) -> Option<i32> {
+        let pid = i32::try_from(self.get(tab)?.shell_pid?).ok()?;
+        provider::runtime::foreground_group(pid)
+    }
+
+    /// Stop task `id`: end its process group (SIGTERM, SIGKILL after
+    /// [`STOP_GRACE`]) off the UI thread; the shell stays. The task reads
+    /// `stopped` once its block closes. `Err` when it is not running, its
+    /// tab is gone, or no group of its own runs in the tab's foreground —
+    /// then nothing was signalled.
+    pub fn stop_task(&mut self, id: u64, cx: &mut Context<Self>) -> Result<i32, String> {
+        let (tab, block) = self.tasks.stop_target(id)?;
+        let tab_state = self.get(&tab).ok_or_else(|| format!("tab {tab} is gone"))?;
+        // The task's own block must be what runs (or be about to form): a
+        // later command in the same tab is someone else's.
+        let blocks = tab_state.session.read(cx).blocks();
+        if blocks.get(block).is_some_and(|block| !block.running()) {
+            return Err(format!("task {id} has finished"));
+        }
+        let group = self.foreground_group(&tab).ok_or_else(|| format!("no process group of its own runs in tab {tab}"))?;
+        self.tasks.mark_stopping(id);
+        cx.background_spawn(async move {
+            provider::runtime::end_groups(&[group], STOP_GRACE);
+        })
+        .detach();
+        self.ensure_task_poll(cx);
+        Ok(group)
+    }
+
+    /// End every running task's group at once, waiting at most
+    /// [`QUIT_GRACE`] before SIGKILL: the quit path, so nothing the agent
+    /// started in a tab outlives Baaz (a server that ignores the hang-up
+    /// the closing pty sends). Blocking, briefly; only quit calls it.
+    pub fn end_all_tasks(&self, cx: &App) {
+        let groups: Vec<i32> = self
+            .tasks
+            .running()
+            .into_iter()
+            .filter(|(_, tab, block)| {
+                self.get(tab).is_some_and(|state| state.session.read(cx).blocks().get(*block).is_none_or(|block| block.running()))
+            })
+            .filter_map(|(_, tab, _)| self.foreground_group(&tab))
+            .collect();
+        if !groups.is_empty() {
+            provider::runtime::end_groups(&groups, QUIT_GRACE);
+        }
+    }
+
+    /// These sessions are gone: their finished tasks go (running ones stay
+    /// until they end).
+    pub fn forget_tasks(&mut self, sessions: &[String], cx: &mut Context<Self>) {
+        self.tasks.forget_finished(sessions);
+        self.ensure_task_poll(cx);
+    }
+
+    /// A session answers as `to` now: its tasks follow.
+    pub fn rekey_tasks(&mut self, from: &str, to: &str, cx: &mut Context<Self>) {
+        self.tasks.rekey(from, to);
+        self.ensure_task_poll(cx);
+    }
+
+    /// Run [`Self::poll_tasks`] now and every [`POLL_EVERY`] while it says
+    /// there is more to follow. Idempotent.
+    pub fn ensure_task_poll(&mut self, cx: &mut Context<Self>) {
+        if self.task_polling {
+            return;
+        }
+        self.task_polling = true;
+        cx.spawn(async move |this, cx| loop {
+            let more = this.update(cx, |host, cx| host.poll_tasks(cx)).unwrap_or(false);
+            if !more {
+                break;
+            }
+            cx.background_executor().timer(POLL_EVERY).await;
+        })
+        .detach();
+    }
+
+    /// One poll: read each running task's block (and its foreground group),
+    /// start a port lookup when the Tasks view looks and one is due, and
+    /// notify once when anything drawn changed — or every poll while the
+    /// view watches a running task, so its duration ticks. False when there
+    /// is nothing left to follow (the poll stops; it clears its own flag in
+    /// the same update, so a record that lands next restarts it).
+    pub fn poll_tasks(&mut self, cx: &mut Context<Self>) -> bool {
+        let more = self.publish(false, cx);
+        if !more {
+            self.task_polling = false;
+        }
+        more
+    }
+
+    /// The host's one notify: settle the task book against the tabs, start
+    /// a port lookup when due, and notify when `tabs_changed` (a tab closed
+    /// or the active one moved), when a task changed, or while the Tasks view
+    /// watches a running task (its duration ticks). True while something
+    /// is left to follow.
+    fn publish(&mut self, tabs_changed: bool, cx: &mut Context<Self>) -> bool {
+        let tabs = &self.tabs;
+        self.tasks.settle(|tab, block| {
+            let Some(state) = tabs.iter().find(|candidate| candidate.id == tab) else { return Seen::Gone };
+            // A tab the dock never drew has no reader thread: drain it here,
+            // as the service does for the runs it waits on.
+            let session = state.session.read(cx);
+            session.pump();
+            match session.blocks().get(block) {
+                None => Seen::NotYet,
+                Some(block) if block.running() => Seen::Running,
+                Some(block) => Seen::Finished { exit: block.exit, ended: block.ended },
+            }
+        });
+        for (id, tab, _) in self.tasks.running() {
+            let group = self.foreground_group(&tab);
+            self.tasks.set_group(id, group);
+        }
+        let watched = self.tasks.watched();
+        let running = self.tasks.any_running();
+        let ports_due = self.tasks.ports_at.is_none_or(|at| at.elapsed() >= PORTS_EVERY);
+        let groups = self.tasks.running_groups();
+        if watched && running && ports_due && !self.tasks.ports_in_flight && !groups.is_empty() {
+            self.tasks.ports_in_flight = true;
+            self.tasks.ports_at = Some(Instant::now());
+            cx.spawn(async move |this, cx| {
+                let ports = cx.background_spawn(async move { listening_ports(&groups) }).await;
+                let _ = this.update(cx, |host, _| {
+                    host.tasks.set_ports(&ports);
+                    host.tasks.ports_in_flight = false;
+                });
+            })
+            .detach();
+        }
+        if self.tasks.take_dirty() || tabs_changed || (watched && running) {
+            cx.notify();
+        }
+        running || self.tasks.ports_in_flight
+    }
+
+    /// `session`'s tasks now, newest first, for the Tasks view; marks the
+    /// view as watching, so running durations tick.
+    pub fn task_rows(&self, session: &str) -> Vec<TaskRow> {
+        self.tasks.watch();
+        self.tasks.rows(session, Instant::now())
     }
 }
 
@@ -686,22 +863,6 @@ mod tests {
             assert!(!host.busy(cx, &done));
             assert_eq!(host.running_command(cx, &done), None);
             assert_eq!(host.running_command(cx, "t404"), None);
-        });
-    }
-
-    /// The sidebar's counts: one busy tab of the session counts once, a
-    /// finished one and a session-less one count nowhere.
-    #[gpui::test]
-    fn busy_counts_cover_only_busy_origin_tabs(cx: &mut gpui::TestAppContext) {
-        let host = cx.new(|_| TerminalHost::new());
-        let nonce = "counts-nonce";
-        cx.update(|cx| {
-            open_scripted(&host, cx, "sleep 300", Some("s1".into()), running_script(nonce, "sleep 300"), nonce);
-            open_scripted(&host, cx, "shell", Some("s1".into()), deterministic_script("d1"), "d1");
-            open_scripted(&host, cx, "sleep 60", None, running_script(nonce, "sleep 60"), nonce);
-        });
-        cx.read(|cx| {
-            assert_eq!(host.read(cx).busy_counts(cx), vec![("s1".to_owned(), 1)]);
         });
     }
 

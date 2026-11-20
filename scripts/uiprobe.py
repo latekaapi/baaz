@@ -990,6 +990,14 @@ ENTRIES.update({
     # Task 6.4's confirms, from fixture data: a capture takes no
     # checkpoints and runs in the owner's repository, so neither button can
     # apply anything (the session refuses: no checkpoints).
+    # Task 6.5: the Tasks screen from fixture tasks (a dev server running on
+    # :5173, a test run exited 0, a lint exited 1, a watcher stopped), with
+    # no process behind any of them; its empty state; and the sidebar row's
+    # "N running" in its trailing slot (the open session's, from the same
+    # fixture). No baselines yet.
+    "right-tasks":             _populated("right-width:440;tasks-fixture;right:tasks", replay=True),
+    "right-tasks-empty":       _populated("right-width:440;right:tasks", replay=True),
+    "sidebar-tasks-running":   _populated("tasks-fixture", replay=True),
     "undo-turn-confirm":       _populated("undo-turn:last", replay=True),
     "revert-file-confirm":     _populated("right-width:440;right:changes;revert-file:crates/baaz/src/layout.rs", replay=True),
     "right-files-preview":     _populated("right-width:440;right:files;files-select:src/lib.rs",

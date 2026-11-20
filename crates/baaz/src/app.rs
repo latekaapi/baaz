@@ -808,7 +808,11 @@ impl Harness {
         // starts there, sharing the window's floating layer for its toasts.
         let overlays = cx.new(|_| Overlays::default());
         let right_restored = layout::right_width(layout::Layout::get(cx));
-        let right_pane = cx.new(|cx| crate::right_pane::RightPane::new(right_restored, overlays.clone(), cx));
+        // The terminal's tabs: the dock draws them, the service serves the
+        // agent's tools over them, and the pane's Tasks screen lists what the
+        // agent started there (docs/82 6.5).
+        let terminal_host = cx.new(|_| TerminalHost::new());
+        let right_pane = cx.new(|cx| crate::right_pane::RightPane::new(right_restored, overlays.clone(), terminal_host.clone(), cx));
         // The Skills page, closed: it lists for the launch workspace until
         // the root pushes the current project.
         // It also holds where new sessions start: `--provider`, else the
@@ -832,7 +836,6 @@ impl Harness {
         // The terminal service binds before the first frame: its socket is
         // how the agent's routes reach the tabs, and a relay started
         // beside the app must find it already listening.
-        let terminal_host = cx.new(|_| TerminalHost::new());
         // Tests isolate the socket per Harness (a unique short dir plus a
         // unique fake pid): no two Harnesses in one test process share a
         // name, so none races for ownership.
@@ -4324,6 +4327,11 @@ impl Harness {
     /// A provider draft still opening has no child in any view yet: its
     /// open (`provider_open_work`) is told to hang the child up as soon as
     /// it answers, on the background thread, so no window is needed.
+    ///
+    /// Last, every command an agent started in Baaz's terminal that still
+    /// runs has its process group ended (docs/82 6.5): the closing ptys hang
+    /// their shells up, but a server that ignores the hang-up would outlive
+    /// the app.
     pub(crate) fn shutdown_provider_views(&mut self, cx: &mut Context<Self>) {
         self.open_state.provider_opens_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
         self.cancel_pending_switch(cx);
@@ -4331,6 +4339,7 @@ impl Harness {
         if let Some(shared) = self.providers.shared() {
             shared.shutdown();
         }
+        self.terminal_dock.read(cx).host().read(cx).end_all_tasks(cx);
     }
 
     /// The inline state for a provider that could not start (Z4, typed in
@@ -5749,8 +5758,8 @@ mod tests {
     }
 
     /// Task 4.4: the terminal dock is its own region entity. Picking a tab
-    /// on its strip lands on the dock and notifies the dock alone — the
-    /// root is never notified. (No frame is drawn here: the grid's first
+    /// on its strip lands on the dock's host, which notifies (the dock draws
+    /// it) — the root is never notified. (No frame is drawn here: the grid's first
     /// layout resizes its pty, which redraws inside the test draw and trips
     /// gpui's stale-arena panic; the root composes the dock uncached, so a
     /// notified dock re-renders on the next frame.)
@@ -5776,15 +5785,18 @@ mod tests {
         let active = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| dock.read(cx).host().read(cx).active_for(&root).map(|tab| tab.id.clone()));
         assert_eq!(active(vc).as_deref(), Some(tabs[1].as_str()), "the last open is active");
         vc.run_until_parked();
+        // The host owns the tabs and notifies for the pick (docs/82 6.5);
+        // the dock, which draws the host, redraws with it.
+        let host = vc.update(|_, cx| dock.read(cx).host().clone());
         let (dock_notes, root_notes) = (Rc::new(Cell::new(0usize)), Rc::new(Cell::new(0usize)));
         let _watch = vc.update(|_, cx| {
             let (d, r) = (dock_notes.clone(), root_notes.clone());
-            (cx.observe(&dock, move |_, _| d.set(d.get() + 1)), cx.observe(&baaz, move |_, _| r.set(r.get() + 1)))
+            (cx.observe(&host, move |_, _| d.set(d.get() + 1)), cx.observe(&baaz, move |_, _| r.set(r.get() + 1)))
         });
         vc.update(|_, cx| dock.update(cx, |dock, cx| dock.activate_tab(0, cx)));
         vc.run_until_parked();
         assert_eq!(active(vc).as_deref(), Some(tabs[0].as_str()), "the pick landed on the host");
-        assert!(dock_notes.get() > 0, "the pick notifies the dock");
+        assert!(dock_notes.get() > 0, "the pick notifies the host the dock draws");
         assert_eq!(root_notes.get(), 0, "the root is not notified for the dock's own state");
         restore_state(state);
     }
@@ -7477,27 +7489,30 @@ mod tests {
 
     /// docs/83 §6: the tab row carries Changes · Files · Page, each id
     /// parsing back to its kind and sitting at its strip index, the active
-    /// one lit; a previewed file adds one closable tab that is lit in Files'
-    /// place.
+    /// one lit; Tasks joins them while it shows or the session has tasks
+    /// (docs/82 6.5); a previewed file adds one closable tab that is lit in
+    /// Files' place.
     #[test]
-    fn the_tab_row_maps_to_the_three_kinds_and_the_open_file() {
+    fn the_tab_row_maps_to_the_kinds_and_the_open_file() {
         use crate::layout::RightKind;
-        let tabs = crate::right::pane_tab_list(RightKind::Files, None);
-        assert_eq!(tabs.len(), 3, "Changes, Files, Page — no more without an open file");
-        for (index, tab) in tabs.iter().enumerate() {
+        let tabs = crate::right::pane_tab_list(RightKind::Files, None, false);
+        assert_eq!(tabs.len(), 3, "Changes, Files, Page — no more without an open file or tasks");
+        let with_tasks = crate::right::pane_tab_list(RightKind::Tasks, None, true);
+        for (index, tab) in with_tasks.iter().enumerate() {
             let kind = RightKind::parse(&tab.id).unwrap_or_else(|| panic!("tab {:?} parses back to no kind", tab.id));
             assert_eq!(crate::right::screen_index(kind), index, "tab {:?} sits at its own index", tab.id);
             assert_eq!(kind.label(), tab.label.as_ref(), "tab {:?} is labelled as its kind", tab.id);
-            assert_eq!(tab.active, kind == RightKind::Files);
+            assert_eq!(tab.active, kind == RightKind::Tasks);
         }
+        assert_eq!(with_tasks.iter().map(|t| t.label.as_ref()).collect::<Vec<_>>(), ["Changes", "Files", "Page", "Tasks"]);
         assert_eq!(tabs.iter().map(|t| t.label.as_ref()).collect::<Vec<_>>(), ["Changes", "Files", "Page"]);
-        assert!(!tabs.iter().any(|tab| tab.closable), "the views' tabs are fixed");
+        assert!(!with_tasks.iter().any(|tab| tab.closable), "the views' tabs are fixed");
 
-        let tabs = crate::right::pane_tab_list(RightKind::Files, Some("right.rs".into()));
+        let tabs = crate::right::pane_tab_list(RightKind::Files, Some("right.rs".into()), false);
         assert_eq!(tabs.len(), 4);
         assert_eq!((tabs[3].id.as_ref(), tabs[3].label.as_ref(), tabs[3].active, tabs[3].closable), (crate::right::FILE_TAB, "right.rs", true, true));
         assert!(!tabs[1].active, "Files is not lit while its file shows");
-        let tabs = crate::right::pane_tab_list(RightKind::Changes, Some("right.rs".into()));
+        let tabs = crate::right::pane_tab_list(RightKind::Changes, Some("right.rs".into()), false);
         assert!(tabs[0].active && !tabs[3].active, "on Changes the file's tab waits unlit");
     }
 
@@ -8425,7 +8440,7 @@ mod tests {
                 title_pending: false,
                 last_ask: None,
                 branch: None,
-                terminals_running: 0,
+                tasks_running: 0,
                 local: false,
                 provisional: false,
                 turns_unknown: false,

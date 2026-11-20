@@ -716,9 +716,9 @@ impl Harness {
     }
 
     /// The right pane's view menu (docs/83 §6), anchored under the tab
-    /// row's `＋`: Changes, Files, Page — the shown one checked — open the
+    /// row's `＋`: Changes, Files, Page, Tasks — the shown one checked — open the
     /// pane on that view, as their tabs and the centre header's toggles do;
-    /// in Sessions a fourth row, Terminal, toggles the dock exactly as ⌃`
+    /// in Sessions a last row, Terminal, toggles the dock exactly as ⌃`
     /// does (checked while it stands open). Browse has no dock, so no row.
     pub(crate) fn render_right_views_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::RightViews) {
@@ -1749,7 +1749,7 @@ mod tests {
                             last_error: None,
                             unread: false,
                             branch: None,
-                            terminals_running: 0,
+                            tasks_running: 0,
                         });
                     });
                 }

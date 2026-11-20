@@ -17,8 +17,8 @@ impl Harness {
     }
 
     /// What a list read needs from the root: the open session, the awaited
-    /// click, whether either is an unsent draft, and whose terminal tabs run
-    /// a block ([`ListFacts`]). Read live on every call, so a read right
+    /// click, whether either is an unsent draft, and whose agent's terminal
+    /// tasks run ([`ListFacts`]). Read live on every call, so a read right
     /// after a switch sees the switch.
     pub(crate) fn list_facts(&self, cx: &gpui::App) -> ListFacts {
         let active = self.active_id(cx);
@@ -28,7 +28,7 @@ impl Harness {
             pending_unsent: pending.as_deref().is_some_and(|id| self.open_state.is_unsent(id)),
             active,
             pending,
-            terminals: self.terminal_dock.read(cx).host().read(cx).busy_counts(cx),
+            tasks: self.terminal_dock.read(cx).host().read(cx).tasks.running_counts(),
         }
     }
 
@@ -251,6 +251,7 @@ impl Harness {
         // Hidden sessions are never cached: a parked view of one is dropped,
         // and reopening (after Undo, or under "Show hidden") pages it afresh.
         self.registry.forget_where(|id| ids.iter().any(|hidden| hidden == id));
+        self.forget_terminal_tasks(&ids, cx);
         self.set_overrides(&ids, |meta| meta.hidden = true, cx);
         self.push_undo(
             UndoBatch::Hidden(ids),
@@ -258,6 +259,14 @@ impl Harness {
             detail.to_owned(),
             cx,
         );
+    }
+
+    /// The sessions left the list (hidden, archived, removed): their
+    /// finished terminal tasks go from the Tasks view; what still runs stays
+    /// listed until it ends (docs/82 6.5).
+    pub(crate) fn forget_terminal_tasks(&mut self, sessions: &[String], cx: &mut Context<Self>) {
+        let host = self.terminal_host(cx);
+        host.update(cx, |host, cx| host.forget_tasks(sessions, cx));
     }
 
     /// One toast with one Undo for one undoable batch, and a timer that takes
@@ -359,6 +368,7 @@ impl Harness {
         // Archived sessions are never cached: a parked view of one is
         // dropped, and reopening (after Undo) pages it afresh.
         self.registry.forget_where(|id| members.iter().any(|member| member == id));
+        self.forget_terminal_tasks(&members, cx);
         self.set_overrides(&members, |meta| meta.archived = true, cx);
         if was_active {
             self.active = None;

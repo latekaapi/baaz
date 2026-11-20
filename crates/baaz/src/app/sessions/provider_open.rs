@@ -259,7 +259,7 @@ impl Harness {
         };
         self.run_open(inline, work, move |this, result, window, cx| match result {
             Ok(open) => {
-                this.terminal_service.alias_session(&alias_from, &open.session_id);
+                this.terminal_service.alias_session(&alias_from, &open.session_id, cx);
                 this.finish_provider_open(open, window, cx);
             }
             Err(error) => {
@@ -612,7 +612,7 @@ impl Harness {
         let timed = request_id.clone();
         self.wire_call_in(cx, work, move |this, result, window, cx| match result {
             Ok(open) => {
-                this.terminal_service.alias_session(&request_id, &open.session_id);
+                this.terminal_service.alias_session(&request_id, &open.session_id, cx);
                 this.land_provider_draft(&request_id, open, window, cx);
             }
             Err(error) => {
@@ -1123,7 +1123,7 @@ impl Harness {
                 // answered another, the agent's tools must still reach this
                 // session's browser and terminal.
                 if open.session_id != retry_id {
-                    this.terminal_service.alias_session(&retry_id, &open.session_id);
+                    this.terminal_service.alias_session(&retry_id, &open.session_id, cx);
                 }
                 this.finish_provider_open(open, window, cx);
             }
@@ -1180,6 +1180,7 @@ impl Harness {
             self.open_state.provider_open_error = None;
         }
         self.registry.forget_where(|id| id == session_id);
+        self.forget_terminal_tasks(&[session_id.to_owned()], cx);
         self.session_list.update(cx, |list, _| list.sessions.retain(|entry| entry.id != session_id));
         self.session_list.update(cx, |list, _| list.overrides.remove(session_id));
         self.session_list.update(cx, |list, _| crate::provider_sessions::remove(&mut list.provider_sessions, session_id));
@@ -1323,7 +1324,7 @@ impl Harness {
                 // As on a reopen: a resume that answers another id keeps
                 // the fork's bridge reaching this session.
                 if open.session_id != registered {
-                    this.terminal_service.alias_session(&registered, &open.session_id);
+                    this.terminal_service.alias_session(&registered, &open.session_id, cx);
                 }
                 this.finish_provider_open(open, window, cx);
             }

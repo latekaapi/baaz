@@ -11,6 +11,7 @@ pub mod host;
 pub mod intents;
 pub mod run;
 pub mod service;
+pub mod tasks;
 
 pub use dock::{clamp_dock_height, DOCK_DEFAULT_HEIGHT};
 pub(crate) use dock::{DockFacts, TerminalDock, TerminalDockEvent};

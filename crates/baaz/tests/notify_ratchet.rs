@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 /// The ceiling on `cx.notify()` in `crates/baaz/src` (tests included, as
 /// the audit counts them). Lower it when a change lowers the count; never
 /// raise it to make room — give the new state an owner that notifies once.
-const MAX_NOTIFIES: usize = 294;
+const MAX_NOTIFIES: usize = 293;
 
 fn src() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")

@@ -157,11 +157,12 @@ pub struct SessionEntry {
     /// shown on the meta line. The live-change signal stays
     /// `session/branchChanged`; this is the index's last derived value.
     pub branch: Option<String>,
-    /// How many of this session's terminal tabs hold a running block right
-    /// now (D52). Stamped by the window from the terminal host on every
-    /// list build — never stored, never on the wire — and read by
-    /// the app's `SessionRow::summary` for the meta-line hint.
-    pub terminals_running: u32,
+    /// How many commands this session's agent started in Baaz's terminal
+    /// still run (docs/82 6.5). Stamped by the window from the terminal
+    /// host's task book on every list build — never stored, never on the
+    /// wire — and read by the app's `SessionEntry::summary` for the row's
+    /// "N running".
+    pub tasks_running: u32,
     /// Placed locally at `session/start`: the wire lists a session only
     /// after its log flushes on `turn/completed`, so the window holds this
     /// row meanwhile. [`merge_session_list`] keeps it until the wire lists
@@ -455,7 +456,7 @@ impl SessionEntry {
                 .map(str::to_owned),
             unread: meta.is_some_and(|m| m.unread),
             branch: session.branch.clone(),
-            terminals_running: 0,
+            tasks_running: 0,
         }
     }
 
@@ -552,7 +553,7 @@ impl SessionEntry {
                 .map(str::to_owned),
             unread: meta.is_some_and(|m| m.unread),
             branch: None,
-            terminals_running: 0,
+            tasks_running: 0,
         })
     }
 
@@ -638,7 +639,7 @@ impl SessionEntry {
                 .map(str::to_owned),
             unread: meta.is_some_and(|m| m.unread),
             branch: None,
-            terminals_running: 0,
+            tasks_running: 0,
         })
     }
 
@@ -693,7 +694,7 @@ impl SessionEntry {
             last_error: None,
             unread: false,
             branch: None,
-            terminals_running: 0,
+            tasks_running: 0,
         }
     }
 
@@ -801,18 +802,6 @@ impl SessionEntry {
     pub fn asked(&self) -> bool {
         self.question_text().is_some() || self.attention.contains(&Attention::InputPending)
     }
-
-    /// The sidebar's terminal hint (D52): `· 1 terminal running`,
-    /// pluralised. `None` while no tab from this session is busy, so the
-    /// meta line stays exactly as it was.
-    pub fn terminal_hint(count: u32) -> Option<String> {
-        match count {
-            0 => None,
-            1 => Some("· 1 terminal running".to_owned()),
-            n => Some(format!("· {n} terminals running")),
-        }
-    }
-
 }
 
 #[cfg(feature = "probe")]
@@ -899,7 +888,7 @@ pub fn local_started_row(
         last_error: None,
         unread: false,
         branch: None,
-        terminals_running: 0,
+        tasks_running: 0,
     }
 }
 
@@ -2149,7 +2138,7 @@ pub mod tests {
             last_error: None,
             unread: false,
             branch: None,
-            terminals_running: 0,
+            tasks_running: 0,
         }
     }
 

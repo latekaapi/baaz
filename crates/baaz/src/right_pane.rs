@@ -133,6 +133,8 @@ pub(crate) enum RightPaneEvent {
     ViewPullRequest(String),
     /// The tab row's ＋: the views menu.
     OpenViewsMenu,
+    /// A Tasks row: open the dock on the tab its command runs in.
+    OpenTerminalTab(String),
     /// What the Page's own controls ask (screenshot, annotate, console…).
     BrowserIntent(aui_webview::WebviewIntent),
 }
@@ -149,7 +151,8 @@ struct Refresh {
     watch: Option<(crate::right_watch::RightWatch, Task<()>)>,
 }
 
-/// The right pane: Changes · Files · Page on one strip under its tab row.
+/// The right pane: Changes · Files · Page · Tasks on one strip under its
+/// tab row.
 pub(crate) struct RightPane {
     /// The last git/diff/filesystem reads, with the roots and instants they
     /// were read for. [`right::render`] draws from this and never touches a
@@ -178,6 +181,9 @@ pub(crate) struct RightPane {
     /// and its two menus (the Files context menu, the Page row's Recent
     /// pages) as entries on the overlay stack.
     pub(crate) overlays: Entity<Overlays>,
+    /// The terminal's tabs and their task book (docs/82 6.5): the Tasks
+    /// screen draws the open session's tasks and stops them through it.
+    pub(crate) host: Entity<crate::terminal::TerminalHost>,
     /// What the root told the pane (see [`RightFacts`]).
     pub(crate) facts: RightFacts,
     /// The layout observer: drops the watch when the pane closes.
@@ -197,7 +203,7 @@ impl RightPane {
 
     /// The pane at boot: the divider at `width` (what `layout.json`
     /// restored), nothing read yet.
-    pub(crate) fn new(width: f32, overlays: Entity<Overlays>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(width: f32, overlays: Entity<Overlays>, host: Entity<crate::terminal::TerminalHost>, cx: &mut Context<Self>) -> Self {
         let layout = cx.observe_global::<layout::LayoutStore>(|this: &mut Self, cx| {
             this.drop_watch_if_idle(cx);
             cx.notify();
@@ -211,6 +217,7 @@ impl RightPane {
             focus: cx.focus_handle(),
             pending_pr_body: None,
             overlays,
+            host,
             facts: RightFacts::default(),
             _layout: layout,
         }
@@ -297,10 +304,10 @@ impl RightPane {
 
     // ── refresh ─────────────────────────────────────────────────────────
 
-    /// Whether `kind` shows data read from git or the filesystem: everything
-    /// but the Page.
+    /// Whether `kind` shows data read from git or the filesystem: Changes
+    /// and Files (the Page draws a webview, Tasks the terminal's book).
     fn needs_data(kind: RightKind) -> bool {
-        !matches!(kind, RightKind::Browser)
+        matches!(kind, RightKind::Changes | RightKind::Files)
     }
 
     /// Keep a file watch on `root` while the pane shows it: a change on disk
@@ -473,7 +480,7 @@ impl RightPane {
     }
 
     /// A two-finger sideways swipe in the pane: one screen along the strip
-    /// (Changes · Files · Page), stopping at either end.
+    /// (Changes · Files · Page · Tasks), stopping at either end.
     fn swipe_screen(&mut self, dir: i32, cx: &mut Context<Self>) {
         let at = right::screen_index(layout::right_kind(layout::Layout::get(cx))) as i32 + dir;
         if let Some(kind) = usize::try_from(at).ok().and_then(|i| RightKind::ALL.get(i).copied()) {
@@ -520,7 +527,7 @@ impl Focusable for RightPane {
 }
 
 impl Region for RightPane {
-    /// The shown screen's name ("Changes", "Files", "Page"). In Browse the
+    /// The shown screen's name ("Changes", "Files", "Page", "Tasks"). In Browse the
     /// Page kind shows Changes (B2a-H2b), and the title says so.
     fn title(&self, cx: &App) -> SharedString {
         let kind = layout::right_kind(layout::Layout::get(cx));
@@ -529,9 +536,9 @@ impl Region for RightPane {
     }
 
     /// The pane's tab row (docs/83 §6), for the shell to seat in the right
-    /// column's 44 px header in both modes: Changes · Files · Page, the
-    /// open file's tab while Files previews one (strip mode only), `＋`,
-    /// maximise and ✕.
+    /// column's 44 px header in both modes: Changes · Files · Page, Tasks
+    /// while it shows or the session has tasks, the open file's tab while
+    /// Files previews one (strip mode only), `＋`, maximise and ✕.
     fn actions(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let kind = layout::right_kind(layout::Layout::get(cx));
         let strip_mode = layout::Layout::get(cx).mode != layout::Mode::Browse && !self.facts.pending_neutral;
@@ -542,7 +549,8 @@ impl Region for RightPane {
         } else {
             None
         };
-        Some(self.render_tabs(kind, open_file, cx))
+        let tasks = self.tasks_tab_shown(kind, cx);
+        Some(self.render_tabs(kind, open_file, tasks, cx))
     }
 
     /// The pane draws over its Page while the strip slides (the page shows
@@ -596,7 +604,7 @@ impl Render for RightPane {
             drawn.set(rows);
         });
         // D6 (docs/43 §2.3): in Sessions the pane is a window onto one of
-        // three screens on a strip — Changes · Files · Page — under the
+        // four screens on a strip — Changes · Files · Page · Tasks — under the
         // pane's tab row (docs/83 §6), each with its own sub-header if any;
         // a tab or toggle slides the strip (240 ms ease-out), a two-finger
         // sideways swipe moves one screen. Browse keeps its pane's body as it
@@ -606,6 +614,9 @@ impl Render for RightPane {
             // tab, one page. The Page kind falls back to Changes; the header
             // keeps the stored kind, only the body falls back.
             let body_kind = if kind == RightKind::Browser { RightKind::Changes } else { kind };
+            if right_open && body_kind == RightKind::Tasks {
+                self.sync_tasks(cx);
+            }
             // B8c: "This session" is computed only while the pane shows
             // Changes (the walk is O(all blocks), so every other kind skips it).
             let session_edits = if right_open && body_kind == RightKind::Changes { self.session_edits(cx) } else { Vec::new() };
@@ -634,7 +645,10 @@ impl Render for RightPane {
         let index = right::screen_index(kind);
         let pos = aui::workbench::strip_position("right-strip", index, window, cx);
         self.strip_moving = aui::workbench::strip_moving(pos, index);
-        let visible = aui::workbench::strip_visible(pos, 3);
+        let visible = aui::workbench::strip_visible(pos, RightKind::ALL.len());
+        if visible(right::screen_index(RightKind::Tasks)) {
+            self.sync_tasks(cx);
+        }
         if visible(2) && self.cache.page_address.is_none() {
             self.ensure_page_address(window, cx);
         }
@@ -642,7 +656,7 @@ impl Render for RightPane {
         let page = self.facts.page.clone();
         let page_menu = self.page_menu_open(cx);
         let base_menu = self.base_menu_open(cx);
-        let mut screens: Vec<Option<AnyElement>> = Vec::with_capacity(3);
+        let mut screens: Vec<Option<AnyElement>> = Vec::with_capacity(RightKind::ALL.len());
         for (i, screen_kind) in RightKind::ALL.into_iter().enumerate() {
             if !visible(i) {
                 screens.push(None);
@@ -779,6 +793,12 @@ impl Harness {
             RightPaneEvent::DraftOnSide { root, kind, prompt } => self.draft_on_muse(root, *kind, prompt.clone(), cx),
             RightPaneEvent::ViewPullRequest(url) => self.view_pull_request(url.clone(), window, cx),
             RightPaneEvent::OpenViewsMenu => self.open_menu(crate::overlays::MenuKind::RightViews, cx),
+            RightPaneEvent::OpenTerminalTab(tab) => {
+                if !self.settings_open(cx) {
+                    let tab = tab.clone();
+                    self.with_terminal_dock(cx, |dock, cx| dock.open_tab(Some(tab), window, cx));
+                }
+            }
             RightPaneEvent::BrowserIntent(intent) => self.handle_browser_intent(intent.clone(), window, cx),
         }
     }

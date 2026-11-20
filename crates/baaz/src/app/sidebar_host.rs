@@ -508,6 +508,11 @@ impl Harness {
                     self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
                 }
             }
+            // The row's "N running" (docs/82 6.5): the session opens (as a
+            // row click opens it) with the pane on its Tasks.
+            SidebarIntent::RowAction(id, RowAction::Tasks) => {
+                self.open_session_tasks(id.to_string(), window, cx);
+            }
             SidebarIntent::RowAction(id, action) => {
                 match action {
                     RowAction::Rename => self.start_rename(id.to_string(), window, cx),

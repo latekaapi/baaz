@@ -158,6 +158,8 @@ pub enum RightKind {
     Changes,
     /// The workspace file tree.
     Files,
+    /// What the session's agent started in Baaz's terminal (docs/82 6.5).
+    Tasks,
 }
 
 impl Serialize for RightKind {
@@ -174,7 +176,7 @@ impl<'de> Deserialize<'de> for RightKind {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
         RightKind::parse(&text).ok_or_else(|| {
-            de::Error::unknown_variant(text.as_str(), &["browser", "changes", "files", "diff", "git"])
+            de::Error::unknown_variant(text.as_str(), &["browser", "changes", "files", "tasks", "diff", "git"])
         })
     }
 }
@@ -187,9 +189,11 @@ impl Default for RightKind {
 }
 
 impl RightKind {
-    /// Every kind the pane's tab row offers: Changes · Files · Page.
-    pub const ALL: [RightKind; 3] =
-        [RightKind::Changes, RightKind::Files, RightKind::Browser];
+    /// Every kind the pane offers, in strip order: Changes · Files · Page ·
+    /// Tasks. The tab row always carries the first three; Tasks rides it
+    /// while it shows or while the session has a task (the app decides).
+    pub const ALL: [RightKind; 4] =
+        [RightKind::Changes, RightKind::Files, RightKind::Browser, RightKind::Tasks];
 
     /// The user-visible name: the tab row's labels, and T3's ⌘K labels.
     /// The legacy aliases label as the view they load into.
@@ -199,6 +203,7 @@ impl RightKind {
             RightKind::Browser => "Page",
             RightKind::Changes => "Changes",
             RightKind::Files => "Files",
+            RightKind::Tasks => "Tasks",
         }
     }
 
@@ -210,6 +215,7 @@ impl RightKind {
             RightKind::Browser => "browser",
             RightKind::Changes => "changes",
             RightKind::Files => "files",
+            RightKind::Tasks => "tasks",
         }
     }
 
@@ -224,6 +230,7 @@ impl RightKind {
             "browser" | "page" => Some(RightKind::Browser),
             "changes" | "diff" | "git" => Some(RightKind::Changes),
             "files" => Some(RightKind::Files),
+            "tasks" => Some(RightKind::Tasks),
             _ => None,
         }
     }
@@ -847,8 +854,11 @@ mod tests {
         assert_eq!(serde_json::to_string(&RightKind::Browser).unwrap(), "\"browser\"");
         assert_eq!(RightKind::Changes.label(), "Changes");
         assert_eq!(RightKind::Changes.slug(), "changes");
-        // And the three live tabs are exactly Changes · Files · Browser.
-        assert_eq!(RightKind::ALL, [RightKind::Changes, RightKind::Files, RightKind::Browser]);
+        assert_eq!(serde_json::to_string(&RightKind::Tasks).unwrap(), "\"tasks\"");
+        assert_eq!(RightKind::parse("tasks"), Some(RightKind::Tasks));
+        assert_eq!(RightKind::Tasks.label(), "Tasks");
+        // And the four screens are exactly Changes · Files · Browser · Tasks.
+        assert_eq!(RightKind::ALL, [RightKind::Changes, RightKind::Files, RightKind::Browser, RightKind::Tasks]);
     }
 
     /// The sidebar's one open state: open by default, and a closed one

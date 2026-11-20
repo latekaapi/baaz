@@ -201,7 +201,7 @@ impl TerminalDock {
                     });
                 }
                 Pick::Existing(id) => {
-                    self.host.update(cx, |host, _| host.activate(&id));
+                    self.host.update(cx, |host, cx| host.activate(&id, cx));
                 }
             }
         }
@@ -209,17 +209,15 @@ impl TerminalDock {
         crate::layout::Layout::save(cx);
     }
 
-    /// D51 "Open terminal" on a terminal tool card: open the dock and focus
-    /// the card's tab. A tab the host no longer holds (or none named) opens
-    /// the dock on its active tab instead of failing. Only its test reaches
-    /// it since the setup sheet took the typed commands (D5 B2); kept for
-    /// the tool card it was written for.
-    #[cfg(test)]
+    /// Open the dock and focus `tab`: a Tasks row's click (docs/82 6.5),
+    /// and D51's "Open terminal" on a tool card. A tab the host no longer
+    /// holds (or none named) opens the dock on its active tab instead of
+    /// failing.
     pub(crate) fn open_tab(&mut self, tab: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         crate::layout::Layout::stage(cx, |layout| layout.terminal_open = true);
         if let Some(tab) = tab {
             if self.host.read(cx).get(&tab).is_some() {
-                self.host.update(cx, |host, _| host.activate(&tab));
+                self.host.update(cx, |host, cx| host.activate(&tab, cx));
             }
         }
         window.focus(&self.focus, cx);
@@ -245,8 +243,8 @@ impl TerminalDock {
 
     /// Close a tab now, with no question (the busy tab's confirmed close).
     pub(crate) fn close_tab_now(&mut self, tab: &str, cx: &mut Context<Self>) {
-        self.host.update(cx, |host, _| host.close(tab));
-        cx.notify();
+        // The host notifies: the dock draws its tab list.
+        self.host.update(cx, |host, cx| host.close(tab, cx));
     }
 
     // ── the dock's own controls ─────────────────────────────────────────
@@ -267,8 +265,8 @@ impl TerminalDock {
         let Some(root) = self.facts.project.clone() else { return };
         let id = self.host.read(cx).tabs_for(&root).get(index).map(|tab| tab.id.clone());
         if let Some(id) = id {
-            self.host.update(cx, |host, _| host.activate(&id));
-            cx.notify();
+            // The host notifies: the dock draws which tab is active.
+            self.host.update(cx, |host, cx| host.activate(&id, cx));
         }
     }
 

@@ -17,7 +17,7 @@
 //! re-renders the column with no frame-time comparison and no root notify.
 //!
 //! What the list cannot know — which session is open, which click is
-//! awaited, whose terminals run a block — arrives as [`ListFacts`] on every
+//! awaited, whose agent's terminal tasks run — arrives as [`ListFacts`] on every
 //! read that depends on it; the cache keys on them, as it always did.
 
 use std::cell::{Cell, RefCell};
@@ -48,8 +48,9 @@ pub(crate) struct ListFacts {
     pub(crate) pending: Option<String>,
     /// Whether that target is an unsent draft.
     pub(crate) pending_unsent: bool,
-    /// Busy terminal tabs per originating session.
-    pub(crate) terminals: Vec<(String, u32)>,
+    /// Running tasks per session (docs/82 6.5): what each row's
+    /// "N running" says.
+    pub(crate) tasks: Vec<(String, u32)>,
 }
 
 /// What the list says changed. The sidebar pane re-renders on either; the
@@ -286,7 +287,7 @@ impl SessionList {
                     return;
                 };
                 let mut row = after;
-                row.terminals_running = visible[at].terminals_running;
+                row.tasks_running = visible[at].tasks_running;
                 if row.updated == visible[at].updated {
                     visible[at] = row;
                 } else {
@@ -329,20 +330,20 @@ impl SessionList {
         // fold, so a click (or an `open:` step) that names a held-back row
         // must rebuild the grouping on its own frame.
         let pending = facts.pending.clone();
-        // Whose tabs hold a running block (D52): what stamps the sidebar
-        // hint below. Part of the key, so a block starting or ending
-        // rebuilds the rows without waiting for a list invalidation.
-        let terminals = facts.terminals.clone();
+        // Whose agent's terminal tasks run (docs/82 6.5): what stamps each
+        // row's "N running" below. Part of the key, so a task starting or
+        // ending rebuilds the rows without waiting for a list invalidation.
+        let tasks = facts.tasks.clone();
         let mut cache = self.cache.borrow_mut();
         if cache.key.as_ref().is_some_and(
-            |(epoch, id, awaited, cached_group, cached_closed, cached_expanded, cached_terminals)| {
+            |(epoch, id, awaited, cached_group, cached_closed, cached_expanded, cached_tasks)| {
                 *epoch == self.epoch
                     && *id == active
                     && *awaited == pending
                     && *cached_group == group_by
                     && *cached_closed == closed
                     && *cached_expanded == expanded
-                    && *cached_terminals == terminals
+                    && *cached_tasks == tasks
             },
         ) {
             return Rc::clone(&cache.visible);
@@ -402,16 +403,16 @@ impl SessionList {
         // Newest first. The sidebar's grouping sorts for itself; the palette
         // takes the head of this list, so the order has to be right here.
         rows.sort_by_key(|entry| std::cmp::Reverse(entry.updated));
-        // The terminal hint's counts, stamped onto copies: the stored rows
+        // The running-task counts, stamped onto copies: the stored rows
         // stay clean of frame-rate liveness.
-        if !terminals.is_empty() {
+        if !tasks.is_empty() {
             for row in &mut rows {
-                if let Some((_, count)) = terminals.iter().find(|(id, _)| *id == row.id) {
-                    row.terminals_running = *count;
+                if let Some((_, count)) = tasks.iter().find(|(id, _)| *id == row.id) {
+                    row.tasks_running = *count;
                 }
             }
         }
-        cache.key = Some((self.epoch, active, pending, group_by, closed, expanded, terminals));
+        cache.key = Some((self.epoch, active, pending, group_by, closed, expanded, tasks));
         cache.visible = Rc::new(rows);
         cache.grouping = None;
         Rc::clone(&cache.visible)
@@ -1048,7 +1049,7 @@ impl SessionList {
                         last_error: None,
                         unread: false,
                         branch: None,
-                        terminals_running: 0,
+                        tasks_running: 0,
                     });
                     changed = true;
                 }

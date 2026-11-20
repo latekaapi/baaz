@@ -157,6 +157,7 @@ impl Harness {
             }
             if unsent {
                 self.registry.forget_where(|id| id == old_id);
+                self.forget_terminal_tasks(&[old_id.to_owned()], cx);
                 self.session_list.update(cx, |list, _| list.sessions.retain(|entry| entry.id != old_id));
                 self.session_list.update(cx, |list, _| list.overrides.remove(old_id));
                 if self.session_list.update(cx, |list, _| crate::provider_sessions::remove(&mut list.provider_sessions, old_id)) {

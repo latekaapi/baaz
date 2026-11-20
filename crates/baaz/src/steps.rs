@@ -129,6 +129,8 @@
 //! | `undo-turn:last` | the confirm for the open session's newest undoable turn (docs/82 6.4), through the session menu's path; a capture (which takes no checkpoints and runs in the owner's repository) puts up the confirm from fixture data — the newest agent turn that edited files — and its button cannot apply; no session, another payload or nothing to undo fails the step, free |
 //! | `revert-file:<path>` | the confirm for that changed file in All changes, back to `HEAD` (docs/82 6.4), through the row's path; a capture puts it up from fixture data and its button cannot apply; no session or project, or no such changed row, fails the step, free |
 //! | `changes-scope:<all\|session\|last>` | the Changes pane on that scope (docs/82 6.3): a capture loads the fixture checkpoint index (two finished turns over the fixture tree) — no refs are read or written; no open session or an unknown word fails the step, free |
+//! | `tasks-fixture` (or `tasks-fixture:<session_id>`) | the Tasks view's capture fixture (docs/82 6.5): four tasks on that session, else the open one — running on :5173, exited 0, exited 1, stopped — with fixed durations and no process behind any; no session, or one that already has tasks, fails the step, free |
+//! | `tasks-row:<session_id>` | the sidebar row's "N running" click: that session opens with the right pane on Tasks; a session with nothing running fails the step, free |
 //! | `files-reveal:<path>` | reveal the project-relative file or folder in the Files pane through the link's own path (a folder selects with every ancestor expanded and no preview, a file previews banded on the payload's `#L…`/`:line` suffix); empty or project-less fails, free |
 //! | `row-detail:<session_id>` | capture aid: pin the hover card open for one row, seated at the selected row's bounds (pair with `click:` on the same id; empty clears), free |
 //! | `hover:<session_id>` | capture aid: deliver the selected row's own hover report (what its hover event sends), arming the card past the delay seated from the row's bounds at the sidebar's right edge (pair with `click:` on the same id and a `wait:` past the delay; empty means the selected row), free |
@@ -417,6 +419,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "files-select", run: |this, rest, _, cx| this.step_files_select(rest, cx) },
     WindowVerb { verb: "changes-open", run: |this, rest, _, cx| this.step_changes_open(rest, cx) },
     WindowVerb { verb: "changes-scope", run: |this, rest, _, cx| this.step_changes_scope(rest, cx) },
+    WindowVerb { verb: "tasks-fixture", run: |this, rest, _, cx| this.step_tasks_fixture(rest, cx) },
+    WindowVerb { verb: "tasks-row", run: |this, rest, window, cx| this.step_tasks_row(rest, window, cx) },
     WindowVerb { verb: "undo-turn", run: |this, rest, _, cx| this.step_undo_turn(rest, cx) },
     WindowVerb { verb: "revert-file", run: |this, rest, _, cx| this.step_revert_file(rest, cx) },
     WindowVerb { verb: "files-reveal", run: |this, rest, _, cx| this.step_files_reveal(rest, cx) },

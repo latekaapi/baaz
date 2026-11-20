@@ -26,6 +26,10 @@
 //! D53) are served; anything else is refused. The socket file is removed
 //! when the service drops (quit).
 //!
+//! Every `terminal_run`, and every command line `terminal_send` types at the
+//! prompt of a tab the agent opened, is recorded on the host as the calling
+//! session's task (docs/82 6.5): the Tasks view and the row's "N running".
+//!
 //! Terminal output never reaches a log line: this module has no logging at
 //! all, by construction (pinned by `crates/baaz/tests/terminal_service.rs`).
 
@@ -630,11 +634,13 @@ impl TerminalService {
     /// Remember that `from` (a provider open's spawn-time request id) is now
     /// served as `to` (the lane's thread id): later tool calls naming `from`
     /// resolve to `to`. Called on the UI thread when the lane's thread id
-    /// lands. Idempotent; `from == to` stores nothing.
-    pub fn alias_session(&self, from: &str, to: &str) {
+    /// lands. Idempotent; `from == to` stores nothing. Tasks the lane's
+    /// tools started under `from` follow it to `to` (docs/82 6.5).
+    pub fn alias_session(&self, from: &str, to: &str, cx: &mut App) {
         if from == to {
             return;
         }
+        self.host().update(cx, |host, cx| host.rekey_tasks(from, to, cx));
         self.shared
             .session_aliases
             .lock()
@@ -741,7 +747,7 @@ impl TerminalService {
             "terminal_open" => self.open(&root, Some(session.clone()), &job.params, cx),
             "terminal_read" => self.read(&root, &job.params, cx),
             "terminal_screen" => self.screen(&root, &job.params, cx),
-            "terminal_send" => self.send(&root, &job.params, cx),
+            "terminal_send" => self.send(&root, &session, &job.params, cx),
             "terminal_close" => self.close(&root, &job.params, cx),
             other => {
                 let mut names = TOOL_NAMES.to_vec();
@@ -1088,6 +1094,10 @@ impl TerminalService {
                 session.write(b"\r");
             });
         }
+        // The session's Tasks view lists it from now on (docs/82 6.5).
+        if let Some(session) = origin.as_deref() {
+            self.host().update(cx, |host, cx| host.record_task(session, &command, &id, before, cx));
+        }
         // The person watches the agent work: the dock opens, unfocused.
         if let Some(hook) = self.shared.activity.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
             hook(cx);
@@ -1296,7 +1306,7 @@ impl TerminalService {
         }))
     }
 
-    fn send(&self, root: &Path, params: &Value, cx: &mut App) -> Result<Value, String> {
+    fn send(&self, root: &Path, origin: &str, params: &Value, cx: &mut App) -> Result<Value, String> {
         let tab_arg = params.get("tab").and_then(Value::as_str).ok_or("terminal_send needs tab")?;
         let tab = self.tab_in_project(root, tab_arg, cx)?;
         // The person's tab is theirs: the agent may only answer a prompt of
@@ -1338,6 +1348,14 @@ impl TerminalService {
             key_bytes.push(key_bytes_for(key)?);
         }
         let session = self.host().read(cx).get(&tab).expect("checked").session.clone();
+        // A command line typed at the prompt of a tab the agent opened is a
+        // task like a `terminal_run` (docs/82 6.5): the tab is idle, there is
+        // text, and it ends in Enter. An answer to a running program's
+        // prompt is not one.
+        let entered = keys.last().is_some_and(|key| key == "enter") || (keys.is_empty() && text.ends_with(['\n', '\r']));
+        let at_prompt = owner == TabOwner::Agent && !self.host().read(cx).busy(cx, &tab);
+        let command = text.lines().map(str::trim).find(|line| !line.is_empty()).map(str::to_owned);
+        let block = session.read(cx).blocks().len();
         session.update(cx, |session, _| {
             if !text.is_empty() {
                 session.paste(text);
@@ -1346,6 +1364,9 @@ impl TerminalService {
                 session.write(bytes);
             }
         });
+        if let (true, true, Some(command)) = (entered, at_prompt, command) {
+            self.host().update(cx, |host, cx| host.record_task(origin, &command, &tab, block, cx));
+        }
         Ok(json!({"ok": true}))
     }
 
@@ -1360,7 +1381,7 @@ impl TerminalService {
         }
         // Dropping a pending run's tab answers the run instead of hanging
         // it; `poll_runs` sends the closed-tab error on its next pass.
-        self.host().update(cx, |host, _| host.close(&tab));
+        self.host().update(cx, |host, cx| host.close(&tab, cx));
         Ok(json!({"ok": true}))
     }
 
@@ -3286,7 +3307,7 @@ mod tests {
     fn browser_calls_through_a_codex_request_id_alias(cx: &mut gpui::TestAppContext) {
         let (fx, _) = scripted_fixture(cx, "thread-id", "https://t.example/");
         fx.service.register_session("request-id", fx.root.clone());
-        fx.service.alias_session("request-id", "thread-id");
+        cx.update(|cx| fx.service.alias_session("request-id", "thread-id", cx));
         assert_eq!(result(&bcall(cx, &fx, "request-id", "browser_read", json!({})))["url"], "https://t.example/");
     }
 
@@ -3357,6 +3378,166 @@ mod tests {
         assert!(fx.service.agent_activity("sb-hold").expect("activity").held);
         fx.service.hand_back("sb-hold");
         assert!(result(&breceive(cx, &fx, &mut reader, id))["snapshot"].is_string());
+    }
+
+    // ── tasks (docs/82 6.5) ─────────────────────────────────────────────
+
+    /// `session`'s tasks as rows, after one host poll.
+    fn polled_rows(cx: &mut gpui::TestAppContext, fx: &Fixture, session: &str) -> Vec<super::super::tasks::TaskRow> {
+        cx.update(|cx| fx.host.update(cx, |host, cx| host.poll_tasks(cx)));
+        cx.read(|cx| fx.host.read(cx).tasks.rows(session, Instant::now()))
+    }
+
+    /// A `terminal_run` becomes the session's task: running while its block
+    /// runs, then its exit code; the sidebar count follows.
+    #[gpui::test]
+    fn a_run_through_the_tools_is_a_task_with_its_command_and_exit(cx: &mut gpui::TestAppContext) {
+        use super::super::tasks::TaskState;
+        let fx = fixture(cx, "s1");
+        open_responding(cx, &fx, "agent", TabOwner::Agent, RespondBackend::new("task-nonce", 3, b"boom\r\n".to_vec()));
+        let out = result(&call(cx, &fx, "terminal_run", json!({"command": "pnpm lint", "tab": "t1", "wait": "exit"})));
+        assert_eq!(out.get("exit_code"), Some(&json!(3)));
+        let rows = polled_rows(cx, &fx, "s1");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].command, "pnpm lint");
+        assert_eq!(rows[0].state, TaskState::Exited(3));
+        assert_eq!(rows[0].state.label(), "exited 3");
+        assert_eq!(rows[0].tab.as_deref(), Some("t1"), "a row opens its tab");
+        assert!(cx.read(|cx| fx.host.read(cx).tasks.running_counts().is_empty()), "nothing runs now");
+        assert!(polled_rows(cx, &fx, "someone-else").is_empty(), "tasks are the session's own");
+    }
+
+    /// A run still going counts toward the row's "N running".
+    #[gpui::test]
+    fn a_run_left_running_counts_for_its_session(cx: &mut gpui::TestAppContext) {
+        use super::super::tasks::TaskState;
+        let fx = fixture(cx, "s1");
+        open_responding(
+            cx,
+            &fx,
+            "agent",
+            TabOwner::Agent,
+            RespondBackend::trickling("count-nonce", b"listening\r\n".to_vec(), b".".to_vec()),
+        );
+        let out = result(&call(cx, &fx, "terminal_run", json!({"command": "pnpm dev", "tab": "t1", "wait": "none"})));
+        assert_eq!(out.get("status"), Some(&json!("running")));
+        let rows = polled_rows(cx, &fx, "s1");
+        assert_eq!(rows[0].state, TaskState::Running);
+        assert_eq!(cx.read(|cx| fx.host.read(cx).tasks.running_counts()), vec![("s1".to_owned(), 1)]);
+        // A scripted tab has no shell of its own: Stop refuses, says why,
+        // and signals nothing.
+        let id = rows[0].id;
+        let refused = cx.update(|cx| fx.host.update(cx, |host, cx| host.stop_task(id, cx)));
+        assert!(refused.is_err_and(|why| why.contains("no process group")), "nothing to signal");
+        assert_eq!(polled_rows(cx, &fx, "s1")[0].state, TaskState::Running, "still running, not stopped");
+    }
+
+    /// A command line typed at the prompt of a tab the agent opened is a
+    /// task; text without Enter, an answer to a running program, and the
+    /// person's own tab are not.
+    #[gpui::test]
+    fn a_command_typed_into_an_idle_agent_tab_is_a_task_and_an_answer_is_not(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "s1");
+        open_responding(cx, &fx, "agent", TabOwner::Agent, RespondBackend::new("send-nonce", 0, b"ok\r\n".to_vec()));
+        result(&call(cx, &fx, "terminal_send", json!({"tab": "t1", "text": "npm run"})));
+        assert!(polled_rows(cx, &fx, "s1").is_empty(), "no Enter: still being typed");
+        result(&call(cx, &fx, "terminal_send", json!({"tab": "t1", "text": " dev", "keys": ["enter"]})));
+        let rows = polled_rows(cx, &fx, "s1");
+        assert_eq!(rows.iter().map(|row| row.command.as_str()).collect::<Vec<_>>(), vec![" dev".trim()], "the line sent with Enter");
+        // A busy agent tab: what it is sent answers the running program.
+        let busy = open_recording(cx, &fx, "busy", TabOwner::Agent, running_script("busy-nonce", "read name"), "busy-nonce");
+        result(&call(cx, &fx, "terminal_send", json!({"tab": busy, "text": "ada", "keys": ["enter"]})));
+        assert_eq!(polled_rows(cx, &fx, "s1").len(), 1, "an answer is not a task");
+    }
+
+    /// The real thing: a shell in a pty, a command that ignores SIGTERM and
+    /// leaves a second process in its group. Stop ends the whole group —
+    /// SIGKILL after the grace — the task reads `stopped`, and the shell
+    /// itself stays.
+    #[gpui::test]
+    fn stop_ends_the_tasks_process_group_and_the_shell_stays(cx: &mut gpui::TestAppContext) {
+        use super::super::tasks::TaskState;
+        if !Path::new("/bin/zsh").exists() {
+            eprintln!("skipped: no /bin/zsh");
+            return;
+        }
+        let fx = fixture(cx, "s1");
+        let config = aui_terminal::PtyConfig::new("/bin/zsh", fx.root.clone()).without_user_rc();
+        let root = fx.root.clone();
+        let tab = cx.update(|cx| {
+            fx.host.update(cx, |host, cx| host.open_config(&root, &config, TabOwner::Agent, Some("s1".into()), cx))
+        });
+        let shell = cx.read(|cx| fx.host.read(cx).get(&tab).and_then(|tab| tab.shell_pid)).expect("a real shell");
+        let command = "sh -c 'trap \"\" TERM; sleep 60 & sleep 60'";
+        result(&call(cx, &fx, "terminal_run", json!({"command": command, "tab": tab, "wait": "none"})));
+        // Wait (real time: the shell is real) until the command holds the
+        // terminal's foreground in a group of its own.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let (id, group) = loop {
+            cx.update(|cx| fx.service.drain(cx));
+            let rows = polled_rows(cx, &fx, "s1");
+            let group = cx.read(|cx| fx.host.read(cx).tasks.running_groups().first().copied());
+            if let (Some(row), Some(group)) = (rows.first(), group) {
+                break (row.id, group);
+            }
+            assert!(Instant::now() < deadline, "the command never took the foreground: {rows:?}");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        // Both sleeps and the sh are in the group.
+        let members = std::process::Command::new("pgrep").args(["-g", &group.to_string()]).output().expect("pgrep");
+        assert!(String::from_utf8_lossy(&members.stdout).lines().count() >= 2, "the group holds the background sleep too");
+        let started = Instant::now();
+        let stopped = cx.update(|cx| fx.host.update(cx, |host, cx| host.stop_task(id, cx)));
+        assert_eq!(stopped, Ok(group));
+        cx.run_until_parked();
+        assert!(started.elapsed() >= super::super::tasks::STOP_GRACE, "SIGTERM was ignored, so SIGKILL ended it after the grace");
+        // SAFETY: signal 0 only asks.
+        assert_ne!(unsafe { libc::kill(-group, 0) }, 0, "no process of the group survives");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.update(|cx| fx.service.drain(cx));
+            let rows = polled_rows(cx, &fx, "s1");
+            if rows[0].state == TaskState::Stopped {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the task never read stopped: {rows:?}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // SAFETY: signal 0 only asks.
+        assert_eq!(unsafe { libc::kill(shell as i32, 0) }, 0, "the tab's shell stays");
+        assert!(cx.read(|cx| fx.host.read(cx).tasks.running_counts().is_empty()));
+        cx.update(|cx| fx.host.update(cx, |host, cx| host.close(&tab, cx)));
+    }
+
+    /// Quitting ends what still runs: a server that ignores the hang-up and
+    /// SIGTERM alike does not outlive the app.
+    #[gpui::test]
+    fn quitting_ends_every_running_tasks_group(cx: &mut gpui::TestAppContext) {
+        if !Path::new("/bin/zsh").exists() {
+            eprintln!("skipped: no /bin/zsh");
+            return;
+        }
+        let fx = fixture(cx, "s1");
+        let config = aui_terminal::PtyConfig::new("/bin/zsh", fx.root.clone()).without_user_rc();
+        let root = fx.root.clone();
+        let tab = cx.update(|cx| {
+            fx.host.update(cx, |host, cx| host.open_config(&root, &config, TabOwner::Agent, Some("s1".into()), cx))
+        });
+        result(&call(cx, &fx, "terminal_run", json!({"command": "sh -c 'trap \"\" TERM HUP; sleep 60'", "tab": tab, "wait": "none"})));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let group = loop {
+            cx.update(|cx| fx.service.drain(cx));
+            polled_rows(cx, &fx, "s1");
+            if let Some(group) = cx.read(|cx| fx.host.read(cx).tasks.running_groups().first().copied()) {
+                break group;
+            }
+            assert!(Instant::now() < deadline, "the command never took the foreground");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        cx.read(|cx| fx.host.read(cx).end_all_tasks(cx));
+        // SAFETY: signal 0 only asks.
+        assert_ne!(unsafe { libc::kill(-group, 0) }, 0, "no process of the group survives quit");
+        cx.update(|cx| fx.host.update(cx, |host, cx| host.close(&tab, cx)));
     }
 
     #[test]

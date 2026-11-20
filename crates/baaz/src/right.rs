@@ -1,7 +1,7 @@
-//! The right pane's three bodies: real read-only data, inert labelled actions.
+//! The right pane's four bodies: real read-only data, inert labelled actions.
 //!
 //! [`render`] dispatches on [`RightKind`](crate::layout::RightKind) to one
-//! builder per pane. It never touches a subprocess or the filesystem: it draws
+//! builder per pane (Tasks draws from [`crate::right_tasks`]). It never touches a subprocess or the filesystem: it draws
 //! whatever [`RightCache`] holds, and an empty cache draws the pane's loading
 //! state. The reads — an expansion-aware directory walk, a handful of
 //! read-only `git` invocations each with a timeout — happen in
@@ -224,6 +224,9 @@ impl DirListCache {
 
 #[derive(Default)]
 pub(crate) struct RightCache {
+    /// The open session's terminal tasks, copied from the host's book each
+    /// render the Tasks screen shows ([`RightPane::sync_tasks`]).
+    pub tasks: Vec<crate::terminal::tasks::TaskRow>,
     /// The last git status read, by root (`Some(None)`: not a repo).
     pub git: Option<Stamped<Option<crate::git_ops::GitTree>>>,
     /// D6: each opened row's diff, read when the row opens and dropped
@@ -361,7 +364,7 @@ impl RightCache {
     /// The refresh path paces the steady-state interval off this.
     pub(crate) fn fetched_at(&self, kind: RightKind, root: &Path) -> Option<Instant> {
         match kind {
-            RightKind::Browser => None,
+            RightKind::Browser | RightKind::Tasks => None,
             RightKind::Changes => self
                 .git
                 .as_ref()
@@ -598,30 +601,37 @@ pub(crate) fn render(
                 ),
             }
         }
+        RightKind::Tasks => crate::right_tasks::tasks_body(&cache.tasks, cx),
     }
 }
 
-/// The screen's place on the strip (D6): Changes 0, Files 1, Page 2.
+/// The screen's place on the strip (D6): Changes 0, Files 1, Page 2,
+/// Tasks 3.
 pub(crate) fn screen_index(kind: RightKind) -> usize {
     match kind {
         RightKind::Changes => 0,
         RightKind::Files => 1,
         RightKind::Browser => 2,
+        RightKind::Tasks => 3,
     }
 }
 
 /// The tab id of an open file's tab in the pane's tab row.
 pub(crate) const FILE_TAB: &str = "file";
 
-/// The pane's tabs (docs/83 §6): Changes · Files · Page, each keyed by its
-/// kind's slug, then — while Files previews one — the open file's tab,
+/// The pane's tabs (docs/83 §6): Changes · Files · Page, then Tasks when
+/// `tasks` (it shows, or the session has tasks), each keyed by its kind's
+/// slug, then — while Files previews one — the open file's tab,
 /// keyed [`FILE_TAB`] and closable. The file's tab is the lit one while it
 /// shows; Files is lit only over the tree. Baaz keeps one preview per
 /// project, so there is at most one file tab.
-pub(crate) fn pane_tab_list(kind: RightKind, open_file: Option<SharedString>) -> Vec<aui::workbench::PaneTab> {
+pub(crate) fn pane_tab_list(kind: RightKind, open_file: Option<SharedString>, tasks: bool) -> Vec<aui::workbench::PaneTab> {
     let file_lit = kind == RightKind::Files && open_file.is_some();
-    let mut tabs: Vec<aui::workbench::PaneTab> =
-        RightKind::ALL.into_iter().map(|k| aui::workbench::PaneTab::new(k.slug(), k.label(), k == kind && !file_lit)).collect();
+    let mut tabs: Vec<aui::workbench::PaneTab> = RightKind::ALL
+        .into_iter()
+        .filter(|k| *k != RightKind::Tasks || tasks)
+        .map(|k| aui::workbench::PaneTab::new(k.slug(), k.label(), k == kind && !file_lit))
+        .collect();
     if let Some(name) = open_file {
         tabs.push(aui::workbench::PaneTab::new(FILE_TAB, name, file_lit).closable());
     }
@@ -639,6 +649,7 @@ pub(crate) fn screen_glyph(kind: RightKind) -> IconName {
         RightKind::Changes => IconName::Git,
         RightKind::Files => IconName::Folder,
         RightKind::Browser => IconName::Globe,
+        RightKind::Tasks => IconName::Terminal,
     }
 }
 
@@ -723,6 +734,7 @@ pub(crate) fn render_screen(
                 let pushed = project.as_ref().is_some_and(|(root, _)| cache.preview_for(root).is_some());
                 (row, body, pushed)
             }
+            (RightKind::Tasks, _) => (None, crate::right_tasks::tasks_body(&cache.tasks, cx), false),
             (RightKind::Changes, None) => (
                 None,
                 aui::workbench::state_block("right-changes-noproject", IconName::Git, "No project").line("Open or add a project to see its changes.").into_any_element(),
@@ -762,8 +774,8 @@ impl RightPane {
     /// (the view menu), maximise and ✕. `open_file` is the project root and
     /// name of the file Files previews, when the strip shows one. What
     /// [`Region::actions`](crate::region::Region::actions) hands the shell.
-    pub(crate) fn render_tabs(&self, kind: RightKind, open_file: Option<(PathBuf, SharedString)>, cx: &mut Context<Self>) -> AnyElement {
-        let tabs = pane_tab_list(kind, open_file.as_ref().map(|(_, name)| name.clone()));
+    pub(crate) fn render_tabs(&self, kind: RightKind, open_file: Option<(PathBuf, SharedString)>, tasks: bool, cx: &mut Context<Self>) -> AnyElement {
+        let tabs = pane_tab_list(kind, open_file.as_ref().map(|(_, name)| name.clone()), tasks);
         let preview_root = open_file.map(|(root, _)| root);
         let close_root = preview_root.clone();
         let (select, seat) = (cx.weak_entity(), cx.weak_entity());

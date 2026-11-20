@@ -61,8 +61,8 @@ pub(crate) const MODE_FADE: std::time::Duration = std::time::Duration::from_mill
 /// that changed none of them leaves the cached column alone.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SidebarFacts {
-    /// The open session, the awaited click, the drafts and the busy
-    /// terminals — what the list's visible rows are keyed on.
+    /// The open session, the awaited click, the drafts and the running
+    /// tasks — what the list's visible rows are keyed on.
     pub(crate) list: ListFacts,
     /// The selected row: the chain head of the awaited click, else of the
     /// open session (one identity per chain, Y2a).
@@ -1493,7 +1493,7 @@ mod tests {
                     last_error: None,
                     unread: false,
                     branch: None,
-                    terminals_running: 0,
+                    tasks_running: 0,
                 })
             })
             .collect();
@@ -1638,7 +1638,7 @@ mod tests {
             last_error: None,
             unread: false,
             branch: None,
-            terminals_running: 0,
+            tasks_running: 0,
         }
     }
 
@@ -2570,7 +2570,7 @@ mod tests {
                 last_error: None,
                 unread: false,
                 branch: None,
-                terminals_running: 0,
+                tasks_running: 0,
             }
         }
         // The open session, with no turns yet: the muse 1.3.0 shape, where
@@ -2798,7 +2798,7 @@ mod tests {
             last_error: None,
             unread: false,
             branch: None,
-            terminals_running: 0,
+            tasks_running: 0,
         }
     }
 

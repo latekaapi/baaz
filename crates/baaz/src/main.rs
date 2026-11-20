@@ -102,6 +102,7 @@ mod right_files;
 mod right_page;
 mod right_pane;
 mod right_scopes;
+mod right_tasks;
 mod right_views;
 use baaz_core::right_watch;
 use baaz_core::runtime;

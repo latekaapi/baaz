@@ -204,11 +204,9 @@ impl SessionRow for SessionEntry {
         if let Some(branch) = branch.as_deref().filter(|_| worktree_branch(self).is_some()) {
             row = row.branch(branch.to_owned());
         }
-        // A tab from this session holds a running block (D52): the hint
-        // joins the meta line, so it shows wherever the meta line does.
-        if let Some(hint) = Self::terminal_hint(self.terminals_running) {
-            row = row.meta(aui::nav::MetaItem::Text(hint.into()));
-        }
+        // Commands the session's agent started that still run (docs/82
+        // 6.5): the row's trailing slot says "N running".
+        row = row.running_tasks(self.tasks_running);
         // A provisional row carries no turn count, no running bit and no
         // status verdict — the index knows none of them — so no status is
         // set: the row says no verdict (never a false `Settled · 0
@@ -1044,33 +1042,22 @@ pub(crate) mod tests {
             last_error: None,
             unread: false,
             branch: None,
-            terminals_running: 0,
+            tasks_running: 0,
         }
     }
 
-    /// The terminal hint (D52): nothing while idle, singular for one busy
-    /// tab, plural past it — and it rides the meta line.
+    /// The row carries its running tasks for the trailing slot's
+    /// "N running" (docs/82 6.5); nothing rides the meta line any more.
     #[test]
-    fn the_terminal_hint_shows_only_while_a_tab_runs() {
-        use aui::nav::MetaItem;
-        assert_eq!(SessionEntry::terminal_hint(0), None);
-        assert_eq!(SessionEntry::terminal_hint(1).as_deref(), Some("· 1 terminal running"));
-        assert_eq!(SessionEntry::terminal_hint(2).as_deref(), Some("· 2 terminals running"));
+    fn running_tasks_ride_the_row_not_the_meta_line() {
         let now = Local::now();
         let idle = entry("idle");
-        assert!(idle.summary(now).meta.is_empty(), "no busy tab, no hint");
-        let mut one = entry("one");
-        one.terminals_running = 1;
-        assert!(
-            one.summary(now).meta.contains(&MetaItem::Text("· 1 terminal running".into())),
-            "one busy tab reads singular"
-        );
-        let mut many = entry("many");
-        many.terminals_running = 3;
-        assert!(
-            many.summary(now).meta.contains(&MetaItem::Text("· 3 terminals running".into())),
-            "several busy tabs pluralise"
-        );
+        assert_eq!(idle.summary(now).running_tasks, 0);
+        let mut busy = entry("busy");
+        busy.tasks_running = 3;
+        let row = busy.summary(now);
+        assert_eq!(row.running_tasks, 3);
+        assert!(row.meta.is_empty(), "the old meta hint is gone: {:?}", row.meta);
     }
 
     /// The grouping tests' roots on disk: availability hides a missing root,
