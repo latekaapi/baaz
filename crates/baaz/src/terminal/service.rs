@@ -3458,7 +3458,8 @@ mod tests {
     fn stop_ends_the_tasks_process_group_and_the_shell_stays(cx: &mut gpui::TestAppContext) {
         use super::super::tasks::TaskState;
         if !Path::new("/bin/zsh").exists() {
-            eprintln!("skipped: no /bin/zsh");
+            // No zsh on this machine: nothing to drive (no log line: the
+            // no-logging ratchet scans this whole file).
             return;
         }
         let fx = fixture(cx, "s1");
@@ -3514,7 +3515,8 @@ mod tests {
     #[gpui::test]
     fn quitting_ends_every_running_tasks_group(cx: &mut gpui::TestAppContext) {
         if !Path::new("/bin/zsh").exists() {
-            eprintln!("skipped: no /bin/zsh");
+            // No zsh on this machine: nothing to drive (no log line: the
+            // no-logging ratchet scans this whole file).
             return;
         }
         let fx = fixture(cx, "s1");
