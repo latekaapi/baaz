@@ -1719,3 +1719,72 @@ fn a_rows_running_tasks_open_that_session_on_its_tasks(cx: &mut gpui::TestAppCon
     });
     lane_restore(state);
 }
+
+/// `child-lost-twice` (gate 6): a live session whose child dies twice in
+/// a row turns its sidebar row `Failed` as the second loss gives up —
+/// the same mark a relaunch on the stored state draws.
+#[gpui::test]
+fn a_child_lost_twice_turns_the_live_row_failed(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("lost-twice-row");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, _| {
+            harness.providers = harness.providers.with_opens_of(&scripted_factory());
+            mark_muse_up(harness);
+        });
+    });
+    vc.update(|window, cx| {
+        baaz.update(cx, |harness, cx| {
+            let workspace = harness.workspace(cx);
+            harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+        });
+    });
+    vc.run_until_parked();
+    let view = vc.update(|_, cx| baaz.read(cx).active.clone().expect("the lane is open"));
+    vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.step_send("hello lost probe", cx))))
+        .expect("the send lands");
+    vc.run_until_parked();
+    // The scripted turn runs to its end, as the capture's `wait:` lets it.
+    vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.test_drain_provider(cx))));
+    vc.run_until_parked();
+    let session_id = vc.update(|_, cx| view.read(cx).rt(cx).session_id.clone());
+    // The row the sidebar draws (the cached visible list), and the row
+    // storage holds — what a relaunch on the stored state rebuilds from.
+    let drawn = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|_, cx| {
+            baaz.read(cx)
+                .visible_sessions(cx)
+                .iter()
+                .find(|entry| entry.id == session_id)
+                .map(|entry| (entry.session_state(), entry.state()))
+        })
+    };
+    let stored = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|_, cx| {
+            baaz.read(cx)
+                .session_list
+                .read(cx)
+                .sessions
+                .iter()
+                .find(|entry| entry.id == session_id)
+                .map(|entry| (entry.session_state(), entry.state()))
+        })
+    };
+    // Drawn once before the losses, as the sidebar has by then.
+    assert!(drawn(vc).is_some(), "the sent session has a drawn row");
+    for _ in 0..2 {
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.step_child_lost(cx))))
+            .expect("the child loss lands");
+        vc.run_until_parked();
+    }
+    vc.update(|_, cx| {
+        let error = baaz.read(cx).session_list.read(cx).overrides.get(&session_id).and_then(|meta| meta.last_error.clone());
+        assert!(error.is_some(), "the failure is stored");
+    });
+    let failed = Some((crate::sidebar::SessionState::Failed, aui_tokens::AgentState::Failed));
+    assert_eq!(stored(vc), failed, "the stored row reads Failed");
+    assert_eq!(drawn(vc), failed, "the drawn row reads Failed live, as a relaunched one does");
+    lane_restore(state);
+}

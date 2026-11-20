@@ -570,11 +570,15 @@ impl Harness {
         }
         let message = error.map(str::trim).filter(|s| !s.is_empty());
         let next = if failed { message.map(str::to_owned) } else { None };
-        let changed_entry = self.session_list.update(cx, |list, _| {
-            list.sessions.iter_mut().find(|entry| entry.id == session_id).is_some_and(|entry| {
-                let before = entry.last_error.clone();
+        // The row as the sidebar last drew it: the override write below
+        // rejoins from a row already changed here, so it sees no change
+        // and leaves the drawn copy stale — the live row of a child lost
+        // twice stayed idle while a relaunch drew it `Failed` (gate 6).
+        let before = self.session_list.update(cx, |list, _| {
+            list.sessions.iter_mut().find(|entry| entry.id == session_id).map(|entry| {
+                let before = entry.clone();
                 entry.apply_turn_outcome(failed, error);
-                entry.last_error != before
+                before
             })
         });
         // The turn's end is unread unless the person is reading this
@@ -592,8 +596,9 @@ impl Harness {
                 },
                 cx,
             );
-        } else if changed_entry {
-            self.invalidate_list(cx);
+        }
+        if let Some(before) = before {
+            self.invalidate_row(&before, cx);
         }
     }
 
