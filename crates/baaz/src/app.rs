@@ -2091,9 +2091,17 @@ impl Harness {
 
     /// The project the right pane reads for: root plus display name, from the
     /// in-memory current project — never the projects store on disk, which the
-    /// old render path re-read on every frame.
+    /// old render path re-read on every frame. A session that runs in one of
+    /// Baaz's worktrees reads its worktree instead (docs/82 6.3: its
+    /// changes and its checkpoints are there, not in the project's folder),
+    /// under the project's name. Pure: no disk.
     pub(crate) fn right_project(&self, cx: &gpui::App) -> Option<(std::path::PathBuf, String)> {
-        self.current_project(cx).map(|project| (project.root.clone(), project.name.clone()))
+        let project = self.current_project(cx).map(|project| (project.root.clone(), project.name.clone()))?;
+        let worktree = self.active.as_ref().map(|view| view.read(cx).rt(cx).workspace_path().to_owned()).filter(|folder| Self::in_worktree(folder));
+        Some(match worktree {
+            Some(folder) => (std::path::PathBuf::from(folder), project.1),
+            None => project,
+        })
     }
 
     /// A new terminal tab on the current project, opening the dock for it

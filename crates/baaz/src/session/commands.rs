@@ -498,6 +498,7 @@ impl SessionRuntime {
                 // the window settle instead of banner-counting.
                 if interrupt_provider_found_turn_over(&error) {
                     crate::baaz_log!("interrupt: the provider turn was already over; settling the view");
+                    this.checkpoint_running_ended(cx);
                     this.clear_running();
                     this.submitting = false;
                     cx.emit(RuntimeEvent::TurnChanged);

@@ -234,6 +234,9 @@ pub(crate) struct RightCache {
     pub gap_lines: HashMap<(String, usize), std::sync::Arc<Vec<String>>>,
     /// D6: the Changes screen's commit box, PR and form state.
     pub changes: crate::right_changes::ChangesUi,
+    /// Bumped each time a landed snapshot's working tree differs from the
+    /// last: what the This session scope follows (docs/82 6.3).
+    pub git_generation: u64,
     /// D6: the Page screen's "Search or enter an address" field.
     pub page_address: Option<gpui::Entity<gpui_kit::base::input::InputState>>,
     /// D6: Files' filter and keyboard state.
@@ -388,8 +391,13 @@ impl RightCache {
         // open rows read theirs again.
         let same = self.git.as_ref().is_some_and(|slot| slot.root == root && slot.value == snapshot.git);
         if !same {
-            self.file_diffs.clear();
-            self.gap_lines.clear();
+            self.git_generation += 1;
+            // A checkpoint diff's rows stay: their two ends did not move
+            // (This session re-reads its list, and its rows, on the bump).
+            if self.changes.scopes.scope == crate::right_scopes::ChangesScope::All {
+                self.file_diffs.clear();
+                self.gap_lines.clear();
+            }
         }
         self.git = Some(Stamped {
             root: root.clone(),

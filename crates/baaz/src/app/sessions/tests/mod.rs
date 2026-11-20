@@ -15,3 +15,4 @@ mod reopen;
 mod handoff;
 mod steps;
 mod worktree;
+mod checkpoints;

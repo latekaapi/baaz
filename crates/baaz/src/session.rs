@@ -211,6 +211,7 @@ const CARET_MENU_CHROME: f32 = 56.0 + 140.0 + 50.0;
 const SKILL_ROWS: usize = 8;
 
 mod approvals;
+mod checkpoints;
 mod clocks;
 mod commands;
 mod composer;
@@ -419,9 +420,9 @@ pub enum SessionEvent {
         /// The skill name, as the quiet row's card target carried it.
         name: String,
     },
-    /// B12: a turn fold's `+N −M` chip: open Changes for that turn (or
-    /// the session without a per-turn checkpoint). Window-level, like
-    /// the skill tap above.
+    /// B12: a turn fold's `+N −M` chip: open Changes on that turn's own
+    /// diff (its checkpoints, docs/82 6.3), or on the working tree with its
+    /// files open when it has none. Window-level, like the skill tap above.
     OpenTurnChanges {
         /// The folded turn's id.
         turn_id: String,
@@ -485,6 +486,12 @@ pub enum SessionEvent {
         turn_id: String,
         /// The turn's final counters, carrying the adapter-reported cost.
         meta: aui_protocol::TurnMeta,
+    },
+    /// A turn's checkpoint refs landed (docs/82 6.3): an open Changes
+    /// screen on this session re-reads which scopes it can offer.
+    CheckpointTaken {
+        /// The session whose folder was snapshotted.
+        session_id: String,
     },
     /// A fold batch that landed with nothing in flight finished turns: a
     /// reopen's replayed history (Claude Code and Codex replay a resumed
@@ -1298,6 +1305,17 @@ impl SessionRuntime {
     /// D6: the files turn `turn_id` edited (its fold chip's files).
     pub fn turn_edits(&self, turn_id: &str) -> Vec<String> {
         self.session().map(|s| crate::transcript::turn_edited_paths(&s.turns, turn_id)).unwrap_or_default()
+    }
+
+    /// The agent's turns, by id, in transcript order: what the Changes
+    /// screen numbers and orders a session's checkpoints by (docs/82 6.3).
+    pub fn assistant_turn_ids(&self) -> Vec<String> {
+        self.session()
+            .map(|s| s.turns.iter().filter_map(|turn| match turn {
+                aui::protocol::Turn::Assistant { id, .. } => Some(id.clone()),
+                _ => None,
+            }).collect())
+            .unwrap_or_default()
     }
 }
 

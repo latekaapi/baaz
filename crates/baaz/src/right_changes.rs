@@ -1,9 +1,12 @@
 //! D6's Changes screen in Baaz (docs/43 §2.6, §4): this session's files and
 //! the rest of the working tree, each row opening its diff in place; the
 //! commit box at the foot whose single primary follows the branch — Commit,
-//! Push, Create PR, then the PR card; Create PR as a pushed view. The git
-//! itself is [`crate::git_ops`]; this module owns the screen's state, its
-//! actions and its drawing. Nothing here touches the disk on the render path.
+//! Push, Create PR, then the PR card; Create PR as a pushed view. Over a
+//! session's checkpoints the list can be another diff — This session, Last
+//! turn, one turn ([`crate::right_scopes`], docs/82 6.3) — with no commit
+//! box. The git itself is [`crate::git_ops`] and [`crate::checkpoints`];
+//! this module owns the screen's state, its actions and its drawing.
+//! Nothing here touches the disk on the render path.
 
 use aui::util::ScrollAxisLock as _;
 use std::path::{Path, PathBuf};
@@ -89,6 +92,9 @@ pub(crate) struct ChangesUi {
     pub form: Option<PrForm>,
     /// The transcript's chip opened these files: they flash 9 % once.
     pub flash: Option<(Instant, Vec<String>)>,
+    /// What the list is a diff of, and the checkpoints behind the choices
+    /// (docs/82 6.3, [`crate::right_scopes`]).
+    pub scopes: crate::right_scopes::ScopeState,
     pub scroll: ScrollHandle,
     /// Each open row's top inside the scroll content, for the sticky row.
     pub row_tops: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, (f32, f32)>>>,
@@ -243,6 +249,7 @@ impl RightPane {
             .detach();
         }
         self.maybe_draft_commit(root, &tree, cx);
+        self.scopes_after_snapshot(root, cx);
     }
 
     /// Draft the commit message once per change set on the session's own
@@ -324,25 +331,30 @@ impl RightPane {
         cx.notify();
     }
 
+    /// Read one row's diff in the shown scope: against `HEAD` in All
+    /// changes, between the scope's two ends otherwise. A diff that lands
+    /// after the scope moved on is dropped.
     fn load_file_diff(&mut self, root: &Path, change: FileChange, cx: &mut Context<Self>) {
         self.cache.file_diffs.insert(change.path.clone(), None);
+        let ends = self.changes_ui(root).scopes.scoped_ends();
         let root = root.to_path_buf();
         cx.spawn(async move |this, cx| {
             let path = change.path.clone();
+            let read_ends = ends.clone();
             let diff = if crate::runtime::captures() {
                 Some(crate::right::fixture_diff_for(&path))
             } else {
                 let root = root.clone();
-                cx.background_executor().spawn(async move { git_ops::read_file_diff(&root, &change) }).await
+                cx.background_executor()
+                    .spawn(async move {
+                        match read_ends {
+                            Some((from, to)) => crate::checkpoints::diff_file(&root, &from, &to, &change.path),
+                            None => git_ops::read_file_diff(&root, &change),
+                        }
+                    })
+                    .await
             };
-            let _ = this.update(cx, |this: &mut Self, cx| {
-                if let Some(diff) = diff {
-                    this.cache.file_diffs.insert(path, Some(Arc::new(diff)));
-                } else {
-                    this.cache.file_diffs.remove(&path);
-                }
-                cx.notify();
-            });
+            let _ = this.update(cx, |this: &mut Self, cx| this.land(&root, crate::right_scopes::Landed::Diff { path, diff, ends }, cx));
         })
         .detach();
     }
@@ -350,30 +362,36 @@ impl RightPane {
     /// Diffs for rows already open when the tree re-read (their reads were
     /// dropped as stale).
     pub(crate) fn reload_open_diffs(&mut self, root: &Path, cx: &mut Context<Self>) {
-        let Some(Some(tree)) = self.cache.git_for(root) else { return };
         for path in self.cache.changes_expanded_for(root) {
             if !self.cache.file_diffs.contains_key(&path) {
-                if let Some(change) = tree.change(&path).cloned() {
+                if let Some(change) = self.shown_change(root, &path) {
                     self.load_file_diff(root, change, cx);
                 }
             }
         }
     }
 
-    /// Expand the unchanged run after hunk `i` of `path` from the file on disk.
+    /// Expand the unchanged run after hunk `i` of `path`: from the file on
+    /// disk in All changes, from the scope's newer end otherwise.
     pub(crate) fn expand_diff_gap(&mut self, root: &Path, path: String, i: usize, range: std::ops::Range<u32>, cx: &mut Context<Self>) {
+        let to = self.changes_ui(root).scopes.scoped_ends().map(|(_, to)| to);
         let root = root.to_path_buf();
+        let root_for_land = root.clone();
         cx.spawn(async move |this, cx| {
             let p = path.clone();
             let lines = if crate::runtime::captures() {
                 (range.start..range.end).map(|n| format!("        // line {n}")).collect()
             } else {
-                cx.background_executor().spawn(async move { git_ops::read_lines(&root, &p, range) }).await
+                cx.background_executor()
+                    .spawn(async move {
+                        match to {
+                            Some(to) => crate::checkpoints::read_lines_at(&root, &to, &p, range),
+                            None => git_ops::read_lines(&root, &p, range),
+                        }
+                    })
+                    .await
             };
-            let _ = this.update(cx, |this: &mut Self, cx| {
-                this.cache.gap_lines.insert((path, i), Arc::new(lines));
-                cx.notify();
-            });
+            let _ = this.update(cx, |this: &mut Self, cx| this.land(&root_for_land, crate::right_scopes::Landed::Gap { path, hunk: i, lines }, cx));
         })
         .detach();
     }
@@ -576,24 +594,24 @@ impl RightPane {
     }
 
     /// The transcript's `+N −M` chip, the pane half: that turn's `files`
-    /// (absolute or relative to `root`) that are changed rows open, the list
-    /// scrolled to the first, the rows flashing once (docs/43 §4).
+    /// (absolute or relative to `root`) that are rows of the shown list
+    /// open, the list scrolled to the first, the rows flashing once (docs/43
+    /// §4). The shown list is the turn's own diff when the chip found its
+    /// checkpoints ([`RightPane::open_turn`]), the working tree otherwise.
     pub(crate) fn open_turn_files(&mut self, root: &Path, files: &[String], cx: &mut Context<Self>) {
-        let tree = self.cache.git_for(root).flatten();
         let mut matched = Vec::new();
         for f in files {
             let rel = Path::new(f).strip_prefix(root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| f.clone());
-            if tree.as_ref().is_some_and(|t| t.change(&rel).is_some()) {
-                matched.push(rel);
+            if let Some(change) = self.shown_change(root, &rel) {
+                matched.push((rel, change));
             }
         }
-        for rel in &matched {
+        for (rel, change) in &matched {
             if !self.cache.changes_expanded_for(root).contains(rel) {
-                if let Some(change) = tree.as_ref().and_then(|t| t.change(rel)).cloned() {
-                    self.toggle_change_row(root, &change, cx);
-                }
+                self.toggle_change_row(root, change, cx);
             }
         }
+        let matched: Vec<String> = matched.into_iter().map(|(rel, _)| rel).collect();
         let ui = self.changes_ui(root);
         ui.flash = Some((Instant::now(), matched.clone()));
         ui.scroll.set_offset(gpui::Point::default());
@@ -604,12 +622,7 @@ impl RightPane {
     /// `changes-open`'s pane half: open the changed row `path` (idempotent).
     /// Not a changed row is an `Err`; a row already open succeeds.
     pub(crate) fn open_change_row(&mut self, root: &Path, path: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let change = self
-            .cache
-            .git_for(root)
-            .flatten()
-            .and_then(|t| t.change(path).cloned())
-            .ok_or_else(|| format!("no changed row `{path}`"))?;
+        let change = self.shown_change(root, path).ok_or_else(|| format!("no changed row `{path}`"))?;
         if !self.cache.changes_expanded_for(root).contains(path) {
             self.toggle_change_row(root, &change, cx);
         }
@@ -684,12 +697,29 @@ impl Harness {
         .detach();
     }
 
-    /// The transcript's `+N −M` chip: Changes, that turn's files opened, the
-    /// list scrolled to the first, the rows flashing once (docs/43 §4).
-    pub(crate) fn open_turn_changes(&mut self, files: Vec<String>, cx: &mut Context<Self>) {
+    /// The transcript's `+N −M` chip: Changes on that turn's own diff
+    /// (Turn N, its two checkpoints; docs/82 6.3), or — for a turn with no
+    /// checkpoint — the working tree, that turn's files opened, the list
+    /// scrolled to the first, the rows flashing once (docs/43 §4).
+    pub(crate) fn open_turn_changes(&mut self, turn_id: &str, files: Vec<String>, cx: &mut Context<Self>) {
         self.select_right(crate::layout::RightKind::Changes, cx);
         let Some((root, _)) = self.right_project(cx) else { return };
-        self.with_right_pane(cx, |pane, cx| pane.open_turn_files(&root, &files, cx));
+        self.with_right_pane(cx, |pane, cx| pane.open_turn(&root, turn_id, files, cx));
+    }
+
+    #[cfg(feature = "probe")]
+    /// `changes-scope:<all|session|last>`: Changes on that scope. A capture
+    /// reads no refs, so this loads the fixture index first (two finished
+    /// turns over the fixture working tree). No project, no open session,
+    /// an unknown word, or a scope the index cannot answer is an `Err`.
+    pub(crate) fn step_changes_scope(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let scope = crate::right_scopes::ChangesScope::parse(rest.trim()).ok_or_else(|| format!("unknown scope `{}` (all, session, last)", rest.trim()))?;
+        let (root, _) = self.right_project(cx).ok_or("no project for the right pane")?;
+        if self.active.is_none() {
+            return Err("no open session: Changes has no scopes".into());
+        }
+        self.select_right(crate::layout::RightKind::Changes, cx);
+        self.with_right_pane(cx, |pane, cx| pane.step_scope(&root, scope, cx))
     }
 
     #[cfg(feature = "probe")]
@@ -800,7 +830,23 @@ pub(crate) fn changes_screen(
     }
     let expanded = cache.changes_expanded_for(root);
     let p = cx.aui().colors;
-    let (session, other) = crate::right::partition_session_files(&tree.files, session_edits, root);
+    // The scope row (docs/82 6.3): shown only over the open session's
+    // checkpoints. Outside All changes the list is the scope's own diff, in
+    // one section, with no commit box.
+    let scopes = &ui.scopes;
+    let scope_row = scopes.row(scopes.shown_session.as_deref()).map(|(labels, choices, active)| scope_row(&root_buf, labels, choices, active, cx));
+    let in_all = scopes.scope == crate::right_scopes::ChangesScope::All || scope_row.is_none();
+    let scoped = if in_all { None } else { Some(scopes.scoped.as_ref().filter(|list| list.scope == scopes.scope)) };
+    if let Some(None) = scoped {
+        let body = v_flex().size_full().children(scope_row).child(loading_body(cx));
+        return (None, body.into_any_element());
+    }
+    let scoped = scoped.flatten();
+    let scope_label = scopes.index.as_ref().map(|index| index.label(&scopes.scope)).unwrap_or_default();
+    let (session, other) = match scoped {
+        Some(_) => (Vec::new(), Vec::new()),
+        None => crate::right::partition_session_files(&tree.files, session_edits, root),
+    };
     let flash = ui.flash.as_ref().filter(|(at, _)| at.elapsed() < FLASH).map(|(at, files)| (1.0 - at.elapsed().as_secs_f32() / FLASH.as_secs_f32(), files.clone()));
     if flash.is_some() {
         aui_motion::request_frame(window);
@@ -813,12 +859,18 @@ pub(crate) fn changes_screen(
 
     let mut list = row_list("right-changes-list").gap(Pixels::ZERO).label("Changes");
     let mut ix = 0usize;
-    let mut sections: Vec<(&str, Vec<FileChange>)> = Vec::new();
-    if !session.is_empty() || !session_edits.is_empty() {
-        sections.push(("This session", session));
-    }
-    if !other.is_empty() {
-        sections.push(("Other changes", other));
+    let mut sections: Vec<(SharedString, Vec<FileChange>)> = Vec::new();
+    if let Some(list) = scoped {
+        if !list.files.is_empty() {
+            sections.push((scope_label.clone(), list.files.clone()));
+        }
+    } else {
+        if !session.is_empty() || !session_edits.is_empty() {
+            sections.push(("This session".into(), session));
+        }
+        if !other.is_empty() {
+            sections.push(("Other changes".into(), other));
+        }
     }
     let mut first = true;
     let mut opened: Vec<(String, AnyElement)> = Vec::new();
@@ -919,10 +971,20 @@ pub(crate) fn changes_screen(
         }
     }
 
-    let foot_el = foot_element(ui, &root_buf, &tree, session_edits, foot, agent, window, cx);
-    let clean = tree.files.is_empty();
+    // The commit box, Push and the PR act on the working tree: All changes
+    // only (rule 13).
+    let foot_el = scoped.is_none().then(|| foot_element(ui, &root_buf, &tree, session_edits, foot, agent, window, cx));
+    let clean = match scoped {
+        Some(list) => list.files.is_empty(),
+        None => tree.files.is_empty(),
+    };
+    let clean_line = match &scopes.scope {
+        _ if scoped.is_none() => "The working tree is clean.",
+        crate::right_scopes::ChangesScope::Session => "Nothing has changed since this session's first turn.",
+        _ => "The turn changed no files.",
+    };
     let body = if clean {
-        div().size_full().pb(px(CLEAN_LIFT)).child(state_block("right-changes-clean", IconName::Check, "No changes").line("The working tree is clean.")).into_any_element()
+        div().size_full().pb(px(CLEAN_LIFT)).child(state_block("right-changes-clean", IconName::Check, "No changes").line(clean_line)).into_any_element()
     } else {
         div()
             .id("right-changes-scroll")
@@ -959,7 +1021,36 @@ pub(crate) fn changes_screen(
     if let Some(row) = sticky {
         screen = screen.child(div().absolute().top_0().left(px(LIST_INSET)).right(px(LIST_INSET)).bg(p.surface_1).child(row));
     }
-    (None, screen.child(commit_foot(foot_el, cx)).into_any_element())
+    if let Some(foot_el) = foot_el {
+        screen = screen.child(commit_foot(foot_el, cx));
+    }
+    match scope_row {
+        Some(row) => (None, v_flex().size_full().bg(p.surface_1).child(row).child(div().flex_1().min_h(px(0.0)).child(screen)).into_any_element()),
+        None => (None, screen.into_any_element()),
+    }
+}
+
+/// The scope row over the Changes list (docs/82 6.3, docs/83 §6): a quiet
+/// row of text tabs — Body, muted at rest, the chosen one on the
+/// `ov-selected` pill, the others hovering — each a `tab` named by its
+/// label, the list named "Changes scope".
+fn scope_row(root: &Path, labels: Vec<SharedString>, choices: Vec<crate::right_scopes::ChangesScope>, active: usize, cx: &mut Context<RightPane>) -> AnyElement {
+    let root = root.to_path_buf();
+    let pick = cx.listener(move |this: &mut RightPane, ix: &usize, _, cx| {
+        if let Some(scope) = choices.get(*ix).cloned() {
+            if let Err(reason) = this.set_scope(&root, scope, cx) {
+                crate::baaz_log!("changes: scope not changed ({reason})");
+            }
+        }
+    });
+    h_flex()
+        .id("right-changes-scope")
+        .flex_none()
+        .h(aui_tokens::Metrics::active().control)
+        .px(px(LIST_INSET))
+        .items_center()
+        .child(aui::data::tabs("right-changes-scope-tabs", "Changes scope", labels, active).on_select(move |ix, window, cx| pick(&ix, window, cx)))
+        .into_any_element()
 }
 
 fn loading_body(cx: &Context<RightPane>) -> gpui::Div {

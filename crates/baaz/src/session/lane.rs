@@ -614,6 +614,7 @@ impl SessionRuntime {
                 if session_id != self.session_id || self.completed_turns.contains(&turn_id) {
                     return;
                 }
+                self.checkpoint_turn_started(&turn_id, cx);
                 self.running = Some(super::Running { turn_id, started: crate::clock::now_instant() });
                 self.submitting = false;
                 self.last_tick_secs = None;
@@ -632,6 +633,7 @@ impl SessionRuntime {
                 }
                 self.completed_turns.insert(turn_id.clone());
                 if self.running.as_ref().is_some_and(|running| running.turn_id == turn_id) {
+                    self.checkpoint_running_ended(cx);
                     self.clear_running();
                 }
                 self.submitting = false;
@@ -733,6 +735,8 @@ impl SessionRuntime {
         for optimistic in std::mem::take(&mut self.pending_optimistic) {
             self.remove_optimistic_turn(&optimistic.id, cx);
         }
+        // The turn ran until the child went: what it left is checkpointed.
+        self.checkpoint_running_ended(cx);
         self.clear_running();
         self.external_approvals.clear();
         self.external_questions.clear();
@@ -1063,6 +1067,7 @@ impl SessionRuntime {
                         // Genuinely new work always carries a new turn id,
                         // exactly as on the muse lane.
                         if !self.completed_turns.contains(id) && !self.provider_kind().has(provider::ProviderTrait::TurnLifecycleEvents) {
+                            self.checkpoint_turn_started(id, cx);
                             self.running = Some(super::Running {
                                 turn_id: id.clone(),
                                 started: crate::clock::now_instant(),
@@ -1116,6 +1121,7 @@ impl SessionRuntime {
                     // in the subscriptions, not here.)
                     let live = self.running.as_ref().is_some_and(|r| r.turn_id == *turn_id);
                     if live {
+                        self.checkpoint_running_ended(cx);
                         self.clear_running();
                         // A live turn finished: the lane is healthy, and a
                         // provider that settles only failures (Claude Code,
@@ -1312,6 +1318,7 @@ impl SessionRuntime {
             _ => None,
         });
         if let Some(turn_id) = open {
+            self.checkpoint_turn_started(&turn_id, cx);
             self.running = Some(super::Running { turn_id, started: crate::clock::now_instant() });
             self.last_tick_secs = None;
             self.start_ticker(cx);

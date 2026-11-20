@@ -134,6 +134,9 @@ pub struct SessionRuntime {
     /// The banner shows the Auto-fallback notice (a model pick left Auto
     /// for Ask), which a later mode pick takes down.
     pub(super) banner_is_mode_fallback: bool,
+    /// The turn checkpoints of this session's folder (docs/82 6.3): which
+    /// turns started and ended, the last snapshot, one job at a time.
+    pub(super) checkpoints: crate::checkpoints::Recorder,
     /// The shared-folder warning (docs/82 6.2) was shown on this session:
     /// it shows once, never again however often the session lands.
     pub(super) shared_folder_warned: bool,
@@ -395,6 +398,7 @@ impl SessionRuntime {
     /// lane, which [`Self::install_lane`] or an opening lane sets.
     pub(crate) fn new(session_id: String, provider_id: String, workspace: String) -> Self {
         let workspace_key = workspace.clone();
+        let checkpoints = crate::checkpoints::Recorder::new(super::checkpoints::checkpoint_folder(&workspace));
         let sent_items = crate::sent::load(&provider_id, &session_id);
         Self {
             store: session_store::SessionStore::new(&session_id, aui_protocol::Provider::Muse, workspace_key.clone()),
@@ -428,6 +432,7 @@ impl SessionRuntime {
             banner: None,
             banner_is_mode_fallback: false,
             shared_folder_warned: false,
+            checkpoints,
             lost_at: None,
             child_failure: None,
             banner_action: None,

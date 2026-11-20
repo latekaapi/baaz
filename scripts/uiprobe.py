@@ -976,6 +976,11 @@ ENTRIES.update({
     "composer-menu-provider":  _populated("provider", replay=True),
     "composer-menu-mode":      _populated("mode", replay=True),
     "right-changes-full":      _populated("right-width:440;right:changes;changes-open:crates/baaz/src/right.rs", replay=True),
+    # Task 6.3: the Changes scope row over a session's checkpoints, on Last
+    # turn with a row open. A capture reads and writes no refs (it runs in
+    # the owner's repository): `changes-scope:` loads a fixture index of two
+    # finished turns over the fixture tree. No baseline yet.
+    "right-changes-scope-last": _populated("right-width:440;right:changes;changes-scope:last;changes-open:crates/baaz/src/layout.rs", replay=True),
     "right-files-preview":     _populated("right-width:440;right:files;files-select:src/lib.rs",
                                           workspace=_REPO_ACME),
     "right-page":              _populated("right-width:440;right:browser;browse:https://example.com", replay=True),

@@ -68,7 +68,8 @@ pub(crate) fn drawn_changes() -> Option<usize> {
 /// root call into the pane (see the module doc). Never persists.
 #[derive(Clone, Default)]
 pub(crate) struct RightFacts {
-    /// The project the pane reads for: root plus display name.
+    /// The project the pane reads for: root plus display name (a worktree
+    /// session's worktree, under its project's name).
     pub project: Option<(PathBuf, String)>,
     /// The active session's view: its edited files ("This session") and its
     /// tool outputs (pushed full-output views).
@@ -561,6 +562,10 @@ impl Render for RightPane {
         // once on open, kind or project change, on the 2 s interval while
         // open on a data kind, never while closed or on the Page.
         self.sync_refresh(cx);
+        // The Changes scope row shows for the open session's checkpoints
+        // only (docs/82 6.3): the screen draws from the cache, so the id
+        // rides there.
+        self.cache.changes.scopes.shown_session = self.scope_session_id(cx);
         if !self.cache.pushed.is_empty() {
             self.sync_pushed_outputs(cx);
         }

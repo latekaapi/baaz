@@ -347,18 +347,21 @@ impl Harness {
                     });
                 }));
             }
-            // B12: a turn fold's `+N −M` chip: Changes for the session.
-            // Per-turn checkpoints do not exist yet, so the chip opens the
-            // session-scoped surface rather than pretending a scope. The
-            // id is kept for that filter — read here so the shape stays.
             // D6 (docs/43 §2.9–2.10, §4): the views the transcript opens.
             SessionEvent::OpenOutput(out) => self.open_tool_output(out.clone(), cx),
             SessionEvent::OpenImage(path) => self.show_image(path.clone(), cx),
-            // D6 (docs/43 §4): the chip opens Changes on that turn's files,
-            // open, scrolled to, flashing once.
+            // D6 (docs/43 §4), docs/82 6.3: the chip opens Changes on that
+            // turn's own diff (its checkpoints), its files open, scrolled
+            // to, flashing once.
             SessionEvent::OpenTurnChanges { turn_id } => {
                 let files = self.active.as_ref().map(|view| view.read(cx).rt(cx).turn_edits(turn_id)).unwrap_or_default();
-                self.open_turn_changes(files, cx);
+                self.open_turn_changes(turn_id, files, cx);
+            }
+            // A turn's checkpoint refs landed: an open Changes screen on
+            // that session offers its scopes (docs/82 6.3).
+            SessionEvent::CheckpointTaken { session_id } => {
+                let session_id = session_id.clone();
+                self.with_right_pane(cx, |pane, cx| pane.note_checkpoints(&session_id, cx));
             }
         }
         cx.notify();
