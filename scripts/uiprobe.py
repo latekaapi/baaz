@@ -921,8 +921,14 @@ _FULL = ["--replay", "fixtures/msp/synthetic-full.jsonl"]
 # The fixture's two projects. Its rows name them by `workspaceRoot`, but a
 # row only sits under a project the store has adopted; a fresh state dir
 # has adopted only the launch directory, so without these every row fell
-# under "Unfiled" beside an empty project head. Adopting is a setter (the
-# second settle run finds them adopted and changes nothing).
+# under "Unfiled" beside an empty project head. Adopting live is not
+# enough on its own: the fixture's claude-code and codex rows carry no
+# provider record, so a live rejoin never re-resolves them (a real row of
+# those providers always has one and does regroup) and only the Muse rows
+# moved. So the probe primes the entry's state dir with these adoptions in
+# a run of their own before the first capture ([`prime_adoptions`]): every
+# attempt boots with the projects stored, files every row at boot, and the
+# steps' own `project:` then finds them adopted and changes nothing.
 _ADOPT = "project:fixtures/ws/acme-web;project:fixtures/ws/acme-internal"
 
 
@@ -1064,7 +1070,8 @@ def boot(entry, verb):
 
 def attempt_state(env, pristine):
     """`env` with BAAZ_STATE_DIR pointed at a fresh copy of `pristine`
-    (the entry's state dir as it stood before any capture), or `env`
+    (the entry's state dir as it stood before any capture, plus its primed
+    adoptions), or `env`
     unchanged when the entry names none. Every capture attempt starts from
     the same state, as an entry with no state dir already does (baaz makes
     a throwaway one per process): reusing one dir let attempt two read
@@ -1077,6 +1084,28 @@ def attempt_state(env, pristine):
     fresh = os.path.join(tempfile.mkdtemp(prefix="uiprobe-attempt-"), "state")
     shutil.copytree(pristine, fresh)
     return {**env, "BAAZ_STATE_DIR": fresh}
+
+
+def prime_adoptions(cmd, env, pristine):
+    """Run the entry once with only its `project:` steps on `pristine`,
+    so the projects are stored before any capture boots (see `_ADOPT`).
+    A no-op for an entry that adopts nothing or names no state dir. The
+    run is a capture like any other (offline, takes no focus); its image
+    is thrown away. Returns an error string, or None."""
+    if pristine is None or "--steps" not in cmd:
+        return None
+    at = cmd.index("--steps") + 1
+    adopt = [s for s in cmd[at].split(";") if s.strip().startswith("project:")]
+    if not adopt:
+        return None
+    prime = cmd[:at] + [";".join(adopt)] + cmd[at + 1:]
+    shot = os.path.join(tempfile.mkdtemp(prefix="uiprobe-prime-"), "prime.png")
+    p = subprocess.run(prime + ["--screenshot", shot, "--screenshot-delay", "200"],
+                       cwd=REPO, capture_output=True, text=True, timeout=180,
+                       env={**env, "BAAZ_STATE_DIR": pristine})
+    if p.returncode != 0:
+        return "uiprobe: priming the adoptions failed:\n" + (p.stderr[-1500:] or p.stdout[-1500:])
+    return None
 
 
 def main():
@@ -1115,7 +1144,8 @@ def main():
         # set they always should, so this is cheap; when they do not, the screen
         # is genuinely still animating and reporting that beats baselining an
         # arbitrary frame. Each attempt runs on its own copy of the entry's
-        # state dir as it stood before the first ([`attempt_state`]), so
+        # state dir as it stood before the first ([`attempt_state`]), with
+        # the entry's adoptions primed into it ([`prime_adoptions`]), so
         # the two compared are the same run, not a run and its sequel.
         import filecmp
         tmp, prev = tempfile.mkdtemp(), None
@@ -1124,6 +1154,10 @@ def main():
         if state and os.path.isdir(state):
             pristine = os.path.join(tempfile.mkdtemp(prefix="uiprobe-pristine-"), "state")
             shutil.copytree(state, pristine)
+        failed = prime_adoptions(cmd, env, pristine)
+        if failed:
+            sys.stderr.write(failed + "\n")
+            return 1
         for attempt in range(SETTLE_TRIES):
             shot = os.path.join(tmp, f"s{attempt}.png")
             p = subprocess.run(cmd + ["--screenshot", shot,
