@@ -993,11 +993,11 @@ ENTRIES.update({
     # Task 6.5: the Tasks screen from fixture tasks (a dev server running on
     # :5173, a test run exited 0, a lint exited 1, a watcher stopped), with
     # no process behind any of them; its empty state; and the sidebar row's
-    # "N running" in its trailing slot (the open session's, from the same
+    # "N running" in its trailing slot (On-call runbook, p-int-5: its slot is otherwise empty; the open session's holds an attention dot, which wins), from the same
     # fixture). No baselines yet.
     "right-tasks":             _populated("right-width:440;tasks-fixture;right:tasks", replay=True),
     "right-tasks-empty":       _populated("right-width:440;right:tasks", replay=True),
-    "sidebar-tasks-running":   _populated("tasks-fixture", replay=True),
+    "sidebar-tasks-running":   _populated("tasks-fixture:p-int-5", replay=True),
     "undo-turn-confirm":       _populated("undo-turn:last", replay=True),
     "revert-file-confirm":     _populated("right-width:440;right:changes;revert-file:crates/baaz/src/layout.rs", replay=True),
     "right-files-preview":     _populated("right-width:440;right:files;files-select:src/lib.rs",
