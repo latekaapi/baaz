@@ -51,6 +51,23 @@ impl Harness {
         });
     }
 
+    #[cfg(feature = "probe")]
+    /// `undo-confirm`: press the open Undo / Revert confirm's primary, the
+    /// button's own path ([`Self::confirm_undo_dialog`]). Danger dialogs
+    /// take no Enter, so a scripted run needs this. No such dialog open
+    /// fails the step.
+    pub(crate) fn step_undo_confirm(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let target = self
+            .overlays
+            .read(cx)
+            .dialog()
+            .filter(|d| d.action == DialogAction::UndoChanges)
+            .map(|d| d.archive_target.clone())
+            .ok_or("no undo or revert confirm is open")?;
+        self.confirm_undo_dialog(target, cx);
+        Ok(())
+    }
+
     /// The confirm's Undo / Revert: the action its target names.
     pub(crate) fn confirm_undo_dialog(&mut self, target: Option<String>, cx: &mut Context<Self>) {
         self.close_dialog(cx);

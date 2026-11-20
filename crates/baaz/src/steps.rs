@@ -155,6 +155,7 @@
 //! | `pin` | pin or unpin the open session |
 //! | `archive` | raise the archive confirmation |
 //! | `archive-confirm` | confirm it |
+//! | `undo-confirm` | press the open Undo / Revert confirm's primary (docs/82 6.4; danger dialogs take no Enter); no such dialog open fails the step |
 //! | `error-dialog:<offline\|blocked\|sorry>` | capture aid: raise a critical error dialog of that family through the real dialog path (empty means `sorry`; an unknown family fails the step), free |
 //! | `toast:<title>\|<body>` | capture aid: raise a toast through the production toast path (empty title fails the step), free |
 //! | `projects` | open the Projects palette |
@@ -452,6 +453,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "error-dialog", run: |this, rest, _, cx| this.step_error_dialog(rest, cx) },
     WindowVerb { verb: "toast", run: |this, rest, _, cx| this.step_toast(rest, cx) },
     WindowVerb { verb: "archive-confirm", run: |this, _, window, cx| { this.confirm_archive_dialog(window, cx); Ok(()) } },
+    WindowVerb { verb: "undo-confirm", run: |this, _, _, cx| this.step_undo_confirm(cx) },
     WindowVerb { verb: "show-archived", run: |this, _, _, cx| this.step_toggle_archived(cx) },
     WindowVerb { verb: "projects", run: |this, _, window, cx| this.step_projects(window, cx) },
     WindowVerb { verb: "project", run: |this, rest, _, cx| this.step_adopt(rest, cx) },
