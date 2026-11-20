@@ -49,6 +49,10 @@ enum ProjectMenuAction {
     Pin,
     /// Reveal the menu project's root in Finder.
     Reveal,
+    /// Flip whether new sessions in the menu's project start in their own
+    /// worktree (`ProjectDefaults::worktree`, docs/82 6.1). Offered only on
+    /// a project in a git repository.
+    WorktreeDefault,
     /// Ask before removing the menu's project from the sidebar.
     Remove,
     /// The unfiled row: adopt through the Projects palette.
@@ -62,6 +66,25 @@ impl Harness {
     /// the menu seats at the group row either way — but the toggle still
     /// tells a header open apart from a group tray open.
     /// Clicking the same affordance again closes it, like every other menu.
+    /// The project menu's "New sessions in their own worktree" row: its
+    /// checked state, or `None` when it is not offered — rule 13, only on a
+    /// project in a git repository, where a worktree can be made.
+    pub(crate) fn worktree_default_offered(&self, project: &str, cx: &gpui::App) -> Option<bool> {
+        self.session_list
+            .read(cx)
+            .projects
+            .find(project)
+            .filter(|p| baaz_core::worktrees::in_git_repository(&p.root))
+            .map(|p| p.defaults.worktree)
+    }
+
+    /// That row's click: flip the project's worktree default. `Err` when the
+    /// row is not offered there.
+    pub(crate) fn flip_worktree_default(&mut self, project: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let on = self.worktree_default_offered(project, cx).ok_or("no worktree default offered for this project")?;
+        self.set_worktree_default(project, !on, cx)
+    }
+
     pub(crate) fn open_project_menu(&mut self, project: Option<String>, from_header: bool, cx: &mut Context<Self>) {
         let already = self
             .overlays
@@ -497,8 +520,15 @@ impl Harness {
                 let pinned = self.session_list.read(cx).projects.find(&id).is_some_and(|p| p.pinned);
                 let colour = self.session_list.read(cx).projects.find(&id).map(|p| p.colour).unwrap_or(1);
                 let colour_name = COLOUR_NAMES.get(colour.saturating_sub(1) as usize).unwrap_or(&"?");
+                let worktree_default = self.worktree_default_offered(&id, cx);
                 push(MenuRow::Separator, None);
                 push(MenuRow::Toggle { label: "New session here".into(), checked: false }, Some(ProjectMenuAction::NewHere));
+                if let Some(on) = worktree_default {
+                    push(
+                        MenuRow::Toggle { label: "New sessions in their own worktree".into(), checked: on },
+                        Some(ProjectMenuAction::WorktreeDefault),
+                    );
+                }
                 push(MenuRow::Toggle { label: "Rename project".into(), checked: false }, Some(ProjectMenuAction::Rename));
                 push(
                     MenuRow::Submenu { label: "Colour".into(), value: (*colour_name).into(), highlighted: colour_open },
@@ -561,6 +591,13 @@ impl Harness {
                         });
                         projects::write(&this.session_list.read(cx).projects);
                         this.invalidate_list(cx);
+                    }
+                }
+                Some(ProjectMenuAction::WorktreeDefault) => {
+                    if let Some(id) = target_for.clone() {
+                        if let Err(reason) = this.flip_worktree_default(&id, cx) {
+                            crate::baaz_log!("project menu: worktree default unchanged: {reason}");
+                        }
                     }
                 }
                 Some(ProjectMenuAction::Reveal) => {

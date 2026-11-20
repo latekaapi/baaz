@@ -207,7 +207,8 @@ impl ScopeState {
 
 /// What a Changes read brought back ([`RightPane::land`]).
 pub(crate) enum Landed {
-    /// The fixture index (a probe step), or one read and already settled.
+    /// The fixture index (a probe step; a shipped build never builds one).
+    #[cfg(feature = "probe")]
     Index(CheckpointIndex),
     /// The background index read.
     IndexRead(CheckpointIndex),
@@ -476,6 +477,7 @@ impl RightPane {
     /// unchanged run.
     pub(crate) fn land(&mut self, root: &Path, landed: Landed, cx: &mut Context<Self>) {
         match landed {
+            #[cfg(feature = "probe")]
             Landed::Index(index) => self.index_landed(root, index, cx),
             Landed::IndexRead(index) => {
                 let state = &mut self.changes_ui(root).scopes;

@@ -630,3 +630,30 @@ fn unarchive_into_a_taken_folder_moves_the_session_with_it(cx: &mut gpui::TestAp
     let _ = std::fs::remove_dir_all(&folder);
     cleanup(&root, state);
 }
+
+/// The project menu's "New sessions in their own worktree" row (Gate 6: the
+/// per-project default had no control outside the probe). Offered on a
+/// project in a git repository, checked as the default stands; a click
+/// flips the stored default both ways. A project outside git is not offered
+/// the row, and its click refuses.
+#[gpui::test]
+fn the_project_menu_flips_the_worktree_default_only_in_git(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("worktree-menu");
+    let root = repo(&state.2);
+    let (factory, _seen) = recording_factory();
+    let (baaz, vc, project) = window(cx, &state.2, &root, factory);
+    let offered = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| baaz.read(cx).worktree_default_offered(&project, cx));
+    assert_eq!(offered(vc), Some(false), "a git project offers the row, unchecked by default");
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.flip_worktree_default(&project, cx))).expect("flips on");
+    assert_eq!(offered(vc), Some(true), "the click turns the default on");
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.flip_worktree_default(&project, cx))).expect("flips off");
+    assert_eq!(offered(vc), Some(false), "a second click turns it off");
+
+    // Outside git: no row, and the click refuses.
+    let plain = state.2.join("plain-folder");
+    std::fs::create_dir_all(&plain).unwrap();
+    let plain_id = vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.adopt_root(&plain, cx)));
+    vc.update(|_, cx| assert_eq!(baaz.read(cx).worktree_default_offered(&plain_id, cx), None));
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.flip_worktree_default(&plain_id, cx)))
+        .expect_err("no row outside git");
+}
