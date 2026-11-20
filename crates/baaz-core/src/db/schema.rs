@@ -18,7 +18,9 @@
 //! * `worktree`: a session's worktree (docs/82 6.1, [`crate::worktrees`]):
 //!   its folder, branch, the commit it was cut from, the project root it
 //!   belongs to, its block of ten ports (unique among rows) and when its
-//!   setup script ran. `session.worktree_id` points here.
+//!   setup script ran; while it is archived (docs/82 6.2), when, and the
+//!   hidden ref and branch head its snapshot is. `session.worktree_id`
+//!   points here.
 //! * `session`: one row per session, keyed `(provider_key,
 //!   provider_session_id)`: the same id under two providers is two rows
 //!   (D-10). `id` is Baaz's own uuid, what every child row points at.
@@ -54,7 +56,7 @@
 use rusqlite::{params, Connection, Transaction};
 
 /// The schema this build writes.
-pub const VERSION: i32 = 2;
+pub const VERSION: i32 = 3;
 
 /// Step 1: every table.
 const V1: &str = "
@@ -189,6 +191,16 @@ ALTER TABLE worktree ADD COLUMN setup_at INTEGER;
 CREATE UNIQUE INDEX worktree_by_port ON worktree(port);
 ";
 
+/// Step 3 (docs/82 6.2): an archived worktree's snapshot. `archived_at`
+/// is set while its folder is gone; `preserved_ref` names the hidden ref
+/// holding its uncommitted work and `preserved_head` the commit its branch
+/// was on.
+const V3: &str = "
+ALTER TABLE worktree ADD COLUMN archived_at INTEGER;
+ALTER TABLE worktree ADD COLUMN preserved_ref TEXT;
+ALTER TABLE worktree ADD COLUMN preserved_head TEXT;
+";
+
 /// Bring `conn` to [`VERSION`]: the ledger's own versions first, then every
 /// step this file has not run, each in its own transaction.
 pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
@@ -219,6 +231,12 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V2)?;
         tx.pragma_update(None, "user_version", 2)?;
+        tx.commit()?;
+    }
+    if version < 3 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V3)?;
+        tx.pragma_update(None, "user_version", 3)?;
         tx.commit()?;
     }
     Ok(())

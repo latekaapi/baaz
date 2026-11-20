@@ -5,7 +5,8 @@
 //! hands out the port block, which must be unique among rows, and the
 //! writer thread runs one job at a time, so two worktrees made at once
 //! never draw the same block. A row whose `git worktree add` failed is
-//! deleted again ([`delete`]).
+//! deleted again ([`delete`]). An archived worktree keeps its row (and its
+//! port block) with its snapshot ([`mark_archived`], [`mark_restored`]).
 //!
 //! Keyed by session id: `worktree.created_by_session` (the bare id of the
 //! session it was made for, set at [`link_session`]) and
@@ -15,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension as _};
 
-use crate::worktrees::{Worktree, PORT_BASE, PORT_BLOCK, PORT_BLOCKS};
+use crate::worktrees::{Snapshot, Worktree, PORT_BASE, PORT_BLOCK, PORT_BLOCKS};
 
 /// Insert `worktree` (its `port` ignored) with the lowest free port block,
 /// and return that block's first port. `None` when every block is taken.
@@ -71,6 +72,39 @@ pub fn setup_ran(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
     Ok(stamp.is_none_or(|stamp| stamp.is_some()))
 }
 
+/// Record that the worktree `id` is archived: its snapshot (docs/82 6.2).
+/// Written, and committed, before its folder is removed, so a crash
+/// between the two never loses where the work went.
+pub fn mark_archived(conn: &Connection, id: &str, snapshot: &Snapshot) -> rusqlite::Result<()> {
+    super::check_writer("archive worktree");
+    let changed = conn.execute(
+        "UPDATE worktree SET archived_at = ?2, preserved_ref = ?3, preserved_head = ?4 WHERE id = ?1",
+        params![id, super::now_ms(), snapshot.reference, snapshot.head],
+    )?;
+    if changed == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    Ok(())
+}
+
+/// Record that the worktree `id` is back, at `path` (its old folder, or a
+/// fresh one when that was taken): the snapshot columns clear.
+pub fn mark_restored(conn: &Connection, id: &str, path: &Path) -> rusqlite::Result<()> {
+    super::check_writer("restore worktree");
+    conn.execute(
+        "UPDATE worktree SET archived_at = NULL, preserved_ref = NULL, preserved_head = NULL, path = ?2 WHERE id = ?1",
+        params![id, path.to_string_lossy()],
+    )?;
+    Ok(())
+}
+
+/// The uuid of the session row `(provider, id)`: what a preserved ref is
+/// named by.
+pub fn session_key(conn: &Connection, provider: &str, session_id: &str) -> rusqlite::Result<Option<String>> {
+    super::check_writer("read session key");
+    super::sessions::read_row(conn, provider, session_id)
+}
+
 /// Tie the session `(provider, id)` to the worktree whose folder is
 /// `path`: the session row's `worktree_id`, and the worktree's
 /// `created_by_session` when it names nobody yet. `false` when either row
@@ -87,7 +121,8 @@ pub fn link_session(conn: &Connection, provider: &str, session_id: &str, path: &
     Ok(true)
 }
 
-const COLUMNS: &str = "id, project_id, path, branch, created_by_session, project_root, base, port";
+const COLUMNS: &str =
+    "id, project_id, path, branch, created_by_session, project_root, base, port, archived_at, preserved_ref, preserved_head";
 
 fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Worktree> {
     let path: String = row.get(2)?;
@@ -104,6 +139,10 @@ fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Worktree> {
         project_root: root.map(PathBuf::from).unwrap_or_default(),
         base: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
         port: row.get::<_, Option<i64>>(7)?.and_then(|port| u16::try_from(port).ok()).unwrap_or(0),
+        snapshot: match row.get::<_, Option<i64>>(8)? {
+            Some(_) => Some(Snapshot { reference: row.get(9)?, head: row.get::<_, Option<String>>(10)?.unwrap_or_default() }),
+            None => None,
+        },
     })
 }
 

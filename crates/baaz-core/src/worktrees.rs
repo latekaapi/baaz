@@ -25,6 +25,12 @@
 //!   `BAAZ_PORT` (the first of the block) and `BAAZ_PORT_COUNT`.
 //! * **An unused worktree goes** ([`discard_unused`]): `git worktree remove`
 //!   without `--force`, so a worktree with changes in it stays.
+//! * **Archive and unarchive** (docs/82 6.2, docs/26b §2.8): [`archive`]
+//!   preserves the work to `refs/baaz/preserved/<session uuid>` through a
+//!   temporary index ([`preserve`]), records the ref and the branch head on
+//!   the row, then removes the folder (the branch stays); [`restore`] adds
+//!   it back and puts the work back unstaged. [`move_back`] hands the
+//!   worktree's changes to the project root instead.
 //!
 //! Every function here blocks on git: callers run it off the UI thread.
 //! No gpui.
@@ -77,6 +83,22 @@ pub struct Worktree {
     pub port: u16,
     /// The bare id of the session it was made for, once known.
     pub created_by_session: Option<String>,
+    /// Set while it is archived: its folder is gone and this is what
+    /// [`restore`] brings back (docs/82 6.2).
+    pub snapshot: Option<Snapshot>,
+}
+
+/// What an archived worktree left behind: the commit its branch was on and
+/// the hidden ref holding its uncommitted and untracked work ([`preserve`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    /// `refs/baaz/preserved/<key>`, a commit whose tree is the worktree's
+    /// files as they were (ignored files aside) and whose parent is
+    /// [`Self::head`]. `None` when the folder was already gone, so there
+    /// was nothing to keep but the branch.
+    pub reference: Option<String>,
+    /// The commit the worktree's branch was on.
+    pub head: String,
 }
 
 impl Worktree {
@@ -253,6 +275,7 @@ pub fn create(spec: &CreateSpec) -> Result<Worktree, String> {
             base: base.commit.clone(),
             port: 0,
             created_by_session: None,
+            snapshot: None,
         };
         let row = candidate.clone();
         let reserved = crate::db::call(db_path.clone(), move |db| crate::db::worktrees::reserve(&db.conn, &row))
@@ -620,36 +643,69 @@ pub fn by_path(state_dir: &Path, folder: &Path) -> Option<Worktree> {
 }
 
 /// The variables a session running in `folder` is started with: the
-/// worktree's [`Worktree::env`] when `folder` is one of Baaz's worktrees
-/// with a row, else none. Reads the database only for a folder under
+/// worktree's [`Worktree::env`] when `folder` is one of Baaz's live
+/// worktrees with a row, else none. Reads the database only for a folder under
 /// [`worktrees_root`]; what it finds is remembered for
 /// [`cached_env_for_folder`].
 pub fn env_for_folder(state_dir: &Path, folder: &Path) -> Vec<(String, String)> {
     if !is_worktree_folder(state_dir, folder) {
         return Vec::new();
     }
-    by_path(state_dir, folder).map(|worktree| worktree.env()).unwrap_or_default()
+    by_path(state_dir, folder).filter(|worktree| worktree.snapshot.is_none()).map(|worktree| worktree.env()).unwrap_or_default()
 }
 
-/// What this run knows of each worktree's variables, by folder: filled by
-/// [`create`] and every [`by_path`] that finds a row, emptied by
-/// [`discard_unused`]. Lets the UI thread start a terminal with them
-/// without touching the database.
-type EnvCache = std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<(String, String)>>>;
+/// What this run knows of each live worktree, by folder: filled by
+/// [`create`], [`restore`], [`remember_all`] and every [`by_path`] that
+/// finds a live row, emptied by [`discard_unused`], [`archive`] and
+/// [`move_back`]. Lets the UI thread start a terminal with a worktree's
+/// variables, and name its branch on a sidebar row, without touching the
+/// database.
+type Cache = std::sync::Mutex<std::collections::HashMap<PathBuf, Worktree>>;
 
-fn env_cache() -> &'static EnvCache {
-    static CACHE: std::sync::OnceLock<EnvCache> = std::sync::OnceLock::new();
+fn cache() -> &'static Cache {
+    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
+fn cached<T>(work: impl FnOnce(&mut std::collections::HashMap<PathBuf, Worktree>) -> T) -> T {
+    work(&mut cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+}
+
 fn remember_env(worktree: &Worktree) {
-    env_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(worktree.path.clone(), worktree.env());
+    if worktree.snapshot.is_none() {
+        cached(|map| map.insert(worktree.path.clone(), worktree.clone()));
+    }
+}
+
+fn forget(folder: &Path) {
+    cached(|map| map.remove(folder));
 }
 
 /// [`env_for_folder`] from what this run already knows, without the
 /// database: empty for a folder no lookup or create has named yet.
 pub fn cached_env_for_folder(folder: &Path) -> Vec<(String, String)> {
-    env_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(folder).cloned().unwrap_or_default()
+    cached(|map| map.get(folder).map(Worktree::env)).unwrap_or_default()
+}
+
+/// The branch of the live worktree in `folder`, from what this run
+/// already knows (no database): `None` for any other folder.
+pub fn cached_branch_for_folder(folder: &Path) -> Option<String> {
+    cached(|map| map.get(folder).map(|worktree| worktree.branch.clone()))
+}
+
+/// Read every live worktree row into the cache once ([`cached_branch_for_folder`],
+/// [`cached_env_for_folder`]): what a launch does before the sidebar names
+/// branches. Returns how many it knows. Blocks; off the UI thread.
+pub fn remember_all(state_dir: &Path) -> usize {
+    let rows = crate::db::read(crate::db::path_in(state_dir), |db| crate::db::worktrees::list(&db.conn).ok())
+        .flatten()
+        .unwrap_or_default();
+    let live: Vec<Worktree> = rows.into_iter().filter(|worktree| worktree.snapshot.is_none()).collect();
+    let count = live.len();
+    for worktree in &live {
+        remember_env(worktree);
+    }
+    count
 }
 
 /// Tie the session `(provider, id)` to the worktree in `folder`, and lock
@@ -708,11 +764,304 @@ pub fn discard_unused(state_dir: &Path, worktree: &Worktree) -> Result<bool, Str
         let _ = git_ok(&worktree.project_root, &["branch", "-D", &worktree.branch]);
     }
     let _ = std::fs::remove_file(worktree.setup_log());
-    env_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&worktree.path);
+    forget(&worktree.path);
     let id = worktree.id.clone();
     crate::db::call(db_path, move |db| crate::db::worktrees::delete(&db.conn, &id));
     crate::baaz_log!("worktree: removed unused {}", worktree.path.display());
     Ok(true)
+}
+
+// ------------------------------------------------------------- lifecycle
+
+/// The prefix of every preserved ref: `refs/baaz/preserved/<key>`, the key
+/// the session row's uuid.
+pub const PRESERVED_PREFIX: &str = "refs/baaz/preserved/";
+
+/// Who a preserve commit is written as: a hidden ref, never a branch the
+/// person pushes, so it does not borrow their identity (or need one set).
+const PRESERVE_IDENTITY: [(&str, &str); 4] = [
+    ("GIT_AUTHOR_NAME", "Baaz"),
+    ("GIT_AUTHOR_EMAIL", "baaz@localhost"),
+    ("GIT_COMMITTER_NAME", "Baaz"),
+    ("GIT_COMMITTER_EMAIL", "baaz@localhost"),
+];
+
+fn git_env_ok(root: &Path, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> Result<String, String> {
+    let done = crate::git_ops::spawn_with_env("git", root, args, None, true, env)
+        .and_then(|job| job.finish(Instant::now() + GIT_TIMEOUT));
+    match done {
+        Some(done) if done.ok => Ok(done.text.trim().to_owned()),
+        Some(done) => Err(first_line(&done.text, &format!("git {} failed", args.first().copied().unwrap_or("")))),
+        None => Err(format!("git {} did not finish", args.first().copied().unwrap_or(""))),
+    }
+}
+
+/// Write the worktree's uncommitted and untracked work (ignored files
+/// aside) to `refs/baaz/preserved/<key>` (docs/26b §2.8): through a
+/// temporary index (a copy of the worktree's own, so unchanged files are
+/// not hashed again), `add -A`, `write-tree`, `commit-tree` on the branch
+/// head, `update-ref`. Never touches the worktree's files, its index or
+/// the person's stash. A clean worktree preserves too: its commit's tree is
+/// the head's. Blocks.
+pub fn preserve(worktree: &Worktree, key: &str) -> Result<Snapshot, String> {
+    let dir = &worktree.path;
+    let head = git_ok(dir, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let index = PathBuf::from(git_ok(dir, &["rev-parse", "--git-path", "index"])?);
+    let index = if index.is_absolute() { index } else { dir.join(index) };
+    let temp = index.with_file_name(format!("baaz-preserve-{}.index", uuid::Uuid::new_v4().simple()));
+    if index.is_file() {
+        std::fs::copy(&index, &temp).map_err(|error| format!("{}: {error}", temp.display()))?;
+    }
+    let tree = {
+        let env = [("GIT_INDEX_FILE", temp.as_os_str())];
+        let tree = git_env_ok(dir, &["add", "-A"], &env).and_then(|_| git_env_ok(dir, &["write-tree"], &env));
+        let _ = std::fs::remove_file(&temp);
+        tree?
+    };
+    let identity: Vec<(&str, &std::ffi::OsStr)> =
+        PRESERVE_IDENTITY.iter().map(|(key, value)| (*key, std::ffi::OsStr::new(*value))).collect();
+    let message = format!("baaz: preserved {}", worktree.path.display());
+    let commit = git_env_ok(dir, &["commit-tree", &tree, "-p", &head, "-m", &message], &identity)?;
+    let reference = format!("{PRESERVED_PREFIX}{key}");
+    git_ok(dir, &["update-ref", &reference, &commit])?;
+    crate::baaz_log!("worktree: preserved {} as {reference} ({})", worktree.path.display(), &commit[..commit.len().min(12)]);
+    Ok(Snapshot { reference: Some(reference), head })
+}
+
+/// Unlock and remove the worktree's folder: `git worktree remove`, and
+/// `--force` only when that refuses (changes or untracked files), which the
+/// caller has already preserved and recorded. A folder already gone is
+/// pruned from git's list. On failure the lock is put back.
+fn remove_folder(worktree: &Worktree) -> Result<(), String> {
+    if !worktree.path.exists() {
+        let _ = git_ok(&worktree.project_root, &["worktree", "prune"]);
+        return Ok(());
+    }
+    unlock(worktree);
+    let path = worktree.path.to_string_lossy();
+    if git_ok(&worktree.project_root, &["worktree", "remove", &path]).is_ok() {
+        return Ok(());
+    }
+    if let Err(error) = git_ok(&worktree.project_root, &["worktree", "remove", "--force", &path]) {
+        let _ = lock(worktree, worktree.created_by_session.as_deref().unwrap_or("pending"));
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// The snapshot of a worktree about to go: [`preserve`] when its folder is
+/// there, else just the branch's tip (nothing else is left to keep).
+fn snapshot_of(worktree: &Worktree, key: &str) -> Result<Snapshot, String> {
+    if worktree.path.exists() {
+        return preserve(worktree, key);
+    }
+    let head = git_ok(&worktree.project_root, &["rev-parse", "--verify", &format!("refs/heads/{}^{{commit}}", worktree.branch)])
+        .unwrap_or_else(|_| worktree.base.clone());
+    Ok(Snapshot { reference: None, head })
+}
+
+fn record_archived(state_dir: &Path, worktree: &Worktree, snapshot: &Snapshot) -> Result<(), String> {
+    let (id, row) = (worktree.id.clone(), snapshot.clone());
+    match crate::db::call(crate::db::path_in(state_dir), move |db| crate::db::worktrees::mark_archived(&db.conn, &id, &row)) {
+        Some(Ok(())) => Ok(()),
+        Some(Err(error)) => Err(format!("the worktree's row did not take the snapshot ({error})")),
+        None => Err("Baaz's database is not available.".to_owned()),
+    }
+}
+
+/// Archive a worktree (docs/82 6.2): [`preserve`] its work under `key`,
+/// record the snapshot on its row (committed first), then unlock and
+/// remove the folder. Its branch, port block and row stay, so [`restore`]
+/// brings it back. Already archived: `Ok` with the row as it is. Blocks.
+pub fn archive(state_dir: &Path, worktree: &Worktree, key: &str) -> Result<Worktree, String> {
+    if worktree.snapshot.is_some() {
+        return Ok(worktree.clone());
+    }
+    let snapshot = snapshot_of(worktree, key)?;
+    record_archived(state_dir, worktree, &snapshot)?;
+    forget(&worktree.path);
+    remove_folder(worktree)?;
+    crate::baaz_log!("worktree: archived {} (branch {} kept)", worktree.path.display(), worktree.branch);
+    Ok(Worktree { snapshot: Some(snapshot), ..worktree.clone() })
+}
+
+/// What [`restore`] made, and anything the person should be told.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Restored {
+    /// The live worktree, at its folder (a fresh one when the old was taken).
+    pub worktree: Worktree,
+    /// Why the work was not put back as it was, when it was not: the
+    /// branch moved on and the snapshot did not apply over it. The work
+    /// stays at its preserved ref.
+    pub note: Option<String>,
+}
+
+/// Unarchive a worktree (docs/82 6.2): `git worktree add` its branch at its
+/// old folder (a fresh name beside it when something is there now; a
+/// branch deleted meanwhile is made again at the snapshot's head), put the
+/// preserved work back — tracked changes unstaged, everything new
+/// untracked — copy the `.worktreeinclude` files again and lock it. The
+/// setup script is not run again: it ran once for this worktree, and what
+/// it made outside git (ignored files) went with the folder. Blocks.
+pub fn restore(state_dir: &Path, worktree: &Worktree) -> Result<Restored, String> {
+    let Some(snapshot) = worktree.snapshot.clone() else {
+        return Err(format!("{} is not archived.", worktree.path.display()));
+    };
+    let root = &worktree.project_root;
+    let _ = git_ok(root, &["worktree", "prune"]);
+    let mut live = Worktree { snapshot: None, ..worktree.clone() };
+    if live.path.exists() {
+        let parent = live.path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let fresh = (0..8).map(|_| parent.join(fresh_name())).find(|path| !path.exists()).ok_or("No free worktree name.")?;
+        crate::baaz_log!("worktree: {} is taken; restoring at {}", live.path.display(), fresh.display());
+        live.name = fresh.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        live.path = fresh;
+    }
+    if let Some(parent) = live.path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+    }
+    let path = live.path.to_string_lossy().into_owned();
+    let branch_ref = format!("refs/heads/{}", live.branch);
+    if git_ok(root, &["rev-parse", "--verify", "--quiet", &branch_ref]).is_ok() {
+        git_ok(root, &["worktree", "add", "--quiet", &path, &live.branch])?;
+    } else {
+        crate::baaz_log!("worktree: branch {} was deleted; making it again at {}", live.branch, snapshot.head);
+        git_ok(root, &["worktree", "add", "--quiet", "-b", &live.branch, &path, &snapshot.head])?;
+    }
+    let note = match snapshot.reference.as_deref() {
+        Some(reference) => put_back(&live, reference, &snapshot.head),
+        None => None,
+    };
+    if let Err(error) = lock(&live, live.created_by_session.as_deref().unwrap_or("pending")) {
+        crate::baaz_log!("worktree: relocking {} failed ({error})", live.path.display());
+    }
+    match copy_included(root, &live.path) {
+        Ok(0) => {}
+        Ok(copied) => crate::baaz_log!("worktree: copied {copied} file(s) named by {INCLUDE_FILE} again"),
+        Err(error) => crate::baaz_log!("worktree: {INCLUDE_FILE} copy stopped ({error})"),
+    }
+    let (id, at) = (live.id.clone(), live.path.clone());
+    match crate::db::call(crate::db::path_in(state_dir), move |db| crate::db::worktrees::mark_restored(&db.conn, &id, &at)) {
+        Some(Ok(())) => {}
+        Some(Err(error)) => crate::baaz_log!("worktree: the row of {} did not take the restore ({error})", live.path.display()),
+        None => crate::baaz_log!("worktree: the database was away for the restore of {}", live.path.display()),
+    }
+    remember_env(&live);
+    crate::baaz_log!("worktree: restored {} on {} (setup not run again)", live.path.display(), live.branch);
+    Ok(Restored { worktree: live, note })
+}
+
+/// Put the preserved tree at `reference` back into the fresh worktree
+/// `live`, unstaged. When its branch is still at `head`, a two-tree
+/// `read-tree -m -u` moves the files to the preserved tree exactly
+/// (deletions and renames included) and `reset` puts the index back on the
+/// branch, so edits read as unstaged and new files as untracked. When the
+/// branch moved on, the snapshot's own changes are applied over it as a
+/// patch; one that does not apply leaves the branch's files and says so.
+fn put_back(live: &Worktree, reference: &str, head: &str) -> Option<String> {
+    let dir = &live.path;
+    let tip = git_ok(dir, &["rev-parse", "--verify", "HEAD^{commit}"]).unwrap_or_default();
+    let commit = match git_ok(dir, &["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")]) {
+        Ok(commit) => commit,
+        Err(_) => return Some(format!("The preserved changes ({reference}) are gone; the worktree is back on its branch.")),
+    };
+    if tip == head {
+        let moved = git_ok(dir, &["read-tree", "-m", "-u", "HEAD", &commit]).and_then(|_| git_ok(dir, &["reset", "-q"]));
+        return moved.err().map(|error| format!("The preserved changes did not come back ({error}); they are kept at {reference}."));
+    }
+    match apply_between(dir, &commit_parent(dir, &commit).unwrap_or_else(|| head.to_owned()), &commit, dir, false) {
+        Ok(()) => None,
+        Err(error) => {
+            crate::baaz_log!("worktree: the snapshot of {} did not apply over the moved branch ({error})", dir.display());
+            Some(format!("Its branch moved on and the preserved changes did not apply over it; they are kept at {reference}."))
+        }
+    }
+}
+
+fn commit_parent(dir: &Path, commit: &str) -> Option<String> {
+    git_ok(dir, &["rev-parse", "--verify", "--quiet", &format!("{commit}^1")]).ok()
+}
+
+/// Apply the changes `from..to` (both commits, read in `objects_in`) to the
+/// working tree at `into`, as uncommitted changes: written to a patch file
+/// first (`diff --binary`, so bytes survive), `git apply --check` before
+/// anything is written, then `git apply`. `check_only` stops after the
+/// check. Run at the top of `into`'s repository, so every path applies.
+fn apply_between(objects_in: &Path, from: &str, to: &str, into: &Path, check_only: bool) -> Result<(), String> {
+    let patch = std::env::temp_dir().join(format!("baaz-worktree-{}.patch", uuid::Uuid::new_v4().simple()));
+    let out = format!("--output={}", patch.to_string_lossy());
+    let result = (|| {
+        git_ok(objects_in, &["diff", "--binary", "--no-color", "--no-ext-diff", &out, from, to])?;
+        if std::fs::metadata(&patch).map(|meta| meta.len() == 0).unwrap_or(true) {
+            return Ok(());
+        }
+        let top = PathBuf::from(git_ok(into, &["rev-parse", "--show-toplevel"])?);
+        let file = patch.to_string_lossy();
+        git_ok(&top, &["apply", "--check", &file])?;
+        if check_only {
+            return Ok(());
+        }
+        git_ok(&top, &["apply", &file]).map(drop)
+    })();
+    let _ = std::fs::remove_file(&patch);
+    result
+}
+
+/// "Move back to the project folder" (docs/82 6.2): hand the worktree's
+/// changes — its branch's commits since [`Worktree::base`] and its
+/// uncommitted work — to the project root as uncommitted changes, then
+/// archive the worktree for good (preserved, folder removed, branch kept)
+/// and drop its row, so the session runs in the root from here.
+///
+/// The work is preserved under `key` first (that never touches the
+/// worktree), then the patch `base..snapshot` is checked against the root:
+/// one that would not apply cleanly is refused with nothing written to
+/// either folder. Blocks.
+pub fn move_back(state_dir: &Path, worktree: &Worktree, key: &str) -> Result<(), String> {
+    if worktree.snapshot.is_some() || !worktree.path.exists() {
+        return Err("The worktree's folder is not there to move back from.".to_owned());
+    }
+    let snapshot = preserve(worktree, key)?;
+    let reference = snapshot.reference.clone().unwrap_or_default();
+    let commit = git_ok(&worktree.project_root, &["rev-parse", "--verify", &format!("{reference}^{{commit}}")])?;
+    let root = &worktree.project_root;
+    if let Err(error) = apply_between(root, &worktree.base, &commit, root, true) {
+        crate::baaz_log!("worktree: moving {} back refused ({error})", worktree.path.display());
+        return Err(format!(
+            "The changes don't apply cleanly to the project folder ({error}). Nothing was changed; the session stays in its worktree."
+        ));
+    }
+    apply_between(root, &worktree.base, &commit, root, false)
+        .map_err(|error| format!("The changes did not apply to the project folder ({error})."))?;
+    record_archived(state_dir, worktree, &snapshot)?;
+    forget(&worktree.path);
+    remove_folder(worktree)?;
+    let id = worktree.id.clone();
+    crate::db::call(crate::db::path_in(state_dir), move |db| crate::db::worktrees::delete(&db.conn, &id));
+    crate::baaz_log!(
+        "worktree: moved {} back into {} (branch {} and {reference} kept)",
+        worktree.path.display(),
+        root.display(),
+        worktree.branch
+    );
+    Ok(())
+}
+
+/// The worktree the session `(provider, id)` runs in (live or archived),
+/// with the key its preserved ref is named by (the session row's uuid; the
+/// bare id when there is no row). `folder` is the session's folder, read
+/// when the row is not tied yet. Blocks.
+pub fn for_session(state_dir: &Path, provider: &str, session_id: &str, folder: Option<&Path>) -> Option<(Worktree, String)> {
+    let (provider, id, folder) = (provider.to_owned(), session_id.to_owned(), folder.map(Path::to_path_buf));
+    crate::db::call(crate::db::path_in(state_dir), move |db| {
+        let by_session = crate::db::worktrees::by_session(&db.conn, &provider, &id).ok().flatten();
+        let worktree = by_session.or_else(|| {
+            folder.as_deref().and_then(|folder| crate::db::worktrees::by_path(&db.conn, folder).ok().flatten())
+        })?;
+        let key = crate::db::worktrees::session_key(&db.conn, &provider, &id).ok().flatten().unwrap_or(id);
+        Some((worktree, key))
+    })
+    .flatten()
 }
 
 #[cfg(test)]

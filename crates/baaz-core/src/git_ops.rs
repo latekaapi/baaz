@@ -81,7 +81,21 @@ pub struct Job {
 /// Start `git <args>` in `root` without waiting. `stdin` is written and
 /// closed first when given (a commit message).
 pub fn spawn(program: &str, root: &Path, args: &[&str], stdin: Option<&str>, merge_stderr: bool) -> Option<Job> {
+    spawn_with_env(program, root, args, stdin, merge_stderr, &[])
+}
+
+/// [`spawn`] with `env` set on the child on top of the usual variables
+/// (a temporary `GIT_INDEX_FILE`, a commit identity).
+pub fn spawn_with_env(
+    program: &str,
+    root: &Path,
+    args: &[&str],
+    stdin: Option<&str>,
+    merge_stderr: bool,
+    env: &[(&str, &std::ffi::OsStr)],
+) -> Option<Job> {
     let mut command = Command::new(program);
+    command.envs(env.iter().copied());
     if program == "git" {
         command.arg("--no-optional-locks");
     }

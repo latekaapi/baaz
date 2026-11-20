@@ -341,3 +341,241 @@ fn the_branch_prefix_and_the_project_default_read_back() {
     let off = crate::projects::ProjectDefaults::default();
     assert!(serde_json::to_value(&off).expect("writes").get("worktree").is_none(), "off is not written");
 }
+
+// ------------------------------------------------- lifecycle (docs/82 6.2)
+
+/// A project with files to delete and rename, an ignored `.env` that
+/// `.worktreeinclude` names, and a worktree of it.
+fn lifecycle_project(scratch: &Scratch) -> (PathBuf, Worktree) {
+    let root = project(scratch);
+    std::fs::write(root.join("b.txt"), "bee\n").expect("b.txt");
+    std::fs::write(root.join("c.txt"), "sea\n").expect("c.txt");
+    std::fs::write(root.join(".gitignore"), ".env\n").expect("ignore");
+    std::fs::write(root.join(".worktreeinclude"), ".env\n").expect("include");
+    run(&root, &["add", "-A"]);
+    run(&root, &["commit", "-q", "-m", "more"]);
+    std::fs::write(root.join(".env"), "SECRET=1\n").expect(".env");
+    let worktree = create(&spec(&scratch.state(), &root, None)).expect("created");
+    assert!(worktree.path.join(".env").is_file(), "the include copied it at create");
+    (root, worktree)
+}
+
+/// Every kind of change a session leaves: a commit on its branch, a
+/// tracked edit (unstaged), a staged edit, a deleted file, a renamed file
+/// (`git mv`, staged), a staged new file and an untracked one.
+fn dirty(worktree: &Worktree) {
+    let dir = &worktree.path;
+    std::fs::write(dir.join("committed.txt"), "on the branch\n").expect("committed");
+    run(dir, &["add", "committed.txt"]);
+    run(dir, &["-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "-m", "work"]);
+    std::fs::write(dir.join("a.txt"), "one\nedited\n").expect("edit");
+    std::fs::write(dir.join("b.txt"), "bee\nstaged edit\n").expect("staged edit");
+    run(dir, &["add", "b.txt"]);
+    std::fs::remove_file(dir.join("c.txt")).expect("delete");
+    run(dir, &["mv", "a.txt", "a-renamed.txt"]);
+    std::fs::write(dir.join("staged-new.txt"), "staged\n").expect("staged new");
+    run(dir, &["add", "staged-new.txt"]);
+    std::fs::write(dir.join("untracked.txt"), "loose\n").expect("untracked");
+}
+
+fn status(dir: &Path) -> Vec<String> {
+    // Not `run`: its trim would eat the first line's leading space.
+    let out = Command::new("git").current_dir(dir).args(["status", "--porcelain", "--untracked-files=all"]).output().expect("git runs");
+    let mut lines: Vec<String> =
+        String::from_utf8_lossy(&out.stdout).lines().filter(|line| !line.is_empty()).map(str::to_owned).collect();
+    lines.sort();
+    lines
+}
+
+fn row(state: &Path, id: &str) -> Worktree {
+    rows(state).into_iter().find(|row| row.id == id).expect("the row")
+}
+
+fn listed(root: &Path, folder: &Path) -> bool {
+    run(root, &["worktree", "list", "--porcelain"]).lines().any(|line| line == format!("worktree {}", folder.display()))
+}
+
+/// THE ROUND TRIP. Archive preserves the dirty tree to its hidden ref
+/// (recorded on the row before anything goes), removes the folder and its
+/// lock, keeps the branch, and touches neither the project's index nor its
+/// stash; unarchive brings the folder back on the branch at the same head
+/// with every file as it was — edits unstaged, new files untracked, the
+/// deletion and the rename as files — the `.env` copied again, re-locked.
+#[test]
+fn archive_then_unarchive_round_trips_a_dirty_tree() {
+    let scratch = Scratch::new("round-trip");
+    let state = scratch.state();
+    let (root, worktree) = lifecycle_project(&scratch);
+    // As the window holds it once its session landed (`link_session`).
+    let worktree = Worktree { created_by_session: Some("sess-1".to_owned()), ..worktree };
+    claim(&worktree, "sess-1").expect("claimed");
+    dirty(&worktree);
+    let head = run(&worktree.path, &["rev-parse", "HEAD"]);
+    let before: Vec<(String, String)> = ["a-renamed.txt", "b.txt", "committed.txt", "staged-new.txt", "untracked.txt"]
+        .iter()
+        .map(|name| (name.to_string(), std::fs::read_to_string(worktree.path.join(name)).expect(name)))
+        .collect();
+    let root_index = std::fs::read(root.join(".git/index")).expect("the project's index");
+
+    let archived = archive(&state, &worktree, "uuid-1").expect("archived");
+    let snapshot = archived.snapshot.clone().expect("a snapshot");
+    assert_eq!(snapshot.reference.as_deref(), Some("refs/baaz/preserved/uuid-1"));
+    assert_eq!(snapshot.head, head, "the branch head is recorded");
+    assert_eq!(row(&state, &worktree.id).snapshot, Some(snapshot.clone()), "the row holds the ref and the head");
+    assert!(!worktree.path.exists(), "the folder is gone");
+    assert!(!listed(&root, &worktree.path), "git no longer lists it (and so holds no lock on it)");
+    assert_eq!(run(&root, &["rev-parse", &format!("refs/heads/{}", worktree.branch)]), head, "the branch is kept");
+    let preserved = run(&root, &["rev-parse", "refs/baaz/preserved/uuid-1^1"]);
+    assert_eq!(preserved, head, "the preserved commit sits on the branch head");
+    assert_eq!(run(&root, &["stash", "list"]), "", "the stash is untouched");
+    assert_eq!(std::fs::read(root.join(".git/index")).expect("index"), root_index, "the project's index is untouched");
+    assert_eq!(status(&root), Vec::<String>::new(), "the project root is clean");
+    assert_eq!(cached_branch_for_folder(&worktree.path), None, "the cache forgot it");
+    assert_eq!(archive(&state, &archived, "uuid-1").expect("again"), archived, "archiving twice changes nothing");
+
+    let restored = restore(&state, &archived).expect("restored");
+    assert_eq!(restored.note, None);
+    let back = restored.worktree;
+    assert_eq!(back.path, worktree.path, "at its old folder");
+    assert_eq!(back.snapshot, None);
+    let live = row(&state, &worktree.id);
+    assert_eq!((live.snapshot, live.path), (None, back.path.clone()), "the row is live again");
+    assert_eq!(run(&back.path, &["branch", "--show-current"]), worktree.branch);
+    assert_eq!(run(&back.path, &["rev-parse", "HEAD"]), head, "at the same head");
+    assert_eq!(
+        status(&back.path),
+        vec![" D a.txt", " D c.txt", " M b.txt", "?? a-renamed.txt", "?? staged-new.txt", "?? untracked.txt"],
+        "edits unstaged, new files untracked, the deletion and the rename as files"
+    );
+    for (name, text) in &before {
+        assert_eq!(&std::fs::read_to_string(back.path.join(name)).expect(name), text, "{name} as it was");
+    }
+    assert!(!back.path.join("c.txt").exists(), "the deleted file stays deleted");
+    assert_eq!(std::fs::read_to_string(back.path.join(".env")).expect(".env"), "SECRET=1\n", "the include's file is copied again");
+    assert_eq!(lock_reason(&back).as_deref(), Some("baaz session sess-1"), "locked again in its session's name");
+    assert_eq!(cached_branch_for_folder(&back.path), Some(worktree.branch.clone()));
+    let _ = std::process::Command::new("git").current_dir(&root).args(["worktree", "remove", "--force", "--force"]).arg(&back.path).output();
+}
+
+/// Something now sits at the old folder: the worktree comes back beside
+/// it under a fresh name, and the row follows.
+#[test]
+fn unarchive_into_a_taken_folder_takes_a_fresh_name() {
+    let scratch = Scratch::new("taken");
+    let state = scratch.state();
+    let (root, worktree) = lifecycle_project(&scratch);
+    std::fs::write(worktree.path.join("untracked.txt"), "loose\n").expect("untracked");
+    let archived = archive(&state, &worktree, "uuid-2").expect("archived");
+    std::fs::create_dir_all(&worktree.path).expect("someone else's folder");
+    let back = restore(&state, &archived).expect("restored").worktree;
+    assert_ne!(back.path, worktree.path);
+    assert_eq!(back.path.parent(), worktree.path.parent(), "beside the old one");
+    assert_eq!(row(&state, &worktree.id).path, back.path, "the row names the new folder");
+    assert_eq!(status(&back.path), vec!["?? untracked.txt"]);
+    let _ = std::process::Command::new("git").current_dir(&root).args(["worktree", "remove", "--force", "--force"]).arg(&back.path).output();
+}
+
+/// The branch was deleted while archived: it is made again at the
+/// snapshot's head, and the work still comes back.
+#[test]
+fn unarchive_after_the_branch_was_deleted_recreates_it() {
+    let scratch = Scratch::new("branch-gone");
+    let state = scratch.state();
+    let (root, worktree) = lifecycle_project(&scratch);
+    dirty(&worktree);
+    let head = run(&worktree.path, &["rev-parse", "HEAD"]);
+    let archived = archive(&state, &worktree, "uuid-3").expect("archived");
+    run(&root, &["branch", "-D", &worktree.branch]);
+    let back = restore(&state, &archived).expect("restored").worktree;
+    assert_eq!(run(&back.path, &["branch", "--show-current"]), worktree.branch, "the old branch name");
+    assert_eq!(run(&back.path, &["rev-parse", "HEAD"]), head, "at the preserved head");
+    assert!(status(&back.path).contains(&"?? untracked.txt".to_owned()));
+    assert_eq!(std::fs::read_to_string(back.path.join("b.txt")).expect("b"), "bee\nstaged edit\n");
+    let _ = std::process::Command::new("git").current_dir(&root).args(["worktree", "remove", "--force", "--force"]).arg(&back.path).output();
+}
+
+/// A folder deleted by hand before the archive: nothing to preserve, so
+/// the row records the branch's tip alone, and git's list is pruned.
+#[test]
+fn archiving_a_missing_folder_records_the_branch_alone() {
+    let scratch = Scratch::new("missing");
+    let state = scratch.state();
+    let (root, worktree) = lifecycle_project(&scratch);
+    let head = run(&worktree.path, &["rev-parse", "HEAD"]);
+    unlock(&worktree);
+    std::fs::remove_dir_all(&worktree.path).expect("deleted by hand");
+    let archived = archive(&state, &worktree, "uuid-4").expect("archived");
+    assert_eq!(archived.snapshot, Some(Snapshot { reference: None, head: head.clone() }));
+    assert!(!listed(&root, &worktree.path), "pruned");
+    let back = restore(&state, &archived).expect("restored").worktree;
+    assert_eq!(run(&back.path, &["rev-parse", "HEAD"]), head);
+    assert_eq!(status(&back.path), Vec::<String>::new());
+    let _ = std::process::Command::new("git").current_dir(&root).args(["worktree", "remove", "--force", "--force"]).arg(&back.path).output();
+}
+
+/// MOVE BACK. The worktree's branch commits and its uncommitted work land
+/// in a clean project root as uncommitted changes — the root's changes are
+/// the worktree's — and the worktree goes (preserved, branch kept, row
+/// gone).
+#[test]
+fn move_back_hands_the_changes_to_a_clean_root() {
+    let scratch = Scratch::new("move-back");
+    let state = scratch.state();
+    let (root, worktree) = lifecycle_project(&scratch);
+    dirty(&worktree);
+    let files = ["a-renamed.txt", "b.txt", "committed.txt", "staged-new.txt", "untracked.txt"];
+    let expected: Vec<(String, String)> =
+        files.iter().map(|name| (name.to_string(), std::fs::read_to_string(worktree.path.join(name)).expect(name))).collect();
+    move_back(&state, &worktree, "uuid-5").expect("moved back");
+    assert_eq!(
+        status(&root),
+        vec![" D a.txt", " D c.txt", " M b.txt", "?? a-renamed.txt", "?? committed.txt", "?? staged-new.txt", "?? untracked.txt"],
+        "the worktree's changes, uncommitted, in the root"
+    );
+    for (name, text) in &expected {
+        assert_eq!(&std::fs::read_to_string(root.join(name)).expect(name), text, "{name}");
+    }
+    assert_eq!(run(&root, &["branch", "--show-current"]), "main", "the root stays on its branch");
+    assert!(!worktree.path.exists(), "the worktree is removed");
+    assert!(run(&root, &["rev-parse", "--verify", &format!("refs/heads/{}", worktree.branch)]).len() == 40, "its branch is kept");
+    assert!(run(&root, &["rev-parse", "--verify", "refs/baaz/preserved/uuid-5"]).len() == 40, "its work is preserved");
+    assert!(rows(&state).iter().all(|row| row.id != worktree.id), "its row is gone");
+}
+
+/// A root whose own changes collide with the worktree's: refused, and
+/// neither folder changes.
+#[test]
+fn move_back_refuses_when_the_root_conflicts_and_changes_nothing() {
+    let scratch = Scratch::new("move-back-conflict");
+    let state = scratch.state();
+    let (root, worktree) = lifecycle_project(&scratch);
+    std::fs::write(worktree.path.join("b.txt"), "bee\nworktree\n").expect("worktree edit");
+    std::fs::write(worktree.path.join("untracked.txt"), "loose\n").expect("untracked");
+    std::fs::write(root.join("b.txt"), "root's own\n").expect("root edit");
+    let (root_before, tree_before) = (status(&root), status(&worktree.path));
+    let error = move_back(&state, &worktree, "uuid-6").expect_err("refused");
+    assert!(error.contains("don't apply cleanly"), "{error}");
+    assert_eq!(status(&root), root_before, "the root is untouched");
+    assert_eq!(std::fs::read_to_string(root.join("b.txt")).expect("b"), "root's own\n");
+    assert!(!root.join("untracked.txt").exists(), "nothing half-applied");
+    assert_eq!(status(&worktree.path), tree_before, "the worktree is untouched");
+    assert_eq!(row(&state, &worktree.id).snapshot, None, "and still live");
+    assert!(lock_reason(&worktree).is_some(), "and still locked");
+    let _ = std::process::Command::new("git").current_dir(&root).args(["worktree", "remove", "--force", "--force"]).arg(&worktree.path).output();
+}
+
+/// A launch reads every live row into the cache; an archived one is not.
+#[test]
+fn remember_all_caches_live_rows_only() {
+    let scratch = Scratch::new("remember");
+    let state = scratch.state();
+    let (root, live) = lifecycle_project(&scratch);
+    let gone = create(&spec(&state, &root, None)).expect("second");
+    archive(&state, &gone, "uuid-7").expect("archived");
+    forget(&live.path);
+    assert_eq!(remember_all(&state), 1);
+    assert_eq!(cached_branch_for_folder(&live.path), Some(live.branch.clone()));
+    assert_eq!(cached_branch_for_folder(&gone.path), None);
+    assert!(env_for_folder(&state, &gone.path).is_empty(), "an archived worktree gives no variables");
+    let _ = std::process::Command::new("git").current_dir(&root).args(["worktree", "remove", "--force", "--force"]).arg(&live.path).output();
+}
