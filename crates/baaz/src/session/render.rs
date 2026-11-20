@@ -623,6 +623,19 @@ impl SessionView {
                 Some(Rc::new(move |turn: String, words: String, window: &mut Window, cx: &mut gpui::App| scroll(&(turn, words), window, cx)))
             },
             tool_starts: Rc::new(self.tool_first_seen.clone()),
+            // docs/82 6.4: "Undo turn" on the fold rows of the turns Undo
+            // can act on now, and the note under an undone turn.
+            undo_turn: self.rt(cx).undo_offered().map(|offered| {
+                let ask = cx.listener(|this: &mut Self, turn_id: &String, _, cx| {
+                    let asked = this.runtime.update(cx, |rt, cx| rt.ask_undo_turn(turn_id, cx));
+                    if let Err(why) = asked {
+                        crate::baaz_log!("undo: {why}");
+                    }
+                });
+                let tap: crate::transcript::CardHandler = Rc::new(move |id: String, window: &mut Window, cx: &mut gpui::App| ask(&id, window, cx));
+                (offered, tap)
+            }),
+            undone: self.rt(cx).undone_notes(),
         }
     }
 
@@ -1037,7 +1050,12 @@ impl SessionView {
                             // actions and its meta row forever.
                             let settled =
                                 turn_ix != last_turn || crate::runtime::captures() || idle;
-                            item.child(transcript::turn_row(turn, row, settled, &folds, window, cx)).into_any_element()
+                            let item = item.child(transcript::turn_row(turn, row, settled, &folds, window, cx));
+                            // docs/82 6.4: an undone turn ends in its note.
+                            match folds.undone.get(turn.id()).filter(|_| last_of_turn) {
+                                Some(note) => item.child(transcript::undone_note(note, cx)).into_any_element(),
+                                None => item.into_any_element(),
+                            }
                         })
                         .flex_1()
                         .into_any_element(),

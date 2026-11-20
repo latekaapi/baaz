@@ -114,6 +114,11 @@ pub(crate) enum RightPaneEvent {
     /// Reveal an absolute file in Files through the link path (a Changes
     /// row's file button).
     Reveal { root: PathBuf, abs: PathBuf },
+    /// A Changes row's "Revert" (docs/82 6.4): `path` in `root`, to `HEAD`
+    /// (`turn` None, All changes) or out of that turn (its id, number and
+    /// ends: Last turn, Turn N). The session asks before it changes
+    /// anything.
+    RevertFile { root: PathBuf, path: String, turn: Option<(String, usize, String, String)> },
     /// Quote text into the active session's composer (a refused hook's
     /// output), `lines` long.
     Quote { text: String, lines: usize },
@@ -566,6 +571,7 @@ impl Render for RightPane {
         // only (docs/82 6.3): the screen draws from the cache, so the id
         // rides there.
         self.cache.changes.scopes.shown_session = self.scope_session_id(cx);
+        self.cache.changes.scopes.revert = self.revert_offered(cx);
         if !self.cache.pushed.is_empty() {
             self.sync_pushed_outputs(cx);
         }
@@ -757,6 +763,11 @@ impl Harness {
             RightPaneEvent::Toggle => self.toggle_right(cx),
             RightPaneEvent::OpenUrl(url) => self.open_url_in_browser(url.clone(), cx),
             RightPaneEvent::Reveal { root, abs } => self.reveal_link_path(root, abs, Some(false), None, cx),
+            RightPaneEvent::RevertFile { root, path, turn } => {
+                if let Err(why) = self.revert_file_from_changes(root, path, turn.clone(), cx) {
+                    crate::baaz_log!("undo: revert not asked ({why})");
+                }
+            }
             RightPaneEvent::Quote { text, lines } => {
                 if let Some(view) = self.active.clone() {
                     view.update(cx, |view, cx| view.add_quote(text.clone(), None, Some(("text".into(), *lines)), window, cx));

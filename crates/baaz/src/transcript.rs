@@ -215,6 +215,13 @@ pub struct Folds {
     /// run rows tick from the run's first member start, never from summed
     /// durations; unknown ids fall back to the turn timestamp.
     pub tool_starts: Rc<HashMap<String, u64>>,
+    /// docs/82 6.4: the turns (by checkpoint ref component) whose fold row
+    /// offers "Undo turn", and its tap (the turn id, out). `None` while
+    /// nothing can be undone (a turn running, no checkpoints, a replay): no
+    /// action is drawn.
+    pub undo_turn: Option<(Rc<HashSet<String>>, CardHandler)>,
+    /// docs/82 6.4: turn id → the quiet note drawn under that undone turn.
+    pub undone: Rc<HashMap<String, String>>,
 }
 
 /// Q1b: stamp first-seen wall times for every tool-call id in `turns`
@@ -1688,7 +1695,7 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
                 Some(TurnSlot::FoldHeader) => {
                     let plan = fold_plan_cached(turn, settled, &folds.toggled).expect("header implies a plan");
                     let open = folds.open(&fold_key(id), false);
-                    fold_header_row(id, &plan, open, folds)
+                    fold_header_row(id, &plan, open, folds, cx)
                 }
                 Some(TurnSlot::LiveRun(indices)) => {
                     let start = indices.first().copied().unwrap_or(0);
@@ -1711,9 +1718,11 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
 /// B12: one settled turn's fold header row: "Worked for 2m 14s · read 12
 /// files, edited 3, ran 5 commands" with the `+N −M` chip opening
 /// Changes. The header toggles the fold; the chip opens the turn's diff.
-/// No new chrome is added here — the library owns the row's roles and
-/// labels — only the two intents are wired.
-fn fold_header_row(turn_id: &str, plan: &FoldPlan, open: bool, folds: &Folds) -> AnyElement {
+/// The library owns the row's roles and labels; only the two intents are
+/// wired — plus, on a turn Undo can act on (docs/82 6.4), the quiet text
+/// action "Undo turn" at the row's right end, shown while the row is hovered
+/// (its box always laid out, so nothing shifts under the pointer).
+fn fold_header_row(turn_id: &str, plan: &FoldPlan, open: bool, folds: &Folds, cx: &App) -> AnyElement {
     use aui_protocol::DiffStat;
     let id = ElementId::from(SharedString::from(format!("{turn_id}:fold")));
     let diff = (plan.diff_added + plan.diff_removed > 0).then_some(DiffStat {
@@ -1724,18 +1733,54 @@ fn fold_header_row(turn_id: &str, plan: &FoldPlan, open: bool, folds: &Folds) ->
     let toggle = folds.toggle.clone();
     let key = fold_key(turn_id);
     let open_diff = folds.open_turn_diff.clone();
-    let turn_id = turn_id.to_owned();
-    turn_fold(id, plan.elapsed_ms, plan.reads, plan.edits, plan.commands)
-        .diff_stat(diff)
-        .open(open)
-        .on_intent(move |intent, window, cx| match intent {
-            TurnFoldIntent::Toggle => toggle(key.clone(), window, cx),
-            TurnFoldIntent::OpenDiff => {
-                if let Some(open_diff) = &open_diff {
-                    open_diff(turn_id.clone(), window, cx);
+    let undo = folds.undo_turn.as_ref().filter(|(offered, _)| offered.contains(&crate::checkpoints::component(turn_id))).map(|(_, undo)| undo.clone());
+    let fold = {
+        let turn_id = turn_id.to_owned();
+        turn_fold(id, plan.elapsed_ms, plan.reads, plan.edits, plan.commands)
+            .diff_stat(diff)
+            .open(open)
+            .on_intent(move |intent, window, cx| match intent {
+                TurnFoldIntent::Toggle => toggle(key.clone(), window, cx),
+                TurnFoldIntent::OpenDiff => {
+                    if let Some(open_diff) = &open_diff {
+                        open_diff(turn_id.clone(), window, cx);
+                    }
                 }
-            }
-        })
+            })
+    };
+    let Some(undo) = undo else { return fold.into_any_element() };
+    use aui::interact::PaintHover as _;
+    let turn_id = turn_id.to_owned();
+    let action = aui::workbench::text_action(ElementId::from(SharedString::from(format!("{turn_id}:undo"))), "Undo turn", None, aui_tokens::scale::H_SM, cx)
+        .aria_label("Undo this turn")
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            undo(turn_id.clone(), window, cx);
+        });
+    div()
+        .relative()
+        .w_full()
+        .hover_group()
+        .child(fold)
+        .child(div().absolute().top_0().right_0().h(aui::transcript::quiet_row_h()).flex().items_center().reveal_on_hover(false).child(action))
+        .into_any_element()
+}
+
+/// docs/82 6.4: the quiet note under an undone turn ("Turn undone · 2
+/// files restored"): one line, `t-caption`, `fg-muted`, on the quiet
+/// rows' height and bleed. Not interactive.
+pub fn undone_note(text: &str, cx: &App) -> AnyElement {
+    use aui_tokens::{ActiveAui, AuiStyled};
+    let p = cx.aui().colors;
+    div()
+        .w_full()
+        .h(aui::transcript::quiet_row_h())
+        .px(px(aui::transcript::QUIET_ROW_BLEED))
+        .flex()
+        .items_center()
+        .text_role(TextRole::Caption)
+        .text_color(p.fg_muted)
+        .child(text.to_owned())
         .into_any_element()
 }
 
@@ -3200,6 +3245,8 @@ mod tests {
             scroll_to_turn: None,
             span_flash: None,
             tool_starts: Rc::new(HashMap::new()),
+            undo_turn: None,
+            undone: Rc::new(HashMap::new()),
         }
     }
 

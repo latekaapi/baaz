@@ -88,6 +88,11 @@ pub enum DialogAction {
     /// the Trash (D-8). The paths ride the dialog's `archive_target`, one
     /// per line; dismissing any other way keeps them.
     TrashTranscript,
+    /// Undo a turn or revert a file (docs/82 6.4): the session and the
+    /// ask's number ride `archive_target` (`<session id>\n<n>`), so only
+    /// this button runs the action; dismissing any other way changes
+    /// nothing.
+    UndoChanges,
 }
 
 /// Which popover is open over the composer.
@@ -419,9 +424,9 @@ impl Overlays {
 
     /// Show a note carrying one action, and return the toast's id.
     ///
-    /// The one action that exists is Undo, and it exists because hiding a
-    /// session is the only thing in this window that takes something away from
-    /// the list without asking first.
+    /// The one action that exists is Undo: for what the window took away
+    /// without asking (a hidden session), and for what it put back after
+    /// asking (an archive, an undone turn, a reverted file).
     pub fn toast_with_action(
         &mut self,
         title: impl Into<String>,

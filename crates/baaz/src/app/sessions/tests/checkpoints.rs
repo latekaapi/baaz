@@ -8,7 +8,7 @@
 use super::*;
 use crate::right_scopes::ChangesScope;
 
-fn git(dir: &std::path::Path, args: &[&str]) -> String {
+pub(super) fn git(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git").current_dir(dir).args(args).output().expect("git runs");
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
@@ -16,7 +16,7 @@ fn git(dir: &std::path::Path, args: &[&str]) -> String {
 
 /// A folder beside the state dir (inside the temp dir, where tests may
 /// take checkpoints), a git repository with one commit when `repo`.
-fn folder(state: &std::path::Path, repo: bool) -> std::path::PathBuf {
+pub(super) fn folder(state: &std::path::Path, repo: bool) -> std::path::PathBuf {
     let root = state.with_file_name(format!("{}-folder", state.file_name().expect("named").to_string_lossy()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("folder");
@@ -39,6 +39,15 @@ fn session_in<'a>(
     cx: &'a mut gpui::TestAppContext,
     root: &std::path::Path,
 ) -> (gpui::Entity<Harness>, &'a mut gpui::VisualTestContext, String) {
+    session_with(cx, root, scripted_factory())
+}
+
+/// [`session_in`] over `factory`.
+pub(super) fn session_with<'a>(
+    cx: &'a mut gpui::TestAppContext,
+    root: &std::path::Path,
+    factory: crate::providers::Registry,
+) -> (gpui::Entity<Harness>, &'a mut gpui::VisualTestContext, String) {
     cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
     cx.update(crate::app::bind_keys);
     let state = crate::store::support_dir();
@@ -49,7 +58,7 @@ fn session_in<'a>(
     vc.run_until_parked();
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
-            harness.providers = harness.providers.with_opens_of(&scripted_factory());
+            harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
             adopt_for_muse(harness, root, cx);
             harness.provider_model.update(cx, |model, _| model.point_new_provider(ProviderId::Codex));
@@ -65,7 +74,7 @@ fn session_in<'a>(
 
 /// Run one turn by hand: it starts, `edit` runs (the agent's work), it
 /// finishes; then every checkpoint job has landed.
-fn turn(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext, id: &str, turn_id: &str, edit: impl FnOnce()) {
+pub(super) fn turn(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext, id: &str, turn_id: &str, edit: impl FnOnce()) {
     let runtime = vc.update(|_, cx| baaz.read(cx).active.clone().expect("open").read(cx).runtime().clone());
     vc.update(|_, cx| {
         runtime.update(cx, |rt, cx| {
@@ -99,7 +108,7 @@ fn turn(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext, id: &str
     assert!(idle, "every checkpoint job landed");
 }
 
-fn session_uuid(id: &str) -> String {
+pub(super) fn session_uuid(id: &str) -> String {
     let id = id.to_owned();
     crate::db::call(crate::db::path_in(&crate::store::support_dir()), move |db| crate::db::sessions::read_row(&db.conn, "codex", &id).expect("read"))
         .flatten()
@@ -201,7 +210,7 @@ fn a_session_outside_git_takes_no_checkpoint_and_shows_no_scope_row(cx: &mut gpu
     cleanup(&root, state);
 }
 
-fn cleanup(root: &std::path::Path, state: (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf)) {
+pub(super) fn cleanup(root: &std::path::Path, state: (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf)) {
     crate::db::flush();
     crate::db::close(crate::db::path_in(&state.2));
     let _ = std::fs::remove_dir_all(root);

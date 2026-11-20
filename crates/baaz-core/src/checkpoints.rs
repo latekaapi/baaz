@@ -392,6 +392,12 @@ impl Recorder {
         self.folder.is_some() && !self.unsupported
     }
 
+    /// The folder this session checkpoints, while it takes checkpoints
+    /// ([`Self::on`]).
+    pub fn folder(&self) -> Option<&Path> {
+        self.folder.as_deref().filter(|_| !self.unsupported)
+    }
+
     /// The session's uuid, once a job found it.
     pub fn key(&self) -> Option<&str> {
         self.key.as_deref()

@@ -987,6 +987,11 @@ ENTRIES.update({
     # the owner's repository): `changes-scope:` loads a fixture index of two
     # finished turns over the fixture tree. No baseline yet.
     "right-changes-scope-last": _populated("right-width:440;right:changes;changes-scope:last;changes-open:crates/baaz/src/layout.rs", replay=True),
+    # Task 6.4's confirms, from fixture data: a capture takes no
+    # checkpoints and runs in the owner's repository, so neither button can
+    # apply anything (the session refuses: no checkpoints).
+    "undo-turn-confirm":       _populated("undo-turn:last", replay=True),
+    "revert-file-confirm":     _populated("right-width:440;right:changes;revert-file:crates/baaz/src/layout.rs", replay=True),
     "right-files-preview":     _populated("right-width:440;right:files;files-select:src/lib.rs",
                                           workspace=_REPO_ACME),
     "right-page":              _populated("right-width:440;right:browser;browse:https://example.com", replay=True),

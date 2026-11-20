@@ -39,27 +39,36 @@ use crate::layout::LayoutGlobal as _;
 
 /// The overflow row that hands a worktree's changes to the project root.
 const MOVE_BACK_LABEL: &str = "Move back to project folder";
+/// The overflow row that undoes the newest undoable turn (docs/82 6.4).
+const UNDO_LAST_LABEL: &str = "Undo last turn";
 
 /// Actions of the header's overflow menu, in row order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OverflowAction {
     Rename,
     Fork,
+    UndoLastTurn,
     MoveBack,
     Archive,
 }
 
-/// The header overflow menu's rows and their actions: Rename, Fork, Move
-/// back to project folder, Archive — Fork only where the session's provider
-/// can fork (`fork`; docs/82 5.5, rule 13: a control is shown only if it
-/// works), Move back only for a worktree session whose provider can resume
-/// it in the project folder (`move_back`; docs/82 6.2).
-fn overflow_rows(fork: bool, move_back: bool) -> (Vec<MenuRow>, Vec<OverflowAction>) {
+/// The header overflow menu's rows and their actions: Rename, Fork, Undo
+/// last turn, Move back to project folder, Archive — Fork only where the
+/// session's provider can fork (`fork`; docs/82 5.5, rule 13: a control is
+/// shown only if it works), Undo last turn only while a finished turn can
+/// be undone (`undo_last`; docs/82 6.4), Move back only for a worktree
+/// session whose provider can resume it in the project folder
+/// (`move_back`; docs/82 6.2).
+fn overflow_rows(fork: bool, undo_last: bool, move_back: bool) -> (Vec<MenuRow>, Vec<OverflowAction>) {
     let mut rows = vec![MenuRow::Toggle { label: "Rename".into(), checked: false }];
     let mut actions = vec![OverflowAction::Rename];
     if fork {
         rows.push(MenuRow::Toggle { label: "Fork".into(), checked: false });
         actions.push(OverflowAction::Fork);
+    }
+    if undo_last {
+        rows.push(MenuRow::Toggle { label: UNDO_LAST_LABEL.into(), checked: false });
+        actions.push(OverflowAction::UndoLastTurn);
     }
     if move_back {
         rows.push(MenuRow::Toggle { label: MOVE_BACK_LABEL.into(), checked: false });
@@ -188,6 +197,7 @@ impl Render for DialogView {
                 | DialogAction::DeleteSpace
                 | DialogAction::ClearHistory
                 | DialogAction::TrashTranscript
+                | DialogAction::UndoChanges
         );
         // A dialog whose primary already dismisses it carries no second
         // button: "Dismiss  Dismiss" was what a screenshot showed. The danger
@@ -629,8 +639,9 @@ impl Harness {
 
     /// The header's overflow menu, anchored under the "…" button: Rename swaps
     /// the title for the dense inline field, Fork opens the fork picker,
-    /// Move back hands a worktree's changes to the project folder, and
-    /// Archive asks first through the archive dialog.
+    /// Undo last turn asks before undoing the newest undoable turn, Move
+    /// back hands a worktree's changes to the project folder, and Archive
+    /// asks first through the archive dialog.
     pub(crate) fn render_overflow_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::Overflow) {
             return None;
@@ -639,7 +650,7 @@ impl Harness {
             .active
             .as_ref()
             .is_some_and(|view| view.read(cx).rt(cx).offers(provider::Capability::ForkSession));
-        let (rows, actions) = overflow_rows(fork, self.move_back_offered(cx));
+        let (rows, actions) = overflow_rows(fork, self.undo_last_offered(cx), self.move_back_offered(cx));
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
             let action = actions.get(*index).copied();
             this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
@@ -655,6 +666,11 @@ impl Harness {
                     }
                 }
                 Some(OverflowAction::Fork) => this.open_palette(PaletteKind::Fork, cx),
+                Some(OverflowAction::UndoLastTurn) => {
+                    if let Err(why) = this.undo_last_turn(cx) {
+                        crate::baaz_log!("undo: last turn not asked ({why})");
+                    }
+                }
                 Some(OverflowAction::MoveBack) => {
                     if let Err(why) = this.move_back_to_root(cx) {
                         this.overlays.update(cx, |overlays, cx| overlays.toast("Couldn't move back", why, cx));
@@ -907,6 +923,11 @@ impl Harness {
             self.trash_transcript(target, cx);
             return;
         }
+        // Undo (docs/82 6.4): the session and the ask rode the dialog.
+        if action == DialogAction::UndoChanges {
+            self.confirm_undo_dialog(target, cx);
+            return;
+        }
         // Confirmed through its own path, like Archive: the tab id rode
         // the dialog, so closing any other way already dropped it.
         if action == DialogAction::CloseTerminalTab {
@@ -951,6 +972,7 @@ impl Harness {
             | DialogAction::ClearHistory
             | DialogAction::SpaceSignIns
             | DialogAction::TrashTranscript
+            | DialogAction::UndoChanges
             | DialogAction::HandoffConfirm => {}
         }
     }
@@ -1058,8 +1080,9 @@ impl Harness {
     /// The newest toast as the stack's chip, with `+n` while more wait. The
     /// same [`ToastData`](aui::feedback::ToastData) as ever: toasts wait for
     /// a press, never a clock. One action exists, and it is Undo — one
-    /// hidden row, one "Clear empty" batch, or one archived session,
-    /// whichever the newest toast was for.
+    /// hidden row, one "Clear empty" batch, one archived session, one
+    /// import, or one undone turn or reverted file — whichever the newest
+    /// toast was for.
     fn render_toast_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let toasts = self.overlays.read(cx).toasts.clone();
         let newest = toasts.last()?.clone();
@@ -1115,28 +1138,32 @@ mod tests {
     use aui::nav::MenuRow;
     use crate::layout::LayoutGlobal as _;
 
-    /// The header ⋯ menu's rows: Rename, Fork, Move back, Archive, one
-    /// action each; Fork only where the session's provider forks, Move back
-    /// only where it is offered.
+    /// The header ⋯ menu's rows: Rename, Fork, Undo last turn, Move back,
+    /// Archive, one action each; Fork only where the session's provider
+    /// forks, Undo last turn and Move back only where they are offered.
     #[test]
     fn overflow_menu_rows_are_rename_fork_archive() {
         let label = |row: &MenuRow| match row {
             MenuRow::Toggle { label, checked } => (label.to_string(), *checked),
             _ => panic!("overflow rows are toggles"),
         };
-        let (rows, actions) = super::overflow_rows(true, false);
+        let (rows, actions) = super::overflow_rows(true, false, false);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Fork", "Archive"]);
         assert!(rows.iter().all(|r| !label(r).1), "no row is checked");
         assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::Fork, super::OverflowAction::Archive]);
         // A provider that cannot fork shows no Fork row (docs/82 5.5).
-        let (rows, actions) = super::overflow_rows(false, false);
+        let (rows, actions) = super::overflow_rows(false, false, false);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Archive"]);
         assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::Archive]);
         // A worktree session whose provider resumes in a named folder gets
         // Move back, above Archive (docs/82 6.2).
-        let (rows, actions) = super::overflow_rows(false, true);
+        let (rows, actions) = super::overflow_rows(false, false, true);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Move back to project folder", "Archive"]);
         assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::MoveBack, super::OverflowAction::Archive]);
+        // A finished turn Undo can act on adds Undo last turn (docs/82 6.4).
+        let (rows, actions) = super::overflow_rows(true, true, false);
+        assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Fork", "Undo last turn", "Archive"]);
+        assert_eq!(actions[2], super::OverflowAction::UndoLastTurn);
     }
 
     use crate::palette::{filter_commands, tilde_root};

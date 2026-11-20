@@ -358,6 +358,8 @@ impl SessionRuntime {
         if !self.read_only {
             self.request_provider_pending(cx);
             self.request_provider_models(cx);
+            // Which finished turns Undo can offer (docs/82 6.4).
+            self.refresh_undoable(cx);
         }
         // Every lane outlives a lost child (docs/71 §2): Claude Code's
         // adapter resumes the session (`--resume`) and Codex's starts a

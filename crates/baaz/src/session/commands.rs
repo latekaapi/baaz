@@ -210,6 +210,14 @@ impl SessionRuntime {
         // mode is the provider's own state, and the words go as typed.
         let skill_plan = self.plan && self.plan_support() == provider::PlanMode::Skill;
         let model_text = if skill_plan { plan::prefix(&quoted) } else { quoted };
+        // Undo (docs/82 6.4): what the person put back since the last
+        // message rides this one's wire text, ahead of it — never the
+        // bubble. A send that never leaves puts the notes back.
+        let preface = self.take_undo_preface();
+        let model_text = match &preface {
+            Some(notes) => format!("{}\n\n{model_text}", notes.iter().map(|(_, note)| note.as_str()).collect::<Vec<_>>().join("\n")),
+            None => model_text,
+        };
         // The provider echoes the whole model-visible input; the bubble
         // shows what the person typed, including across a restart (the
         // record mirrors the map for replayed histories).
@@ -252,6 +260,9 @@ impl SessionRuntime {
         // bubble stands from now on, so nothing looks lost.
         let tail = self.saving_memories();
         self.provider_send(command, cx, move |this, result, cx| {
+            if let (Err(_), Some(notes)) = (&result, preface) {
+                this.put_back_undo_preface(notes);
+            }
             this.submitted_provider(result, text, planning, optimistic_id, tail, cx);
         });
         cx.emit(RuntimeEvent::TurnChanged);

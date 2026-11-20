@@ -549,12 +549,16 @@ pub(crate) enum Wire {
 /// What one toast's Undo restores: one `/hide` is a batch of one, one
 /// "Clear empty" is a batch of everything it hid, and one archive confirm is
 /// a batch of one archived session. An import run (docs/72) is a batch of
-/// the records it added, named by its journal run id.
+/// the records it added, named by its journal run id. An undone turn or a
+/// reverted file (docs/82 6.4) is its session's action, by number.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum UndoBatch {
     Hidden(Vec<String>),
     Archived(Vec<String>),
     Imported(String),
+    /// An undone turn or a reverted file (docs/82 6.4): the session and
+    /// the action's number.
+    Files { session_id: String, n: u64 },
 }
 
 /// What decides the search card's status line: whether the query is blank,

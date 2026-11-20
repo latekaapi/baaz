@@ -363,6 +363,13 @@ impl Harness {
                 let session_id = session_id.clone();
                 self.with_right_pane(cx, |pane, cx| pane.note_checkpoints(&session_id, cx));
             }
+            // Undo (docs/82 6.4): the confirm, then the toast.
+            SessionEvent::UndoConfirm { session_id, seq, title, detail, primary } => {
+                self.open_undo_confirm(session_id, *seq, title, detail, primary, cx);
+            }
+            SessionEvent::UndoLanded { session_id, title, body, undo } => {
+                self.undo_landed(session_id, title, body, *undo, cx);
+            }
         }
         cx.notify();
     }

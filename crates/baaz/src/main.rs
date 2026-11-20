@@ -46,6 +46,7 @@ mod billing;
 mod browser;
 use baaz_core::byline;
 use baaz_core::checkpoints;
+use baaz_core::undo;
 use baaz_core::clock;
 mod connect;
 use baaz_core::conn;

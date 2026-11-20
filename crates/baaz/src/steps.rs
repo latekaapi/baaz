@@ -126,6 +126,8 @@
 //! | `mode:<sessions\|browse>` | set the window's mode idempotently (`browse` shows the person's tabs, `sessions` the sessions; never toggles); unknown fails the step, free |
 //! | `files-select:<path>` | preview the project-relative file in the Files pane through the click's own path (a directory toggles instead); empty or project-less fails, free |
 //! | `changes-open:<path>` | open that changed file's diff in the Changes pane (idempotent; the path is project-relative, as git reports it); unknown fails the step, free |
+//! | `undo-turn:last` | the confirm for the open session's newest undoable turn (docs/82 6.4), through the session menu's path; a capture (which takes no checkpoints and runs in the owner's repository) puts up the confirm from fixture data — the newest agent turn that edited files — and its button cannot apply; no session, another payload or nothing to undo fails the step, free |
+//! | `revert-file:<path>` | the confirm for that changed file in All changes, back to `HEAD` (docs/82 6.4), through the row's path; a capture puts it up from fixture data and its button cannot apply; no session or project, or no such changed row, fails the step, free |
 //! | `changes-scope:<all\|session\|last>` | the Changes pane on that scope (docs/82 6.3): a capture loads the fixture checkpoint index (two finished turns over the fixture tree) — no refs are read or written; no open session or an unknown word fails the step, free |
 //! | `files-reveal:<path>` | reveal the project-relative file or folder in the Files pane through the link's own path (a folder selects with every ancestor expanded and no preview, a file previews banded on the payload's `#L…`/`:line` suffix); empty or project-less fails, free |
 //! | `row-detail:<session_id>` | capture aid: pin the hover card open for one row, seated at the selected row's bounds (pair with `click:` on the same id; empty clears), free |
@@ -415,6 +417,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "files-select", run: |this, rest, _, cx| this.step_files_select(rest, cx) },
     WindowVerb { verb: "changes-open", run: |this, rest, _, cx| this.step_changes_open(rest, cx) },
     WindowVerb { verb: "changes-scope", run: |this, rest, _, cx| this.step_changes_scope(rest, cx) },
+    WindowVerb { verb: "undo-turn", run: |this, rest, _, cx| this.step_undo_turn(rest, cx) },
+    WindowVerb { verb: "revert-file", run: |this, rest, _, cx| this.step_revert_file(rest, cx) },
     WindowVerb { verb: "files-reveal", run: |this, rest, _, cx| this.step_files_reveal(rest, cx) },
     WindowVerb { verb: "row-detail", run: |this, rest, _, cx| this.step_row_detail(rest, cx) },
     WindowVerb { verb: "hover", run: |this, rest, _, cx| this.step_hover(rest, cx) },

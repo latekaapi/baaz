@@ -10,6 +10,7 @@
 //! whatever repository the probe was pointed at, which is the owner's), a
 //! replayed or read-only lane, and — in tests — any folder outside the
 //! temp dir, so a test never writes refs into the repository it runs in.
+//! Undo (docs/82 6.4, [`super::undo`]) acts only where these are on.
 
 use super::*;
 
@@ -57,11 +58,7 @@ impl SessionRuntime {
         cx.spawn(async move |this, cx| {
             let done = cx
                 .background_spawn(async move {
-                    crate::checkpoints::run_job(job, move || {
-                        let state = crate::store::support_dir();
-                        crate::db::read(crate::db::path_in(&state), move |db| crate::db::sessions::read_row(&db.conn, &provider, &id).ok().flatten())
-                            .flatten()
-                    })
+                    crate::checkpoints::run_job(job, move || super::undo::session_key(&provider, &id))
                 })
                 .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
@@ -70,6 +67,8 @@ impl SessionRuntime {
                     this.run_checkpoint_job(next, cx);
                 }
                 if landed {
+                    // A finished turn's refs make it undoable (docs/82 6.4).
+                    this.refresh_undoable(cx);
                     cx.emit(super::SessionEvent::CheckpointTaken { session_id: this.session_id.clone() });
                 }
             });

@@ -160,6 +160,9 @@ pub(crate) struct ScopeState {
     open_when_listed: Option<Vec<String>>,
     /// The open session the pane last drew for (set each frame).
     pub shown_session: Option<String>,
+    /// Whether that session can revert a file in this folder now (docs/82
+    /// 6.4; set each frame): Changes rows offer "Revert" only then.
+    pub revert: bool,
     /// A probe step asked for the fixture index (captures read no refs).
     #[cfg(feature = "probe")]
     pub fixture: bool,
@@ -176,6 +179,24 @@ impl ScopeState {
         }
         let active = scopes.iter().position(|scope| scope == &self.scope).unwrap_or(0);
         Some((scopes.iter().map(|scope| index.label(scope)).collect(), scopes, active))
+    }
+
+    /// What a row's "Revert" puts back in a scoped list (docs/82 6.4): the
+    /// shown turn's id, number and ends in Last turn and Turn N; `None` —
+    /// no Revert — in This session (whose ends span turns and the
+    /// person's own edits, so "revert" has no one meaning) or while
+    /// reverting is not offered.
+    pub(crate) fn revert_turn(&self) -> Option<(String, usize, String, String)> {
+        if !self.revert {
+            return None;
+        }
+        let index = self.index.as_ref()?;
+        let turn = match &self.scope {
+            ChangesScope::Last => index.last()?,
+            ChangesScope::Turn(id) => index.finished(id)?,
+            ChangesScope::All | ChangesScope::Session => return None,
+        };
+        Some((turn.turn_id.clone(), turn.number, turn.pre.clone()?, turn.post.clone()?))
     }
 
     /// The shown list's ends when it is not All changes.
@@ -234,6 +255,15 @@ impl RightPane {
         let view = self.facts.session.as_ref()?;
         let rt = view.read(cx).rt(cx);
         Some(SessionFacts { id: rt.session_id.clone(), provider: rt.provider_kind().as_str().to_owned(), order: rt.assistant_turn_ids() })
+    }
+
+    /// Whether a Changes row offers "Revert" (docs/82 6.4): the open
+    /// session can act now ([`crate::session::SessionRuntime::undo_ready`])
+    /// and the pane reads that session's own folder.
+    pub(crate) fn revert_offered(&self, cx: &Context<Self>) -> bool {
+        let (Some(view), Some((root, _))) = (self.facts.session.as_ref(), self.facts.project.as_ref()) else { return false };
+        let rt = view.read(cx).rt(cx);
+        rt.undo_ready() && Path::new(rt.workspace_path().trim_end_matches('/')) == root.as_path()
     }
 
     /// The open session's id, if any.

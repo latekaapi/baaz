@@ -277,13 +277,15 @@ impl Harness {
     }
 
     /// The toast's Undo: put the newest batch back — one hidden row, one
-    /// "Clear empty" whole, or one archived session.
+    /// "Clear empty" whole, one archived session, one import, or one undone
+    /// turn or reverted file taken back.
     pub(crate) fn undo_newest(&mut self, cx: &mut Context<Self>) {
         let Some(batch) = self.session_list.update(cx, |list, _| list.undo_stack.pop()) else { return };
         match batch {
             UndoBatch::Hidden(ids) => self.set_overrides(&ids, |meta| meta.hidden = false, cx),
             UndoBatch::Archived(ids) => self.unarchive_with_worktrees(ids, cx),
             UndoBatch::Imported(run) => self.undo_import(&run, cx),
+            UndoBatch::Files { session_id, n } => self.take_back_undo(&session_id, n, cx),
         }
     }
 

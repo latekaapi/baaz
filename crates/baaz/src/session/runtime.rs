@@ -137,6 +137,9 @@ pub struct SessionRuntime {
     /// The turn checkpoints of this session's folder (docs/82 6.3): which
     /// turns started and ended, the last snapshot, one job at a time.
     pub(super) checkpoints: crate::checkpoints::Recorder,
+    /// Undo's state for this session (docs/82 6.4): what can be undone,
+    /// the confirm waiting, what was done, the notes, the provider's preface.
+    pub(super) undo: super::undo::UndoBook,
     /// The shared-folder warning (docs/82 6.2) was shown on this session:
     /// it shows once, never again however often the session lands.
     pub(super) shared_folder_warned: bool,
@@ -364,6 +367,9 @@ pub enum RuntimeEvent {
     HistoryChanged,
     /// The session's header facts (or a scripted context reading) moved.
     HeaderChanged,
+    /// What Undo offers moved (docs/82 6.4): a fold row's action, the
+    /// note under an undone turn.
+    UndoChanged,
     /// A short notice for the window's toast stack.
     Toast {
         /// The toast's heading.
@@ -433,6 +439,7 @@ impl SessionRuntime {
             banner_is_mode_fallback: false,
             shared_folder_warned: false,
             checkpoints,
+            undo: super::undo::UndoBook::default(),
             lost_at: None,
             child_failure: None,
             banner_action: None,

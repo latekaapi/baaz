@@ -856,6 +856,13 @@ pub(crate) fn changes_screen(
     let row_tops = ui.row_tops.clone();
     let diffs = cache.file_diffs.clone();
     let gaps = cache.gap_lines.clone();
+    // docs/82 6.4: what a row's "Revert" puts back — to HEAD in All
+    // changes, the shown turn's part in Last turn / Turn N, nothing in This
+    // session — and only while the open session can act (rule 13).
+    let revert: Option<Option<(String, usize, String, String)>> = match scoped {
+        None => scopes.revert.then_some(None),
+        Some(_) => scopes.revert_turn().map(Some),
+    };
 
     let mut list = row_list("right-changes-list").gap(Pixels::ZERO).label("Changes");
     let mut ix = 0usize;
@@ -898,9 +905,30 @@ pub(crate) fn changes_screen(
                 }
                 row
             };
-            let row = row_el(id.clone(), cx);
+            // docs/82 6.4: "Revert" beside the row (the pane's quiet text
+            // action), shown while it is hovered (its box always laid out, so the counts never move
+            // under the pointer).
+            let with_revert = |row: aui::workbench::ChangeRow, slot: &str, cx: &mut Context<RightPane>| -> AnyElement {
+                let Some(turn) = revert.clone() else { return row.into_any_element() };
+                use aui::interact::PaintHover as _;
+                let (root, path) = (root_buf.clone(), change.path.clone());
+                let button = text_action(SharedString::from(format!("right-changes-revert-{slot}:{}", change.path)), "Revert", None, scale::H_SM, cx)
+                    .aria_label(format!("Revert {}", change.path))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.emit(RightPaneEvent::RevertFile { root: root.clone(), path: path.clone(), turn: turn.clone() });
+                    }));
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .hover_group()
+                    .child(div().flex_1().min_w(px(0.0)).child(row))
+                    .child(div().flex_none().reveal_on_hover(false).child(button))
+                    .into_any_element()
+            };
+            let row = with_revert(row_el(id.clone(), cx), "row", cx);
             if open {
-                opened.push((change.path.clone(), row_el(SharedString::from(format!("right-changes-sticky:{}", change.path)), cx).into_any_element()));
+                opened.push((change.path.clone(), with_revert(row_el(SharedString::from(format!("right-changes-sticky:{}", change.path)), cx), "sticky", cx)));
             }
             // `Some(None)`: read, but there is no text diff (a binary file).
             let unreadable = matches!(diffs.get(&change.path), Some(None));

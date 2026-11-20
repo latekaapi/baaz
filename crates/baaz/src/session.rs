@@ -226,6 +226,7 @@ pub(crate) mod render;
 mod scripting;
 mod shell;
 pub(crate) mod spans;
+pub(crate) mod undo;
 
 pub use runtime::{RuntimeEvent, SessionRuntime};
 use crate::layout::LayoutGlobal as _;
@@ -492,6 +493,26 @@ pub enum SessionEvent {
     CheckpointTaken {
         /// The session whose folder was snapshotted.
         session_id: String,
+    },
+    /// Undo (docs/82 6.4) asks first: put the confirm up. Its target is
+    /// the session and `seq`, so only its own button runs the action.
+    UndoConfirm {
+        session_id: String,
+        seq: u64,
+        title: String,
+        detail: String,
+        /// The primary button: Undo or Revert.
+        primary: &'static str,
+    },
+    /// An undo, a revert or the taking back of one landed, or was refused:
+    /// the toast says so (with Undo when `undo` names the action), and
+    /// Changes re-reads.
+    UndoLanded {
+        session_id: String,
+        title: String,
+        body: String,
+        /// The action the toast's Undo takes back.
+        undo: Option<u64>,
     },
     /// A fold batch that landed with nothing in flight finished turns: a
     /// reopen's replayed history (Claude Code and Codex replay a resumed
@@ -1209,7 +1230,8 @@ impl SessionView {
             | RuntimeEvent::ComposerChanged
             | RuntimeEvent::QuestionsChanged
             | RuntimeEvent::HistoryChanged
-            | RuntimeEvent::HeaderChanged => {}
+            | RuntimeEvent::HeaderChanged
+            | RuntimeEvent::UndoChanged => {}
             RuntimeEvent::Toast { title, body } => {
                 let (title, body) = (title.clone(), body.clone());
                 self.overlays.update(cx, |overlays, cx| overlays.toast(title, body, cx));
