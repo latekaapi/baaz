@@ -291,9 +291,9 @@ fn refs_wait_for_the_session_uuid() {
 #[test]
 fn a_turn_id_becomes_one_safe_ref_component() {
     assert_eq!(component("msg_01ABC-x"), "msg_01ABC-x");
-    for odd in ["a/b", "a..b", ".lock", "pre", "", "a b:c~^?*[\\"] {
+    for odd in ["a/b", "a..b", ".lock", "pre", "undo", "", "a b:c~^?*[\\"] {
         let c = component(odd);
-        assert!(!c.is_empty() && c != PRE && c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'), "{odd:?} → {c:?}");
+        assert!(!c.is_empty() && c != PRE && c != UNDO && c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'), "{odd:?} → {c:?}");
     }
     assert_ne!(component("a/b"), component("a:b"), "two ids never meet");
     assert_eq!(pre_ref("k", "t"), "refs/baaz/k/pre/t");

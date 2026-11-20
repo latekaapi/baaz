@@ -26,7 +26,8 @@
 //! job at a time); [`run_job`] does a job's git work. The reads the Changes
 //! screen's scopes need are [`session_refs`], [`diff_files`], [`diff_file`]
 //! and [`read_lines_at`]; [`delete_session_refs`] is what forgetting a
-//! session does to them.
+//! session does to them (Undo's safety snapshots under
+//! `refs/baaz/<uuid>/undo/<n>` go with them, [`crate::undo`]).
 //!
 //! Every function here blocks on git: callers run it off the UI thread.
 //! No gpui.
@@ -46,6 +47,9 @@ use crate::git_ops::{spawn, spawn_with_env};
 pub const PREFIX: &str = "refs/baaz/";
 /// The folder under a session's refs that holds the pre-turn checkpoints.
 pub const PRE: &str = "pre";
+/// The folder under a session's refs that holds Undo's safety snapshots
+/// ([`crate::undo`], docs/82 6.4).
+pub const UNDO: &str = "undo";
 /// How long a snapshot's git command may take (an `add -A` over a big
 /// untracked tree is the slow one).
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -74,7 +78,7 @@ fn first_line(text: &str, fallback: &str) -> String {
     text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or(fallback).to_owned()
 }
 
-fn git_in(dir: &Path, args: &[&str], env: &[(&str, &OsStr)], stdin: Option<&str>, timeout: Duration) -> Result<String, String> {
+pub(crate) fn git_in(dir: &Path, args: &[&str], env: &[(&str, &OsStr)], stdin: Option<&str>, timeout: Duration) -> Result<String, String> {
     let done = spawn_with_env("git", dir, args, stdin, true, env).and_then(|job| job.finish(Instant::now() + timeout));
     match done {
         Some(done) if done.ok => Ok(done.text.trim().to_owned()),
@@ -164,10 +168,11 @@ pub fn snapshot(dir: &Path, reuse: Option<&Checkpoint>, message: &str) -> Result
 /// A turn id (or a session key) as one ref component: letters, digits, `-`
 /// and `_` kept, anything else `-`, with a short hash of the original
 /// appended when anything changed (so two ids never meet); never empty and
-/// never [`PRE`], which would collide with the pre-turn folder.
+/// never [`PRE`] or [`UNDO`], which would collide with the pre-turn and
+/// undo folders.
 pub fn component(id: &str) -> String {
     let kept: String = id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
-    if kept == id && !id.is_empty() && id != PRE {
+    if kept == id && !id.is_empty() && id != PRE && id != UNDO {
         return kept;
     }
     use std::hash::{Hash, Hasher};
@@ -217,8 +222,8 @@ pub fn session_refs(dir: &Path, key: &str) -> Option<HashMap<String, TurnRefs>> 
     Some(out)
 }
 
-/// Delete every checkpoint ref of the session `key` (`refs/baaz/<key>/…`)
-/// in the repository of `dir`, in one `update-ref --stdin`. Returns how
+/// Delete every checkpoint ref of the session `key` (`refs/baaz/<key>/…`,
+/// Undo's safety snapshots under `undo/` with them) in the repository of `dir`, in one `update-ref --stdin`. Returns how
 /// many went. The worktree service's preserved refs are not under it.
 pub fn delete_session_refs(dir: &Path, key: &str) -> Result<usize, String> {
     let prefix = format!("{PREFIX}{}/", component(key));
