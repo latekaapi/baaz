@@ -115,8 +115,10 @@ pub(crate) fn confirm_copy(action: &UndoAction, files: &[String]) -> (String, St
         UndoAction::Turn { number, .. } => (
             "Undo this turn?".to_owned(),
             format!(
-                "{} go back to how they were before turn {number}: {}. Your other edits stay, and the agent is told with your next message.",
+                "{} {} back to how {} before turn {number}: {}. Your other edits stay, and the agent is told with your next message.",
                 capitalised(&files_word(files.len())),
+                if files.len() == 1 { "goes" } else { "go" },
+                if files.len() == 1 { "it was" } else { "they were" },
                 name_files(files)
             ),
             "Undo",
