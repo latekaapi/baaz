@@ -285,8 +285,12 @@ fn the_row_ties_to_its_session() {
     assert_eq!(linked.path, worktree.path);
     assert_eq!(lock_reason(&worktree).as_deref(), Some("baaz session s-1"), "relocked in the session's name");
     assert_eq!(by_path(&state, &worktree.path).map(|row| row.id), Some(worktree.id.clone()));
+    assert_eq!(env_for_folder(&state, &worktree.path), worktree.env(), "a session there starts with them");
+    assert_eq!(cached_env_for_folder(&worktree.path), worktree.env(), "and the UI thread reads them without the database");
+    assert!(env_for_folder(&state, &root).is_empty(), "the project root has none");
     // The row goes with the worktree, and the session row lets go of it.
     assert_eq!(discard_unused(&state, &linked), Ok(true));
+    assert!(cached_env_for_folder(&worktree.path).is_empty());
     let column: Option<String> = crate::db::call(crate::db::path_in(&state), |db| {
         db.conn.query_row("SELECT worktree_id FROM session WHERE provider_session_id = 's-1'", [], |row| row.get(0)).expect("column")
     })

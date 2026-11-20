@@ -43,6 +43,9 @@ pub struct SessionLaunch {
     /// The `--permission-mode` flag, when one was requested (see
     /// [`with_permission_mode`]).
     pub permission_mode: Option<PermissionMode>,
+    /// Variables the child gets on top of its own environment: the
+    /// session's `OpenSession.env`, carried onto every relaunch of it.
+    pub env: Vec<(String, String)>,
 }
 
 /// The `--permission-mode` spelling for each neutral approval mode.
@@ -430,6 +433,7 @@ pub fn argv_for_open(
         model: model.map(str::to_owned),
         effort: effort.filter(|effort| !effort.is_empty()).map(str::to_owned),
         permission_mode: None,
+        env: Vec::new(),
     }
 }
 
@@ -456,6 +460,7 @@ pub fn argv_for_resume(
         model: model.map(str::to_owned),
         effort: effort.filter(|effort| !effort.is_empty()).map(str::to_owned),
         permission_mode: None,
+        env: Vec::new(),
     }
 }
 
@@ -486,6 +491,7 @@ pub fn argv_for_fork(
         model: model.map(str::to_owned),
         effort: effort.filter(|effort| !effort.is_empty()).map(str::to_owned),
         permission_mode: None,
+        env: Vec::new(),
     }
 }
 

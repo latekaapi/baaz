@@ -282,6 +282,7 @@ pub fn create(spec: &CreateSpec) -> Result<Worktree, String> {
         Ok(copied) => crate::baaz_log!("worktree: copied {copied} file(s) named by {INCLUDE_FILE}"),
         Err(error) => crate::baaz_log!("worktree: {INCLUDE_FILE} copy stopped ({error})"),
     }
+    remember_env(&worktree);
     crate::baaz_log!(
         "worktree: made {} on {} from {} ({}), ports {}–{}",
         worktree.path.display(),
@@ -610,8 +611,45 @@ fn run_script(script: &str, worktree: &Worktree, base_env: &[(OsString, OsString
 /// The worktree whose folder is `folder`, from `state_dir`'s database.
 pub fn by_path(state_dir: &Path, folder: &Path) -> Option<Worktree> {
     let folder = folder.to_path_buf();
-    crate::db::read(crate::db::path_in(state_dir), move |db| crate::db::worktrees::by_path(&db.conn, &folder).ok().flatten())
-        .flatten()
+    let found = crate::db::read(crate::db::path_in(state_dir), move |db| crate::db::worktrees::by_path(&db.conn, &folder).ok().flatten())
+        .flatten();
+    if let Some(worktree) = &found {
+        remember_env(worktree);
+    }
+    found
+}
+
+/// The variables a session running in `folder` is started with: the
+/// worktree's [`Worktree::env`] when `folder` is one of Baaz's worktrees
+/// with a row, else none. Reads the database only for a folder under
+/// [`worktrees_root`]; what it finds is remembered for
+/// [`cached_env_for_folder`].
+pub fn env_for_folder(state_dir: &Path, folder: &Path) -> Vec<(String, String)> {
+    if !is_worktree_folder(state_dir, folder) {
+        return Vec::new();
+    }
+    by_path(state_dir, folder).map(|worktree| worktree.env()).unwrap_or_default()
+}
+
+/// What this run knows of each worktree's variables, by folder: filled by
+/// [`create`] and every [`by_path`] that finds a row, emptied by
+/// [`discard_unused`]. Lets the UI thread start a terminal with them
+/// without touching the database.
+type EnvCache = std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<(String, String)>>>;
+
+fn env_cache() -> &'static EnvCache {
+    static CACHE: std::sync::OnceLock<EnvCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn remember_env(worktree: &Worktree) {
+    env_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(worktree.path.clone(), worktree.env());
+}
+
+/// [`env_for_folder`] from what this run already knows, without the
+/// database: empty for a folder no lookup or create has named yet.
+pub fn cached_env_for_folder(folder: &Path) -> Vec<(String, String)> {
+    env_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(folder).cloned().unwrap_or_default()
 }
 
 /// Tie the session `(provider, id)` to the worktree in `folder`, and lock
@@ -670,6 +708,7 @@ pub fn discard_unused(state_dir: &Path, worktree: &Worktree) -> Result<bool, Str
         let _ = git_ok(&worktree.project_root, &["branch", "-D", &worktree.branch]);
     }
     let _ = std::fs::remove_file(worktree.setup_log());
+    env_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&worktree.path);
     let id = worktree.id.clone();
     crate::db::call(db_path, move |db| crate::db::worktrees::delete(&db.conn, &id));
     crate::baaz_log!("worktree: removed unused {}", worktree.path.display());

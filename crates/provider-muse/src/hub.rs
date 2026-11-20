@@ -726,7 +726,7 @@ impl Core {
 
     fn dispatch(&self, lane: &MuseLane, command: Command) -> Result<Ack, ProviderError> {
         match command {
-            Command::OpenSession { request_id, workspace, model, model_provider, mode } => {
+            Command::OpenSession { request_id, workspace, model, model_provider, mode, env: _ } => {
                 // The session's id is minted here, from the request id
                 // (`session/start` takes an exact identity), and the lane
                 // binds before the start: nothing the start streams before

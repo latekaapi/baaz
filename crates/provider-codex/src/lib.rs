@@ -113,6 +113,9 @@ pub struct CodexAdapter {
     /// `BAAZ_STATE_DIR`) — env-only, so tests never touch the real
     /// Application Support dir unless they point there.
     state_override: Mutex<Option<std::path::PathBuf>>,
+    /// The session's `OpenSession.env`: every child this lane spawns (the
+    /// open and each revive) starts with it.
+    session_env: Mutex<Vec<(String, String)>>,
     /// Stand-in owner `$HOME` for home upkeep (tests): the dir whose
     /// `.codex` is linked from. Production reads the real `HOME`.
     home_override: Option<std::path::PathBuf>,
@@ -160,6 +163,7 @@ impl CodexAdapter {
             terminal: Mutex::new(None),
             use_own_mcp: Mutex::new(false),
             state_override: Mutex::new(None),
+            session_env: Mutex::new(Vec::new()),
             home_override: None,
             stderr: provider::StderrTail::new(),
             revive_owed: std::sync::atomic::AtomicBool::new(false),
@@ -212,10 +216,13 @@ impl CodexAdapter {
         crate::home::home_dir(&self.resolved_state_dir())
     }
 
-    /// The `CODEX_HOME` env for a child of this adapter: the Baaz home,
-    /// applied on top of the [`provider::child_env`] scrub.
+    /// The env for a child of this adapter: the session's own variables
+    /// (`OpenSession.env`), then `CODEX_HOME` for the Baaz home, applied on
+    /// top of the [`provider::child_env`] scrub.
     fn child_env(&self) -> Vec<(String, String)> {
-        crate::home::child_env(&self.resolved_home())
+        let mut env = self.session_env.lock().expect("session env mutex").clone();
+        env.extend(crate::home::child_env(&self.resolved_home()));
+        env
     }
 
     /// The env for one resume spawn: empty while `session_id`'s legacy
@@ -1122,7 +1129,8 @@ impl ProviderAdapter for CodexAdapter {
 
     fn dispatch(&self, command: Command) -> Result<Ack, ProviderError> {
         match command {
-            Command::OpenSession { request_id, workspace, model, mode, .. } => {
+            Command::OpenSession { request_id, workspace, model, mode, env, .. } => {
+                *self.session_env.lock().expect("session env mutex") = env;
                 self.open_session(&request_id, workspace.as_deref(), model.as_deref(), mode)
             }
             Command::ResumeSession { session_id, mode, .. } => {
@@ -1465,6 +1473,9 @@ if len(sys.argv) > 1 and sys.argv[1] == "--version":
     print("codex-cli 0.200.0")
     sys.exit(0)
 log = os.environ["FAKE_CODEX_LOG"]
+with open(log + ".env", "w") as out:
+    out.write("|".join(os.environ.get(name, "") for name in
+                       ("BAAZ_WORKTREE_PATH", "BAAZ_PROJECT_ROOT", "BAAZ_PORT", "BAAZ_PORT_COUNT")))
 seen = []
 def result_for(method):
     if method == "model/list":
@@ -1908,19 +1919,33 @@ for line in sys.stdin:
                 model: Some("gpt-test".into()),
                 model_provider: None,
                 mode: None,
+                // docs/82 6.1: a worktree session's variables.
+                env: vec![
+                    ("BAAZ_WORKTREE_PATH".to_owned(), "/w/s-1".to_owned()),
+                    ("BAAZ_PROJECT_ROOT".to_owned(), "/p".to_owned()),
+                    ("BAAZ_PORT".to_owned(), "41010".to_owned()),
+                    ("BAAZ_PORT_COUNT".to_owned(), "10".to_owned()),
+                ],
             })
             .expect("fake handshake opens");
         assert!(matches!(ack, Ack::Session { .. }), "opened: {ack:?}");
+        let mut env_seen = log.clone().into_os_string();
+        env_seen.push(".env");
+        assert_eq!(
+            std::fs::read_to_string(&env_seen).expect("the child recorded its env"),
+            "/w/s-1|/p|41010|10",
+            "the session's variables reach its child"
+        );
         // The spawn upkept the Baaz home under the pinned temp state
         // dir — and the child env names it, never the owner's home.
         assert_eq!(adapter.resolved_home(), state_dir.join("codex-home"));
         assert!(state_dir.join("codex-home").is_dir(), "the spawn ensures the Baaz home");
         assert_eq!(
-            adapter.child_env(),
-            vec![(
+            adapter.child_env().last(),
+            Some(&(
                 "CODEX_HOME".to_owned(),
                 state_dir.join("codex-home").to_string_lossy().into_owned()
-            )],
+            )),
             "the child writes to the Baaz home"
         );
         // The folded answer behind `read_usage`: plan plus a weekly

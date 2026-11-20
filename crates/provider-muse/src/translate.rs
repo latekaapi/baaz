@@ -216,7 +216,7 @@ pub fn dispatch(
     terminal: Option<(String, muse_client::schema::SessionConfig)>,
 ) -> Result<Ack, ProviderError> {
     match command {
-        Command::OpenSession { request_id, workspace, model, model_provider, mode } => {
+        Command::OpenSession { request_id, workspace, model, model_provider, mode, env: _ } => {
             let (session_id, config) = match terminal {
                 Some((id, config)) => (Some(id), Some(config)),
                 None => (None, None),

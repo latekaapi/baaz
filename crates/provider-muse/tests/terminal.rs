@@ -105,6 +105,7 @@ fn open_session(provider: &Provider) -> Ack {
             model: None,
             model_provider: None,
             mode: None,
+            env: Vec::new(),
         })
         .expect("open lands")
 }

@@ -78,6 +78,9 @@ pub struct AcpAdapter {
     place: Mutex<Option<Place>>,
     relay: Mutex<Option<McpServer>>,
     stderr: provider::StderrTail,
+    /// The session's `OpenSession.env`, which every agent child after the
+    /// open starts with (the child started at connect is restarted with it).
+    env: Mutex<Vec<(String, String)>>,
 }
 
 impl AcpAdapter {
@@ -97,6 +100,7 @@ impl AcpAdapter {
             place: Mutex::new(None),
             relay: Mutex::new(None),
             stderr: provider::StderrTail::new(),
+            env: Mutex::new(Vec::new()),
         }
     }
 
@@ -149,7 +153,8 @@ impl AcpAdapter {
     fn start(&self) -> Result<AgentHandshake, ProviderError> {
         let client = self.client.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         let client = client.unwrap_or_else(|| ConnectInfo::new("baaz", "0"));
-        let running = RunningChild::spawn(&self.program, &self.args, Arc::clone(&self.shared), self.tx.clone(), self.stderr.clone())
+        let env = self.env.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let running = RunningChild::spawn(&self.program, &self.args, &env, Arc::clone(&self.shared), self.tx.clone(), self.stderr.clone())
             .map_err(|error| ProviderError::Unavailable { reason: format!("could not start the agent `{}`: {error}", self.program) })?;
         let answer = running.request(
             wire::INITIALIZE,
@@ -239,7 +244,19 @@ impl AcpAdapter {
         }
     }
 
-    fn open_session(&self, request_id: &str, workspace: Option<&str>) -> Result<Ack, ProviderError> {
+    fn open_session(&self, request_id: &str, workspace: Option<&str>, env: Vec<(String, String)>) -> Result<Ack, ProviderError> {
+        // The child started at connect has no session yet: one that must
+        // carry the session's variables is started again with them.
+        let mut wanted = self.env.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *wanted != env {
+            *wanted = env;
+            drop(wanted);
+            if let Some(old) = self.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
+                old.shutdown();
+            }
+        } else {
+            drop(wanted);
+        }
         self.revive()?;
         let cwd = workspace
             .filter(|workspace| !workspace.is_empty())
@@ -469,7 +486,7 @@ impl ProviderAdapter for AcpAdapter {
 
     fn dispatch(&self, command: Command) -> Result<Ack, ProviderError> {
         match command {
-            Command::OpenSession { request_id, workspace, .. } => self.open_session(&request_id, workspace.as_deref()),
+            Command::OpenSession { request_id, workspace, env, .. } => self.open_session(&request_id, workspace.as_deref(), env),
             Command::ResumeSession { session_id, workspace, .. } => self.resume_session(&session_id, workspace.as_deref()),
             Command::SubmitInput { request_id, session_id, parts, display_text, .. } => {
                 self.submit(&request_id, &session_id, &parts, display_text.as_deref())

@@ -44,6 +44,7 @@ fn scripted_provider_drives_a_session_end_to_end_through_the_trait() {
             model: None,
             model_provider: None,
             mode: None,
+            env: Vec::new(),
         })
         .expect("open")
     else {

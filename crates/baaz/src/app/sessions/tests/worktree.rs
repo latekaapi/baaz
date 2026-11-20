@@ -6,7 +6,8 @@
 
 use super::*;
 
-/// Every `OpenSession` folder the recorder saw, in order.
+/// What each `OpenSession` the recorder saw carried, in order: its
+/// folder, then its env as `KEY=value` words (two entries per open).
 type Seen = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
 /// The scripted double, one distinct session per open (`s-wt-1`, …),
@@ -28,8 +29,10 @@ fn recording_factory() -> (crate::providers::Registry, Seen) {
             self.inner.capabilities()
         }
         fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
-            if let provider::Command::OpenSession { workspace, .. } = &command {
+            if let provider::Command::OpenSession { workspace, env, .. } = &command {
                 self.seen.lock().expect("seen").push(workspace.clone().unwrap_or_default());
+                let env: Vec<String> = env.iter().map(|(key, value)| format!("{key}={value}")).collect();
+                self.seen.lock().expect("seen").push(env.join(" "));
             }
             self.inner.dispatch(command)
         }
@@ -145,7 +148,19 @@ fn a_session_with_the_worktree_default_on_runs_and_writes_only_in_its_worktree(c
         "the session's folder is a worktree under the state dir: {}",
         folder.display()
     );
-    assert_eq!(*seen.lock().expect("seen"), vec![folder.to_string_lossy().into_owned()], "the lane opened there, once");
+    let port = baaz_core::worktrees::by_path(&state.2, &folder).expect("its row").port;
+    assert_eq!(
+        *seen.lock().expect("seen"),
+        vec![
+            folder.to_string_lossy().into_owned(),
+            format!(
+                "BAAZ_WORKTREE_PATH={} BAAZ_PROJECT_ROOT={} BAAZ_PORT={port} BAAZ_PORT_COUNT=10",
+                folder.display(),
+                root.display()
+            ),
+        ],
+        "the lane opened there, once, its child given the worktree's variables"
+    );
     assert_eq!(
         git(&folder, &["branch", "--show-current"]),
         format!("team-x/{}", folder.file_name().expect("named").to_string_lossy()),
@@ -158,6 +173,11 @@ fn a_session_with_the_worktree_default_on_runs_and_writes_only_in_its_worktree(c
         assert_eq!(harness.session_list.read(cx).overrides.get(&id).and_then(|meta| meta.project.clone()), Some(project.clone()), "its project stays the original");
         assert_eq!(harness.terminal_service.session_root(&id), Some(folder.clone()), "its terminal runs there");
     });
+    // What a terminal tab of that root starts with (`open_with_cwd`).
+    assert!(
+        baaz_core::worktrees::cached_env_for_folder(&folder).contains(&("BAAZ_PORT".to_owned(), port.to_string())),
+        "the terminal's shell gets the worktree's variables"
+    );
     // An edit through the session's folder lands in the worktree only.
     std::fs::write(folder.join("edited.txt"), "agent\n").expect("write in the session's folder");
     assert_eq!(git(&folder, &["status", "--porcelain"]), "?? edited.txt");
@@ -198,7 +218,11 @@ fn worktree_on_and_off_move_an_unsent_draft_and_the_unused_worktree_goes(cx: &mu
     vc.run_until_parked();
     let (first_id, worktree) = active(&baaz, vc);
     assert!(Harness::in_worktree(&worktree), "the draft now runs in a worktree: {worktree}");
-    assert_eq!(seen.lock().expect("seen").last(), Some(&worktree), "its lane reopened there");
+    {
+        let seen = seen.lock().expect("seen");
+        assert_eq!(seen.get(seen.len() - 2), Some(&worktree), "its lane reopened there");
+        assert!(seen.last().is_some_and(|env| env.contains("BAAZ_PORT=")), "with the worktree's variables");
+    }
     let again = vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.step_worktree("on", cx)));
     assert!(again.is_err(), "already in a worktree");
 

@@ -83,6 +83,7 @@ fn open(tag: &str, plans: &[&str]) -> Rig {
             model: None,
             model_provider: None,
             mode: None,
+            env: Vec::new(),
         })
         .expect("the session opens");
     let Ack::Session { session_id, .. } = ack else { panic!("open answered {ack:?}") };
@@ -334,4 +335,46 @@ fn every_recording_folds_offline_into_closed_turns() {
         assert!(replay.session_id.is_some(), "{name}: names its session");
     }
     assert!(provider_acp::replay::fold_recording("<-- {\"method\":\"turn/started\"}").is_none(), "another provider's recording");
+}
+
+/// docs/82 6.1: `OpenSession.env` reaches the agent child. The child
+/// started at connect has no session; the open restarts it with the
+/// session's variables (a worktree session's port block), which every
+/// child the stand-in's wrapper starts records.
+#[test]
+fn an_open_starts_the_agent_with_the_sessions_env() {
+    let (dir, program) = stand_in("env", &[&fixture("answer.jsonl")]);
+    let seen = dir.join("env-seen");
+    let wrapper = std::fs::read_to_string(&program).expect("wrapper");
+    let recording = wrapper.replacen(
+        "#!/bin/sh\n",
+        &format!(
+            "#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"$BAAZ_WORKTREE_PATH\" \"$BAAZ_PROJECT_ROOT\" \"$BAAZ_PORT\" \"$BAAZ_PORT_COUNT\" >> '{}'\n",
+            seen.display()
+        ),
+        1,
+    );
+    std::fs::write(&program, recording).expect("recording wrapper");
+    let mut provider = Provider::new(AcpAdapter::new(&program.to_string_lossy(), &[]));
+    provider.connect(&ConnectInfo::new("baaz", "0.0.0-test")).expect("the stand-in shakes hands");
+    let ack = provider
+        .send(Command::OpenSession {
+            request_id: provider::new_request_id(),
+            workspace: Some(dir.to_string_lossy().into_owned()),
+            model: None,
+            model_provider: None,
+            mode: None,
+            env: vec![
+                ("BAAZ_WORKTREE_PATH".to_owned(), "/w/s-1".to_owned()),
+                ("BAAZ_PROJECT_ROOT".to_owned(), "/p".to_owned()),
+                ("BAAZ_PORT".to_owned(), "41010".to_owned()),
+                ("BAAZ_PORT_COUNT".to_owned(), "10".to_owned()),
+            ],
+        })
+        .expect("the session opens");
+    assert!(matches!(ack, Ack::Session { .. }), "opened: {ack:?}");
+    provider.shutdown();
+    let lines: Vec<String> = std::fs::read_to_string(&seen).expect("recorded").lines().map(str::to_owned).collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(lines, vec!["|||".to_owned(), "/w/s-1|/p|41010|10".to_owned()], "connect's child had none; the session's child has them");
 }

@@ -60,6 +60,10 @@ fn provider_open_work(
     // `claude` settings, the last reported model) never reaches
     // the child — no `--model` flag without a pick — so the CLI
     // resolves its own default exactly as before.
+    // A session in one of Baaz's worktrees starts its child with the
+    // worktree's variables (docs/82 6.1), so the agent's own commands see
+    // its port block.
+    let env = baaz_core::worktrees::env_for_folder(&crate::store::support_dir(), std::path::Path::new(&workspace_bg));
     let ack = provider
         .send(provider::Command::OpenSession {
             request_id,
@@ -67,6 +71,7 @@ fn provider_open_work(
             model: None,
             model_provider,
             mode,
+            env,
         })
         // The child is about to go with the provider: its stderr travels
         // with the refusal, for the failure view's well (docs/71 §3).

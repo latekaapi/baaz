@@ -200,6 +200,9 @@ impl RunningChild {
         if let Some(cwd) = &launch.cwd {
             command.current_dir(cwd);
         }
+        for (key, value) in &launch.env {
+            command.env(key, value);
+        }
         if trace_enabled() {
             eprintln!(
                 "baaz: claude spawn: {program} {} (cwd {:?}, CLAUDE_CONFIG_DIR {})",

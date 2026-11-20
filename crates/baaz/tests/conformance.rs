@@ -243,6 +243,7 @@ fn open(agent: Agent, tag: &str, plans: Plan) -> Rig {
             model: None,
             model_provider: None,
             mode: None,
+            env: Vec::new(),
         })
         .unwrap_or_else(|error| panic!("{agent:?} opens: {error}"));
     let Ack::Session { session_id, .. } = ack.clone() else { panic!("{agent:?} open answered {ack:?}") };
@@ -784,6 +785,7 @@ fn a_child_that_cannot_start_fails_the_open_with_its_stderr() {
             model: None,
             model_provider: None,
             mode: None,
+            env: Vec::new(),
         })
         .expect_err("a child that dies on its first breath fails the open");
     assert!(matches!(error, ProviderError::Unavailable { .. }), "{error:?}");

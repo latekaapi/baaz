@@ -189,6 +189,7 @@ impl RunningChild {
     pub fn spawn(
         program: &str,
         args: &[String],
+        env: &[(String, String)],
         shared: Arc<Mutex<Shared>>,
         events: Sender<ProviderEvent>,
         stderr: provider::StderrTail,
@@ -196,6 +197,9 @@ impl RunningChild {
         let mut command = Command::new(program);
         command.args(args).env("PATH", provider::env_path::child_path_for(std::path::Path::new(program)));
         provider::child_env::scrub_command(&mut command);
+        for (key, value) in env {
+            command.env(key, value);
+        }
         let Spawned { process: child, stdin, stdout, stderr: stderr_pipe } = ChildProcess::spawn(&command)?;
         stderr.drain(stderr_pipe, "provider-acp-stderr", Some("acp"))?;
         let retired = Arc::new(AtomicBool::new(false));

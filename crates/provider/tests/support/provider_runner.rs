@@ -244,6 +244,7 @@ pub fn run_cell(
         model: model.map(str::to_owned),
         model_provider: None,
         mode: Some(opening),
+        env: Vec::new(),
     });
     let session_id = match ack {
         Ok(Ack::Session { session_id, .. }) => session_id,
@@ -311,6 +312,7 @@ pub fn print_catalog(provider: &mut Provider, workspace: &std::path::Path) {
         model: None,
         model_provider: None,
         mode: Some(PermissionMode::DenyUnmatched),
+        env: Vec::new(),
     });
     let session = match ack {
         Ok(Ack::Session { session_id, .. }) => session_id,

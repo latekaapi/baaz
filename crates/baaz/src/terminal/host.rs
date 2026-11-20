@@ -334,7 +334,9 @@ impl TerminalHost {
         // The scrub rides along ([`pty_extra_env`]): the inherited
         // desktop-agent vars blank, the owner's homes untouched.
         let mut config = aui_terminal::PtyConfig::login(cwd);
-        for (key, value) in pty_extra_env() {
+        // A session in one of Baaz's worktrees (its root is the worktree):
+        // the shell gets the worktree's variables too (docs/82 6.1).
+        for (key, value) in pty_extra_env().into_iter().chain(baaz_core::worktrees::cached_env_for_folder(project_root)) {
             config = config.with_env(key, value);
         }
         let nonce = config.nonce().to_owned();

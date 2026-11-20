@@ -73,6 +73,13 @@ pub enum Command {
         /// which the adapter then reports back rather than the chip
         /// guessing it.
         mode: Option<PermissionMode>,
+        /// Variables the session's child is started with on top of its
+        /// own environment (docs/82 6.1: a worktree session's
+        /// `BAAZ_WORKTREE_PATH`, `BAAZ_PROJECT_ROOT`, `BAAZ_PORT`,
+        /// `BAAZ_PORT_COUNT`), so the agent's own commands see them. A
+        /// backend whose sessions share one child cannot take them per
+        /// session and ignores them (Muse).
+        env: Vec<(String, String)>,
     },
     /// Re-attach to a stored session. With `cursor` the provider serves only
     /// the suffix after it; with `metadata_only` it serves no history and

@@ -1690,6 +1690,15 @@ impl Harness {
         provider: &str,
         cx: &mut Context<Self>,
     ) {
+        // A worktree session's terminal starts with the worktree's
+        // variables: learn them off the UI thread now, for the first tab.
+        if crate::app::Harness::in_worktree(&project_root.to_string_lossy()) {
+            let (state_dir, folder) = (crate::store::support_dir(), project_root.clone());
+            cx.background_spawn(async move {
+                baaz_core::worktrees::env_for_folder(&state_dir, &folder);
+            })
+            .detach();
+        }
         self.terminal_service.register_session(session_id, project_root);
         self.terminal_dock.update(cx, |dock, _| dock.note_provider(session_id, provider));
     }

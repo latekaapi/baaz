@@ -192,6 +192,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                 model: Some("m-1".into()),
                 model_provider: Some("p-1".into()),
                 mode: None,
+                env: Vec::new(),
             }),
             expected_params: params_of!(SessionStartParams {
                 approval_mode: None,

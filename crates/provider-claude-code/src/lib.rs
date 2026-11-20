@@ -133,6 +133,9 @@ pub struct ClaudeCodeAdapter {
     /// bytes a spawn would carry.
     sent_control: Mutex<Vec<String>>,
     workspace: Mutex<Option<PathBuf>>,
+    /// The session's `OpenSession.env`: every child this lane spawns (the
+    /// open and each relaunch) starts with it.
+    session_env: Mutex<Vec<(String, String)>>,
     home_override: Option<PathBuf>,
     config_override: Mutex<Option<PathBuf>>,
     connected: Mutex<bool>,
@@ -330,6 +333,7 @@ impl ClaudeCodeAdapter {
             control_seq: Mutex::new(1),
             sent_control: Mutex::new(Vec::new()),
             workspace: Mutex::new(None),
+            session_env: Mutex::new(Vec::new()),
             home_override: None,
             config_override: Mutex::new(None),
             connected: Mutex::new(false),
@@ -951,6 +955,14 @@ impl ClaudeCodeAdapter {
     /// a legacy child at the real `HOME` keeps it (no override, the scrub
     /// still applies); every other child names its config dir.
     fn spawn_child(&self, launch: &SessionLaunch) -> std::io::Result<RunningChild> {
+        let session_env = self.session_env.lock().expect("session env mutex").clone();
+        let with_env;
+        let launch = if session_env.is_empty() || !launch.env.is_empty() {
+            launch
+        } else {
+            with_env = SessionLaunch { env: session_env, ..launch.clone() };
+            &with_env
+        };
         let config = self.spawn_config_for(&launch.session_id);
         self.prepare_home(crate::home::is_legacy_resume(&launch.session_id));
         match config {
@@ -1742,7 +1754,8 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         }
         self.ensure_read_only_layer();
         match command {
-            Command::OpenSession { request_id, workspace, model, mode, .. } => {
+            Command::OpenSession { request_id, workspace, model, mode, env, .. } => {
+                *self.session_env.lock().expect("session env mutex") = env;
                 let launch =
                     self.launch_for_open(&request_id, workspace.as_deref(), model.as_deref())?;
                 self.spawn_launch(&argv::with_permission_mode(launch, mode))
@@ -2844,6 +2857,52 @@ mod tests {
         (read("cwd"), read("config"))
     }
 
+    /// docs/82 6.1: `OpenSession.env` reaches the session's child — a
+    /// worktree session's port block is what the agent's own commands
+    /// see. Against a stand-in `claude` that prints its environment.
+    #[test]
+    fn an_open_starts_the_child_with_the_sessions_env() {
+        let root = scratch_dir("open-env");
+        let (dir, _) = seed_executable("open-env", "unused", "");
+        let out = dir.join("env.txt");
+        let script = dir.join("fake-claude");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s|%s|%s|%s' \"$BAAZ_WORKTREE_PATH\" \"$BAAZ_PROJECT_ROOT\" \"$BAAZ_PORT\" \"$BAAZ_PORT_COUNT\" > '{out}.tmp'; mv '{out}.tmp' '{out}'\nexec cat >/dev/null\n",
+                out = out.display()
+            ),
+        )
+        .expect("fake writes");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let adapter = ClaudeCodeAdapter::new(&script.to_string_lossy()).with_config_dir(root.join("home"));
+        let env = vec![
+            ("BAAZ_WORKTREE_PATH".to_owned(), "/w/s-1".to_owned()),
+            ("BAAZ_PROJECT_ROOT".to_owned(), "/p".to_owned()),
+            ("BAAZ_PORT".to_owned(), "41010".to_owned()),
+            ("BAAZ_PORT_COUNT".to_owned(), "10".to_owned()),
+        ];
+        let ack = adapter.dispatch(Command::OpenSession {
+            request_id: format!("env-{}", std::process::id()),
+            workspace: Some(root.to_string_lossy().into_owned()),
+            model: None,
+            model_provider: None,
+            mode: None,
+            env,
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !out.is_file() {
+            assert!(std::time::Instant::now() < deadline, "the stand-in never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(adapter);
+        assert!(matches!(ack, Ok(Ack::Session { .. })), "opened: {ack:?}");
+        assert_eq!(std::fs::read_to_string(&out).expect("recorded"), "/w/s-1|/p|41010|10");
+    }
+
     /// THE 2026-10-30 IMPORT REOPEN. An imported session (docs/72) is
     /// pinned on its owner home; its resume must start the child IN the
     /// session's own folder (the cwd its transcript records — the record's
@@ -3485,6 +3544,7 @@ mod tests {
             model: Some("opus".into()),
             effort: None,
             permission_mode: None,
+            env: Vec::new(),
         };
         // The spawn fails (no such program); the old child's requests are
         // forgotten before it is attempted.
@@ -3516,6 +3576,7 @@ mod tests {
             model: None,
             effort: None,
             permission_mode: None,
+            env: Vec::new(),
         };
         let _ = adapter.relaunch(&launch);
         assert!(adapter.fold.lock().expect("fold").pending_approvals().is_empty(), "the old ask is dropped");
@@ -3573,6 +3634,7 @@ mod tests {
             model: None,
             effort: None,
             permission_mode: None,
+            env: Vec::new(),
         };
         let _ = adapter.relaunch(&launch);
         assert!(!adapter.fold.lock().expect("fold mutex").has_submissions(), "nothing stale survives");
@@ -4894,6 +4956,7 @@ mod tests {
                 model: None,
                 effort: None,
                 permission_mode: None,
+                env: Vec::new(),
             };
             let _child = crate::child::RunningChild::spawn_legacy("/bin/sh", &launch, &adapter.hub).expect("sh runs");
             let events = adapter.events();
@@ -4922,6 +4985,7 @@ mod tests {
             model: None,
             effort: None,
             permission_mode: None,
+            env: Vec::new(),
         };
         let child = crate::child::RunningChild::spawn_legacy("/bin/sh", &launch, &adapter.hub).expect("sh runs");
         *adapter.child.lock().expect("child mutex") = Some(child);
@@ -5028,6 +5092,7 @@ mod tests {
             model: None,
             effort: None,
             permission_mode: None,
+            env: Vec::new(),
         };
         let cat = crate::child::RunningChild::spawn_legacy("/bin/cat", &launch, &adapter.hub).expect("cat runs");
         *adapter.child.lock().expect("child mutex") = Some(cat);

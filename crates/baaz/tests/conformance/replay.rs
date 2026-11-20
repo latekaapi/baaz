@@ -678,6 +678,7 @@ pub fn run(agent: Agent, case: &Case) -> (Trace, Vec<Violation>) {
                 model: None,
                 model_provider: None,
                 mode: None,
+                env: Vec::new(),
             };
             driver.send(Sent::Open, command)
         }
@@ -837,6 +838,7 @@ fn a_display_text_rides_an_echo_that_beats_the_ack() {
             model: None,
             model_provider: None,
             mode: None,
+            env: Vec::new(),
         };
         let Ok(Ack::Session { session_id, .. }) = driver.send(Sent::Open, open) else { panic!("the session opens") };
         driver.session = session_id;
