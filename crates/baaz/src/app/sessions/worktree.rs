@@ -306,6 +306,7 @@ impl Harness {
         let state_dir = crate::store::support_dir();
         let work = move || worktrees::one_at_a_time(|| {
             let mut notes = Vec::new();
+            let mut moved = Vec::new();
             for member in members {
                 let folder = std::path::PathBuf::from(&member.folder);
                 let Some((worktree, _)) = worktrees::for_session(&state_dir, &member.provider, &member.id, Some(&folder)) else {
@@ -318,15 +319,29 @@ impl Harness {
                     Ok(restored) => {
                         if restored.worktree.path != folder {
                             notes.push(format!("Its old folder was taken; it is back at {}.", restored.worktree.path.display()));
+                            moved.push((member.id.clone(), restored.worktree.path.to_string_lossy().into_owned()));
                         }
                         notes.extend(restored.note);
                     }
                     Err(error) => notes.push(format!("Its worktree did not come back ({error}).")),
                 }
             }
-            notes
+            (notes, moved)
         });
-        self.wire_call_in(cx, work, move |this, notes, _, cx| {
+        self.wire_call_in(cx, work, move |this, (notes, moved), _, cx| {
+            // A worktree back at a fresh folder: the session's record names
+            // it, so its next reopen (and its terminal) starts there.
+            if !moved.is_empty() {
+                this.session_list.update(cx, |list, _| {
+                    for (id, folder) in &moved {
+                        if let Some(record) = list.provider_sessions.get_mut(id) {
+                            record.workspace = Some(folder.clone());
+                        }
+                    }
+                });
+                this.persist_provider_sessions(cx);
+                this.merge_provider_rows(cx);
+            }
             this.set_overrides(&ids, |meta| meta.archived = false, cx);
             if let Some(note) = notes.into_iter().next() {
                 crate::baaz_log!("worktree: unarchive: {note}");

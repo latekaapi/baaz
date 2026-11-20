@@ -580,3 +580,42 @@ fn move_back_hands_the_changes_to_the_root_and_reopens_there(cx: &mut gpui::Test
     assert!(rows.is_empty(), "the worktree's row went");
     cleanup(&root, state);
 }
+
+/// Unarchive into a taken folder: the worktree comes back beside it, and
+/// the session follows — its record names the new folder and its reopen
+/// starts there, never in whatever now sits at the old path.
+#[gpui::test]
+fn unarchive_into_a_taken_folder_moves_the_session_with_it(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("worktree-unarchive-taken");
+    let root = repo(&state.2);
+    let (factory, seen) = recording_factory();
+    let (baaz, vc, project) = window(cx, &state.2, &root, factory);
+    let (id, folder) = worktree_session(&baaz, vc, &project);
+    send(&baaz, vc, "edit something");
+    std::fs::write(folder.join("new.txt"), "new\n").expect("untracked");
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.archive_session(id.clone(), Some(window), cx)));
+    vc.run_until_parked();
+    assert!(!folder.exists());
+    std::fs::create_dir_all(&folder).expect("someone else's folder");
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.unarchive_session(id.clone(), cx)));
+    vc.run_until_parked();
+    let fresh = row_of(&state.2, &id).path;
+    assert_ne!(fresh, folder, "a fresh folder beside the taken one");
+    assert_eq!(porcelain(&fresh), vec!["?? new.txt"], "the work came back there");
+    let fresh_text = fresh.to_string_lossy().into_owned();
+    vc.update(|_, cx| {
+        let record = baaz.read(cx).session_list.read(cx).provider_sessions.get(&id).cloned().expect("record");
+        assert_eq!(record.workspace.as_deref(), Some(fresh_text.as_str()), "the record follows the worktree");
+    });
+    assert!(!baaz_core::worktrees::env_for_folder(&state.2, &fresh).is_empty(), "its variables are found at the new folder");
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet(id.clone(), window, cx)));
+    vc.run_until_parked();
+    assert!(
+        seen.lock().expect("seen").iter().any(|line| line == &format!("resume {id} in {fresh_text}")),
+        "the reopen starts in the new folder: {:?}",
+        seen.lock().expect("seen")
+    );
+    let _ = std::process::Command::new("git").current_dir(&root).args(["worktree", "remove", "--force", "--force"]).arg(&fresh).output();
+    let _ = std::fs::remove_dir_all(&folder);
+    cleanup(&root, state);
+}
