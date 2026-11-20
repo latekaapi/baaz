@@ -241,15 +241,16 @@ pub(crate) fn shown_branch(entry: &SessionEntry) -> Option<String> {
     worktree_branch(entry).or_else(|| entry.branch.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned))
 }
 
-/// The branch as a row draws it: with its pull request riding after it
-/// (`fix-checkout · PR #12 open`, docs/82 7.3) wherever the row names its
+/// The branch as a row draws it: led by its pull request
+/// (`PR #12 open · fix-checkout`, docs/82 7.3; the PR first so a narrow row
+/// truncates the branch, never the state) wherever the row names its
 /// branch — the hover card's meta row and the summary line's `project ·
 /// branch`. The flat row (docs/83 §4) has no other place for it: no
 /// leading glyph, and the trailing slot holds the row's one state.
 fn branch_with_pr(entry: &SessionEntry) -> Option<String> {
     let branch = shown_branch(entry)?;
     Some(match &entry.pull_request {
-        Some(pr) => format!("{branch} · {}", pr.label()),
+        Some(pr) => format!("{} · {branch}", pr.label()),
         None => branch,
     })
 }
@@ -1086,11 +1087,11 @@ pub(crate) mod tests {
         row.branch = Some("fix-checkout".into());
         row.project_name = Some("acme-web".into());
         for (state, failing, words) in [
-            (PrState::Open, 0, "fix-checkout · PR #12 open"),
-            (PrState::Draft, 0, "fix-checkout · PR #12 draft"),
-            (PrState::Open, 1, "fix-checkout · PR #12 · 1 check failing"),
-            (PrState::Merged, 1, "fix-checkout · PR #12 merged"),
-            (PrState::Closed, 0, "fix-checkout · PR #12 closed"),
+            (PrState::Open, 0, "PR #12 open · fix-checkout"),
+            (PrState::Draft, 0, "PR #12 draft · fix-checkout"),
+            (PrState::Open, 1, "PR #12 · 1 check failing · fix-checkout"),
+            (PrState::Merged, 1, "PR #12 merged · fix-checkout"),
+            (PrState::Closed, 0, "PR #12 closed · fix-checkout"),
         ] {
             row.pull_request = Some(RowPr { number: 12, state, failing });
             assert_eq!(row.detail_data(now).branch.as_deref(), Some(words));
