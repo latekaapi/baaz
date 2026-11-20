@@ -11,6 +11,19 @@ run costs nothing and reaches no model.
     uiprobe.py --entry signed-in --probe-idle 2000
 """
 import argparse, json, os, shutil, subprocess, sys, tempfile, time
+import atexit
+
+# Every temporary folder this process makes lives under one run folder that
+# goes when the process ends. The entries below build their state folders
+# at import, one per entry, and a capture uses one: before this, each run
+# left ~150 behind (267,000 `uiprobe-populated-state-*` folders, 40 GB, by
+# Gate 6). `REAL_TMP` is the system temp folder, for the one fixture that
+# is meant to outlive a run (`_new_row_repo`: its path shows in a menu, so
+# it keeps one fixed home).
+REAL_TMP = tempfile.gettempdir()
+RUN_TMP = tempfile.mkdtemp(prefix="uiprobe-run-")
+atexit.register(shutil.rmtree, RUN_TMP, ignore_errors=True)
+tempfile.tempdir = RUN_TMP
 
 
 def keep_display_awake(seconds=900):
@@ -235,7 +248,7 @@ def _new_row_repo():
     Never the person's repository: the entries adopt this one. They never
     flip the worktree toggle on — a capture makes no worktree anyway
     (`worktree_move_refusal`)."""
-    parent = os.path.join(tempfile.gettempdir(), "baaz-uiprobe-new-row")
+    parent = os.path.join(REAL_TMP, "baaz-uiprobe-new-row")
     root = os.path.join(parent, "acme-web")
     if os.path.isdir(os.path.join(root, ".git")):
         return root
