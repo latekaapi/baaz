@@ -127,6 +127,8 @@
 //! | `mode:<sessions\|browse>` | set the window's mode idempotently (`browse` shows the person's tabs, `sessions` the sessions; never toggles); unknown fails the step, free |
 //! | `files-select:<path>` | preview the project-relative file in the Files pane through the click's own path (a directory toggles instead); empty or project-less fails, free |
 //! | `changes-open:<path>` | open that changed file's diff in the Changes pane (idempotent; the path is project-relative, as git reports it); unknown fails the step, free |
+//! | `select-lines:<path>:<a>-<b>` | hold a line selection (docs/82 7.1) over the shown view of `path`: on Files its open preview (file lines `a..=b`), on Changes its open diff (the rows numbered `a..=b` on the new side; `<path>:old:<a>-<b>` for removed rows on the old side); fails, holding nothing, when that view is not open or loaded or no line matches, free |
+//! | `quote-lines` | the pane's selection bar's Quote: the held lines go to the open session's composer as a quote with their path and range; fails when no lines are held, their view closed, or no session is open, free |
 //! | `undo-turn:last` | the confirm for the open session's newest undoable turn (docs/82 6.4), through the session menu's path; a capture (which takes no checkpoints and runs in the owner's repository) puts up the confirm from fixture data — the newest agent turn that edited files — and its button cannot apply; no session, another payload or nothing to undo fails the step, free |
 //! | `revert-file:<path>` | the confirm for that changed file in All changes, back to `HEAD` (docs/82 6.4), through the row's path; a capture puts it up from fixture data and its button cannot apply; no session or project, or no such changed row, fails the step, free |
 //! | `changes-scope:<all\|session\|last>` | the Changes pane on that scope (docs/82 6.3): a capture loads the fixture checkpoint index (two finished turns over the fixture tree) — no refs are read or written; no open session or an unknown word fails the step, free |
@@ -420,6 +422,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     },
     WindowVerb { verb: "files-select", run: |this, rest, _, cx| this.step_files_select(rest, cx) },
     WindowVerb { verb: "changes-open", run: |this, rest, _, cx| this.step_changes_open(rest, cx) },
+    WindowVerb { verb: "select-lines", run: |this, rest, _, cx| this.with_right_pane(cx, |pane, cx| pane.step_select_lines(rest, cx)) },
+    WindowVerb { verb: "quote-lines", run: |this, _, _, cx| this.with_right_pane(cx, |pane, cx| pane.quote_held_lines(cx)) },
     WindowVerb { verb: "changes-scope", run: |this, rest, _, cx| this.step_changes_scope(rest, cx) },
     WindowVerb { verb: "tasks-fixture", run: |this, rest, _, cx| this.step_tasks_fixture(rest, cx) },
     WindowVerb { verb: "tasks-row", run: |this, rest, window, cx| this.step_tasks_row(rest, window, cx) },

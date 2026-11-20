@@ -119,9 +119,11 @@ pub(crate) enum RightPaneEvent {
     /// ends: Last turn, Turn N). The session asks before it changes
     /// anything.
     RevertFile { root: PathBuf, path: String, turn: Option<(String, usize, String, String)> },
-    /// Quote text into the active session's composer (a refused hook's
-    /// output), `lines` long.
-    Quote { text: String, lines: usize },
+    /// Quote text into the active session's composer as a code quote in
+    /// `lang`, `lines` long: a refused hook's output (no location), or lines
+    /// selected in a diff or a preview (docs/82 7.1, with where they came
+    /// from).
+    Quote { text: String, lang: String, lines: usize, location: Option<crate::session::QuoteLocation> },
     /// A new change set wants a commit message drafted on the session's
     /// provider; the pane already marked it drafting.
     CommitDraftWanted { root: PathBuf, files: Vec<aui_protocol::FileChange> },
@@ -208,8 +210,10 @@ impl RightPane {
             this.drop_watch_if_idle(cx);
             cx.notify();
         });
+        let mut cache = RightCache::default();
+        cache.line_select.focus = Some(cx.focus_handle());
         Self {
-            cache: RightCache::default(),
+            cache,
             resize: RightResizeDrag::restored(width),
             refresh: Refresh::default(),
             snap: false,
@@ -580,6 +584,9 @@ impl Render for RightPane {
         // rides there.
         self.cache.changes.scopes.shown_session = self.scope_session_id(cx);
         self.cache.changes.scopes.revert = self.revert_offered(cx);
+        // docs/82 7.1: lines quote into the open session's composer; with
+        // none open (or a switch pending) there is nowhere to put them.
+        self.cache.line_select.can_quote = self.can_quote();
         if !self.cache.pushed.is_empty() {
             self.sync_pushed_outputs(cx);
         }
@@ -782,11 +789,11 @@ impl Harness {
                     crate::baaz_log!("undo: revert not asked ({why})");
                 }
             }
-            RightPaneEvent::Quote { text, lines } => {
+            RightPaneEvent::Quote { text, lang, lines, location } => {
                 if let Some(view) = self.active.clone() {
-                    view.update(cx, |view, cx| view.add_quote(text.clone(), None, Some(("text".into(), *lines)), window, cx));
+                    // The session owns its quotes and redraws itself.
+                    view.update(cx, |view, cx| view.add_quote(text.clone(), None, Some((lang.clone(), *lines)), location.clone(), window, cx));
                 }
-                cx.notify();
             }
             RightPaneEvent::CommitDraftWanted { root, files } => self.draft_commit_for_pane(root, files, cx),
             RightPaneEvent::OpenPrForm(root) => self.open_pr_form(root, window, cx),

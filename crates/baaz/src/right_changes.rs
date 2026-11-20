@@ -325,6 +325,9 @@ impl RightPane {
     /// Toggle one row's diff, reading it the first time it opens.
     pub(crate) fn toggle_change_row(&mut self, root: &Path, change: &FileChange, cx: &mut Context<Self>) {
         let open = self.cache.flip_changes_file(root, &change.path);
+        if !open && self.cache.line_select.held.as_ref().is_some_and(|(t, _)| *t == crate::right_quote::diff_target(root, &change.path)) {
+            self.cache.line_select.held = None;
+        }
         if open && !self.cache.file_diffs.contains_key(&change.path) {
             self.load_file_diff(root, change.clone(), cx);
         }
@@ -501,7 +504,7 @@ impl RightPane {
     /// quote (docs/43 §2.6.3, §4), with no draft text — through the root,
     /// which holds the composer.
     pub(crate) fn ask_to_fix_hook(&mut self, lines: &[String], cx: &mut Context<Self>) {
-        cx.emit(RightPaneEvent::Quote { text: lines.join("\n"), lines: lines.len() });
+        cx.emit(RightPaneEvent::Quote { text: lines.join("\n"), lang: "text".into(), lines: lines.len(), location: None });
     }
 
     /// Open the Create PR form: base = the default branch, the title and
@@ -938,11 +941,18 @@ pub(crate) fn changes_screen(
             let weak = cx.weak_entity();
             let gaps = gaps.clone();
             let muted = cx.aui().colors.fg_muted;
+            // docs/82 7.1: the diff's lines select, for the quote bar.
+            let target = crate::right_quote::diff_target(&root_buf, &change.path);
+            let held = cache.line_select.range_for(&target);
+            let geometry = cache.line_select.geometry.clone();
             let body = move || -> AnyElement {
                 match diff {
                     Some(diff) => {
                         let d: Arc<Diff> = diff.clone();
-                        let mut b = diff_body(SharedString::from(format!("right-diff:{path}")), d.clone());
+                        let w3 = weak.clone();
+                        let mut b = diff_body(SharedString::from(format!("right-diff:{path}")), d.clone()).selected(held).selection_geometry(&geometry).on_select_lines(move |range, window, cx| {
+                            let _ = w3.update(cx, |this: &mut RightPane, cx| this.select_lines(target.clone(), range, window, cx));
+                        });
                         for i in 0..d.hunks.len() {
                             if let Some(lines) = gaps.get(&(path.clone(), i)) {
                                 b = b.open_gap(i, lines.clone());
@@ -1045,13 +1055,40 @@ pub(crate) fn changes_screen(
             })
         })
         .flatten();
-    let mut screen = div().relative().size_full().bg(p.surface_1).child(body);
+    // docs/82 7.1: the quote bar over a selection in one of these diffs;
+    // a press anywhere else in the screen, or Esc, clears it.
+    let held_here = cache.line_select.held.as_ref().is_some_and(|(t, _)| matches!(t, crate::right_quote::LineTarget::Diff { root: r, .. } if *r == root_buf));
+    let bar = match &cache.line_select.held {
+        Some((target @ crate::right_quote::LineTarget::Diff { path, .. }, _)) if held_here => {
+            let shown = expanded.contains(path) && matches!(diffs.get(path), Some(Some(_)));
+            crate::right_quote::screen_bar(cache, &target.clone(), shown, window, cx)
+        }
+        _ => None,
+    };
+    let body_cell = cache.line_select.body.clone();
+    let mut screen = div()
+        .id("right-changes-screen")
+        .relative()
+        .size_full()
+        .bg(p.surface_1)
+        .when_some(cache.line_select.focus.clone(), |d, f| d.track_focus(&f))
+        .on_key_down(cx.listener(|this: &mut RightPane, e: &gpui::KeyDownEvent, _, cx| {
+            if e.keystroke.key == "escape" && this.clear_line_selection(cx) {
+                cx.stop_propagation();
+            }
+        }))
+        .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this: &mut RightPane, _: &gpui::MouseDownEvent, _, cx| {
+            this.clear_line_selection(cx);
+        }))
+        .when(held_here, |d| d.on_prepaint(move |bounds, _, _| body_cell.set(Some(bounds))))
+        .child(body);
     if let Some(row) = sticky {
         screen = screen.child(div().absolute().top_0().left(px(LIST_INSET)).right(px(LIST_INSET)).bg(p.surface_1).child(row));
     }
     if let Some(foot_el) = foot_el {
         screen = screen.child(commit_foot(foot_el, cx));
     }
+    let screen = screen.children(bar);
     match scope_row {
         Some(row) => (None, v_flex().size_full().bg(p.surface_1).child(row).child(div().flex_1().min_h(px(0.0)).child(screen)).into_any_element()),
         None => (None, screen.into_any_element()),

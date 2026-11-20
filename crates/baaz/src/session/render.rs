@@ -2654,6 +2654,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                         id: quote.id.clone().into(),
                         text: quote_block_text(&quote.text, quote.code.is_some()).into(),
                         code: quote.code.clone().map(|(lang, n)| (lang.into(), n)),
+                        location: quote.location.as_ref().map(|at| at.label().into()),
                     })
                     .collect(),
             )
@@ -3714,6 +3715,41 @@ mod tests {
                 view.scroll_to_quote("t-1", "other words", cx);
                 assert!(view.quote_flash_now().is_none(), "no span known, no flash");
             })
+        });
+    }
+
+    /// docs/82 7.1: lines from the right pane land as a code quote that
+    /// keeps its location, the chip's caption names the file and lines,
+    /// and the same lines from another file are a second quote.
+    #[gpui::test]
+    fn pane_lines_become_a_located_quote(cx: &mut gpui::TestAppContext) {
+        use crate::session::{QuoteLocation, QuoteSide};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = vc.update(|window, cx| {
+            let host = crate::session::SessionHost {
+                provider_id: "echo".to_owned(),
+                workspace: std::env::temp_dir().to_string_lossy().into_owned(),
+                overlays: cx.new(|_| crate::overlays::Overlays::default()),
+                capture: crate::runtime::CaptureToken::default(),
+                terminal_host: None,
+            };
+            cx.new(|cx| crate::session::SessionView::new("s-1".to_owned(), host, window, cx))
+        });
+        let at = |path: &str| QuoteLocation { path: path.into(), first: 6, last: 8, side: QuoteSide::File };
+        vc.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.add_quote("a\nb\nc".into(), None, Some(("rust".into(), 3)), Some(at("src/lib.rs")), window, cx);
+                view.add_quote("a\nb\nc".into(), None, Some(("rust".into(), 3)), Some(at("src/lib.rs")), window, cx);
+                view.add_quote("a\nb\nc".into(), None, Some(("rust".into(), 3)), Some(at("src/main.rs")), window, cx);
+            });
+            let quotes = view.read(cx).rt(cx).quotes.clone();
+            assert_eq!(quotes.len(), 2, "the same lines from the same file add nothing");
+            assert_eq!(quotes[0].location, Some(at("src/lib.rs")));
+            assert_eq!(quotes[0].code, Some(("rust".into(), 3)));
+            assert_eq!(quotes[0].source, None);
+            let chip = aui::composer::ComposerQuote { id: "q".into(), text: "a".into(), code: Some(("rust".into(), 3)), location: quotes[0].location.as_ref().map(|l| l.label().into()) };
+            assert_eq!(chip.caption().as_deref(), Some("src/lib.rs:6–8 · 3 lines"));
         });
     }
 

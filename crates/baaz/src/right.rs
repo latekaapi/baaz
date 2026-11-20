@@ -285,6 +285,9 @@ pub(crate) struct RightCache {
     /// of the view menu ([`crate::overlays::MenuKind::RightViews`]). Never
     /// persists.
     pub views_menu_seat: Option<gpui::Bounds<gpui::Pixels>>,
+    /// Lines selected in a diff or the preview, for the quote bar (docs/82
+    /// 7.1). Never persists.
+    pub line_select: crate::right_quote::LineSelectUi,
 }
 
 impl RightCache {

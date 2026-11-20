@@ -342,7 +342,8 @@ pub type ToolOutputNow = (Vec<String>, bool, Option<i32>, Option<(Vec<String>, b
 /// rows' flash (right_changes `FLASH`).
 pub(crate) const QUOTE_FLASH: std::time::Duration = std::time::Duration::from_millis(900);
 
-/// One quotation in the composer (D4): the words and their source turn.
+/// One quotation in the composer (D4): the words and their source turn,
+/// or, for lines quoted from the right pane, the file and lines (docs/82 7.1).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct QuoteDraft {
     /// The block's id.
@@ -357,6 +358,61 @@ pub(crate) struct QuoteDraft {
     /// turn, or a tool output's owner), so the sent quote can flash its
     /// source span when clicked (docs/43 §0). None for a hook's output.
     pub span: Option<(String, aui::transcript::MessageSelection)>,
+    /// Lines quoted from the right pane (docs/82 7.1): the file and lines
+    /// they came from. None for a quote from the transcript or a hook.
+    pub location: Option<QuoteLocation>,
+}
+
+/// Which numbering a [`QuoteLocation`]'s lines count on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QuoteSide {
+    /// A file preview's lines.
+    File,
+    /// A diff's lines, numbered in the new file.
+    DiffNew,
+    /// A diff's removed lines only, numbered in the old file.
+    DiffOld,
+}
+
+/// Where lines quoted from the right pane came from (docs/82 7.1): the path
+/// relative to the project root and the 1-based lines `first..=last`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QuoteLocation {
+    pub path: String,
+    pub first: u32,
+    pub last: u32,
+    pub side: QuoteSide,
+}
+
+impl QuoteLocation {
+    /// `12` or `12–18`.
+    fn lines(&self) -> String {
+        if self.first == self.last {
+            self.first.to_string()
+        } else {
+            format!("{}–{}", self.first, self.last)
+        }
+    }
+
+    /// The chip's and the sent quote's label: `src/a.rs:12–18`, and
+    /// `src/a.rs:40–42 (removed)` for removed lines (old numbering).
+    pub(crate) fn label(&self) -> String {
+        match self.side {
+            QuoteSide::DiffOld => format!("{}:{} (removed)", self.path, self.lines()),
+            _ => format!("{}:{}", self.path, self.lines()),
+        }
+    }
+
+    /// The line the model reads above the quote's fence: `From src/a.rs,
+    /// lines 12–18:`; a diff says so, and removed lines say which numbering.
+    pub(crate) fn prompt_line(&self) -> String {
+        let n = if self.first == self.last { "line" } else { "lines" };
+        match self.side {
+            QuoteSide::File => format!("From {}, {n} {}:", self.path, self.lines()),
+            QuoteSide::DiffNew => format!("From the diff of {}, {n} {}:", self.path, self.lines()),
+            QuoteSide::DiffOld => format!("From the diff of {}, removed {n} {} (old numbering):", self.path, self.lines()),
+        }
+    }
 }
 
 /// An unsent composer's content: the text plus the images and files waiting
@@ -2485,12 +2541,14 @@ impl SessionView {
 
     /// The quote flow (docs/43 §0): add a quote block above the composer's
     /// text — quoting text already quoted adds nothing — and give the field
-    /// the keyboard with the caret after any draft.
-    pub(crate) fn add_quote(&mut self, text: String, source: Option<String>, code: Option<(String, usize)>, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_quote_with_span(text, source, code, None, window, cx);
+    /// the keyboard with the caret after any draft. `location`: lines quoted
+    /// from the right pane (docs/82 7.1).
+    pub(crate) fn add_quote(&mut self, text: String, source: Option<String>, code: Option<(String, usize)>, location: Option<QuoteLocation>, window: &mut Window, cx: &mut Context<Self>) {
+        self.push_quote(text, source, code, None, location, window, cx);
     }
 
-    /// [`Self::add_quote`] remembering the selection it came from.
+    /// [`Self::add_quote`] from the transcript, remembering the selection it
+    /// came from.
     pub(crate) fn add_quote_with_span(
         &mut self,
         text: String,
@@ -2500,14 +2558,28 @@ impl SessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.push_quote(text, source, code, span, None, window, cx);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_quote(
+        &mut self,
+        text: String,
+        source: Option<String>,
+        code: Option<(String, usize)>,
+        span: Option<(String, aui::transcript::MessageSelection)>,
+        location: Option<QuoteLocation>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let text = text.trim_end().to_string();
-        if text.is_empty() || self.runtime.read(cx).quotes.iter().any(|q| q.text == text) {
+        if text.is_empty() || self.runtime.read(cx).quotes.iter().any(|q| q.text == text && q.location == location) {
             self.focus_composer(window, cx);
             return;
         }
         self.runtime.update(cx, |rt, _| {
             rt.quote_seq += 1;
-            rt.quotes.push(QuoteDraft { id: format!("quote-{}", rt.quote_seq), text, source, code, span });
+            rt.quotes.push(QuoteDraft { id: format!("quote-{}", rt.quote_seq), text, source, code, span, location });
         });
         let draft = self.draft_text(cx);
         let end = position_of(&draft, draft.len());

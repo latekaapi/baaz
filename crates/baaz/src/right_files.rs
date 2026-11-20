@@ -5,6 +5,7 @@
 //! does not show, a file that is gone.
 
 use aui::util::ScrollAxisLock as _;
+use aui::util::ElementExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -411,7 +412,21 @@ fn preview_screen(
         },
         PreviewContent::Text { language, code } => {
             let lines = preview_lines(&cache.files_ui, preview, code);
-            let mut view = code_view("right-file-code", lines).language(language.clone()).soft_wrap(wrap).width_hint(width);
+            // docs/82 7.1: the lines select, for the quote bar.
+            let target = crate::right_quote::LineTarget::Preview { root: root.to_path_buf(), path: preview.path.clone() };
+            let held = cache.line_select.range_for(&target);
+            let mut view = code_view("right-file-code", lines)
+                .language(language.clone())
+                .soft_wrap(wrap)
+                .width_hint(width)
+                .selected(held)
+                .selection_geometry(&cache.line_select.geometry)
+                .on_select_lines({
+                    let weak = cx.weak_entity();
+                    move |range, window, cx| {
+                        let _ = weak.update(cx, |this: &mut RightPane, cx| this.select_lines(target.clone(), range, window, cx));
+                    }
+                });
             if let Some(band) = preview.highlight.clone() {
                 view = view.band(band, cache.files_ui.band_token);
             }
@@ -430,24 +445,38 @@ fn preview_screen(
                 .into_any_element()
         }
     };
+    // docs/82 7.1: the quote bar over lines selected in the code.
+    let target = crate::right_quote::LineTarget::Preview { root: root.to_path_buf(), path: preview.path.clone() };
+    let held_here = cache.line_select.range_for(&target).is_some();
+    let shown = matches!(&preview.content, PreviewContent::Text { .. }) && !gone && !image;
+    let bar = held_here.then(|| crate::right_quote::screen_bar(cache, &target, shown, window, cx)).flatten();
+    let body_cell = cache.line_select.body.clone();
     // ⌥Z flips wrapping, as in VS Code. The preview takes the Files focus
     // so the key lands here; every other key goes on as before.
     let body = div()
         .id("right-file-body")
+        .relative()
         .size_full()
         .track_focus(focus)
         .key_context("RightFiles")
-        // A click into the code takes the keyboard, so ⌥Z works from there.
+        // A click into the code takes the keyboard, so ⌥Z works from there;
+        // a press off the selected lines clears them (a press on a line
+        // never reaches here).
         .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this: &mut RightPane, _: &gpui::MouseDownEvent, window, cx| {
+            this.clear_line_selection(cx);
             window.focus(&this.focus.clone(), cx);
         }))
         .on_key_down(cx.listener(|this: &mut RightPane, e: &gpui::KeyDownEvent, _, cx| {
             if is_wrap_key(&e.keystroke) && this.code_preview_open() {
                 this.toggle_code_wrap(cx);
                 cx.stop_propagation();
+            } else if e.keystroke.key == "escape" && this.clear_line_selection(cx) {
+                cx.stop_propagation();
             }
         }))
+        .when(held_here, |d| d.on_prepaint(move |bounds, _, _| body_cell.set(Some(bounds))))
         .child(body)
+        .children(bar)
         .into_any_element();
     (Some(row.into_any_element()), body)
 }

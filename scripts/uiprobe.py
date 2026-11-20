@@ -1063,6 +1063,19 @@ ENTRIES.update({
     "revert-file-confirm":     _populated("right-width:440;right:changes;revert-file:crates/baaz/src/layout.rs", replay=True),
     "right-files-preview":     _populated("right-width:440;right:files;files-select:src/lib.rs",
                                           workspace=_REPO_ACME),
+    # Task 7.1: lines selected in the pane, the selection bar hung over
+    # them, and Quote's chip in the composer. `select-lines:` holds the
+    # selection a press-and-drag makes; `quote-lines` is the bar's Quote.
+    # Over the fixture diff (two added lines and two more), over the acme
+    # repo's lib.rs preview (lines 5-8), and the chip of two removed lines
+    # (numbered on the old side). The replay is the open session whose
+    # composer the quote goes to. No baselines yet.
+    "right-changes-select":    _populated("right-width:440;right:changes;changes-open:crates/baaz/src/right.rs;wait:800;"
+                                          "select-lines:crates/baaz/src/right.rs:2823-2826", replay=True),
+    "right-preview-select":    _populated("right-width:440;right:files;files-select:src/lib.rs;wait:800;"
+                                          "select-lines:src/lib.rs:5-8", replay=True, workspace=_REPO_ACME),
+    "composer-quote-lines":    _populated("right-width:440;right:changes;changes-open:crates/baaz/src/right.rs;wait:800;"
+                                          "select-lines:crates/baaz/src/right.rs:old:2823-2824;quote-lines", replay=True),
     "right-page":              _populated("right-width:440;right:browser;browse:https://example.com", replay=True),
     "terminal-dock":           _populated("terminal-dock:zsh", replay=True),
     "settings-sidebar":        _populated("settings:sidebar"),

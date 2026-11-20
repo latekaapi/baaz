@@ -1289,18 +1289,7 @@ impl SessionRuntime {
             if let (Some(source), Some(span)) = (&quote.source, &quote.span) {
                 self.sent_quote_spans.insert((source.clone(), quote.text.clone()), span.clone());
             }
-            // A code quote says so in `meta` (`code` / `code:<lang>`), which
-            // the sent bubble's quote block reads (docs/43 §0).
-            let meta = quote.code.map(|(lang, _)| if lang.is_empty() { "code".to_string() } else { format!("code:{lang}") });
-            attachments.push(Attachment {
-                name: quote.text,
-                kind: AttachmentKind::Quote,
-                size_bytes: None,
-                meta,
-                state: UploadState::Ready,
-                path: None,
-                quote_of: quote.source,
-            });
+            attachments.push(quote_attachment(quote));
         }
         self.failed_chips.clear();
         if attachments.is_empty() && annotations.is_none() {
@@ -1392,4 +1381,49 @@ pub(super) struct ProviderRow {
 /// reader's message (`notes.pdf: couldn't be read` → `couldn't be read`).
 pub(super) fn short_reason(reason: &str) -> String {
     reason.rsplit_once(": ").map(|(_, tail)| tail).unwrap_or(reason).trim().to_owned()
+}
+
+/// A composer quote as the sent bubble's attachment: the words in `name`,
+/// the source turn in `quote_of`, and a code quote's language — then, for
+/// lines from the right pane, their location after a newline — in `meta`
+/// (`code` / `code:<lang>[\n<location>]`, read by
+/// `aui::transcript::quote_code` / `quote_location`; docs/43 §0, docs/82
+/// 7.1).
+pub(crate) fn quote_attachment(quote: super::QuoteDraft) -> aui_protocol::Attachment {
+    use aui_protocol::{Attachment, AttachmentKind, UploadState};
+    let location = quote.location.as_ref().map(|at| at.label());
+    let meta = quote.code.map(|(lang, _)| aui::transcript::quote_meta(&lang, location.as_deref()));
+    Attachment { name: quote.text, kind: AttachmentKind::Quote, size_bytes: None, meta, state: UploadState::Ready, path: None, quote_of: quote.source }
+}
+
+#[cfg(test)]
+mod quote_tests {
+    use super::super::{QuoteDraft, QuoteLocation, QuoteSide};
+    use super::quote_attachment;
+    use aui::transcript::{quote_code, quote_location, quote_source_line};
+
+    fn draft(code: Option<(&str, usize)>, location: Option<QuoteLocation>) -> QuoteDraft {
+        QuoteDraft { id: "q".into(), text: "x".into(), source: None, code: code.map(|(l, n)| (l.into(), n)), span: None, location }
+    }
+
+    /// (d) The sent quote's meta carries the location, and reads back.
+    #[test]
+    fn a_pane_quote_round_trips_through_the_bubble_meta() {
+        let at = QuoteLocation { path: "src/a b:c.rs".into(), first: 40, last: 42, side: QuoteSide::DiffOld };
+        let a = quote_attachment(draft(Some(("diff", 3)), Some(at)));
+        assert_eq!(a.meta.as_deref(), Some("code:diff\nsrc/a b:c.rs:40–42 (removed)"));
+        assert_eq!(quote_code(&a), Some("diff"));
+        assert_eq!(quote_location(&a), Some("src/a b:c.rs:40–42 (removed)"));
+        assert_eq!(quote_source_line(quote_code(&a), quote_location(&a)), "from src/a b:c.rs:40–42 (removed) · diff");
+    }
+
+    /// (d) Transcript quotes write the metas they always did.
+    #[test]
+    fn transcript_quotes_keep_their_old_metas() {
+        assert_eq!(quote_attachment(draft(None, None)).meta, None);
+        assert_eq!(quote_attachment(draft(Some(("", 2)), None)).meta.as_deref(), Some("code"));
+        let a = quote_attachment(draft(Some(("rust", 2)), None));
+        assert_eq!(a.meta.as_deref(), Some("code:rust"));
+        assert_eq!((quote_code(&a), quote_location(&a)), (Some("rust"), None));
+    }
 }

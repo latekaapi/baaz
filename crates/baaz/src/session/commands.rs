@@ -1256,7 +1256,9 @@ fn interrupt_provider_found_turn_over(error: &provider::ProviderError) -> bool {
 
 /// The model-visible prompt: the composer's quotes ahead of the person's
 /// words (docs/43 §0) — prose as a Markdown blockquote, a code quote as a
-/// fence in its language — then the typed text. The bubble shows the typed
+/// fence in its language, lines from the right pane with the file and
+/// lines named on the line above their fence (docs/82 7.1) — then the
+/// typed text. The bubble shows the typed
 /// text with the quote blocks drawn from the attachments; this is what the
 /// model reads. (Live 2026-10-21: quotes reached the bubble but never the
 /// model — Claude Code answered "Which two?" to a quoted pair of lines.)
@@ -1268,6 +1270,10 @@ pub(crate) fn quoted_prompt(quotes: &[super::QuoteDraft], text: &str) -> String 
     for quote in quotes {
         match &quote.code {
             Some((lang, _)) => {
+                if let Some(at) = &quote.location {
+                    out.push_str(&at.prompt_line());
+                    out.push('\n');
+                }
                 let longest = quote.text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
                 let fence = "`".repeat(longest.max(2) + 1);
                 out.push_str(&format!("{fence}{lang}\n{}\n{fence}\n\n", quote.text));
@@ -1293,7 +1299,7 @@ mod tests {
     #[test]
     fn quotes_ride_ahead_of_the_typed_words() {
         use super::super::QuoteDraft;
-        let q = |text: &str, code: Option<(&str, usize)>| QuoteDraft { id: "q".into(), text: text.into(), source: Some("t".into()), code: code.map(|(l, n)| (l.into(), n)), span: None };
+        let q = |text: &str, code: Option<(&str, usize)>| QuoteDraft { id: "q".into(), text: text.into(), source: Some("t".into()), code: code.map(|(l, n)| (l.into(), n)), span: None, location: None };
         assert_eq!(super::quoted_prompt(&[], "hi"), "hi");
         assert_eq!(
             super::quoted_prompt(&[q("first line\n\nsecond", None)], "Why?"),
@@ -1302,6 +1308,33 @@ mod tests {
         assert_eq!(
             super::quoted_prompt(&[q("-rw big.txt\ndrwx docs", Some(("shell", 2))), q("a ``` b", Some(("", 1)))], "Which is a folder?"),
             "```shell\n-rw big.txt\ndrwx docs\n```\n\n````\na ``` b\n````\n\nWhich is a folder?"
+        );
+    }
+
+    /// (c) docs/82 7.1: lines from the right pane name their file and lines
+    /// on the line above the fence, so the agent knows where they are.
+    #[test]
+    fn pane_quotes_name_their_file_and_lines() {
+        use super::super::{QuoteDraft, QuoteLocation, QuoteSide};
+        let q = |text: &str, lang: &str, n, path: &str, first, last, side| QuoteDraft {
+            id: "q".into(),
+            text: text.into(),
+            source: None,
+            code: Some((lang.into(), n)),
+            span: None,
+            location: Some(QuoteLocation { path: path.into(), first, last, side }),
+        };
+        assert_eq!(
+            super::quoted_prompt(&[q("fn a() {}\nfn b() {}", "rust", 2, "src/a.rs", 12, 13, QuoteSide::File)], "Why two?"),
+            "From src/a.rs, lines 12–13:\n```rust\nfn a() {}\nfn b() {}\n```\n\nWhy two?"
+        );
+        assert_eq!(
+            super::quoted_prompt(&[q("+    both();", "diff", 1, "src/a.rs", 39, 39, QuoteSide::DiffNew)], "Ok?"),
+            "From the diff of src/a.rs, line 39:\n```diff\n+    both();\n```\n\nOk?"
+        );
+        assert_eq!(
+            super::quoted_prompt(&[q("-    one();\n-    two();", "diff", 2, "src/a.rs", 39, 40, QuoteSide::DiffOld)], "Why gone?"),
+            "From the diff of src/a.rs, removed lines 39–40 (old numbering):\n```diff\n-    one();\n-    two();\n```\n\nWhy gone?"
         );
     }
 
