@@ -155,6 +155,65 @@ pub(crate) fn end_group(pgid: i32, grace: Duration) -> bool {
     wait_until(KILL_WAIT, || !group_alive(pgid))
 }
 
+/// End several groups at once, the way [`end_group`] ends one: SIGTERM to
+/// every live group, one shared wait of up to `grace` for them all to empty,
+/// then SIGKILL to whatever is left and a bounded wait for that too. True
+/// when every group is gone. What a terminal task's Stop and the quit sweep
+/// use: a group that ignores SIGTERM costs `grace` once, not once per group.
+///
+/// The groups are not this process's children: callers name a group they
+/// read from a live terminal moments ago ([`foreground_group`]), whose
+/// leader the shell has not reaped while the group still runs.
+pub fn end_groups(pgids: &[i32], grace: Duration) -> bool {
+    let live: Vec<i32> = pgids.iter().copied().filter(|pgid| group_alive(*pgid)).collect();
+    if live.is_empty() {
+        return true;
+    }
+    for pgid in &live {
+        signal_group(*pgid, libc::SIGTERM);
+    }
+    if wait_until(grace, || live.iter().all(|pgid| !group_alive(*pgid))) {
+        return true;
+    }
+    for pgid in &live {
+        signal_group(*pgid, libc::SIGKILL);
+    }
+    wait_until(KILL_WAIT, || live.iter().all(|pgid| !group_alive(*pgid)))
+}
+
+/// The process group in the foreground of the terminal `session_leader`
+/// controls — the command running at its prompt — when it is not the
+/// leader's own group. `None` while the shell sits at its prompt (the shell
+/// holds the foreground itself), when the leader is gone, or when it has no
+/// terminal. Read from the kernel's process table (`proc_pidinfo`): no
+/// process is started.
+#[cfg(target_os = "macos")]
+pub fn foreground_group(session_leader: i32) -> Option<i32> {
+    if session_leader <= 1 {
+        return None;
+    }
+    // SAFETY: an all-zero `proc_bsdinfo` is a valid value of a plain C
+    // struct; `proc_pidinfo` writes at most `size` bytes into it.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `info` is a valid, writable `proc_bsdinfo` of `size` bytes.
+    let written = unsafe {
+        libc::proc_pidinfo(session_leader, libc::PROC_PIDTBSDINFO, 0, std::ptr::addr_of_mut!(info).cast(), size)
+    };
+    if written != size {
+        return None;
+    }
+    let foreground = i32::try_from(info.e_tpgid).ok()?;
+    let own = i32::try_from(info.pbi_pgid).ok()?;
+    (foreground > 1 && foreground != own && signallable(foreground)).then_some(foreground)
+}
+
+/// Elsewhere there is no process table to read.
+#[cfg(not(target_os = "macos"))]
+pub fn foreground_group(_session_leader: i32) -> Option<i32> {
+    None
+}
+
 /// Poll `done` every few milliseconds until it holds or `limit` passes.
 fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + limit;
@@ -499,6 +558,39 @@ mod tests {
         spawned.process.terminate(Duration::from_secs(5));
         assert!(started.elapsed() < Duration::from_secs(2), "SIGTERM ended it");
         assert_eq!(spawned.process.try_exit(), Some(Exit::Signal(libc::SIGTERM)));
+    }
+
+    #[test]
+    fn end_groups_kills_a_group_that_ignores_sigterm_after_the_grace() {
+        // The shell and both sleeps ignore SIGTERM (an ignored signal stays
+        // ignored across exec), so only the SIGKILL after the grace ends them.
+        let stubborn = sh("trap '' TERM; sleep 60 & sleep 60");
+        let polite = sh("exec sleep 60");
+        let (a, b) = (stubborn.process.pid() as i32, polite.process.pid() as i32);
+        // Let the stubborn shell set its trap and start both sleeps.
+        assert!(wait_until(Duration::from_secs(5), || {
+            std::process::Command::new("pgrep").args(["-g", &a.to_string()]).output().is_ok_and(|out| {
+                String::from_utf8_lossy(&out.stdout).lines().count() >= 3
+            })
+        }));
+        let grace = Duration::from_millis(300);
+        let started = Instant::now();
+        assert!(end_groups(&[a, b], grace), "both groups end");
+        assert!(started.elapsed() >= grace, "the stubborn group waited out the grace");
+        assert!(!group_alive(a) && !group_alive(b), "no process of either group survives");
+        assert_eq!(polite.process.wait_exit(Duration::from_secs(2)), Some(Exit::Signal(libc::SIGTERM)));
+        assert_eq!(stubborn.process.wait_exit(Duration::from_secs(2)), Some(Exit::Signal(libc::SIGKILL)));
+        // Gone groups need nothing.
+        assert!(end_groups(&[a, b], grace));
+    }
+
+    #[test]
+    fn a_shell_at_its_prompt_has_no_foreground_group_of_another() {
+        // No terminal at all: nothing is in its foreground.
+        let plain = sh("exec sleep 30");
+        assert_eq!(foreground_group(plain.process.pid() as i32), None);
+        assert_eq!(foreground_group(0), None);
+        assert_eq!(foreground_group(1), None, "never pid 1");
     }
 
     #[test]

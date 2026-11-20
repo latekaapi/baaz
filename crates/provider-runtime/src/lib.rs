@@ -42,7 +42,7 @@ mod stdin;
 
 pub use backoff::{Respawn, RespawnBackoff};
 pub use lines::{Line, LineFault, LineReader, LINE_CAP};
-pub use process::{start_time, ChildProcess, Exit, Identity, Spawned, TERM_GRACE};
+pub use process::{end_groups, foreground_group, start_time, ChildProcess, Exit, Identity, Spawned, TERM_GRACE};
 pub use requests::{RequestMap, Unanswered, Waiter};
 pub use stderr_tail::{StderrTail, STDERR_TAIL_LINES};
 pub use stdin::StdinWriter;
