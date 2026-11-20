@@ -450,18 +450,21 @@ fn prune(conn: &Connection, owned: &mut HashMap<String, String>, id: &str, uuid:
 
 /// Forget a session for good: its row and everything hanging off it
 /// (turns, attachments), every provider's row for that bare id the window
-/// stood for. Returns how many rows went.
-pub(crate) fn forget(conn: &mut Connection, front: &mut FrontState, provider: &str, id: &str) -> rusqlite::Result<usize> {
+/// stood for. Returns the uuids of the rows that went (what the session's
+/// checkpoint refs are named by, [`crate::checkpoints`]).
+pub(crate) fn forget(conn: &mut Connection, front: &mut FrontState, provider: &str, id: &str) -> rusqlite::Result<Vec<String>> {
     super::check_writer("forget session");
     let tx = conn.transaction()?;
-    let mut gone = 0;
+    let mut gone = Vec::new();
+    let mut rows: Vec<String> = Vec::new();
     for key in [provider, ""] {
-        if let Some(uuid) = exact_row(&tx, key, id)? {
-            gone += tx.execute("DELETE FROM session WHERE id = ?1", params![uuid])?;
-        }
+        rows.extend(exact_row(&tx, key, id)?);
     }
-    if let Some(uuid) = front.owned.get(id).cloned() {
-        gone += tx.execute("DELETE FROM session WHERE id = ?1", params![uuid])?;
+    rows.extend(front.owned.get(id).cloned());
+    for uuid in rows {
+        if !gone.contains(&uuid) && tx.execute("DELETE FROM session WHERE id = ?1", params![uuid])? > 0 {
+            gone.push(uuid);
+        }
     }
     tx.commit()?;
     front.owned.remove(id);

@@ -349,18 +349,32 @@ fn transcript_in_home(state_dir: &std::path::Path, provider: &str, session_id: &
 }
 
 /// Forget `provider`'s session `session_id` for good (D-8): its row and
-/// everything hanging off it leave the database, and its sent files and
-/// hand-off snapshot leave the disk. Returns what was cleared; the
-/// transcript in it is for the caller to offer for the Trash. Blocking (the
-/// file walk and the writer): call it off the UI thread.
-pub fn forget(provider: &str, session_id: &str, imported: bool) -> Forgotten {
+/// everything hanging off it leave the database, its checkpoint refs leave
+/// the repository of `folder` (the session's folder, when known; docs/82
+/// 6.3), and its sent files and hand-off snapshot leave the disk. Returns
+/// what was cleared; the transcript in it is for the caller to offer for
+/// the Trash. Blocking (the file walk, git and the writer): call it off the
+/// UI thread.
+pub fn forget(provider: &str, session_id: &str, imported: bool, folder: Option<&std::path::Path>) -> Forgotten {
     let state_dir = crate::store::support_dir();
     let (key, id) = (provider.to_owned(), session_id.to_owned());
-    crate::db::read(crate::db::path_in(&state_dir), move |db| {
-        if let Err(error) = crate::db::sessions::forget(&mut db.conn, &mut db.front, &key, &id) {
+    let uuids = crate::db::read(crate::db::path_in(&state_dir), move |db| match crate::db::sessions::forget(&mut db.conn, &mut db.front, &key, &id) {
+        Ok(uuids) => uuids,
+        Err(error) => {
             crate::baaz_log!("db: forgetting a session failed ({error})");
+            Vec::new()
         }
-    });
+    })
+    .unwrap_or_default();
+    if let Some(folder) = folder.filter(|folder| folder.is_dir()) {
+        for uuid in &uuids {
+            match crate::checkpoints::delete_session_refs(folder, uuid) {
+                Ok(0) => {}
+                Ok(n) => crate::baaz_log!("forget: {n} checkpoint ref(s) of {uuid} deleted"),
+                Err(error) => crate::baaz_log!("forget: the checkpoint refs of {uuid} stay ({error})"),
+            }
+        }
+    }
     let plan = forget_plan(&state_dir, provider, session_id, imported);
     for path in &plan.removed {
         let gone = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };

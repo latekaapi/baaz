@@ -13,6 +13,7 @@ pub mod attachments;
 pub mod auth;
 pub mod browser_prefs;
 pub mod byline;
+pub mod checkpoints;
 pub mod clock;
 pub mod conn;
 pub mod db;

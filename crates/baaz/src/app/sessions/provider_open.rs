@@ -1157,7 +1157,8 @@ impl Harness {
     /// Baaz only ever hides or archives them.
     ///
     /// What Baaz kept for it goes too (D-8), off the UI thread: its row in
-    /// `baaz.db` with its turns and attachments, its sent pictures and its
+    /// `baaz.db` with its turns and attachments, its checkpoint refs in its
+    /// folder's repository (docs/82 6.3), its sent pictures and its
     /// hand-off snapshot. A transcript the provider wrote in Baaz's own home
     /// is never removed silently: the person is asked whether to move it to
     /// the Trash ([`Self::offer_transcript_trash`]).
@@ -1165,7 +1166,7 @@ impl Harness {
         let forgotten = self
             .session_list.read(cx).provider_sessions
             .get(session_id)
-            .map(|record| (record.provider.clone(), record.is_imported()));
+            .map(|record| (record.provider.clone(), record.is_imported(), record.workspace.clone()));
         if self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).session_id == session_id) {
             self.active = None;
         }
@@ -1183,9 +1184,10 @@ impl Harness {
         self.session_list.update(cx, |list, _| list.overrides.remove(session_id));
         self.session_list.update(cx, |list, _| crate::provider_sessions::remove(&mut list.provider_sessions, session_id));
         self.persist_provider_sessions(cx);
-        if let Some((provider, imported)) = forgotten {
+        if let Some((provider, imported, folder)) = forgotten {
             let id = session_id.to_owned();
-            self.wire_call(cx, move || crate::sessions::forget(&provider, &id, imported), |this, forgotten, cx| {
+            let folder = folder.map(std::path::PathBuf::from);
+            self.wire_call(cx, move || crate::sessions::forget(&provider, &id, imported, folder.as_deref()), |this, forgotten, cx| {
                 this.offer_transcript_trash(forgotten.transcript, cx);
             });
         }

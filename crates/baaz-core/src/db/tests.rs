@@ -333,8 +333,9 @@ fn the_windows_snapshots_write_one_row_per_session() {
     assert_eq!(count(&conn, "session"), 1, "kept: a sent turn hangs off it");
     let (facts, records) = rows::load_front(&conn, &mut FrontState::default()).unwrap();
     assert!(facts.is_empty() && records.is_empty(), "but it leaves the list");
-    // Forgetting takes the row and what hangs off it.
-    rows::forget(&mut conn, &mut front, "codex", "d-1").unwrap();
+    // Forgetting takes the row and what hangs off it, and names the row it
+    // took: the uuid its checkpoint refs are under (docs/82 6.3).
+    assert_eq!(rows::forget(&mut conn, &mut front, "codex", "d-1").unwrap(), vec![uuid]);
     assert_eq!(count(&conn, "session"), 0);
     assert_eq!(count(&conn, "attachment"), 0, "cascaded");
 }

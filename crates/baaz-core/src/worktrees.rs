@@ -27,10 +27,11 @@
 //!   without `--force`, so a worktree with changes in it stays.
 //! * **Archive and unarchive** (docs/82 6.2, docs/26b §2.8): [`archive`]
 //!   preserves the work to `refs/baaz/preserved/<session uuid>` through a
-//!   temporary index ([`preserve`]), records the ref and the branch head on
-//!   the row, then removes the folder (the branch stays); [`restore`] adds
-//!   it back and puts the work back unstaged. [`move_back`] hands the
-//!   worktree's changes to the project root instead.
+//!   temporary index ([`preserve`], on [`crate::checkpoints::write_tree`]),
+//!   records the ref and the branch head on the row, then removes the
+//!   folder (the branch stays); [`restore`] adds it back and puts the work
+//!   back unstaged. [`move_back`] hands the worktree's changes to the
+//!   project root instead.
 //!
 //! Every function here blocks on git: callers run it off the UI thread.
 //! No gpui.
@@ -795,51 +796,19 @@ pub fn discard_unused(state_dir: &Path, worktree: &Worktree) -> Result<bool, Str
 /// the session row's uuid.
 pub const PRESERVED_PREFIX: &str = "refs/baaz/preserved/";
 
-/// Who a preserve commit is written as: a hidden ref, never a branch the
-/// person pushes, so it does not borrow their identity (or need one set).
-const PRESERVE_IDENTITY: [(&str, &str); 4] = [
-    ("GIT_AUTHOR_NAME", "Baaz"),
-    ("GIT_AUTHOR_EMAIL", "baaz@localhost"),
-    ("GIT_COMMITTER_NAME", "Baaz"),
-    ("GIT_COMMITTER_EMAIL", "baaz@localhost"),
-];
-
-fn git_env_ok(root: &Path, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> Result<String, String> {
-    let done = crate::git_ops::spawn_with_env("git", root, args, None, true, env)
-        .and_then(|job| job.finish(Instant::now() + GIT_TIMEOUT));
-    match done {
-        Some(done) if done.ok => Ok(done.text.trim().to_owned()),
-        Some(done) => Err(first_line(&done.text, &format!("git {} failed", args.first().copied().unwrap_or("")))),
-        None => Err(format!("git {} did not finish", args.first().copied().unwrap_or(""))),
-    }
-}
-
 /// Write the worktree's uncommitted and untracked work (ignored files
-/// aside) to `refs/baaz/preserved/<key>` (docs/26b §2.8): through a
-/// temporary index (a copy of the worktree's own, so unchanged files are
-/// not hashed again), `add -A`, `write-tree`, `commit-tree` on the branch
-/// head, `update-ref`. Never touches the worktree's files, its index or
-/// the person's stash. A clean worktree preserves too: its commit's tree is
-/// the head's. Blocks.
+/// aside) to `refs/baaz/preserved/<key>` (docs/26b §2.8): the folder's
+/// whole state as a tree through a temporary index
+/// ([`crate::checkpoints::write_tree`], the mechanism the turn checkpoints
+/// share), a commit of it on the branch head written as Baaz, `update-ref`.
+/// Never touches the worktree's files, its index or the person's stash. A
+/// clean worktree preserves too: its commit's tree is the head's. Blocks.
 pub fn preserve(worktree: &Worktree, key: &str) -> Result<Snapshot, String> {
     let dir = &worktree.path;
     let head = git_ok(dir, &["rev-parse", "--verify", "HEAD^{commit}"])?;
-    let index = PathBuf::from(git_ok(dir, &["rev-parse", "--git-path", "index"])?);
-    let index = if index.is_absolute() { index } else { dir.join(index) };
-    let temp = index.with_file_name(format!("baaz-preserve-{}.index", uuid::Uuid::new_v4().simple()));
-    if index.is_file() {
-        std::fs::copy(&index, &temp).map_err(|error| format!("{}: {error}", temp.display()))?;
-    }
-    let tree = {
-        let env = [("GIT_INDEX_FILE", temp.as_os_str())];
-        let tree = git_env_ok(dir, &["add", "-A"], &env).and_then(|_| git_env_ok(dir, &["write-tree"], &env));
-        let _ = std::fs::remove_file(&temp);
-        tree?
-    };
-    let identity: Vec<(&str, &std::ffi::OsStr)> =
-        PRESERVE_IDENTITY.iter().map(|(key, value)| (*key, std::ffi::OsStr::new(*value))).collect();
+    let tree = crate::checkpoints::write_tree(dir)?;
     let message = format!("baaz: preserved {}", worktree.path.display());
-    let commit = git_env_ok(dir, &["commit-tree", &tree, "-p", &head, "-m", &message], &identity)?;
+    let commit = crate::checkpoints::commit_tree(dir, &tree, Some(&head), &message)?;
     let reference = format!("{PRESERVED_PREFIX}{key}");
     git_ok(dir, &["update-ref", &reference, &commit])?;
     crate::baaz_log!("worktree: preserved {} as {reference} ({})", worktree.path.display(), &commit[..commit.len().min(12)]);
