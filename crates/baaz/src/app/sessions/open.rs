@@ -152,8 +152,9 @@ impl Harness {
             return;
         }
         if self.open_state.take_claim_for(epoch) {
-            let current = self.current_project_id();
-            self.new_session_open(current, window, cx, Some(epoch));
+            // A folder pick moves the draft into its project (docs/82 6.6).
+            let project = self.open_state.folder_pick.take().or_else(|| self.current_project_id());
+            self.new_session_open(project, window, cx, Some(epoch));
         }
     }
 
@@ -451,6 +452,9 @@ impl Harness {
             self.open_state.pending_draft = moving;
         }
         self.open_state.drafts.insert(id.clone(), draft_id);
+        if let Some(view) = self.active.clone() {
+            self.sync_new_row(&view, cx);
+        }
         crate::baaz_log!(
             "session/start project={} reason={}",
             id,
@@ -1054,6 +1058,7 @@ impl Harness {
         }
         let project_name = self.project_name_for(&session_id, cx);
         view.update(cx, |view, _| view.set_project_name(project_name));
+        self.sync_new_row(&view, cx);
         // Y2b: a landed switch closes the replaced view in this same update,
         // so no frame renders without a session. Otherwise park as usual.
         // Y2b2: only the current switch epoch may close what it replaced —

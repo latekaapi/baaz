@@ -157,6 +157,17 @@ impl Harness {
                     self.overlays.update(cx, |overlays, cx| overlays.toast("Couldn't move to a worktree", why, cx));
                 }
             }
+            // The new-session row (docs/82 6.6): the folder picker's rows,
+            // its pick, and the worktree toggle.
+            SessionEvent::FolderMenu => {
+                if let Some(view) = self.active.clone().filter(|view| view.read(cx).runtime() == &runtime) {
+                    if let Err(why) = self.open_folder_menu(&view, cx) {
+                        crate::baaz_log!("new-session row: folder menu refused ({why})");
+                    }
+                }
+            }
+            SessionEvent::FolderPicked { pick } => self.on_folder_pick(runtime, pick, cx),
+            SessionEvent::ToggleWorktree => self.on_toggle_worktree(runtime, cx),
             SessionEvent::Status { detail } => {
                 // What the login is entitled to belongs at the top of
                 // `/status` and `/usage`: it is the first thing that decides

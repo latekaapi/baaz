@@ -226,6 +226,47 @@ def _p6_entry(steps, claude_auth=None):
             "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-p6-state-"),
                     "BAAZ_PROVIDER_STATUS_SCRIPT": _p6_statuses(claude_auth)}}
 
+def _new_row_repo():
+    """docs/82 6.6: a throwaway git repository for the new-session row's
+    entries, at one fixed path (its name, `acme-web`, is what the folder
+    control reads, and its path is the folder menu's detail line, so both
+    stay the same run to run). Built once, in a scratch folder renamed into
+    place, so two probes importing at once never see half a repository.
+    Never the person's repository: the entries adopt this one. They never
+    flip the worktree toggle on — a capture makes no worktree anyway
+    (`worktree_move_refusal`)."""
+    parent = os.path.join(tempfile.gettempdir(), "baaz-uiprobe-new-row")
+    root = os.path.join(parent, "acme-web")
+    if os.path.isdir(os.path.join(root, ".git")):
+        return root
+    try:
+        os.makedirs(parent, exist_ok=True)
+        scratch = tempfile.mkdtemp(prefix="acme-web-", dir=parent)
+        git = ["git", "-c", "user.name=Probe", "-c", "user.email=probe@example.com", "-C", scratch]
+        subprocess.run(git + ["init", "-q", "-b", "main"], check=True, capture_output=True)
+        with open(os.path.join(scratch, "README.md"), "w") as f:
+            f.write("# acme-web\n")
+        subprocess.run(git + ["add", "-A"], check=True, capture_output=True)
+        subprocess.run(git + ["commit", "-q", "-m", "first"], check=True, capture_output=True)
+        try:
+            os.rename(scratch, root)
+        except OSError:
+            shutil.rmtree(scratch, ignore_errors=True)  # another probe won
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"uiprobe: the new-row fixture repo was not built ({error})", file=sys.stderr)
+    return root
+
+
+_NEW_ROW_REPO = _new_row_repo()
+
+
+def _new_row_entry(steps=""):
+    """A fresh Codex draft in the throwaway repository, on its own state dir."""
+    return {"shot": ["--no-connect", "--login", "signed-in",
+                     "--steps", f"project:{_NEW_ROW_REPO};new;setprovider:codex;wait:300" + steps],
+            "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-new-row-state-")}}
+
+
 ENTRIES = {
     "signed-in":            {"shot": ["--no-connect", "--login", "signed-in"]},
     "right-browser":        {"shot": ["--no-connect", "--login", "signed-in",
@@ -508,6 +549,13 @@ ENTRIES = {
     # makes one), no baseline yet — generate on main after merge.
     "shared-folder-banner": _p6_entry("new;setprovider:codex;send:[hold 9000] working in this folder;wait:500;"
                                       "new;setprovider:codex;wait:500"),
+    # docs/82 6.6: the new-session row on a fresh draft — `acme-web ▾` and
+    # "Own worktree" (off) left of the provider — and its folder menu open
+    # (the projects, this one checked, then "Choose a folder…"). Offline,
+    # in a throwaway repo the entry builds; no baseline yet — generate on
+    # main after merge.
+    "composer-new-row":     _new_row_entry(),
+    "composer-menu-folder": _new_row_entry(";folder"),
     "settings-providers":   {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "settings:providers"],
                              "env": {"BAAZ_PROVIDER_STATUS_SCRIPT":

@@ -106,6 +106,9 @@ pub enum MenuKind {
     Mode,
     /// The provider picker, anchored to the composer's provider chip.
     Provider,
+    /// The new-session row's folder picker (docs/82 6.6), anchored to its
+    /// folder control.
+    Folder,
     /// The `/` command menu, above the composer.
     Command,
     /// The `@` mention picker, above the composer.

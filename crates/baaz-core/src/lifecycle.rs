@@ -177,9 +177,15 @@ pub struct OpenState<D> {
     replacing: Option<Replacing>,
     /// Whether the next new session starts in its own worktree (docs/82
     /// 6.1), when something asked: a draft moved into or out of a worktree
-    /// sets it for its replacement's start, which takes it. `None` follows
-    /// the project's default.
+    /// sets it for its replacement's start, which takes it, and so does a
+    /// draft moved to another project (that project's default, docs/82
+    /// 6.6). `None` follows the project's default.
     pub worktree_pick: Option<bool>,
+    /// The project the next new session starts in, when something asked
+    /// (docs/82 6.6): the new-session row's folder picker moves an unsent
+    /// draft through a same-provider switch, whose replacement's start
+    /// takes it. `None` starts in the current project.
+    pub folder_pick: Option<String>,
 }
 
 impl<D> OpenState<D> {
@@ -329,6 +335,9 @@ impl<D> OpenState<D> {
     /// claim is dropped, the verbs are released and the replace aborts.
     /// Returns the replaced id, as [`Self::abort_replace`].
     pub fn cancel_switch(&mut self) -> Option<String> {
+        // A move's picks belong to its replacement, which never starts.
+        self.worktree_pick = None;
+        self.folder_pick = None;
         self.switch_epoch = self.switch_epoch.wrapping_add(1);
         self.next_open();
         self.switch_claim = None;

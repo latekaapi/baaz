@@ -7,7 +7,9 @@
 //! something asked (a draft moved into or out of a worktree), else the
 //! project's own default ([`crate::projects::ProjectDefaults::worktree`]).
 //! The session's folder (`workspace`) is the worktree; its project stays
-//! the original one. The visible toggle and folder picker are task 6.6.
+//! the original one. The new-session row's "Own worktree" toggle and its
+//! folder picker (docs/82 6.6) move an unsent draft through
+//! [`Harness::move_draft_worktree`] and [`Harness::move_draft_to_project`].
 //!
 //! The lifecycle (docs/82 6.2): archiving a worktree session preserves and
 //! removes its worktree ([`Harness::archive_worktrees`]), unarchiving
@@ -418,32 +420,51 @@ impl Harness {
         self.resume(session_id.to_owned(), window, cx);
     }
 
-    /// Why the session `runtime` cannot move into (`on`) or out of a
-    /// worktree now, or `Ok`: only the open unsent draft, with a lane that
-    /// finished opening, not already there, and — into one — with a
-    /// project, outside a capture.
-    pub(crate) fn worktree_move_refusal(&self, runtime: &Entity<SessionRuntime>, on: bool, cx: &gpui::App) -> Result<(), String> {
-        let (id, folder, opening) = {
+    /// Why the open session `runtime` cannot move now, or `Ok`: only the
+    /// open unsent draft, and not while it is already moving
+    /// ([`SessionRuntime::is_moving`]). `Ok(true)` when its lane is still
+    /// opening — the callers say "not yet" for that ([`STILL_OPENING`]),
+    /// after their own refusals. What the worktree toggle and the folder
+    /// picker (docs/82 6.6) share.
+    pub(super) fn draft_move_refusal(&self, runtime: &Entity<SessionRuntime>, cx: &gpui::App) -> Result<bool, String> {
+        let (id, opening, moving) = {
             let rt = runtime.read(cx);
-            (rt.session_id.clone(), rt.workspace_path().to_owned(), rt.is_opening_lane())
+            (rt.session_id.clone(), rt.is_opening_lane(), rt.is_moving())
         };
         if self.active.as_ref().is_none_or(|view| view.read(cx).runtime() != runtime) {
             return Err("only the open session moves".into());
         }
-        if is_local_draft(&id) {
-            return Err("a local draft has no lane to move".into());
-        }
         // A lane still opening is a new draft only when nothing stored
         // names it (a reopen of a session with turns opens too).
-        let unsent = if opening {
+        let unsent = if is_local_draft(&id) {
+            self.is_live_draft(&id, cx)
+        } else if opening {
             let list = self.session_list.read(cx);
             !list.provider_sessions.contains_key(&id) && !list.sessions.iter().any(|entry| entry.id == id)
         } else {
             self.open_state.is_unsent(&id) && self.is_live_draft(&id, cx)
         };
         if !unsent {
-            return Err("only an unsent draft moves into or out of a worktree".into());
+            return Err("only an unsent draft moves".into());
         }
+        if moving {
+            return Err("the draft is already moving".into());
+        }
+        Ok(opening && !is_local_draft(&id))
+    }
+
+    /// Why the session `runtime` cannot move into (`on`) or out of a
+    /// worktree now, or `Ok`: [`Self::draft_move_refusal`], and a draft
+    /// with a lane, not already there, and — into one — with a project,
+    /// outside a capture.
+    pub(crate) fn worktree_move_refusal(&self, runtime: &Entity<SessionRuntime>, on: bool, cx: &gpui::App) -> Result<(), String> {
+        if is_local_draft(&runtime.read(cx).session_id) && self.active.as_ref().is_some_and(|view| view.read(cx).runtime() == runtime) {
+            return Err("a local draft has no lane to move".into());
+        }
+        let opening = self.draft_move_refusal(runtime, cx).map_err(|why| {
+            if why == "only an unsent draft moves" { "only an unsent draft moves into or out of a worktree".to_owned() } else { why }
+        })?;
+        let folder = runtime.read(cx).workspace_path().to_owned();
         if Self::in_worktree(&folder) == on {
             return Err(format!("the draft already runs {}", if on { "in a worktree" } else { "in the project root" }));
         }

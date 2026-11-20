@@ -579,3 +579,22 @@ fn remember_all_caches_live_rows_only() {
     assert!(env_for_folder(&state, &gone.path).is_empty(), "an archived worktree gives no variables");
     let _ = std::process::Command::new("git").current_dir(&root).args(["worktree", "remove", "--force", "--force"]).arg(&live.path).output();
 }
+
+/// The new-session row's check (docs/82 6.6): a repository, a folder inside
+/// one and a worktree (whose `.git` is a file) are in one; a plain folder
+/// is not.
+#[test]
+fn in_git_repository_sees_repos_subfolders_and_worktrees() {
+    let scratch = Scratch::new("in-repo");
+    let plain = scratch.path().join("plain");
+    std::fs::create_dir_all(&plain).expect("plain");
+    assert!(!in_git_repository(&plain), "a folder outside any repository");
+    let root = project(&scratch);
+    assert!(in_git_repository(&root));
+    let sub = root.join("src/deep");
+    std::fs::create_dir_all(&sub).expect("sub");
+    assert!(in_git_repository(&sub), "a folder inside the repository");
+    let worktree = create(&spec(&scratch.state(), &root, None)).expect("created");
+    assert!(worktree.path.join(".git").is_file());
+    assert!(in_git_repository(&worktree.path), "a worktree");
+}

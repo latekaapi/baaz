@@ -2407,7 +2407,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             }
             // The chip pickers are anchored to their chips, and the shell's
             // menus to their own buttons — none of them hangs off the caret.
-            MenuKind::Model | MenuKind::Effort | MenuKind::Mode | MenuKind::Provider => return None,
+            MenuKind::Model | MenuKind::Effort | MenuKind::Mode | MenuKind::Provider | MenuKind::Folder => return None,
             MenuKind::Overflow
             | MenuKind::ViewOptions
             | MenuKind::Account
@@ -2562,6 +2562,12 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 this.toggle_plus_menu(cx);
             }
             ComposerIntent::RemoveChip(id) => this.runtime.update(cx, |rt, cx| rt.remove_chip(id, cx)),
+            ComposerIntent::Folder => this.toggle_folder_picker(cx),
+            ComposerIntent::Worktree => {
+                if this.runtime.read(cx).new_row().is_some_and(|row| row.worktree.is_some()) && !this.runtime.read(cx).is_moving() {
+                    cx.emit(SessionEvent::ToggleWorktree);
+                }
+            }
         });
         let plus = cx.listener(|this: &mut Self, id: &SharedString, window, cx| {
             this.close_plus_menu(cx);
@@ -2664,6 +2670,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     && (!self.draft_empty || !self.runtime.read(cx).images.is_empty() || !self.runtime.read(cx).files.is_empty()),
             )
             .plus_menu(plus_open, Some(plus_item))
+            .new_row(self.composer_new_row(cx))
             .on_intent(move |i, window, cx| intent(&i, window, cx));
         // The meter only where the provider reported real context (docs/82
         // 5.5): absent, never a running token sum.
@@ -2742,6 +2749,21 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         rows
     }
 
+    /// The new-session row (docs/83 §5) for the composer: the folder
+    /// control and, where it works, the worktree toggle — on an unsent
+    /// draft only; both wait while the draft moves.
+    fn composer_new_row(&self, cx: &gpui::App) -> Option<aui::composer::ComposerNewRow> {
+        let rt = self.runtime.read(cx);
+        let row = rt.new_row()?;
+        let busy = rt.is_moving();
+        let worktree = row.worktree.map(|on| match (busy, on) {
+            (true, _) => aui::composer::ComposerWorktree::Busy,
+            (false, true) => aui::composer::ComposerWorktree::On,
+            (false, false) => aui::composer::ComposerWorktree::Off,
+        });
+        Some(aui::composer::ComposerNewRow { folder: row.folder.clone().into(), worktree, busy })
+    }
+
     pub(super) fn render_pickers(&self, cx: &mut Context<Self>) -> Vec<(ComposerChipAnchor, AnyElement)> {
         let Some((kind, selected)) = self.overlays.read(cx).menu().map(|m| (m.kind, m.selected)) else {
             return Vec::new();
@@ -2761,6 +2783,12 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     })
                 });
                 vec![(ComposerChipAnchor::Model, picker.into_any_element())]
+            }
+            // The folder picker is its own view too; its rows were pushed
+            // when it opened.
+            MenuKind::Folder => {
+                let Some(picker) = self.folder_picker(cx) else { return Vec::new() };
+                vec![(ComposerChipAnchor::Folder, picker.into_any_element())]
             }
             MenuKind::Effort if !self.runtime.read(cx).effort_levels().is_empty() => {
                 // D4 (docs/41 §2.10; the owner chose the slider, 2026-10-14):

@@ -8,15 +8,22 @@ use super::*;
 
 /// What each `OpenSession` the recorder saw carried, in order: its
 /// folder, then its env as `KEY=value` words (two entries per open).
-type Seen = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+pub(super) type Seen = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
 /// The scripted double, one distinct session per open (`s-wt-1`, …),
 /// recording each `OpenSession`'s folder.
-fn recording_factory() -> (crate::providers::Registry, Seen) {
+pub(super) fn recording_factory() -> (crate::providers::Registry, Seen) {
+    let (factory, seen, _) = recording_factory_counting();
+    (factory, seen)
+}
+
+/// [`recording_factory`], also counting the lanes hung up.
+pub(super) fn recording_factory_counting() -> (crate::providers::Registry, Seen, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
     use provider::ProviderAdapter as _;
     struct Recording {
         inner: provider::scripted::ScriptedProvider,
         seen: Seen,
+        shutdowns: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
     impl provider::ProviderAdapter for Recording {
         fn id(&self) -> provider::ProviderId {
@@ -43,10 +50,13 @@ fn recording_factory() -> (crate::providers::Registry, Seen) {
             self.inner.events()
         }
         fn shutdown(&mut self) {
+            self.shutdowns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.inner.shutdown();
         }
     }
     let seen: Seen = std::sync::Arc::default();
+    let shutdowns = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let factory_shutdowns = shutdowns.clone();
     let opens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let factory_seen = seen.clone();
     let factory = crate::providers::Registry::test(move |_: ProviderId| {
@@ -54,21 +64,22 @@ fn recording_factory() -> (crate::providers::Registry, Seen) {
         let mut adapter = Recording {
             inner: provider::scripted::ScriptedProvider::with_session_id(format!("s-wt-{n}")),
             seen: factory_seen.clone(),
+            shutdowns: factory_shutdowns.clone(),
         };
         adapter.connect(&conn::connect_info())?;
         Ok(provider::Provider::new(adapter))
     });
-    (factory, seen)
+    (factory, seen, shutdowns)
 }
 
-fn git(dir: &std::path::Path, args: &[&str]) -> String {
+pub(super) fn git(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git").current_dir(dir).args(args).output().expect("git runs");
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
 /// A project repository beside the state dir (never inside it), one commit.
-fn repo(state: &std::path::Path) -> std::path::PathBuf {
+pub(super) fn repo(state: &std::path::Path) -> std::path::PathBuf {
     let root = state.with_file_name(format!("{}-repo", state.file_name().expect("named").to_string_lossy()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("repo dir");
@@ -84,7 +95,7 @@ fn repo(state: &std::path::Path) -> std::path::PathBuf {
 
 /// The window on a Codex default over `factory`, `root` adopted as the
 /// current project. Returns the harness, the context and the project id.
-fn window<'a>(
+pub(super) fn window<'a>(
     cx: &'a mut gpui::TestAppContext,
     state: &std::path::Path,
     root: &std::path::Path,
@@ -110,7 +121,7 @@ fn window<'a>(
 }
 
 /// The active view's session id and folder.
-fn active(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext) -> (String, String) {
+pub(super) fn active(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext) -> (String, String) {
     vc.update(|_, cx| {
         let view = baaz.read(cx).active.clone().expect("a session is open");
         let rt = view.read(cx).rt(cx);
@@ -118,7 +129,7 @@ fn active(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext) -> (St
     })
 }
 
-fn cleanup(root: &std::path::Path, state: (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf)) {
+pub(super) fn cleanup(root: &std::path::Path, state: (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, std::path::PathBuf)) {
     crate::db::flush();
     crate::db::close(crate::db::path_in(&state.2));
     let _ = std::fs::remove_dir_all(root);
@@ -268,7 +279,7 @@ fn worktree_session(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestConte
 
 /// Send `text` on the open session and fold what the double answered so
 /// far (a `[hold <ms>]` turn stays running).
-fn send(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext, text: &str) {
+pub(super) fn send(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext, text: &str) {
     let text = text.to_owned();
     vc.update(|_, cx| {
         let view = baaz.read(cx).active.clone().expect("open");

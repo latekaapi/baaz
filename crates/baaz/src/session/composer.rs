@@ -133,6 +133,9 @@ impl SessionView {
         if let Some(picker) = self.mention_picker(cx) {
             return Some(picker.read(cx).selected());
         }
+        if let Some(picker) = self.folder_picker(cx) {
+            return Some(picker.read(cx).selected());
+        }
         self.overlays.read(cx).menu().map(|menu| menu.selected)
     }
 
@@ -143,6 +146,10 @@ impl SessionView {
             return;
         }
         if let Some(picker) = self.mention_picker(cx) {
+            picker.update(cx, |picker, cx| picker.move_selection(delta, cx));
+            return;
+        }
+        if let Some(picker) = self.folder_picker(cx) {
             picker.update(cx, |picker, cx| picker.move_selection(delta, cx));
             return;
         }
@@ -178,6 +185,7 @@ impl SessionView {
                 let filter = overlays.menu().map(|m| m.filter.clone()).unwrap_or_default();
                 self.mention_rows(&filter, cx).len()
             }
+            Some(MenuKind::Folder) => self.folder_picker(cx).map_or(0, |picker| picker.read(cx).delegate.rows.len()),
             // The shell's own menus are rendered and driven by the window,
             // not by the composer: no rows here, no Enter here.
             Some(
@@ -261,6 +269,11 @@ impl SessionView {
                 let rows = self.mention_rows(&filter, cx);
                 if let Some(path) = rows.get(selected).cloned() {
                     self.replace_token(&format!("@{path} "), window, cx);
+                }
+            }
+            MenuKind::Folder => {
+                if let Some(picker) = self.folder_picker(cx) {
+                    picker.update(cx, |picker, cx| picker.confirm(window, cx));
                 }
             }
             // Click-driven by the window; Enter stays with the composer.

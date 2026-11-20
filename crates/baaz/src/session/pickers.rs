@@ -1,5 +1,6 @@
-//! The composer's two [`Picker`]s (plan 4.6): the model picker on the model
-//! chip and the `@` file mention at the caret.
+//! The composer's [`Picker`]s (plan 4.6): the model picker on the model
+//! chip, the `@` file mention at the caret, and the new-session row's
+//! folder picker (docs/82 6.6).
 //!
 //! Both keep the composer's caret: the draft holds the keyboard, and the
 //! composer's own menu keys (↑ ↓ ← → ↩, see [`SessionView::move_menu`] and
@@ -16,6 +17,88 @@ use crate::picker::{Picker, PickerDelegate, PickerFrame};
 pub(crate) type ModelPicker = Picker<ModelDelegate>;
 /// The `@` file mention.
 pub(crate) type MentionPicker = Picker<MentionDelegate>;
+
+/// The new-session row's folder picker.
+pub(crate) type FolderPicker = Picker<FolderDelegate>;
+
+/// What the new-session row shows (docs/82 6.6, docs/83 §5), set by the
+/// window when an unsent draft activates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NewRow {
+    /// The folder control's text: the project's name, or the folder's
+    /// last component for an unfiled draft.
+    pub(crate) folder: String,
+    /// The worktree toggle's state (`true` = the draft runs in its own
+    /// worktree), or `None` where it cannot have one: not a git
+    /// repository, no project, or a draft with no lane to move.
+    pub(crate) worktree: Option<bool>,
+}
+
+/// The folder picker's "Choose a folder…" row id.
+pub(crate) const CHOOSE_FOLDER_ROW: &str = "choose-folder";
+
+/// The prefix of a folder-picker project row's id (`p:<project id>`).
+pub(crate) const PROJECT_ROW_PREFIX: &str = "p:";
+
+/// What a folder-picker pick asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FolderPick {
+    /// Move the draft into this project.
+    Project(String),
+    /// The native folder panel, then the folder as a project.
+    Choose,
+}
+
+impl FolderPick {
+    /// The pick a row id names.
+    pub(crate) fn from_row(id: &str) -> Option<Self> {
+        if id == CHOOSE_FOLDER_ROW {
+            return Some(Self::Choose);
+        }
+        id.strip_prefix(PROJECT_ROW_PREFIX).map(|project| Self::Project(project.to_owned()))
+    }
+}
+
+/// The folder picker's rows, pushed by the window when it opens.
+#[derive(Default)]
+pub(crate) struct FolderDelegate {
+    /// The adopted projects (the draft's first), then "Choose a folder…".
+    pub(crate) rows: Vec<PickerRow>,
+}
+
+impl PickerDelegate for FolderDelegate {
+    type Row = PickerRow;
+    type Pick = FolderPick;
+
+    fn match_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn match_id(&self, ix: usize) -> Option<SharedString> {
+        self.rows.get(ix).map(|row| row.id.clone())
+    }
+
+    fn confirm(&self, ix: usize) -> Option<FolderPick> {
+        self.match_id(ix).and_then(|id| FolderPick::from_row(&id))
+    }
+
+    fn confirm_id(&self, id: &SharedString) -> Option<FolderPick> {
+        FolderPick::from_row(id)
+    }
+
+    fn render_match(&self, ix: usize, _selected: bool) -> PickerRow {
+        self.rows[ix].clone()
+    }
+
+    fn render_picker(&self, rows: Vec<PickerRow>, frame: PickerFrame, _window: &mut Window, _cx: &mut Context<FolderPicker>) -> AnyElement {
+        let (select, dismiss) = (frame.select.clone(), frame.dismiss.clone());
+        let menu = aui::composer::folder_menu("folder-menu", rows, frame.selected, true)
+            .on_pick(move |id, window, cx| select(id, window, cx))
+            .on_close(move |window, cx| dismiss(window, cx));
+        let menu = if crate::runtime::captures() { menu.at_rest() } else { menu };
+        menu.into_any_element()
+    }
+}
 
 /// What a model-picker pick asks for.
 #[derive(Clone, Debug)]
@@ -133,6 +216,11 @@ impl SessionView {
         self.overlays.read(cx).stack.view_as::<ModelPicker>(crate::overlay_stack::LayerKind::Menu)
     }
 
+    /// The open folder picker.
+    pub(crate) fn folder_picker(&self, cx: &gpui::App) -> Option<Entity<FolderPicker>> {
+        self.overlays.read(cx).stack.view_as::<FolderPicker>(crate::overlay_stack::LayerKind::Menu)
+    }
+
     /// The open `@` picker.
     pub(crate) fn mention_picker(&self, cx: &gpui::App) -> Option<Entity<MentionPicker>> {
         self.overlays.read(cx).stack.view_as::<MentionPicker>(crate::overlay_stack::LayerKind::Menu)
@@ -164,6 +252,46 @@ impl SessionView {
             picker
         });
         self.open_picker_menu(Menu::picker(MenuKind::Model, selected), picker, cx);
+    }
+
+    /// Open the new-session row's folder picker on `rows` (the window
+    /// lists them: the projects, the draft's first, then "Choose a
+    /// folder…"), the selection on the first. A pick goes up to the window,
+    /// which moves the draft.
+    pub(crate) fn open_folder_picker(&mut self, rows: Vec<PickerRow>, cx: &mut Context<Self>) {
+        let pick = cx.listener(|this: &mut Self, pick: &FolderPick, _, cx| {
+            this.close_menu(cx);
+            cx.emit(SessionEvent::FolderPicked { pick: pick.clone() });
+        });
+        let picker = cx.new(|cx| Picker::new(FolderDelegate { rows }, cx).on_pick(pick));
+        self.open_picker_menu(Menu::picker(MenuKind::Folder, 0), picker, cx);
+    }
+
+    /// The folder control: closes its picker when open, else asks the
+    /// window for the rows (it owns the projects).
+    pub(crate) fn toggle_folder_picker(&mut self, cx: &mut Context<Self>) {
+        if self.overlays.read(cx).is_open(MenuKind::Folder) {
+            self.close_menu(cx);
+        } else if self.runtime.read(cx).new_row().is_some() && !self.runtime.read(cx).is_moving() {
+            cx.emit(SessionEvent::FolderMenu);
+        }
+    }
+
+    #[cfg(feature = "probe")]
+    /// `folder`: open the new-session row's folder picker. Fails when the
+    /// session shows no row, the draft is moving, or the picker is open.
+    pub(crate) fn step_folder(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if self.runtime.read(cx).new_row().is_none() {
+            return Err("the open session shows no new-session row".into());
+        }
+        if self.runtime.read(cx).is_moving() {
+            return Err("the draft is already moving".into());
+        }
+        if self.overlays.read(cx).is_open(MenuKind::Folder) {
+            return Err("the folder picker is already open".into());
+        }
+        cx.emit(SessionEvent::FolderMenu);
+        Ok(())
     }
 
     /// Open the `@` picker for the token at byte `at`, narrowed to `filter`.

@@ -293,6 +293,10 @@ pub struct SessionRuntime {
     /// The switch's pick, for the composer chip while this view is still
     /// drawn: the lane itself never changes, only the displayed mark.
     pub(super) switching_to: Option<ProviderId>,
+    /// The new-session row's facts (docs/82 6.6): set by the window when
+    /// this session activates as an unsent draft, `None` otherwise. The
+    /// row hides on its own once a turn starts.
+    pub(super) new_row: Option<crate::session::pickers::NewRow>,
     /// This session started as a handoff's destination: where it came from.
     /// Drawn as the quiet marker at the top of the transcript.
     pub(super) handoff_origin: Option<crate::handoff::HandoffOrigin>,
@@ -487,6 +491,7 @@ impl SessionRuntime {
             input_locked: false,
             start: StartState::Started,
             switching_to: None,
+            new_row: None,
             handoff_origin: None,
             handoff_prefix: Rc::new(Vec::new()),
             handoff_divider: None,

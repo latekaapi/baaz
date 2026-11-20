@@ -538,6 +538,18 @@ pub enum SessionEvent {
     /// "Run in a worktree" on the shared-folder warning (docs/82 6.2): the
     /// application moves this unsent draft into a worktree of its own.
     RunInWorktree,
+    /// The new-session row's folder control (docs/82 6.6): the application
+    /// lists the projects and opens the view's folder picker on them.
+    FolderMenu,
+    /// A folder-picker pick: the application moves this unsent draft into
+    /// that project (or asks for a folder first).
+    FolderPicked {
+        /// The picked row.
+        pick: pickers::FolderPick,
+    },
+    /// The new-session row's "Own worktree" toggle: the application moves
+    /// this unsent draft into a worktree of its own, or back to the root.
+    ToggleWorktree,
     /// `/status` or `/usage`: the application owns the dialog stack.
     Status {
         /// The lines of the dialog body, already formatted.
@@ -2656,6 +2668,27 @@ impl SessionRuntime {
     pub(crate) fn set_switching_to(&mut self, provider: Option<ProviderId>, cx: &mut Context<Self>) {
         self.switching_to = provider;
         cx.emit(RuntimeEvent::ComposerChanged);
+    }
+
+    /// The new-session row's facts (docs/82 6.6), or `None` to hide it.
+    /// The window sets them on every activation.
+    pub(crate) fn set_new_row(&mut self, row: Option<pickers::NewRow>, cx: &mut Context<Self>) {
+        if self.new_row != row {
+            self.new_row = row;
+            cx.emit(RuntimeEvent::ComposerChanged);
+        }
+    }
+
+    /// The new-session row's facts, when this session shows it: set for
+    /// an unsent draft, and only while no turn has started or is moving.
+    pub(crate) fn new_row(&self) -> Option<&pickers::NewRow> {
+        self.new_row.as_ref().filter(|_| !self.has_turns() && !self.is_sending())
+    }
+
+    /// Whether the draft is moving (a switch's replacement opening): the
+    /// new-session row's controls wait.
+    pub(crate) fn is_moving(&self) -> bool {
+        self.switching_to.is_some()
     }
 
     /// The provider mark the composer chip draws (Y2b display override).

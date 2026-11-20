@@ -131,6 +131,14 @@ pub fn is_worktree_folder(state_dir: &Path, folder: &Path) -> bool {
     folder.starts_with(worktrees_root(state_dir)) && folder != worktrees_root(state_dir)
 }
 
+/// Whether `folder` lies in a git repository: it or an ancestor holds a
+/// `.git` (a directory, or a worktree's file). A few `stat`s, no git: what
+/// the new-session row checks before offering "Own worktree" (docs/82
+/// 6.6); [`create`] still asks git itself.
+pub fn in_git_repository(folder: &Path) -> bool {
+    folder.ancestors().any(|dir| dir.join(".git").exists())
+}
+
 /// A short lowercase ascii slug of `text`: what a project folder's name
 /// becomes when the project has no id.
 fn slug(text: &str) -> String {

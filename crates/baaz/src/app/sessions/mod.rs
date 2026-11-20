@@ -2,7 +2,8 @@
 //! opening and parking ([`open`]), provider-lane opens ([`provider_open`]),
 //! the replace state machine ([`switch`]), the session-event sink
 //! ([`events`]), handoffs ([`handoff`]), a session's worktree
-//! ([`worktree`]), Undo's confirm and toast ([`undo`]) and the scripted
+//! ([`worktree`]), the new-session row's folder picker and worktree
+//! toggle ([`new_row`]), Undo's confirm and toast ([`undo`]) and the scripted
 //! run's glue ([`steps`]).
 //!
 //! Every file is part of [`Harness`]; see [`crate::app`] for what the
@@ -18,6 +19,7 @@ mod switch;
 mod events;
 mod handoff;
 mod worktree;
+mod new_row;
 mod undo;
 #[cfg(feature = "probe")]
 mod steps;

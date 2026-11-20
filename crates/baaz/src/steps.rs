@@ -44,6 +44,7 @@
 //! | `effort` | open the reasoning-effort picker |
 //! | `provider` | open the provider picker |
 //! | `mode` | open the approval-mode picker |
+//! | `folder` | open the new-session row's folder picker (docs/82 6.6); fails when the session shows no row (it has turns), the draft is moving, or the picker is already open |
 //! | `confirm` | activate the open menu's selected row |
 //! | `name:<name>` | `/name`, the session rename command |
 //! | `hide` | `/hide` the open session |
@@ -993,6 +994,9 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "submenu", run: |v, _, _, cx| v.step_submenu(cx) },
     SessionVerb { verb: "provider", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Provider, cx); Ok(()) } },
     SessionVerb { verb: "mode", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Mode, cx); Ok(()) } },
+    // The new-session row's folder picker (docs/82 6.6), opened as its
+    // control does; fails on a session that shows no row.
+    SessionVerb { verb: "folder", run: |v, _, _, cx| v.step_folder(cx) },
     SessionVerb { verb: "confirm", run: |v, _, window, cx| v.step_confirm(window, cx) },
     // The session operations, so their screenshots come from a command
     // line rather than from a pointer.

@@ -15,5 +15,6 @@ mod reopen;
 mod handoff;
 mod steps;
 mod worktree;
+mod new_row;
 mod checkpoints;
 mod undo;
