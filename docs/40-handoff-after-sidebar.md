@@ -7,8 +7,11 @@ docs/39 as the entry point; read those only for history. This file is self-conta
 
 | Repo | Branch | State |
 |---|---|---|
-| agentic-ui (`~/Projects/agentic-ui`) | `main` only | **v0.4.2** (6f8b209), tagged and pushed |
-| harness / Baaz (`~/Projects/harness`) | `main` only | pinned to agentic-ui **v0.4.2**, pushed; docs commit on top |
+| agentic-ui (`~/Projects/agentic-ui`) | `main` only | **v0.7.5** (fe8461f), tagged and pushed (21 Nov 2026, after the docs/82 plan's Stage 6) |
+| harness / Baaz (`~/Projects/harness`) | `main` only | pinned to agentic-ui **v0.7.5**, pushed; no local patch needed until the next library change |
+
+The improvement plan's finished stage branches are local only: `plan/s0`–`plan/s3` as branches, `archive/plan-s4`–`s6`
+as tags (both repos); none is on GitHub. Plan progress lives in `docs/82-status.md` (not in git).
 
 - **Git is clean.** No other branches, no stashes, no worktrees. Every old unmerged branch and the old stash are
   `archive/<branch>` tags on GitHub (7 in agentic-ui, 9 in Baaz). Restore one with `git switch -c <name> archive/<name>`.
