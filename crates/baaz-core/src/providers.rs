@@ -572,7 +572,10 @@ impl Registry {
 
 /// One connected scripted stand-in. Each its own session: the first keeps
 /// `s-scripted` (probe entries reopen it by that id), later ones are
-/// numbered.
+/// numbered. The numbering starts again in every process, so two runs on
+/// one state dir mint the same ids and the second opens onto the first's
+/// records: the visual probe gives each capture attempt its own copy of an
+/// entry's state dir (`attempt_state` in `scripts/uiprobe.py`).
 fn scripted_lane() -> Result<Provider, ProviderError> {
     use provider::ProviderAdapter as _;
     static SCRIPTED_LANES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

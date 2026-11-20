@@ -1057,6 +1057,23 @@ def boot(entry, verb):
     return [BAAZ] + spec[verb]
 
 
+def attempt_state(env, pristine):
+    """`env` with BAAZ_STATE_DIR pointed at a fresh copy of `pristine`
+    (the entry's state dir as it stood before any capture), or `env`
+    unchanged when the entry names none. Every capture attempt starts from
+    the same state, as an entry with no state dir already does (baaz makes
+    a throwaway one per process): reusing one dir let attempt two read
+    attempt one's sessions, and the scripted lanes, which number their ids
+    from `s-scripted` again in every process, opened attempt two's new
+    draft on attempt one's busy session — its title in the header, its row
+    selected (`shared-folder-banner`, 6.2)."""
+    if pristine is None:
+        return env
+    fresh = os.path.join(tempfile.mkdtemp(prefix="uiprobe-attempt-"), "state")
+    shutil.copytree(pristine, fresh)
+    return {**env, "BAAZ_STATE_DIR": fresh}
+
+
 def main():
     keep_display_awake()
     ap = argparse.ArgumentParser()
@@ -1092,15 +1109,22 @@ def main():
         # Capture twice and require the two to agree. With BAAZ_DETERMINISTIC
         # set they always should, so this is cheap; when they do not, the screen
         # is genuinely still animating and reporting that beats baselining an
-        # arbitrary frame.
+        # arbitrary frame. Each attempt runs on its own copy of the entry's
+        # state dir as it stood before the first ([`attempt_state`]), so
+        # the two compared are the same run, not a run and its sequel.
         import filecmp
         tmp, prev = tempfile.mkdtemp(), None
+        state = env.get("BAAZ_STATE_DIR")
+        pristine = None
+        if state and os.path.isdir(state):
+            pristine = os.path.join(tempfile.mkdtemp(prefix="uiprobe-pristine-"), "state")
+            shutil.copytree(state, pristine)
         for attempt in range(SETTLE_TRIES):
             shot = os.path.join(tmp, f"s{attempt}.png")
             p = subprocess.run(cmd + ["--screenshot", shot,
                                       "--screenshot-delay", str(a.delay_ms)],
                                cwd=REPO, capture_output=True, text=True,
-                               timeout=180, env=env)
+                               timeout=180, env=attempt_state(env, pristine))
             if p.returncode != 0 or not os.path.exists(shot):
                 sys.stderr.write(p.stderr[-1500:] or p.stdout[-1500:])
                 return 1
