@@ -175,6 +175,11 @@ pub struct OpenState<D> {
     switch_claim: Option<(String, u64)>,
     /// The view a provider switch is replacing; `None` outside a switch.
     replacing: Option<Replacing>,
+    /// Whether the next new session starts in its own worktree (docs/82
+    /// 6.1), when something asked: a draft moved into or out of a worktree
+    /// sets it for its replacement's start, which takes it. `None` follows
+    /// the project's default.
+    pub worktree_pick: Option<bool>,
 }
 
 impl<D> OpenState<D> {

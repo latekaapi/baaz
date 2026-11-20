@@ -444,6 +444,9 @@ impl Harness {
             )
         });
         self.persist_provider_sessions(cx);
+        // A session in one of Baaz's worktrees: its row ties to the
+        // worktree's, queued behind the record just written.
+        self.link_worktree_session(provider_id, session_id, &workspace, cx);
         // A provider that lists its own sessions (Muse) owns their rows:
         // the record never builds one. Its row goes in now from what the
         // open knows — zero turns, so out of view until the first send

@@ -75,7 +75,7 @@ use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
 use std::collections::{HashMap, HashSet};
 
 use gpui::{div, prelude::*, px, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Task, Window};
-use gpui_kit::base::input::TextareaState;
+use gpui_kit::base::input::{InputEvent, TextareaState};
 
 use crate::app::{Harness, SettingsFind, SETTINGS_CONTEXT};
 use crate::region::Region;
@@ -117,6 +117,16 @@ pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
 /// What the Settings → Browser page's Chromium row opens: Chromium's own
 /// settings surface, shown in a Browse person tab.
 pub(crate) const CHROMIUM_SETTINGS_URL: &str = "chrome://settings";
+
+/// Store the branch prefix as typed (normalised; blank or unusable is the
+/// default, stored as nothing). Used by the General page's field.
+pub(crate) fn set_worktree_branch_prefix(typed: &str, cx: &mut App) {
+    let prefix = crate::layout::normalize_branch_prefix(typed)
+        .filter(|prefix| prefix != baaz_core::worktrees::DEFAULT_BRANCH_PREFIX);
+    if crate::layout::Layout::get(cx).worktree_branch_prefix != prefix {
+        crate::layout::Layout::update(cx, |layout| layout.worktree_branch_prefix = prefix);
+    }
+}
 
 /// The Settings content's widest measure (docs/83 §7: "content column max
 /// 720"); the column adds its side padding, so its rows span at most this.
@@ -604,6 +614,11 @@ pub(crate) struct SettingsPage {
     pub(crate) state: SettingsPageState,
     /// The Shortcuts search field (⌘F on the page).
     pub(crate) search: Entity<TextareaState>,
+    /// General › Worktrees: the branch prefix field. Each edit is stored
+    /// (normalised) in the layout as it is typed.
+    pub(crate) branch_prefix: Entity<TextareaState>,
+    /// The prefix field's edits, stored as they land.
+    _branch_prefix_changed: gpui::Subscription,
     /// The surface's focus, tracked on the surface element.
     pub(crate) focus: FocusHandle,
     /// Set when the next render should move the keyboard onto the
@@ -654,9 +669,23 @@ impl SettingsPage {
                 cx.notify();
             }
         });
+        let prefix = crate::layout::Layout::get(cx).worktree_branch_prefix();
+        let branch_prefix = cx.new(|cx| {
+            let mut field = aui::composer::composer_state_rows(baaz_core::worktrees::DEFAULT_BRANCH_PREFIX, 1, 1, window, cx);
+            field.set_value(prefix, window, cx);
+            field
+        });
+        let branch_prefix_changed = cx.subscribe(&branch_prefix, |_: &mut Self, field, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let typed = field.read(cx).value().to_string();
+                set_worktree_branch_prefix(&typed, cx);
+            }
+        });
         SettingsPage {
             state: SettingsPageState::default(),
             search: cx.new(|cx| aui::composer::composer_state_rows("Search shortcuts", 1, 1, window, cx)),
+            branch_prefix,
+            _branch_prefix_changed: branch_prefix_changed,
             focus: cx.focus_handle(),
             focus_armed: false,
             shortcuts: crate::keymap::effective_bindings(),
@@ -1131,7 +1160,7 @@ impl SettingsPage {
         let title = page_title(&section);
         let blurb = settings_blurb(&section);
         let body: AnyElement = match section.as_str() {
-            "general" => self.settings_general_page(cx),
+            "general" => self.settings_general_page(window, cx),
             "appearance" => self.settings_appearance_page(cx),
             "sidebar" => self.settings_sidebar_page(cx),
             "notifications" => self.settings_notifications_page(cx),
@@ -1140,7 +1169,7 @@ impl SettingsPage {
             "shortcuts" => self.settings_shortcuts_page(window, cx),
             "archived" => self.settings_archived_page(cx),
             _ if is_provider_subpage(&section) => self.settings_provider_subpage(window, cx),
-            _ => self.settings_general_page(cx),
+            _ => self.settings_general_page(window, cx),
         };
         // While a shortcut records, the next keystroke binds it (the old
         // dialog's capture, moved onto the page): a bare modifier stays
@@ -1242,9 +1271,34 @@ impl SettingsPage {
         section(label.to_string()).rows(rows).into_any_element()
     }
 
+    /// General › Worktrees: the branch prefix a session's worktree branch
+    /// starts with (docs/82 6.1), as a one-line field.
+    fn settings_worktrees_group(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let field = aui::data::field_frame("settings-branch-prefix", &self.branch_prefix, window, cx)
+            .flex_none()
+            .w(px(SHORTCUT_SEARCH_W))
+            .role(gpui::Role::TextInput)
+            .aria_label("Worktree branch prefix")
+            .child(
+                gpui_kit::component::input::Textarea::new(&self.branch_prefix)
+                    .appearance(false)
+                    .bordered(false)
+                    .role_size(TextRole::Body)
+                    .h_auto()
+                    .whitespace_nowrap()
+                    .into_any_element(),
+            );
+        let row = div().debug_selector(|| "settings-branch-prefix-row".into()).child(
+            settings_row("Branch prefix")
+                .description("A session in its own worktree works on a new branch named with this prefix.")
+                .control(field),
+        );
+        self.settings_group("Worktrees", vec![row.into_any_element()], cx)
+    }
+
     /// General: the three model-spending switches under "Model
-    /// housekeeping".
-    fn settings_general_page(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// housekeeping", the transcript's fold, and the worktree branch prefix.
+    fn settings_general_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let rows = vec![
             self.settings_switch_row(
                 "auto_title",
@@ -1278,6 +1332,7 @@ impl SettingsPage {
         settings_sections_stack()
             .child(self.settings_group("Model housekeeping", rows, cx))
             .child(self.settings_group("Transcript", transcript, cx))
+            .child(self.settings_worktrees_group(window, cx))
             .into_any_element()
     }
 

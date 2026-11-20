@@ -177,6 +177,9 @@ impl Harness {
         // A missing root is nowhere to start: fall back to the effective
         // current (a missing current is never current), or start nothing.
         let current = self.current_project(cx).map(|project| project.id.clone());
+        // In its own worktree or in the project root (docs/82 6.1): a pick
+        // made for this start, else the project's default.
+        let worktree = self.take_worktree_plan(current.as_deref(), switch, cx);
         // A live draft in the target project is the session: reopen its view
         // without touching the wire.
         if let Some(id) = current.clone() {
@@ -184,13 +187,15 @@ impl Harness {
                 DraftDecision::Reuse(draft_id) => {
                     // A draft serves only the lane it was created on: a muse
                     // draft under a provider pick (or the reverse) is stale,
-                    // dropped below, and started fresh on the pick.
+                    // dropped below, and started fresh on the pick. So is a
+                    // draft in the project root when a worktree is wanted,
+                    // and the reverse.
                     let wanted = self.new_provider_id(cx);
                     // The Ask rides only this reused draft: key it before
                     // the view lands, so `activate` takes it here — and
                     // only here.
                     self.browser.update(cx, |browser, _| browser.key_pending_ask(&draft_id));
-                    if wanted.is_some_and(|wanted| self.draft_serves(&draft_id, wanted, cx))
+                    if wanted.is_some_and(|wanted| self.draft_serves(&draft_id, wanted, worktree.in_worktree(), cx))
                         && self.open_draft(&draft_id, window, cx)
                     {
                         return;
@@ -224,8 +229,17 @@ impl Harness {
             // A session with no project — on any provider — goes to the
             // default workspace, which is not a project, so it files as
             // unfiled (docs/81 F C1).
-            let workspace = root.unwrap_or_else(|| self.unfiled_workspace());
             self.ensure_provider_started(wanted, cx);
+            // A worktree is made first, off the UI thread; the lane opens
+            // in it once it exists (never for an unfiled session).
+            let workspace = match (worktree, root) {
+                (worktree::WorktreePlan::New, Some(root)) => {
+                    self.open_in_new_worktree(wanted, current.clone(), root, switch, cx);
+                    return;
+                }
+                (worktree::WorktreePlan::Reuse(folder), _) => folder,
+                (_, root) => root.unwrap_or_else(|| self.unfiled_workspace()),
+            };
             self.open_new_on_provider(wanted, current.clone(), workspace, switch, window, cx);
             return;
         }
@@ -314,19 +328,21 @@ impl Harness {
         view.read(cx).rt(cx).session().is_none_or(|session| session.turns.is_empty())
     }
 
-    /// Whether the draft's view already rides `wanted`'s lane: a muse draft
-    /// serves a muse pick, and a provider draft serves its own provider's
-    /// pick. Anything else (or a view that is gone) is stale — the start
-    /// below drops the name and opens fresh on the pick rather than
-    /// reopening the wrong lane.
-    fn draft_serves(&self, draft_id: &str, wanted: ProviderId, cx: &gpui::App) -> bool {
+    /// Whether the draft's view already rides `wanted`'s lane, in a
+    /// worktree exactly when `worktree` asks for one: a muse draft serves a
+    /// muse pick, and a provider draft serves its own provider's pick.
+    /// Anything else (or a view that is gone) is stale — the start below
+    /// drops the name and opens fresh on the pick rather than reopening the
+    /// wrong lane or the wrong folder.
+    fn draft_serves(&self, draft_id: &str, wanted: ProviderId, worktree: bool, cx: &gpui::App) -> bool {
         let Some(view) = self.find_view(draft_id, cx) else { return false };
         // A local Muse draft stood in while Muse was not running; once it
         // runs, the draft cannot send, so a new session starts a real one.
         if is_local_draft(draft_id) && self.providers.shared_ready() {
             return false;
         }
-        view.read(cx).rt(cx).provider_kind() == wanted
+        let rt = view.read(cx).rt(cx);
+        rt.provider_kind() == wanted && (is_local_draft(draft_id) || Self::in_worktree(rt.workspace_path()) == worktree)
     }
 
     /// Reopen a live draft's view: the active one when it is already open,
@@ -932,6 +948,13 @@ impl Harness {
         // A provider draft that never landed (opening, or its open failed)
         // takes its provisional names with it.
         let never_landed = self.find_view(session_id, cx).is_some_and(|view| view.read(cx).rt(cx).is_opening_lane());
+        // Its folder, when that is a worktree nobody will use: an unsent
+        // draft's, or a draft's still opening. A failed open keeps it: Retry
+        // opens there again.
+        let folder = self
+            .find_view(session_id, cx)
+            .filter(|view| !view.read(cx).rt(cx).is_opening_lane() || view.read(cx).rt(cx).is_starting())
+            .map(|view| view.read(cx).rt(cx).workspace_path().to_owned());
         if never_landed {
             self.forget_provisional(session_id, cx);
         }
@@ -955,6 +978,12 @@ impl Harness {
             .session_list.read(cx).provider_sessions
             .get(session_id)
             .is_some_and(|record| record.turns == 0 && !self.first_prompt_sent(session_id, cx));
+        // Its worktree goes with it, when nothing was changed there.
+        if unsent_draft || never_landed {
+            if let Some(folder) = folder {
+                self.release_unused_worktree(&folder, cx);
+            }
+        }
         if unsent_draft {
             self.delete_provider_session(session_id, cx);
             return;

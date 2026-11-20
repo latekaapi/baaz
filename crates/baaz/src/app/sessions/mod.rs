@@ -1,8 +1,8 @@
 //! The session lifecycle, split along its seams: listing ([`list`]),
 //! opening and parking ([`open`]), provider-lane opens ([`provider_open`]),
 //! the replace state machine ([`switch`]), the session-event sink
-//! ([`events`]), handoffs ([`handoff`]) and the scripted run's glue
-//! ([`steps`]).
+//! ([`events`]), handoffs ([`handoff`]), a session's worktree
+//! ([`worktree`]) and the scripted run's glue ([`steps`]).
 //!
 //! Every file is part of [`Harness`]; see [`crate::app`] for what the
 //! entity owns.
@@ -16,6 +16,7 @@ mod provider_open;
 mod switch;
 mod events;
 mod handoff;
+mod worktree;
 #[cfg(feature = "probe")]
 mod steps;
 

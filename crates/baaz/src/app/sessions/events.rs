@@ -566,7 +566,7 @@ impl Harness {
     /// is not muse. Y2b: the old view stays active and drawn (composer
     /// locked, chip already on the pick) until the replacement
     /// activates in the same update — no empty-state frame between.
-    fn on_switch_provider(&mut self, runtime: Entity<SessionRuntime>, provider: &ProviderId, cx: &mut Context<Self>) {
+    pub(super) fn on_switch_provider(&mut self, runtime: Entity<SessionRuntime>, provider: &ProviderId, cx: &mut Context<Self>) {
         let old = runtime.read(cx).session_id.clone();
         // Y2b2: every switch stamps a fresh generation. A second
         // switch while one is pending supersedes the first: its

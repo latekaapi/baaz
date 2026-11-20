@@ -126,8 +126,9 @@ impl Harness {
                 }
             });
         }
+        let never_landed = old_view.read(cx).rt(cx).is_opening_lane();
         old_view.read(cx).runtime().clone().update(cx, |rt, _| rt.shutdown_lane());
-        if new_id != old_id && old_view.read(cx).rt(cx).is_opening_lane() {
+        if new_id != old_id && never_landed {
             self.forget_provisional(old_id, cx);
         }
         // A stale parked copy under the same id never survives the swap —
@@ -148,6 +149,12 @@ impl Harness {
                 .session_list.read(cx).provider_sessions
                 .get(old_id)
                 .is_some_and(|record| record.turns == 0 && !self.first_prompt_sent(old_id, cx));
+            // A draft moved out of its worktree (or onto another provider
+            // in a new one) leaves that worktree unused: it goes, if clean.
+            let folder = old_view.read(cx).rt(cx).workspace_path().to_owned();
+            if (unsent || never_landed) && folder != new_view.read(cx).rt(cx).workspace_path() {
+                self.release_unused_worktree(&folder, cx);
+            }
             if unsent {
                 self.registry.forget_where(|id| id == old_id);
                 self.session_list.update(cx, |list, _| list.sessions.retain(|entry| entry.id != old_id));

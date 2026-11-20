@@ -264,8 +264,10 @@ mod tests {
             assistant: Default::default(),
             agents: Default::default(),
             adblock: Default::default(),
+            worktree_branch_prefix: Some("lk/".into()),
         };
         let text = serde_json::to_string(&stored).unwrap();
+        assert!(text.contains("\"worktreeBranchPrefix\":\"lk/\""));
         assert!(text.contains("\"groupBy\":\"project\""));
         assert!(text.contains("\"closedGroups\":[\"other\"]"));
         assert!(text.contains("\"expandedGroups\":[\"p-baaz\"]"));
