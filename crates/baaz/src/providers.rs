@@ -8,17 +8,16 @@ pub use baaz_core::providers::*;
 
 /// A [`ProviderId`]'s badge in the library's icon set.
 pub trait ProviderMark {
-    /// The provider mark a sidebar row wears after its tags: every row,
-    /// on every provider (docs/82 5.5) — a row with no mark used to mean
-    /// Muse.
+    /// The provider mark a session row's data carries: every row, on
+    /// every provider (docs/82 5.5). The flat sidebar row does not draw it
+    /// (docs/83 §4); the library's compact row does, in its meta line.
     fn row_mark(self) -> aui_icons::Provider;
     /// The mark beside the composer model chip.
     fn icon(self) -> aui_icons::Provider;
 }
 
 impl ProviderMark for ProviderId {
-    /// The provider mark a sidebar row wears after its tags: its own badge,
-    /// on every provider (docs/82 5.5).
+    /// Its own badge, on every provider (docs/82 5.5).
     fn row_mark(self) -> aui_icons::Provider {
         self.icon()
     }

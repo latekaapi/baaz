@@ -450,8 +450,11 @@ ENTRIES = {
     # the window's bottom edge). `fixture-models` fills a fixed Muse-shaped
     # catalog offline, `submenu` opens the highlighted row's levels as →
     # does. Its own state dir, so no other entry's provider pick leaks in.
+    # `setprovider:muse` first: since 5.8 a new session starts on the first
+    # connected provider, and the Muse-shaped catalog's submenu does not draw
+    # on a Claude Code composer (Gate 5 found the submenu silently absent).
     "composer-model-submenu": {"shot": ["--no-connect", "--login", "signed-in",
-                                        "--steps", "new;wait:300;fixture-models;model;submenu"],
+                                        "--steps", "new;setprovider:muse;wait:300;fixture-models;model;submenu"],
                                "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-submenu-state-")}},
     # One composer per non-muse lane, reached by the scripted provider
     # pick. `setprovider:` is a setter through the picker's own path —
@@ -817,7 +820,6 @@ def _jump_entry(*extra, steps="wait:1500;wheel:300;wait:800"):
 #   composer-plan         the Plan toggle on (Muse's plan skill: the pill)
 #   composer-commands-codex  the `/` menu on Codex: no /plan, /compact, /fork,
 #                         /skills or /logout, and no Muse skills
-#   sidebar-row-badges    every row wears its provider's badge, Muse's too
 ENTRIES.update({
     "approval-vocabulary":     {"shot": ["--no-connect", "--login", "signed-in",
                                          "--replay", "fixtures/msp/transcript-approve-stage1.jsonl",
@@ -966,7 +968,6 @@ ENTRIES.update({
     "composer-menu-effort":    _populated("effort", replay=True),
     "composer-menu-provider":  _populated("provider", replay=True),
     "composer-menu-mode":      _populated("mode", replay=True),
-    "sidebar-row-badges":      _populated(_PROJECTS),
     "right-changes-full":      _populated("right-width:440;right:changes;changes-open:crates/baaz/src/right.rs", replay=True),
     "right-files-preview":     _populated("right-width:440;right:files;files-select:src/lib.rs",
                                           workspace=_REPO_ACME),

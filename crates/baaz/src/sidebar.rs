@@ -156,7 +156,9 @@ impl SessionRow for SessionEntry {
     }
 
     /// The library row for this session, labelled against `now`. Every
-    /// row carries its provider's mark after the tags (docs/82 5.5).
+    /// row's data carries its provider's mark (docs/82 5.5); the flat
+    /// sidebar row (docs/83 §4) does not draw it — only the library's
+    /// compact row shows marks, in its meta line.
     fn summary(&self, now: DateTime<Local>) -> SessionSummary {
         let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed_at(self.updated, now))
             .provider(self.provider.row_mark());
