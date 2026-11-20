@@ -150,6 +150,13 @@ impl Harness {
             // "Enable" on a disabled-provider banner: Settings on the
             // Providers page, where the switch lives.
             SessionEvent::OpenProviders => self.open_providers(cx),
+            // "Run in a worktree" on the shared-folder warning (docs/82 6.2).
+            SessionEvent::RunInWorktree => {
+                if let Err(why) = self.move_draft_worktree(runtime.clone(), true, cx) {
+                    crate::baaz_log!("worktree: run in a worktree refused ({why})");
+                    self.overlays.update(cx, |overlays, cx| overlays.toast("Couldn't move to a worktree", why, cx));
+                }
+            }
             SessionEvent::Status { detail } => {
                 // What the login is entitled to belongs at the top of
                 // `/status` and `/usage`: it is the first thing that decides

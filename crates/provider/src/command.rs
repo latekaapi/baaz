@@ -105,6 +105,11 @@ pub enum Command {
         /// others find theirs where their CLI stored it. `None` when the
         /// app has no folder for the session.
         workspace: Option<String>,
+        /// Variables the resumed session's child is started with, as in
+        /// [`Command::OpenSession`] (docs/82 6.2: a worktree session keeps
+        /// its port block across a restart). A backend whose sessions
+        /// share one child ignores them (Muse).
+        env: Vec<(String, String)>,
     },
     /// Branch a session into a new one, copying history through
     /// `through_turn` (inclusive) or all completed turns when absent.

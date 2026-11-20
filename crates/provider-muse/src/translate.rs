@@ -241,7 +241,7 @@ pub fn dispatch(
         }
         // MSP stores the mode with the session and resumes and forks it
         // as stored: neither call takes one.
-        Command::ResumeSession { request_id, session_id, cursor, metadata_only, mode: _, workspace: _ } => {
+        Command::ResumeSession { request_id, session_id, cursor, metadata_only, mode: _, workspace: _, env: _ } => {
             let config = terminal.map(|(_, config)| config);
             let result = client
                 .session_resume(&SessionResumeParams {

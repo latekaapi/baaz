@@ -1098,6 +1098,8 @@ impl Harness {
         view.update(cx, |_, cx| cx.notify());
         self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::PageMenu, cx); });
         self.active = Some(view.clone());
+        // Another session working in this folder: one warning (docs/82 6.2).
+        self.warn_if_folder_busy(&view, cx);
         // Reopening a session that stands at its end reads it (task 3.1);
         // one still loading reads on its `HistoryReady`.
         if view.read(cx).at_transcript_end() && !view.read(cx).rt(cx).history_loading() {

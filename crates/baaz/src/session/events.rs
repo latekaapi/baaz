@@ -355,6 +355,7 @@ for line in sys.stdin:
                 metadata_only: true,
                 mode: None,
                 workspace: None,
+                env: Vec::new(),
             })
             .expect("the stub resumes");
         let (provider, events) = crate::conn::gate_quiet(provider);

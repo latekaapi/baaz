@@ -48,6 +48,7 @@ fn resume(provider: &Provider, session: &str) {
             metadata_only: true,
             mode: None,
             workspace: None,
+            env: Vec::new(),
         })
         .expect("resume");
     assert!(matches!(ack, Ack::Session { ref session_id, .. } if session_id == session), "{ack:?}");

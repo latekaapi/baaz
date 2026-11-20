@@ -258,6 +258,7 @@ fn resume_replays_stored_history_once_with_its_model() {
             metadata_only: false,
             mode: None,
             workspace: None,
+            env: Vec::new(),
         })
         .expect("resume lands over the stub");
     assert!(
@@ -364,6 +365,7 @@ fn a_resume_with_no_transcript_is_refused_typed_before_any_spawn() {
             metadata_only: false,
             mode: None,
             workspace: None,
+            env: Vec::new(),
         })
         .expect_err("a resume with no stored transcript is refused");
     assert_eq!(error.hint(), provider::RefusalHint::HistoryMissing, "typed, not a child loss: {error:?}");

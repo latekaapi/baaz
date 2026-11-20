@@ -2040,6 +2040,9 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 return Some(self.render_child_failure(&failure, cx));
             }
         }
+        if let Some(crate::session::BannerAction::SharedFolder { worktree }) = self.runtime.read(cx).banner_action {
+            return Some(self.render_shared_folder(&message, worktree, cx));
+        }
         let label = match self.runtime.read(cx).banner_action {
             Some(crate::session::BannerAction::OpenProviders) => "Enable",
             Some(crate::session::BannerAction::RetryNow) => "Retry now",
@@ -2068,6 +2071,27 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             row.into_any_element()
         };
         Some(div().w_full().px(px(TRANSCRIPT_PAD_X)).pb(px(scale::SP_3)).child(centred(row)).into_any_element())
+    }
+
+    /// The shared-folder warning (docs/82 6.2): a fact, not an error — the
+    /// quiet banner (docs/83 §5: `surface-2`, radius 10, no border, 36 px,
+    /// `t-body`) with its text actions at the right: "Run in a worktree"
+    /// when the session is an unsent draft that can move, and Dismiss.
+    /// Each library button names itself (role Button, its label).
+    fn render_shared_folder(&self, message: &str, worktree: bool, cx: &mut Context<Self>) -> AnyElement {
+        let press = cx.listener(|this: &mut Self, _: &(), _, cx| this.runtime.update(cx, |rt, cx| rt.run_banner_action(cx)));
+        let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| this.runtime.update(cx, |rt, cx| rt.dismiss_banner(cx)));
+        let mut row = banner("session-banner-shared-folder", BannerKind::Info, vec![BannerRun::Text(message.to_owned().into())]);
+        row = if worktree {
+            row.action("Run in a worktree", BannerActionStyle::Ghost)
+                .on_action(move |window, cx| press(&(), window, cx))
+                .secondary_action("Dismiss", BannerActionStyle::Ghost)
+                .on_secondary(move |window, cx| dismiss(&(), window, cx))
+        } else {
+            row.action("Dismiss", BannerActionStyle::Ghost).on_action(move |window, cx| dismiss(&(), window, cx))
+        };
+        let row = div().id("session-banner-shared").role(gpui::Role::Status).aria_label(message.to_owned()).child(row);
+        div().w_full().px(px(TRANSCRIPT_PAD_X)).pb(px(scale::SP_3)).child(centred(row)).into_any_element()
     }
 
     /// The lost banner grown into the typed failure (docs/71 §2–§3): the

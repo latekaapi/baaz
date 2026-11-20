@@ -282,7 +282,7 @@ impl Harness {
         let Some(batch) = self.session_list.update(cx, |list, _| list.undo_stack.pop()) else { return };
         match batch {
             UndoBatch::Hidden(ids) => self.set_overrides(&ids, |meta| meta.hidden = false, cx),
-            UndoBatch::Archived(ids) => self.set_overrides(&ids, |meta| meta.archived = false, cx),
+            UndoBatch::Archived(ids) => self.unarchive_with_worktrees(ids, cx),
             UndoBatch::Imported(run) => self.undo_import(&run, cx),
         }
     }
@@ -331,10 +331,28 @@ impl Harness {
     /// An archived session is never loaded, so the active one closes when it
     /// is the one archived: the newest remaining visible session opens in its
     /// place, or the empty state when nothing remains.
+    ///
+    /// A member that runs in one of Baaz's worktrees has it archived too
+    /// (docs/82 6.2: work preserved, folder removed, branch kept); while any
+    /// such member has a turn running, nothing is archived and a toast says
+    /// why.
     pub(super) fn archive_session(&mut self, session_id: String, window: Option<&mut Window>, cx: &mut Context<Self>) {
         // The whole chain, head included: archiving names the head, the
         // expansion covers the members.
         let members = self.chain_members(&session_id, cx);
+        // A member in a worktree loses its folder (docs/82 6.2): never from
+        // under a running turn. The whole archive waits for it.
+        let in_worktrees = self.worktree_members(&members, cx);
+        if self.busy_worktree_member(&in_worktrees, cx).is_some() {
+            self.overlays.update(cx, |overlays, cx| {
+                overlays.toast(
+                    "Session is working",
+                    "Archiving removes its worktree. Stop it, or let it finish, then archive.",
+                    cx,
+                )
+            });
+            return;
+        }
         let was_active = self.active.as_ref().is_some_and(|a| a.read(cx).rt(cx).session_id == session_id);
         // Archived sessions are never cached: a parked view of one is
         // dropped, and reopening (after Undo) pages it afresh.
@@ -343,6 +361,7 @@ impl Harness {
         if was_active {
             self.active = None;
         }
+        self.archive_worktrees(in_worktrees, cx);
         self.push_undo(
             UndoBatch::Archived(members),
             "Session archived".to_owned(),
@@ -367,10 +386,11 @@ impl Harness {
 
     /// Put a session back in the list (the Archive tray action on an archived
     /// row, or the toast's Undo through [`Self::undo_newest`]). A chain
-    /// unarchives as one, symmetric with [`Self::archive_session`].
+    /// unarchives as one, symmetric with [`Self::archive_session`]; a
+    /// member's archived worktree comes back first.
     pub(crate) fn unarchive_session(&mut self, session_id: String, cx: &mut Context<Self>) {
         let members = self.chain_members(&session_id, cx);
-        self.set_overrides(&members, |meta| meta.archived = false, cx);
+        self.unarchive_with_worktrees(members, cx);
     }
 
     /// A turn completed in this app: leave the free byline excerpt on the

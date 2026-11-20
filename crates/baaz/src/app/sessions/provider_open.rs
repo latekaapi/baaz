@@ -1068,8 +1068,15 @@ impl Harness {
                 // already regenerated pages in anyway, and a session
                 // another window holds opens read-only under the lease
                 // notice. Any other refusal fails the reopen.
+                // A worktree session's child gets its variables back after
+                // a restart, as its open gave them (docs/82 6.2).
+                let env = record
+                    .workspace
+                    .as_deref()
+                    .map(|folder| baaz_core::worktrees::env_for_folder(&state, std::path::Path::new(folder)))
+                    .unwrap_or_default();
                 let (session_id, lease_held) =
-                    match crate::provider_sessions::send_resume(&provider, &record, &provider::new_request_id(), Some(mode)) {
+                    match crate::provider_sessions::send_resume(&provider, &record, &provider::new_request_id(), Some(mode), env) {
                         Ok(session_id) => (session_id, false),
                         Err(error) if error.hint() == provider::RefusalHint::StaleHistory => {
                             crate::baaz_log!("resume of {} hit a stale history ({error}); paging anyway", record.session_id);
@@ -1284,6 +1291,7 @@ impl Harness {
                 metadata_only: false,
                 mode: Some(mode),
                 workspace: Some(workspace_bg.clone()),
+                env: baaz_core::worktrees::env_for_folder(&crate::store::support_dir(), std::path::Path::new(&workspace_bg)),
             })?;
             // Tests drain after the resume, synchronously on the test
             // executor: no forwarding thread wakes the lane task.

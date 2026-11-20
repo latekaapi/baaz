@@ -37,23 +37,33 @@ use crate::wire::WireCall;
 use crate::{files, skills};
 use crate::layout::LayoutGlobal as _;
 
+/// The overflow row that hands a worktree's changes to the project root.
+const MOVE_BACK_LABEL: &str = "Move back to project folder";
+
 /// Actions of the header's overflow menu, in row order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OverflowAction {
     Rename,
     Fork,
+    MoveBack,
     Archive,
 }
 
-/// The header overflow menu's rows and their actions: Rename, Fork,
-/// Archive — Fork only where the session's provider can fork (`fork`;
-/// docs/82 5.5, rule 13: a control is shown only if it works).
-fn overflow_rows(fork: bool) -> (Vec<MenuRow>, Vec<OverflowAction>) {
+/// The header overflow menu's rows and their actions: Rename, Fork, Move
+/// back to project folder, Archive — Fork only where the session's provider
+/// can fork (`fork`; docs/82 5.5, rule 13: a control is shown only if it
+/// works), Move back only for a worktree session whose provider can resume
+/// it in the project folder (`move_back`; docs/82 6.2).
+fn overflow_rows(fork: bool, move_back: bool) -> (Vec<MenuRow>, Vec<OverflowAction>) {
     let mut rows = vec![MenuRow::Toggle { label: "Rename".into(), checked: false }];
     let mut actions = vec![OverflowAction::Rename];
     if fork {
         rows.push(MenuRow::Toggle { label: "Fork".into(), checked: false });
         actions.push(OverflowAction::Fork);
+    }
+    if move_back {
+        rows.push(MenuRow::Toggle { label: MOVE_BACK_LABEL.into(), checked: false });
+        actions.push(OverflowAction::MoveBack);
     }
     rows.push(MenuRow::Toggle { label: "Archive".into(), checked: false });
     actions.push(OverflowAction::Archive);
@@ -618,7 +628,8 @@ impl Harness {
     }
 
     /// The header's overflow menu, anchored under the "…" button: Rename swaps
-    /// the title for the dense inline field, Fork opens the fork picker, and
+    /// the title for the dense inline field, Fork opens the fork picker,
+    /// Move back hands a worktree's changes to the project folder, and
     /// Archive asks first through the archive dialog.
     pub(crate) fn render_overflow_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::Overflow) {
@@ -628,7 +639,7 @@ impl Harness {
             .active
             .as_ref()
             .is_some_and(|view| view.read(cx).rt(cx).offers(provider::Capability::ForkSession));
-        let (rows, actions) = overflow_rows(fork);
+        let (rows, actions) = overflow_rows(fork, self.move_back_offered(cx));
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
             let action = actions.get(*index).copied();
             this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
@@ -644,6 +655,11 @@ impl Harness {
                     }
                 }
                 Some(OverflowAction::Fork) => this.open_palette(PaletteKind::Fork, cx),
+                Some(OverflowAction::MoveBack) => {
+                    if let Err(why) = this.move_back_to_root(cx) {
+                        this.overlays.update(cx, |overlays, cx| overlays.toast("Couldn't move back", why, cx));
+                    }
+                }
                 Some(OverflowAction::Archive) => {
                     if let Some(session_id) = this.active_id(cx) {
                         this.open_archive_dialog(session_id, cx);
@@ -1099,22 +1115,28 @@ mod tests {
     use aui::nav::MenuRow;
     use crate::layout::LayoutGlobal as _;
 
-    /// The header ⋯ menu's rows: Rename, Fork, Archive, one action each;
-    /// Fork only where the session's provider forks.
+    /// The header ⋯ menu's rows: Rename, Fork, Move back, Archive, one
+    /// action each; Fork only where the session's provider forks, Move back
+    /// only where it is offered.
     #[test]
     fn overflow_menu_rows_are_rename_fork_archive() {
         let label = |row: &MenuRow| match row {
             MenuRow::Toggle { label, checked } => (label.to_string(), *checked),
             _ => panic!("overflow rows are toggles"),
         };
-        let (rows, actions) = super::overflow_rows(true);
+        let (rows, actions) = super::overflow_rows(true, false);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Fork", "Archive"]);
         assert!(rows.iter().all(|r| !label(r).1), "no row is checked");
         assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::Fork, super::OverflowAction::Archive]);
         // A provider that cannot fork shows no Fork row (docs/82 5.5).
-        let (rows, actions) = super::overflow_rows(false);
+        let (rows, actions) = super::overflow_rows(false, false);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Archive"]);
         assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::Archive]);
+        // A worktree session whose provider resumes in a named folder gets
+        // Move back, above Archive (docs/82 6.2).
+        let (rows, actions) = super::overflow_rows(false, true);
+        assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Move back to project folder", "Archive"]);
+        assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::MoveBack, super::OverflowAction::Archive]);
     }
 
     use crate::palette::{filter_commands, tilde_root};

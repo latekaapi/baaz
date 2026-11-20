@@ -282,6 +282,13 @@ pub enum ProviderTrait {
     /// It signs in with a device code its own child mints, shown in the
     /// app; the others sign in through their CLI in a terminal.
     DeviceCodeSignIn,
+    /// A stored session resumes in the folder the app names
+    /// (`ResumeSession.workspace`) rather than one its own store keeps, so
+    /// the app can move a session to another folder (docs/82 6.2, "Move
+    /// back to the project folder"). The others resume where their CLI
+    /// recorded the session: Claude Code's transcript store is keyed by
+    /// the folder, Codex's thread and Muse's session keep their own.
+    ResumesInNamedFolder,
 }
 
 /// A stdio MCP server every session of a window gets: the terminal relay's

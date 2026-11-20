@@ -671,14 +671,32 @@ fn cached<T>(work: impl FnOnce(&mut std::collections::HashMap<PathBuf, Worktree>
     work(&mut cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner))
 }
 
+/// The spellings a folder is looked up by: as named, and as the disk
+/// resolves it (a sidebar row's folder is canonical; `/var` is
+/// `/private/var` on a Mac).
+fn spellings(folder: &Path) -> Vec<PathBuf> {
+    let mut keys = vec![folder.to_path_buf()];
+    if let Ok(real) = folder.canonicalize() {
+        if real != folder {
+            keys.push(real);
+        }
+    }
+    keys
+}
+
 fn remember_env(worktree: &Worktree) {
     if worktree.snapshot.is_none() {
-        cached(|map| map.insert(worktree.path.clone(), worktree.clone()));
+        let keys = spellings(&worktree.path);
+        cached(|map| {
+            for key in keys {
+                map.insert(key, worktree.clone());
+            }
+        });
     }
 }
 
 fn forget(folder: &Path) {
-    cached(|map| map.remove(folder));
+    cached(|map| map.retain(|key, worktree| key != folder && worktree.path != folder));
 }
 
 /// [`env_for_folder`] from what this run already knows, without the
@@ -1045,6 +1063,15 @@ pub fn move_back(state_dir: &Path, worktree: &Worktree, key: &str) -> Result<(),
         worktree.branch
     );
     Ok(())
+}
+
+/// Run `work` while no other archive, restore or move back runs in this
+/// process: an Undo pressed while its archive is still removing the folder
+/// waits for it, then reads the archived row, rather than racing it.
+pub fn one_at_a_time<T>(work: impl FnOnce() -> T) -> T {
+    static LIFECYCLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _held = LIFECYCLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    work()
 }
 
 /// The worktree the session `(provider, id)` runs in (live or archived),

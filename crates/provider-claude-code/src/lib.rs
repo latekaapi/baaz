@@ -133,8 +133,9 @@ pub struct ClaudeCodeAdapter {
     /// bytes a spawn would carry.
     sent_control: Mutex<Vec<String>>,
     workspace: Mutex<Option<PathBuf>>,
-    /// The session's `OpenSession.env`: every child this lane spawns (the
-    /// open and each relaunch) starts with it.
+    /// The session's `OpenSession.env` (or `ResumeSession.env`): every
+    /// child this lane spawns (the open or resume, and each relaunch)
+    /// starts with it.
     session_env: Mutex<Vec<(String, String)>>,
     home_override: Option<PathBuf>,
     config_override: Mutex<Option<PathBuf>>,
@@ -1760,7 +1761,10 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                     self.launch_for_open(&request_id, workspace.as_deref(), model.as_deref())?;
                 self.spawn_launch(&argv::with_permission_mode(launch, mode))
             }
-            Command::ResumeSession { session_id, mode, .. } => {
+            Command::ResumeSession { session_id, mode, env, .. } => {
+                // The resumed lane's children carry the session's variables
+                // as an opened one's do (docs/82 6.2).
+                *self.session_env.lock().expect("session env mutex") = env;
                 // No transcript anywhere under the config dir: `--resume`
                 // can only die on it ("No conversation found"), which read
                 // as a lost child and promised to "pick up where it left
@@ -2903,6 +2907,59 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&out).expect("recorded"), "/w/s-1|/p|41010|10");
     }
 
+    /// docs/82 6.2: `ResumeSession.env` reaches the resumed child too — a
+    /// worktree session reopened after a restart keeps its port block.
+    #[test]
+    fn a_resume_starts_the_child_with_the_sessions_env() {
+        let root = scratch_dir("resume-env");
+        let (baaz, work) = (root.join("baaz-home"), root.join("work"));
+        std::fs::create_dir_all(&work).expect("workspace");
+        let id = format!("env-{}", std::process::id());
+        let slug = baaz.join("projects").join(history::slug_for_cwd(&work));
+        std::fs::create_dir_all(&slug).expect("slug dir");
+        std::fs::write(
+            slug.join(format!("{id}.jsonl")),
+            format!(
+                "{{\"type\":\"user\",\"cwd\":\"{}\",\"sessionId\":\"{id}\",\"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n",
+                work.display()
+            ),
+        )
+        .expect("transcript");
+        let (dir, _) = seed_executable("resume-env", "unused", "");
+        let out = dir.join("env.txt");
+        let script = dir.join("fake-claude");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s|%s' \"$BAAZ_WORKTREE_PATH\" \"$BAAZ_PORT\" > '{out}.tmp'; mv '{out}.tmp' '{out}'\nexec cat >/dev/null\n",
+                out = out.display()
+            ),
+        )
+        .expect("fake writes");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let adapter = ClaudeCodeAdapter::new(&script.to_string_lossy()).with_config_dir(baaz);
+        let ack = adapter.dispatch(Command::ResumeSession {
+            request_id: "r-env".into(),
+            session_id: id,
+            cursor: None,
+            metadata_only: false,
+            mode: None,
+            workspace: Some(work.to_string_lossy().into_owned()),
+            env: vec![("BAAZ_WORKTREE_PATH".to_owned(), "/w/s-2".to_owned()), ("BAAZ_PORT".to_owned(), "41020".to_owned())],
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !out.is_file() {
+            assert!(std::time::Instant::now() < deadline, "the stand-in never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(adapter);
+        assert!(matches!(ack, Ok(Ack::Session { .. })), "resumed: {ack:?}");
+        assert_eq!(std::fs::read_to_string(&out).expect("recorded"), "/w/s-2|41020");
+    }
+
     /// THE 2026-10-30 IMPORT REOPEN. An imported session (docs/72) is
     /// pinned on its owner home; its resume must start the child IN the
     /// session's own folder (the cwd its transcript records — the record's
@@ -2935,6 +2992,7 @@ mod tests {
                 metadata_only: false,
                 mode: None,
                 workspace: None,
+                env: Vec::new(),
             })
         };
 

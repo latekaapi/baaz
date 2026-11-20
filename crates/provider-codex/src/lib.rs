@@ -113,8 +113,9 @@ pub struct CodexAdapter {
     /// `BAAZ_STATE_DIR`) — env-only, so tests never touch the real
     /// Application Support dir unless they point there.
     state_override: Mutex<Option<std::path::PathBuf>>,
-    /// The session's `OpenSession.env`: every child this lane spawns (the
-    /// open and each revive) starts with it.
+    /// The session's `OpenSession.env` (or `ResumeSession.env`): every
+    /// child this lane spawns (the open or resume, and each revive) starts
+    /// with it.
     session_env: Mutex<Vec<(String, String)>>,
     /// Stand-in owner `$HOME` for home upkeep (tests): the dir whose
     /// `.codex` is linked from. Production reads the real `HOME`.
@@ -225,21 +226,34 @@ impl CodexAdapter {
         env
     }
 
-    /// The env for one resume spawn: empty while `session_id`'s legacy
-    /// pin stands (the child keeps the owner's real home — no
-    /// `CODEX_HOME` override; the scrub still applies in the spawn),
-    /// else the Baaz home. Pure over the pin set, so tests drive the
+    /// The env for one resume spawn: while `session_id`'s legacy pin
+    /// stands, only the session's own variables (the child keeps the
+    /// owner's real home — no `CODEX_HOME` override; the scrub still
+    /// applies in the spawn) or the pinned fixture home's, else the Baaz
+    /// home. Pure over the pin set, so tests drive the
     /// routing without spawning.
     fn resume_env_for(&self, session_id: &str) -> Vec<(String, String)> {
         if crate::home::is_legacy_resume(session_id) {
             // A pin at another owner home (a fixture, docs/72) points the
             // child at that home's `.codex`; the real `HOME` needs none.
-            crate::home::legacy_owner_home(session_id)
-                .map(|owner| crate::home::child_env(&crate::home::owner_home_dir(&owner)))
-                .unwrap_or_default()
+            // The session's own variables ride either way.
+            let mut env = self.session_env.lock().expect("session env mutex").clone();
+            env.extend(
+                crate::home::legacy_owner_home(session_id)
+                    .map(|owner| crate::home::child_env(&crate::home::owner_home_dir(&owner)))
+                    .unwrap_or_default(),
+            );
+            env
         } else {
             self.child_env()
         }
+    }
+
+    /// Whether a resume of `session_id` names a home (the Baaz one, or a
+    /// pinned fixture's), so the home upkeep runs first: not for one that
+    /// keeps the owner's real home.
+    fn resume_names_a_home(session_id: &str) -> bool {
+        !crate::home::is_legacy_resume(session_id) || crate::home::legacy_owner_home(session_id).is_some()
     }
 
     /// Best-effort home upkeep before a spawn: ensure the dir and its
@@ -599,7 +613,7 @@ impl CodexAdapter {
         // override (the scrub still applies) so `thread/resume` finds
         // the rollout where it still lives, in the owner's home.
         let env = self.resume_env_for(session_id);
-        if !env.is_empty() {
+        if Self::resume_names_a_home(session_id) {
             self.prepare_home();
         }
         let running = self.spawn_handshaken(&extra, &env)?;
@@ -729,7 +743,7 @@ impl CodexAdapter {
         self.revive_owed.store(true, std::sync::atomic::Ordering::SeqCst);
         let extra = self.spawn_args_for(session_id);
         let env = self.resume_env_for(session_id);
-        if !env.is_empty() {
+        if Self::resume_names_a_home(session_id) {
             self.prepare_home();
         }
         let running = self.spawn_handshaken(&extra, &env)?;
@@ -1133,7 +1147,8 @@ impl ProviderAdapter for CodexAdapter {
                 *self.session_env.lock().expect("session env mutex") = env;
                 self.open_session(&request_id, workspace.as_deref(), model.as_deref(), mode)
             }
-            Command::ResumeSession { session_id, mode, .. } => {
+            Command::ResumeSession { session_id, mode, env, .. } => {
+                *self.session_env.lock().expect("session env mutex") = env;
                 self.resume_session(&session_id, mode)
             }
             Command::ForkSession { .. } => Err(ProviderError::Rejected {
@@ -1532,7 +1547,8 @@ if len(sys.argv) > 1 and sys.argv[1] == "--version":
 log = open(os.environ["FAKE_CODEX_LOG"], "a", buffering=1)
 if os.environ.get("FAKE_CODEX_ENV_LOG"):
     with open(os.environ["FAKE_CODEX_ENV_LOG"], "w") as seen:
-        seen.write(json.dumps({"codexHome": os.environ.get("CODEX_HOME"), "cwd": os.getcwd()}))
+        seen.write(json.dumps({"codexHome": os.environ.get("CODEX_HOME"), "cwd": os.getcwd(),
+                               "port": os.environ.get("BAAZ_PORT")}))
 out = threading.Lock()
 def write(answer):
     with out:
@@ -1615,6 +1631,7 @@ for line in sys.stdin:
                 metadata_only: false,
                 mode: None,
                 workspace: None,
+                env: Vec::new(),
             })
             .expect_err("a resume with no rollout is refused");
         std::env::remove_var("FAKE_CODEX_RESUME_ERROR");
@@ -1653,6 +1670,7 @@ for line in sys.stdin:
                 metadata_only: false,
                 mode: None,
                 workspace: None,
+                env: Vec::new(),
             })
             .expect("resumes");
         let resumed_in = at.elapsed();
@@ -1753,6 +1771,7 @@ for line in sys.stdin:
             metadata_only: false,
             mode: None,
             workspace: None,
+            env: Vec::new(),
         });
         let took = at.elapsed();
         std::env::remove_var("FAKE_CODEX_RATE_DELAY");
@@ -2022,6 +2041,8 @@ for line in sys.stdin:
             metadata_only: false,
             mode: None,
             workspace: None,
+            // docs/82 6.2: a worktree session's variables survive a restart.
+            env: vec![("BAAZ_PORT".to_owned(), "41030".to_owned())],
         });
         crate::home::clear_legacy_resume(&id);
         std::env::remove_var("FAKE_CODEX_ENV_LOG");
@@ -2034,6 +2055,7 @@ for line in sys.stdin:
             Some(fixture.join(".codex").to_string_lossy().as_ref()),
             "the app-server reads the owner home's rollouts"
         );
+        assert_eq!(env["port"].as_str(), Some("41030"), "and gets the session's variables");
         let frames: Vec<serde_json::Value> = std::fs::read_to_string(&log)
             .unwrap_or_default()
             .lines()

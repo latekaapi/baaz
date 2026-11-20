@@ -217,6 +217,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                 metadata_only: true,
                 mode: None,
                 workspace: None,
+                env: Vec::new(),
             }),
             expected_params: params_of!(SessionResumeParams {
                 command_id: "cmd-resume".into(),

@@ -34,6 +34,9 @@ fn recording_factory() -> (crate::providers::Registry, Seen) {
                 let env: Vec<String> = env.iter().map(|(key, value)| format!("{key}={value}")).collect();
                 self.seen.lock().expect("seen").push(env.join(" "));
             }
+            if let provider::Command::ResumeSession { workspace, session_id, .. } = &command {
+                self.seen.lock().expect("seen").push(format!("resume {session_id} in {}", workspace.clone().unwrap_or_default()));
+            }
             self.inner.dispatch(command)
         }
         fn events(&self) -> crossbeam_channel::Receiver<provider::ProviderEvent> {
@@ -248,5 +251,332 @@ fn worktree_on_and_off_move_an_unsent_draft_and_the_unused_worktree_goes(cx: &mu
     crate::db::flush();
     let rows = crate::db::call(crate::db::path_in(&state.2), |db| crate::db::worktrees::list(&db.conn).expect("list")).expect("db");
     assert!(rows.is_empty(), "its row went with it");
+    cleanup(&root, state);
+}
+
+/// Open a session in a new worktree (the project's default on) and return
+/// its id and folder.
+fn worktree_session(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext, project: &str) -> (String, std::path::PathBuf) {
+    let project = project.to_owned();
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.set_worktree_default(&project, true, cx))).expect("default on");
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
+    vc.run_until_parked();
+    let (id, folder) = active(baaz, vc);
+    assert!(Harness::in_worktree(&folder), "a worktree session: {folder}");
+    (id, std::path::PathBuf::from(folder))
+}
+
+/// Send `text` on the open session and fold what the double answered so
+/// far (a `[hold <ms>]` turn stays running).
+fn send(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext, text: &str) {
+    let text = text.to_owned();
+    vc.update(|_, cx| {
+        let view = baaz.read(cx).active.clone().expect("open");
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text(text, cx)));
+    });
+    vc.run_until_parked();
+    vc.update(|_, cx| {
+        let view = baaz.read(cx).active.clone().expect("open");
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.test_drain_provider(cx)));
+    });
+    vc.run_until_parked();
+}
+
+fn porcelain(dir: &std::path::Path) -> Vec<String> {
+    let out = std::process::Command::new("git").current_dir(dir).args(["status", "--porcelain"]).output().expect("git");
+    let mut lines: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(str::to_owned).collect();
+    lines.sort();
+    lines
+}
+
+fn row_of(state: &std::path::Path, id: &str) -> baaz_core::worktrees::Worktree {
+    crate::db::flush();
+    let id = id.to_owned();
+    crate::db::call(crate::db::path_in(state), move |db| crate::db::worktrees::by_session(&db.conn, "codex", &id).expect("read"))
+        .flatten()
+        .expect("the session's worktree row")
+}
+
+/// THE ROUND TRIP THROUGH THE WINDOW (docs/82 6.2). Archiving a worktree
+/// session archives its worktree — work preserved to the session's hidden
+/// ref, the snapshot on the row, the folder gone, the branch kept — and
+/// the toast's Undo (the unarchive path) brings the folder back with the
+/// work unstaged before the row returns. Settings › Archived's unarchive
+/// does the same.
+#[gpui::test]
+fn archiving_a_worktree_session_preserves_and_removes_it_and_unarchive_restores_it(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("worktree-archive");
+    let root = repo(&state.2);
+    let (factory, _seen) = recording_factory();
+    let (baaz, vc, project) = window(cx, &state.2, &root, factory);
+    let (id, folder) = worktree_session(&baaz, vc, &project);
+    send(&baaz, vc, "edit something");
+    vc.run_until_parked();
+    std::fs::write(folder.join("a.txt"), "one\nedited\n").expect("tracked edit");
+    std::fs::write(folder.join("new.txt"), "new\n").expect("untracked");
+    let branch = git(&folder, &["branch", "--show-current"]);
+    let row = row_of(&state.2, &id);
+    assert_eq!(row.path, folder);
+
+    for round in ["undo", "settings"] {
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.archive_session(id.clone(), Some(window), cx)));
+        vc.run_until_parked();
+        let archived = row_of(&state.2, &id);
+        let snapshot = archived.snapshot.clone().expect("the row holds the snapshot");
+        let uuid = crate::db::call(crate::db::path_in(&state.2), {
+            let id = id.clone();
+            move |db| crate::db::worktrees::session_key(&db.conn, "codex", &id).expect("read")
+        })
+        .flatten()
+        .expect("the session row's uuid");
+        assert_eq!(snapshot.reference, Some(format!("refs/baaz/preserved/{uuid}")), "{round}: named by the session's uuid");
+        assert!(!folder.exists(), "{round}: the folder is removed");
+        assert_eq!(git(&root, &["branch", "--list", &branch]).trim_start_matches(['*', '+', ' ']), branch, "{round}: the branch is kept");
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(harness.session_list.read(cx).overrides.get(&id).is_some_and(|meta| meta.archived), "{round}: the row is archived");
+        });
+        assert_eq!(baaz_core::worktrees::cached_branch_for_folder(&folder), None, "{round}: no branch is named for a gone folder");
+
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| match round {
+                "undo" => harness.undo_newest(cx),
+                _ => harness.unarchive_session(id.clone(), cx),
+            })
+        });
+        vc.run_until_parked();
+        assert!(folder.is_dir(), "{round}: the folder is back");
+        assert_eq!(git(&folder, &["branch", "--show-current"]), branch);
+        assert_eq!(porcelain(&folder), vec![" M a.txt", "?? new.txt"], "{round}: the work is back, unstaged");
+        assert_eq!(row_of(&state.2, &id).snapshot, None, "{round}: the row is live");
+        assert_eq!(baaz_core::worktrees::lock_reason(&row_of(&state.2, &id)).as_deref(), Some(format!("baaz session {id}").as_str()), "{round}: relocked");
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(!harness.session_list.read(cx).overrides.get(&id).is_some_and(|meta| meta.archived), "{round}: the row is back");
+        });
+        assert_eq!(baaz_core::worktrees::cached_branch_for_folder(&folder), Some(branch.clone()));
+    }
+    let _ = std::process::Command::new("git").current_dir(&root).args(["worktree", "remove", "--force", "--force"]).arg(&folder).output();
+    cleanup(&root, state);
+}
+
+/// A worktree session with a turn running is not archived from under its
+/// agent: nothing changes and a toast says why.
+#[gpui::test]
+fn a_busy_worktree_session_is_not_archived(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("worktree-archive-busy");
+    let root = repo(&state.2);
+    let (factory, _seen) = recording_factory();
+    let (baaz, vc, project) = window(cx, &state.2, &root, factory);
+    let (id, folder) = worktree_session(&baaz, vc, &project);
+    send(&baaz, vc, "[hold 3000] working");
+    vc.run_until_parked();
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.archive_session(id.clone(), Some(window), cx)));
+    vc.run_until_parked();
+    assert!(folder.is_dir(), "the folder stays");
+    assert_eq!(row_of(&state.2, &id).snapshot, None);
+    vc.update(|_, cx| {
+        let harness = baaz.read(cx);
+        assert!(!harness.session_list.read(cx).overrides.get(&id).is_some_and(|meta| meta.archived), "not archived");
+        assert_eq!(harness.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone()), Some(id.clone()), "still open");
+    });
+    let _ = std::process::Command::new("git").current_dir(&root).args(["worktree", "remove", "--force", "--force"]).arg(&folder).output();
+    cleanup(&root, state);
+}
+
+/// THE SHARED-FOLDER WARNING. A new session that lands in the folder where
+/// another session has a turn running shows one banner — once, however
+/// often it lands — whose "Run in a worktree" moves the unsent draft into a
+/// worktree of its own. A folder whose other session is idle shows none.
+#[gpui::test]
+fn a_session_opened_where_another_is_working_is_warned_once(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("shared-folder");
+    let root = repo(&state.2);
+    let (factory, _seen) = recording_factory();
+    let (baaz, vc, _project) = window(cx, &state.2, &root, factory);
+    let banner = |baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext| {
+        vc.update(|_, cx| {
+            let view = baaz.read(cx).active.clone().expect("open");
+            let rt = view.read(cx).rt(cx);
+            (rt.banner_text().map(str::to_owned), rt.banner_action_for_test(), rt.session_id.clone())
+        })
+    };
+    // Idle: the first session's turn finished before the second opens.
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
+    vc.run_until_parked();
+    let first_id = active(&baaz, vc).0;
+    send(&baaz, vc, "done already");
+    vc.run_until_parked();
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
+    vc.run_until_parked();
+    let (text, _, idle_id) = banner(&baaz, vc);
+    assert_eq!(text, None, "nobody is working in the folder: no warning");
+    // Busy: that second session works, and a third opens beside it.
+    send(&baaz, vc, "[hold 3000] working");
+    vc.run_until_parked();
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
+    vc.run_until_parked();
+    let (text, action, draft_id) = banner(&baaz, vc);
+    assert_ne!(draft_id, idle_id);
+    assert_eq!(text.as_deref(), Some(crate::session::SHARED_FOLDER_TEXT), "warned");
+    assert_eq!(action, Some(crate::session::BannerAction::SharedFolder { worktree: true }), "an unsent draft is offered a worktree");
+    // Dismissed, then back to the busy one and here again: not twice.
+    vc.update(|_, cx| {
+        let view = baaz.read(cx).active.clone().expect("open");
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.dismiss_banner(cx)));
+    });
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet(idle_id.clone(), window, cx)));
+    vc.run_until_parked();
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet(draft_id.clone(), window, cx)));
+    vc.run_until_parked();
+    let (text, _, again) = banner(&baaz, vc);
+    assert_eq!(again, draft_id);
+    assert_eq!(text, None, "shown once per session");
+    // A session with turns that lands there is warned, with no worktree
+    // offered (it cannot move: rule 13).
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet(first_id.clone(), window, cx)));
+    vc.run_until_parked();
+    let (text, action, landed) = banner(&baaz, vc);
+    assert_eq!(landed, first_id);
+    assert_eq!(text.as_deref(), Some(crate::session::SHARED_FOLDER_TEXT));
+    assert_eq!(action, Some(crate::session::BannerAction::SharedFolder { worktree: false }), "only Dismiss");
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet(draft_id.clone(), window, cx)));
+    vc.run_until_parked();
+    // "Run in a worktree" on a fresh draft's banner moves it.
+    vc.update(|_, cx| {
+        let view = baaz.read(cx).active.clone().expect("open");
+        view.update(cx, |view, cx| {
+            view.runtime().clone().update(cx, |rt, cx| {
+                rt.forget_shared_folder_warning();
+                assert!(rt.warn_shared_folder(true, cx));
+                rt.run_banner_action(cx);
+            })
+        });
+    });
+    vc.run_until_parked();
+    let (_, folder) = active(&baaz, vc);
+    assert!(Harness::in_worktree(&folder), "the draft now runs in a worktree: {folder}");
+    let _ = std::process::Command::new("git").current_dir(&root).args(["worktree", "remove", "--force", "--force"]).arg(&folder).output();
+    cleanup(&root, state);
+}
+
+/// A worktree session reopened after a restart (`ResumeSession`) gets its
+/// worktree's variables, as its open did (docs/82 6.2, the 6.1 carry-over).
+#[gpui::test]
+fn a_reopened_worktree_session_resumes_with_its_variables(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("worktree-resume-env");
+    let root = repo(&state.2);
+    let worktree = baaz_core::worktrees::create(&baaz_core::worktrees::CreateSpec {
+        state_dir: &state.2,
+        project_root: &root,
+        project_id: None,
+        branch_prefix: baaz_core::worktrees::DEFAULT_BRANCH_PREFIX,
+        name: None,
+    })
+    .expect("a worktree");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    let (factory, commands) = recording_resumable_factory();
+    let folder = worktree.path.to_string_lossy().into_owned();
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, cx| {
+            harness.providers = harness.providers.with_opens_of(&factory);
+            mark_muse_up(harness);
+            z4_seed_stored_codex(harness, cx);
+            harness.session_list.update(cx, |list, _| {
+                if let Some(record) = list.provider_sessions.get_mut("s-codex-old") {
+                    record.workspace = Some(folder.clone());
+                }
+            });
+            harness.merge_provider_rows(cx);
+        });
+    });
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet("s-codex-old".into(), window, cx)));
+    vc.run_until_parked();
+    let env = commands
+        .lock()
+        .expect("commands")
+        .iter()
+        .find_map(|command| match command {
+            provider::Command::ResumeSession { env, workspace, .. } => Some((env.clone(), workspace.clone())),
+            _ => None,
+        })
+        .expect("the reopen resumed");
+    assert_eq!(env.1.as_deref(), Some(folder.as_str()));
+    assert_eq!(env.0, worktree.env(), "the resume carries the worktree's variables");
+    let _ = std::process::Command::new("git").current_dir(&root).args(["worktree", "remove", "--force", "--force"]).arg(&worktree.path).output();
+    crate::db::flush();
+    crate::db::close(crate::db::path_in(&state.2));
+    let _ = std::fs::remove_dir_all(&root);
+    lane_restore(state);
+}
+
+/// Rule 13: "Move back to project folder" is offered only on a provider
+/// that resumes a session in a folder the app names — not on the
+/// providers whose own store keeps the folder (here Codex) — and the step
+/// says so rather than doing nothing.
+#[gpui::test]
+fn move_back_is_offered_only_where_the_provider_resumes_in_a_named_folder(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("worktree-move-back-gate");
+    let root = repo(&state.2);
+    let (factory, _seen) = recording_factory();
+    let (baaz, vc, project) = window(cx, &state.2, &root, factory);
+    let (_id, folder) = worktree_session(&baaz, vc, &project);
+    vc.update(|_, cx| {
+        let harness = baaz.read(cx);
+        assert!(!harness.move_back_offered(cx), "Codex resumes where its thread says: not offered");
+    });
+    let refused = vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.move_back_to_root(cx)));
+    assert!(refused.is_err(), "and refused, saying so");
+    assert!(folder.is_dir(), "nothing moved");
+    assert!(!ProviderId::Codex.has(provider::ProviderTrait::ResumesInNamedFolder));
+    assert!(!ProviderId::ClaudeCode.has(provider::ProviderTrait::ResumesInNamedFolder));
+    assert!(!ProviderId::Muse.has(provider::ProviderTrait::ResumesInNamedFolder));
+    assert!(ProviderId::parse_known("acp").expect("acp is registered").has(provider::ProviderTrait::ResumesInNamedFolder));
+    let _ = std::process::Command::new("git").current_dir(&root).args(["worktree", "remove", "--force", "--force"]).arg(&folder).output();
+    cleanup(&root, state);
+}
+
+/// MOVE BACK THROUGH THE WINDOW, on a provider that resumes in a named
+/// folder (ACP): the worktree's committed and uncommitted changes land in
+/// the project root, uncommitted; the worktree goes (branch kept); the
+/// record names the root and the session reopens there.
+#[gpui::test]
+fn move_back_hands_the_changes_to_the_root_and_reopens_there(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("worktree-move-back");
+    let root = repo(&state.2);
+    let (factory, seen) = recording_factory();
+    let (baaz, vc, project) = window(cx, &state.2, &root, factory);
+    let acp = ProviderId::parse_known("acp").expect("acp is registered");
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.provider_model.update(cx, |model, _| model.point_new_provider(acp))));
+    let (id, folder) = worktree_session(&baaz, vc, &project);
+    vc.update(|_, cx| assert_eq!(baaz.read(cx).active.as_ref().map(|view| view.read(cx).rt(cx).provider_kind()), Some(acp)));
+    send(&baaz, vc, "make a change");
+    std::fs::write(folder.join("a.txt"), "one\nfrom the worktree\n").expect("edit");
+    git(&folder, &["-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-qam", "worktree commit"]);
+    std::fs::write(folder.join("loose.txt"), "loose\n").expect("untracked");
+    let branch = git(&folder, &["branch", "--show-current"]);
+    vc.update(|_, cx| assert!(baaz.read(cx).move_back_offered(cx), "offered on ACP"));
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.move_back_to_root(cx))).expect("moving back");
+    vc.run_until_parked();
+    assert_eq!(porcelain(&root), vec![" M a.txt", "?? loose.txt"], "the worktree's changes, uncommitted, in the root");
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).expect("a"), "one\nfrom the worktree\n");
+    assert!(!folder.exists(), "the worktree is removed");
+    assert!(!git(&root, &["branch", "--list", &branch]).is_empty(), "its branch is kept");
+    let root_text = root.to_string_lossy().into_owned();
+    vc.update(|_, cx| {
+        let harness = baaz.read(cx);
+        let record = harness.session_list.read(cx).provider_sessions.get(&id).cloned().expect("the record");
+        assert_eq!(record.workspace.as_deref(), Some(root_text.as_str()), "the session's folder is the root");
+    });
+    assert!(
+        seen.lock().expect("seen").iter().any(|line| line == &format!("resume {id} in {root_text}")),
+        "the session reopened in the root: {:?}",
+        seen.lock().expect("seen")
+    );
+    crate::db::flush();
+    let rows = crate::db::call(crate::db::path_in(&state.2), |db| crate::db::worktrees::list(&db.conn).expect("list")).expect("db");
+    assert!(rows.is_empty(), "the worktree's row went");
     cleanup(&root, state);
 }

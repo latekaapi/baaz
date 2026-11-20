@@ -507,6 +507,9 @@ pub enum SessionEvent {
     /// "Enable" on a disabled-provider banner: the application owns the
     /// Settings dialog.
     OpenProviders,
+    /// "Run in a worktree" on the shared-folder warning (docs/82 6.2): the
+    /// application moves this unsent draft into a worktree of its own.
+    RunInWorktree,
     /// `/status` or `/usage`: the application owns the dialog stack.
     Status {
         /// The lines of the dialog body, already formatted.
@@ -2647,7 +2650,19 @@ pub enum BannerAction {
     /// Revive a lane whose child died, now, without sending a turn
     /// ("Retry now", docs/71 §2).
     RetryNow,
+    /// The shared-folder warning (docs/82 6.2): another session has a turn
+    /// running in this session's folder. `worktree` when the session is an
+    /// unsent draft that can move into a worktree of its own ("Run in a
+    /// worktree"); otherwise the banner only dismisses.
+    SharedFolder {
+        /// The draft can move into a worktree.
+        worktree: bool,
+    },
 }
+
+/// The shared-folder warning's words (docs/82 6.2). No provider name
+/// (rule 14).
+pub(crate) const SHARED_FOLDER_TEXT: &str = "Another session is working in this folder. Edits from both will mix.";
 
 
 /// The pending question a block id names, resolved once so the callers do not

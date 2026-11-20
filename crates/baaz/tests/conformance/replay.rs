@@ -695,6 +695,7 @@ pub fn run(agent: Agent, case: &Case) -> (Trace, Vec<Violation>) {
                 metadata_only: false,
                 mode: None,
                 workspace: super::recorded_workspace(&driver.dir),
+                env: Vec::new(),
             };
             driver.send(Sent::Resume(session.clone()), command)
         }

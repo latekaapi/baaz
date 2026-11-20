@@ -134,6 +134,9 @@ pub struct SessionRuntime {
     /// The banner shows the Auto-fallback notice (a model pick left Auto
     /// for Ask), which a later mode pick takes down.
     pub(super) banner_is_mode_fallback: bool,
+    /// The shared-folder warning (docs/82 6.2) was shown on this session:
+    /// it shows once, never again however often the session lands.
+    pub(super) shared_folder_warned: bool,
     /// When the lane's child last died with no turn finished since: a
     /// second death inside [`LOST_TWICE_WINDOW`] turns the banner into the
     /// failure view. A finished turn clears it.
@@ -424,6 +427,7 @@ impl SessionRuntime {
             lease_notice: None,
             banner: None,
             banner_is_mode_fallback: false,
+            shared_folder_warned: false,
             lost_at: None,
             child_failure: None,
             banner_action: None,

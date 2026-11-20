@@ -352,11 +352,14 @@ pub fn clear_handoff(overrides: &mut Overrides, source: &str, dest: &str) {
 /// every seam command) so this module never reaches past the provider seam
 /// for it. `mode` is the approval mode the reopened session runs in (see
 /// [`provider::Command::ResumeSession`]); the folder is the record's own,
-/// which an agent that re-opens a session only in its folder needs.
+/// which an agent that re-opens a session only in its folder needs; `env`
+/// is what its child is started with (a worktree session's variables,
+/// docs/82 6.2).
 pub fn resume_command(
     record: &ProviderSessionRecord,
     request_id: &str,
     mode: Option<aui_protocol::PermissionMode>,
+    env: Vec<(String, String)>,
 ) -> provider::Command {
     // A provider that pages its history (Muse) re-attaches without it —
     // the view pages it in after the ack — and starts in the host's
@@ -370,6 +373,7 @@ pub fn resume_command(
         metadata_only: pages,
         mode,
         workspace: record.workspace.clone(),
+        env,
     }
 }
 
@@ -382,8 +386,9 @@ pub fn send_resume(
     record: &ProviderSessionRecord,
     request_id: &str,
     mode: Option<aui_protocol::PermissionMode>,
+    env: Vec<(String, String)>,
 ) -> Result<String, provider::ProviderError> {
-    match provider.send(resume_command(record, request_id, mode))? {
+    match provider.send(resume_command(record, request_id, mode, env))? {
         provider::Ack::Session { session_id, .. } => Ok(session_id),
         other => Err(provider::ProviderError::Rejected {
             reason: format!("ResumeSession answered {other:?} instead of a session"),
@@ -734,7 +739,7 @@ mod tests {
         upsert_open(&mut store, &mut Overrides::new(), "codex", "s-old", Some("/w".into()), None, None);
         let (adapter, commands) = RecordingAdapter::new();
         let provider = provider::Provider::new(adapter);
-        let resumed = send_resume(&provider, &store["s-old"], "r-1", None).expect("resume lands");
+        let resumed = send_resume(&provider, &store["s-old"], "r-1", None, Vec::new()).expect("resume lands");
         assert_eq!(resumed, "s-old");
         let sent = commands.lock().expect("commands").clone();
         assert_eq!(sent.len(), 1, "exactly one command leaves the lane, drew {sent:?}");
@@ -752,7 +757,7 @@ mod tests {
     fn resume_command_names_the_session_and_asks_for_the_transcript() {
         let mut store = ProviderSessionStore::new();
         upsert_open(&mut store, &mut Overrides::new(), "codex", "s-old", Some("/w".into()), None, None);
-        match resume_command(&store["s-old"], "r-1", Some(aui_protocol::PermissionMode::AllowAll)) {
+        match resume_command(&store["s-old"], "r-1", Some(aui_protocol::PermissionMode::AllowAll), Vec::new()) {
             provider::Command::ResumeSession { session_id, cursor, metadata_only, mode, .. } => {
                 assert_eq!(session_id, "s-old");
                 assert_eq!(mode, Some(aui_protocol::PermissionMode::AllowAll), "the mode rides along");
@@ -813,6 +818,6 @@ mod tests {
         let mut store = ProviderSessionStore::new();
         upsert_open(&mut store, &mut Overrides::new(), "codex", "s-old", None, None, None);
         let provider = provider::Provider::new(Refusing);
-        assert!(send_resume(&provider, &store["s-old"], "r-1", None).is_err());
+        assert!(send_resume(&provider, &store["s-old"], "r-1", None, Vec::new()).is_err());
     }
 }

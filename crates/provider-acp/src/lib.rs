@@ -78,8 +78,9 @@ pub struct AcpAdapter {
     place: Mutex<Option<Place>>,
     relay: Mutex<Option<McpServer>>,
     stderr: provider::StderrTail,
-    /// The session's `OpenSession.env`, which every agent child after the
-    /// open starts with (the child started at connect is restarted with it).
+    /// The session's `OpenSession.env` (or `ResumeSession.env`), which
+    /// every agent child after the open or resume starts with (the child
+    /// started at connect is restarted with it).
     env: Mutex<Vec<(String, String)>>,
 }
 
@@ -244,9 +245,10 @@ impl AcpAdapter {
         }
     }
 
-    fn open_session(&self, request_id: &str, workspace: Option<&str>, env: Vec<(String, String)>) -> Result<Ack, ProviderError> {
-        // The child started at connect has no session yet: one that must
-        // carry the session's variables is started again with them.
+    /// The child started at connect has no session yet: one that must carry
+    /// the session's variables is started again with them (the next
+    /// `revive`).
+    fn want_env(&self, env: Vec<(String, String)>) {
         let mut wanted = self.env.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if *wanted != env {
             *wanted = env;
@@ -254,9 +256,11 @@ impl AcpAdapter {
             if let Some(old) = self.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
                 old.shutdown();
             }
-        } else {
-            drop(wanted);
         }
+    }
+
+    fn open_session(&self, request_id: &str, workspace: Option<&str>, env: Vec<(String, String)>) -> Result<Ack, ProviderError> {
+        self.want_env(env);
         self.revive()?;
         let cwd = workspace
             .filter(|workspace| !workspace.is_empty())
@@ -487,7 +491,10 @@ impl ProviderAdapter for AcpAdapter {
     fn dispatch(&self, command: Command) -> Result<Ack, ProviderError> {
         match command {
             Command::OpenSession { request_id, workspace, env, .. } => self.open_session(&request_id, workspace.as_deref(), env),
-            Command::ResumeSession { session_id, workspace, .. } => self.resume_session(&session_id, workspace.as_deref()),
+            Command::ResumeSession { session_id, workspace, env, .. } => {
+                self.want_env(env);
+                self.resume_session(&session_id, workspace.as_deref())
+            }
             Command::SubmitInput { request_id, session_id, parts, display_text, .. } => {
                 self.submit(&request_id, &session_id, &parts, display_text.as_deref())
             }

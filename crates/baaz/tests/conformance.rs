@@ -630,6 +630,7 @@ fn a_resumed_session_replays_its_history() {
                 metadata_only: agent == Agent::Muse,
                 mode: None,
                 workspace: recorded_workspace(&dir),
+                env: Vec::new(),
             })
             .unwrap_or_else(|error| panic!("{agent:?} resumes: {error}"));
         assert!(matches!(&ack, Ack::Session { session_id, .. } if *session_id == session), "{agent:?}: {ack:?}");

@@ -146,7 +146,7 @@ impl SessionRow for SessionEntry {
             reply: (!self.description.trim().is_empty()).then(|| self.description.clone().into()),
             status: Some(status),
             project: self.project_name.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_owned().into()),
-            branch: self.branch.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_owned().into()),
+            branch: shown_branch(self).map(Into::into),
             turns: Some(usize::try_from(self.turns).unwrap_or(usize::MAX)),
             updated: Some(if elapsed == "now" { "now".into() } else { format!("{elapsed} ago").into() }),
             workspace: self.workspace.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_owned().into()),
@@ -160,6 +160,7 @@ impl SessionRow for SessionEntry {
     /// sidebar row (docs/83 §4) does not draw it — only the library's
     /// compact row shows marks, in its meta line.
     fn summary(&self, now: DateTime<Local>) -> SessionSummary {
+        let branch = shown_branch(self);
         let mut row = SessionSummary::new(self.id.clone(), self.label.clone(), self.state(), elapsed_at(self.updated, now))
             .provider(self.provider.row_mark());
         // Option B's context priority: the live approval/question override
@@ -188,7 +189,7 @@ impl SessionRow for SessionEntry {
                     if let Some(project) = self.project_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                         row = row.repo(project.to_owned());
                     }
-                    if let Some(branch) = self.branch.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    if let Some(branch) = branch.as_deref() {
                         row = row.branch(branch.to_owned());
                     }
                     if self.archived {
@@ -196,6 +197,12 @@ impl SessionRow for SessionEntry {
                     }
                 }
             }
+        }
+        // A worktree session carries its branch whatever the second line
+        // says: the summary line falls back to it when the session has said
+        // nothing newer, and the hover card always shows it (docs/82 6.2).
+        if let Some(branch) = branch.as_deref().filter(|_| worktree_branch(self).is_some()) {
+            row = row.branch(branch.to_owned());
         }
         // A tab from this session holds a running block (D52): the hint
         // joins the meta line, so it shows wherever the meta line does.
@@ -223,6 +230,17 @@ impl SessionRow for SessionEntry {
         }
         row
     }
+}
+
+/// The branch of the worktree `entry` runs in, when it runs in one of
+/// Baaz's (docs/82 6.2), from the process cache.
+fn worktree_branch(entry: &SessionEntry) -> Option<String> {
+    entry.workspace.as_deref().and_then(|folder| baaz_core::worktrees::cached_branch_for_folder(std::path::Path::new(folder)))
+}
+
+/// The branch a row names: its worktree's, else the index's derived one.
+fn shown_branch(entry: &SessionEntry) -> Option<String> {
+    worktree_branch(entry).or_else(|| entry.branch.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned))
 }
 
 /// Group the entries by calendar day, newest first, against an explicit

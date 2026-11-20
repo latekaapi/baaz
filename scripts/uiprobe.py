@@ -501,6 +501,13 @@ ENTRIES = {
     "launch-failure-signed-out": _p6_entry("launch-failed:claude-code:signed-out", "SignedOut"),
     "child-lost-banner":    _p6_entry("new;setprovider:codex;send:hello lost probe;wait:3000;child-lost"),
     "child-lost-twice":     _p6_entry("new;setprovider:codex;send:hello lost probe;wait:3000;child-lost;child-lost"),
+    # docs/82 6.2: a new draft opened in the folder where another scripted
+    # session has a turn running (`[hold <ms>]` keeps it running) wears the
+    # shared-folder banner above the composer, "Run in a worktree" and
+    # Dismiss at its right. Offline, no worktree is made (a capture never
+    # makes one), no baseline yet — generate on main after merge.
+    "shared-folder-banner": _p6_entry("new;setprovider:codex;send:[hold 9000] working in this folder;wait:500;"
+                                      "new;setprovider:codex;wait:500"),
     "settings-providers":   {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "settings:providers"],
                              "env": {"BAAZ_PROVIDER_STATUS_SCRIPT":

@@ -1186,6 +1186,17 @@ impl Harness {
             this.muse_unavailable(crate::connect::shared_off(), cx);
         }
         this.load_index(cx);
+        // Every live worktree's branch and variables, read once off the UI
+        // thread, so the rows and the header name a worktree session's
+        // branch (docs/82 6.2) without a database read on a frame.
+        if !crate::runtime::state_isolated() {
+            let state_dir = crate::store::support_dir();
+            this.wire_call_in(cx, move || baaz_core::worktrees::remember_all(&state_dir), |this, known, _, cx| {
+                if known > 0 {
+                    this.invalidate_list(cx);
+                }
+            });
+        }
         // Only when a project is current. With none — a first launch, or a
         // bundle opened from Finder, where `boot_projects` declined to adopt
         // `/` — `workspace()` falls back to the launch directory, which is not
@@ -2958,8 +2969,8 @@ impl Harness {
     }
 
     /// The bar's title slot in Sessions: the active session's label (or the
-    /// rename field for the session or the project), semibold 13 — nothing
-    /// else. The project is chosen from the sidebar and the Projects
+    /// rename field for the session or the project), semibold 13 — and, for
+    /// a session in a worktree, its branch beside it, muted. The project is chosen from the sidebar and the Projects
     /// palette, never here.
     fn render_session_title(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
@@ -3005,11 +3016,33 @@ impl Harness {
                 title = title.child(
                     div().flex_1().min_w_0().overflow_hidden().child(self.rename_field(window, cx)),
                 );
+            } else if let Some(branch) = self.active_worktree_branch(cx) {
+                // A worktree session names its branch beside its title, muted
+                // and regular (docs/82 6.2, docs/83 §9); the title gives way
+                // first, and the two sit together at the left.
+                title = title
+                    .child(div().min_w_0().truncate().child(label))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(p.fg_muted)
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .child(branch),
+                    )
+                    .child(div().flex_1());
             } else {
                 title = title.child(div().flex_1().min_w_0().truncate().child(label));
             }
         }
         title.into_any_element()
+    }
+
+    /// The open session's branch when it runs in one of Baaz's worktrees
+    /// (from the process cache: no database on a frame).
+    fn active_worktree_branch(&self, cx: &gpui::App) -> Option<String> {
+        let view = self.active.as_ref()?;
+        baaz_core::worktrees::cached_branch_for_folder(std::path::Path::new(view.read(cx).rt(cx).workspace_path()))
     }
 
     /// The session header's title: the open session's chain head label, or

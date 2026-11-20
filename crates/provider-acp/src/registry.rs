@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use aui_protocol::PermissionMode;
-use provider::{ModeDescriptor, Provider, ProviderDescriptor, ProviderError, ProviderFactory, SessionSpawn};
+use provider::{ModeDescriptor, Provider, ProviderDescriptor, ProviderError, ProviderFactory, ProviderTrait, SessionSpawn};
 
 use crate::AcpAdapter;
 
@@ -42,7 +42,7 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     modes: &MODES,
     plan: provider::PlanMode::None,
     routes: &[],
-    traits: &[],
+    traits: &[ProviderTrait::ResumesInNamedFolder],
     capabilities: |_| crate::caps::capabilities(crate::caps::last_handshake().as_ref()),
     command_env: Some(COMMAND_ENV),
 };

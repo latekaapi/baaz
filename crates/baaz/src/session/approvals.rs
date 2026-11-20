@@ -177,8 +177,45 @@ impl SessionRuntime {
             Some(BannerAction::RetryShell(command)) => self.run_user_shell(command, cx),
             Some(BannerAction::OpenProviders) => cx.emit(SessionEvent::OpenProviders),
             Some(BannerAction::RetryNow) => self.retry_lost_child(cx),
-            None => cx.emit(RuntimeEvent::BannerChanged),
+            Some(BannerAction::SharedFolder { worktree: true }) => {
+                cx.emit(RuntimeEvent::BannerChanged);
+                cx.emit(SessionEvent::RunInWorktree);
+            }
+            Some(BannerAction::SharedFolder { worktree: false }) | None => cx.emit(RuntimeEvent::BannerChanged),
         }
+    }
+
+    #[cfg(test)]
+    /// The banner's action, for the window's tests.
+    pub(crate) fn banner_action_for_test(&self) -> Option<BannerAction> {
+        self.banner_action.clone()
+    }
+
+    #[cfg(test)]
+    /// Let the shared-folder warning show again (a test re-raises it).
+    pub(crate) fn forget_shared_folder_warning(&mut self) {
+        self.shared_folder_warned = false;
+    }
+
+    /// Take the banner down without running its action (a banner's
+    /// secondary Dismiss).
+    pub fn dismiss_banner(&mut self, cx: &mut Context<Self>) {
+        self.banner_action = None;
+        self.banner = None;
+        cx.emit(RuntimeEvent::BannerChanged);
+    }
+
+    /// The shared-folder warning (docs/82 6.2), once per session: `false`
+    /// when this session already showed it. `worktree` offers "Run in a
+    /// worktree". It is a fact, not an error: a banner already up (an
+    /// error the person has not read) is left alone.
+    pub(crate) fn warn_shared_folder(&mut self, worktree: bool, cx: &mut Context<Self>) -> bool {
+        if self.shared_folder_warned || self.banner.is_some() {
+            return false;
+        }
+        self.shared_folder_warned = true;
+        self.set_banner(crate::session::SHARED_FOLDER_TEXT, Some(BannerAction::SharedFolder { worktree }), cx);
+        true
     }
 
     /// Put `message` on the session's banner, with no action.

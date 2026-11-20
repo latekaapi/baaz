@@ -119,6 +119,7 @@ fn resume_session(provider: &Provider) -> Ack {
             metadata_only: false,
             mode: None,
             workspace: None,
+            env: Vec::new(),
         })
         .expect("resume lands")
 }

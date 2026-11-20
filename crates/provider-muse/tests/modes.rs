@@ -49,6 +49,7 @@ impl Stub {
                 metadata_only: true,
                 mode: None,
                 workspace: None,
+                env: Vec::new(),
             })
             .expect("resume");
         assert!(matches!(ack, Ack::Session { .. }));

@@ -293,6 +293,7 @@ fn a_stored_session_reopens_with_its_turns_then_takes_a_prompt() {
             metadata_only: false,
             mode: None,
             workspace: Some("/Users/ada/work/acme-web".into()),
+            env: Vec::new(),
         })
         .expect("the stored session re-opens");
     assert!(matches!(&ack, Ack::Session { session_id, .. } if session_id == "sess-stored"));
@@ -309,7 +310,7 @@ fn a_stored_session_reopens_with_its_turns_then_takes_a_prompt() {
     // A session Baaz has no folder for cannot be re-opened.
     let (provider, _dir) = connected("load-unknown", &[&fixture("load.jsonl")]);
     let refused = provider
-        .send(Command::ResumeSession { request_id: provider::new_request_id(), session_id: "elsewhere".into(), cursor: None, metadata_only: false, mode: None, workspace: None })
+        .send(Command::ResumeSession { request_id: provider::new_request_id(), session_id: "elsewhere".into(), cursor: None, metadata_only: false, mode: None, workspace: None, env: Vec::new() })
         .expect_err("no folder, no load");
     assert!(refused.is_session_scoped(), "{refused:?}");
 }
@@ -377,4 +378,37 @@ fn an_open_starts_the_agent_with_the_sessions_env() {
     let lines: Vec<String> = std::fs::read_to_string(&seen).expect("recorded").lines().map(str::to_owned).collect();
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(lines, vec!["|||".to_owned(), "/w/s-1|/p|41010|10".to_owned()], "connect's child had none; the session's child has them");
+}
+
+/// docs/82 6.2: a resumed session's agent starts with its variables too,
+/// as an opened one's does.
+#[test]
+fn a_resume_starts_the_agent_with_the_sessions_env() {
+    let (dir, program) = stand_in("resume-env", &[&fixture("load.jsonl")]);
+    let seen = dir.join("env-seen");
+    let wrapper = std::fs::read_to_string(&program).expect("wrapper");
+    let recording = wrapper.replacen(
+        "#!/bin/sh\n",
+        &format!("#!/bin/sh\nprintf '%s|%s\\n' \"$BAAZ_WORKTREE_PATH\" \"$BAAZ_PORT\" >> '{}'\n", seen.display()),
+        1,
+    );
+    std::fs::write(&program, recording).expect("recording wrapper");
+    let mut provider = Provider::new(AcpAdapter::new(&program.to_string_lossy(), &[]));
+    provider.connect(&ConnectInfo::new("baaz", "0.0.0-test")).expect("the stand-in shakes hands");
+    let ack = provider
+        .send(Command::ResumeSession {
+            request_id: provider::new_request_id(),
+            session_id: "sess-stored".into(),
+            cursor: None,
+            metadata_only: false,
+            mode: None,
+            workspace: Some("/Users/ada/work/acme-web".into()),
+            env: vec![("BAAZ_WORKTREE_PATH".to_owned(), "/w/s-2".to_owned()), ("BAAZ_PORT".to_owned(), "41020".to_owned())],
+        })
+        .expect("the stored session re-opens");
+    assert!(matches!(ack, Ack::Session { .. }), "resumed: {ack:?}");
+    provider.shutdown();
+    let lines: Vec<String> = std::fs::read_to_string(&seen).expect("recorded").lines().map(str::to_owned).collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(lines, vec!["|".to_owned(), "/w/s-2|41020".to_owned()], "connect's child had none; the resumed one has them");
 }
