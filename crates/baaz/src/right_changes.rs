@@ -1,7 +1,9 @@
 //! D6's Changes screen in Baaz (docs/43 §2.6, §4): this session's files and
 //! the rest of the working tree, each row opening its diff in place; the
-//! commit box at the foot whose single primary follows the branch — Commit,
-//! Push, Create PR, then the PR card; Create PR as a pushed view. Over a
+//! commit box at the foot whose single primary follows the branch — Commit
+//! (the ticked files, or Amend), Push, Create PR, then the PR card; Create
+//! PR as a pushed view; New branch…, Fetch and Pull on the branch line
+//! (docs/82 7.2). Over a
 //! session's checkpoints the list can be another diff — This session, Last
 //! turn, one turn ([`crate::right_scopes`], docs/82 6.3) — with no commit
 //! box. The git itself is [`crate::git_ops`] and [`crate::checkpoints`];
@@ -13,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use aui::data::{checkbox, CheckboxIntent, CheckboxState};
 use aui::interact::{dropdown, row_list, DropdownItem, LIST_INSET};
 use aui::protocol::{ChangeKind, Diff, FileChange};
 use aui::workbench::{
@@ -52,6 +55,10 @@ pub(crate) enum GitBusy {
     Committing,
     Pushing,
     CreatingPr,
+    /// New branch… (`git switch -c`).
+    Branching,
+    Fetching,
+    Pulling,
 }
 
 /// The Create PR form (a pushed view on Changes).
@@ -96,6 +103,25 @@ pub(crate) struct ChangesUi {
     /// (docs/82 6.3, [`crate::right_scopes`]).
     pub scopes: crate::right_scopes::ScopeState,
     pub scroll: ScrollHandle,
+    /// The person's ticks over the default ([`ticked_paths`]), per path;
+    /// a path that leaves the tree drops its tick (docs/82 7.2).
+    pub ticks: std::collections::HashMap<String, bool>,
+    /// "Amend last commit" is ticked.
+    pub amend: bool,
+    /// The message Amend's fill replaced, put back on untick while the
+    /// person has not edited it.
+    pub amend_saved: Option<String>,
+    /// HEAD exists and no remote holds it: Amend may be offered (read
+    /// after each snapshot with changes, [`git_ops::head_amendable`]).
+    pub amendable: bool,
+    /// `origin` is a remote here: Fetch and Pull are offered.
+    pub has_remote: bool,
+    /// New branch…'s name field, while it stands open.
+    pub branch_field: Option<Entity<InputState>>,
+    /// A probe step put the fixture tree on this branch (captures read no
+    /// real tree).
+    #[cfg(feature = "probe")]
+    pub fixture_branch: Option<String>,
     /// Each open row's top inside the scroll content, for the sticky row.
     pub row_tops: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, (f32, f32)>>>,
 }
@@ -168,22 +194,60 @@ pub(crate) fn foot_for(tree: &GitTree, ui: &ChangesUi) -> Foot {
     }
 }
 
-/// What the commit box commits: the "This session" files when the session
-/// touched any, else "Other changes" — the heading's name and its paths
-/// (docs/81 F E3; ticking files comes in docs/82 7.2).
-pub(crate) fn commit_set(files: &[FileChange], session_edits: &[String], root: &Path) -> (&'static str, Vec<String>) {
-    let (session, other) = crate::right::partition_session_files(files, session_edits, root);
-    if !session.is_empty() {
-        ("This session", session.into_iter().map(|f| f.path).collect())
-    } else {
-        ("Other changes", other.into_iter().map(|f| f.path).collect())
+/// What the commit box commits (docs/82 7.2): the ticked files, in tree
+/// order. A path's tick is the person's when they set one, else the
+/// default — the open session's own files when it touched any (docs/81
+/// F E3), else every file.
+pub(crate) fn ticked_paths(files: &[FileChange], session_edits: &[String], root: &Path, ticks: &std::collections::HashMap<String, bool>) -> Vec<String> {
+    let (session, _) = crate::right::partition_session_files(files, session_edits, root);
+    let session: std::collections::HashSet<&str> = session.iter().map(|f| f.path.as_str()).collect();
+    let by_default = |path: &str| session.is_empty() || session.contains(path);
+    files.iter().filter(|f| ticks.get(&f.path).copied().unwrap_or_else(|| by_default(&f.path))).map(|f| f.path.clone()).collect()
+}
+
+/// Ticks for paths no longer in the tree go: a path that comes back takes
+/// the default again.
+fn keep_ticks_in(ticks: &mut std::collections::HashMap<String, bool>, files: &[FileChange]) {
+    let paths: std::collections::HashSet<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    ticks.retain(|path, _| paths.contains(path.as_str()));
+}
+
+/// The commit button's words: "Commit N files", or "Amend" (and their
+/// busy forms).
+fn commit_label(n: usize, amend: bool, busy: bool) -> String {
+    match (amend, busy) {
+        (true, true) => "Amending…".into(),
+        (true, false) => "Amend".into(),
+        (false, true) => "Committing…".into(),
+        (false, false) => format!("Commit {n} file{}", if n == 1 { "" } else { "s" }),
     }
 }
 
+/// Whether the branch is the default branch, or HEAD is detached: New
+/// branch… is offered (docs/82 7.2).
+fn on_default(tree: &GitTree, ui: &ChangesUi) -> bool {
+    tree.branch == default_of(ui) || tree.branch == "HEAD"
+}
+
 /// What follows the branch when nothing is waiting to push: "up to date",
-/// or how far the remote is ahead (no Pull here; docs/43 §2.6).
+/// or how far the remote is ahead. Where Pull is offered it carries that
+/// count instead and no note is drawn (docs/82 7.2).
 fn level_note(behind: u32) -> SharedString {
     if behind == 0 { "· up to date".into() } else { format!("· ↓{behind} on the remote").into() }
+}
+
+/// What a capture's Amend fills the message with (captures read no HEAD).
+const FIXTURE_HEAD_MESSAGE: &str = "Draw the Changes list from the working tree\n\nOne row per file, its diff in place.";
+
+/// Amend unticked: the message it replaced comes back while the person
+/// has not edited it.
+fn untick_amend(ui: &mut ChangesUi) {
+    ui.amend = false;
+    if let Some(saved) = ui.amend_saved.take() {
+        if !ui.message_edited {
+            ui.message = saved;
+        }
+    }
 }
 
 fn default_of(ui: &ChangesUi) -> &str {
@@ -193,7 +257,13 @@ fn default_of(ui: &ChangesUi) -> &str {
 impl RightPane {
     /// Back from the PR form to the changes list (Back, Cancel).
     fn close_pr_form(&mut self, root: &Path, cx: &mut Context<Self>) {
-        self.changes_ui(root).form = None;
+        self.update_changes(root, |ui| ui.form = None, cx);
+    }
+
+    /// Change `root`'s Changes state and redraw once: the screen's state
+    /// changes go through here.
+    pub(crate) fn update_changes(&mut self, root: &Path, change: impl FnOnce(&mut ChangesUi), cx: &mut Context<Self>) {
+        change(self.changes_ui(root));
         cx.notify();
     }
 
@@ -209,10 +279,23 @@ impl RightPane {
     /// default branch once, the unpushed count, the PR on its poll, a draft
     /// for a new change set. Every read runs in the background.
     pub(crate) fn changes_after_snapshot(&mut self, root: &Path, cx: &mut Context<Self>) {
+        #[cfg(feature = "probe")]
+        self.apply_fixture_branch(root);
         let Some(Some(tree)) = self.cache.git_for(root) else { return };
         let root_buf = root.to_path_buf();
         let ui = self.changes_ui(root);
+        // A path that left the tree drops its tick; a new one takes the
+        // default (docs/82 7.2).
+        keep_ticks_in(&mut ui.ticks, &tree.files);
         let need_default = ui.default_branch.is_none();
+        // Amend is offered only for a HEAD no remote holds. A capture reads
+        // no real repository: the fixture's own branch facts decide.
+        let captures = crate::runtime::captures();
+        let need_amendable = !tree.files.is_empty() && !captures;
+        if captures {
+            ui.amendable = tree.upstream.is_none() || tree.ahead > 0;
+            ui.has_remote = true;
+        }
         let need_unpushed = tree.upstream.is_none() && tree.files.is_empty();
         let checks_running = matches!(&ui.pr, Some(Some(pr)) if pr.checks.is_some_and(|c| c.2));
         let poll = if checks_running { CHECKS_POLL } else { PR_POLL };
@@ -220,30 +303,45 @@ impl RightPane {
         if need_pr {
             ui.pr_reading = true;
         }
-        if need_default || need_unpushed || need_pr {
+        if need_default || need_unpushed || need_pr || need_amendable {
             let root = root_buf.clone();
             cx.spawn(async move |this, cx| {
-                let (default, unpushed, pr) = cx
+                let (default, remote, unpushed, pr, amendable) = cx
                     .background_executor()
                     .spawn(async move {
                         let default = git_ops::default_branch(&root);
+                        let remote = (need_default && !captures).then(|| git_ops::has_origin(&root));
                         let unpushed = need_unpushed.then(|| git_ops::unpushed_without_upstream(&root, &default));
                         let pr = need_pr.then(|| git_ops::pr_for_branch(&root));
-                        (default, unpushed, pr)
+                        let amendable = need_amendable.then(|| git_ops::head_amendable(&root));
+                        (default, remote, unpushed, pr, amendable)
                     })
                     .await;
                 let _ = this.update(cx, |this: &mut Self, cx| {
-                    let ui = this.changes_ui(&root_buf);
-                    ui.default_branch = Some(default);
-                    if let Some(n) = unpushed {
-                        ui.unpushed_without_upstream = Some(n);
-                    }
-                    if let Some(pr) = pr {
-                        ui.pr = Some(pr);
-                        ui.pr_read_at = Some(Instant::now());
-                        ui.pr_reading = false;
-                    }
-                    cx.notify();
+                    this.update_changes(
+                        &root_buf,
+                        |ui| {
+                            ui.default_branch = Some(default);
+                            if let Some(remote) = remote {
+                                ui.has_remote = remote;
+                            }
+                            if let Some(n) = unpushed {
+                                ui.unpushed_without_upstream = Some(n);
+                            }
+                            if let Some(pr) = pr {
+                                ui.pr = Some(pr);
+                                ui.pr_read_at = Some(Instant::now());
+                                ui.pr_reading = false;
+                            }
+                            if let Some(amendable) = amendable {
+                                ui.amendable = amendable;
+                                if !amendable && ui.amend {
+                                    untick_amend(ui);
+                                }
+                            }
+                        },
+                        cx,
+                    );
                 });
             })
             .detach();
@@ -277,7 +375,8 @@ impl RightPane {
                 tree.files.len()
             );
         }
-        if own_words || ui.drafting || ui.drafted_for == Some(key) {
+        // Amend's message is HEAD's: no draft lands over it.
+        if own_words || ui.amend || ui.drafting || ui.drafted_for == Some(key) {
             return;
         }
         // No session's provider yet (the first snapshot can land before the
@@ -428,18 +527,23 @@ impl RightPane {
         cx.notify();
     }
 
-    /// Commit the files under the heading the box commits from
-    /// ([`commit_set`]) with the message — never the rest of the tree.
+    /// Commit exactly the ticked files ([`ticked_paths`]) with the message
+    /// — never the rest of the tree — or, with "Amend last commit" ticked,
+    /// take them into HEAD ([`git_ops::amend_paths`]; no ticked file
+    /// rewrites the message alone).
     pub(crate) fn commit_changes(&mut self, root: &Path, cx: &mut Context<Self>) {
         self.settle_commit_message(root, cx);
         let session_edits = self.session_edits(cx);
-        let paths = match self.cache.git_for(root) {
-            Some(Some(tree)) => commit_set(&tree.files, &session_edits, root).1,
-            _ => Vec::new(),
-        };
+        let tree = self.cache.git_for(root).flatten();
         let ui = self.changes_ui(root);
+        let paths = tree.map(|tree| ticked_paths(&tree.files, &session_edits, root, &ui.ticks)).unwrap_or_default();
         let message = ui.message.trim().to_string();
-        if message.is_empty() || ui.busy.is_some() || paths.is_empty() {
+        let amend = ui.amend && ui.amendable;
+        if message.is_empty() || ui.busy.is_some() || (paths.is_empty() && !amend) {
+            return;
+        }
+        if crate::runtime::captures() {
+            crate::baaz_log!("changes: a capture commits nothing");
             return;
         }
         ui.hook_failure = None;
@@ -447,8 +551,10 @@ impl RightPane {
         let root = root.to_path_buf();
         cx.spawn(async move |this, cx| {
             let r = root.clone();
-            let outcome =
-                cx.background_executor().spawn(async move { git_ops::commit_paths(&r, &message, &paths) }).await;
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { if amend { git_ops::amend_paths(&r, &message, &paths) } else { git_ops::commit_paths(&r, &message, &paths) } })
+                .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
                 let ui = this.changes_ui(&root);
                 match outcome {
@@ -457,6 +563,9 @@ impl RightPane {
                         ui.message_edited = false;
                         ui.drafted_for = None;
                         ui.unpushed_without_upstream = None;
+                        ui.amend = false;
+                        ui.amend_saved = None;
+                        ui.ticks.clear();
                     }
                     CommitOutcome::HookFailed(lines) => ui.hook_failure = Some(lines),
                     CommitOutcome::Failed(reason) => this.toast("Commit", reason, cx),
@@ -471,8 +580,156 @@ impl RightPane {
     /// A git operation on `root`'s Changes box starts (`Some`) or ends
     /// (`None`): the box's buttons and its spinner read it.
     fn set_git_busy(&mut self, root: &Path, busy: Option<GitBusy>, cx: &mut Context<Self>) {
-        self.changes_ui(root).busy = busy;
-        cx.notify();
+        self.update_changes(root, |ui| ui.busy = busy, cx);
+    }
+
+    /// Tick or untick `paths` for the commit (a row's box, or a section's
+    /// tick-all): the person's choice over the default from now on.
+    pub(crate) fn set_ticks(&mut self, root: &Path, paths: Vec<String>, on: bool, cx: &mut Context<Self>) {
+        self.update_changes(
+            root,
+            |ui| {
+                for path in paths {
+                    ui.ticks.insert(path, on);
+                }
+            },
+            cx,
+        );
+    }
+
+    /// "Amend last commit" ticked or not. Ticked, the message becomes
+    /// HEAD's unless the person wrote their own; unticked, the message it
+    /// replaced comes back if still untouched.
+    pub(crate) fn set_amend(&mut self, root: &Path, on: bool, cx: &mut Context<Self>) {
+        if !on {
+            self.update_changes(root, untick_amend, cx);
+            return;
+        }
+        let ui = self.changes_ui(root);
+        if !ui.amendable || ui.amend {
+            return;
+        }
+        let own_words = ui.message_edited || ui.editor.is_some();
+        self.update_changes(root, |ui| ui.amend = true, cx);
+        let root = root.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let r = root.clone();
+            let head = if crate::runtime::captures() {
+                Some(FIXTURE_HEAD_MESSAGE.to_owned())
+            } else {
+                cx.background_executor().spawn(async move { git_ops::head_message(&r) }).await
+            };
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                this.update_changes(
+                    &root,
+                    |ui| {
+                        if let Some(head) = head.filter(|_| ui.amend && !own_words && !ui.message_edited) {
+                            ui.amend_saved = Some(std::mem::replace(&mut ui.message, head));
+                        }
+                    },
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    /// New branch…: the name field opens, prefilled with the branch prefix
+    /// (Settings › Worktrees), focused; ⏎ creates, Esc cancels.
+    pub(crate) fn open_new_branch(&mut self, root: &Path, prefix: String, window: &mut Window, cx: &mut Context<Self>) {
+        let field = cx.new(|cx| {
+            let mut s = InputState::new(window, cx).placeholder("Branch name");
+            s.set_accessibility(gpui_kit::base::input::InputAccessibility::new(Some(gpui::Role::TextInput)).with_label(Some("New branch name".into())));
+            s.set_value(&prefix, window, cx);
+            s
+        });
+        let focus = gpui::Focusable::focus_handle(field.read(cx), cx);
+        window.focus(&focus, cx);
+        self.update_changes(root, |ui| ui.branch_field = Some(field), cx);
+    }
+
+    /// Esc, or Cancel: the field closes and nothing changed.
+    pub(crate) fn cancel_new_branch(&mut self, root: &Path, cx: &mut Context<Self>) {
+        self.update_changes(root, |ui| ui.branch_field = None, cx);
+    }
+
+    /// ⏎ in the field: `git switch -c <name>`, the working tree carried. A
+    /// name git refuses, or one that exists, is a toast in git's words, the
+    /// field left open and nothing changed.
+    pub(crate) fn create_new_branch(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let ui = self.changes_ui(root);
+        let Some(field) = ui.branch_field.clone() else { return };
+        if ui.busy.is_some() {
+            return;
+        }
+        let name = field.read(cx).value().trim().to_string();
+        if crate::runtime::captures() {
+            crate::baaz_log!("changes: a capture creates no branch");
+            return;
+        }
+        self.set_git_busy(root, Some(GitBusy::Branching), cx);
+        let root = root.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let r = root.clone();
+            let result = cx.background_executor().spawn(async move { git_ops::create_branch(&r, &name) }).await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                match result {
+                    Ok(()) => {
+                        let ui = this.changes_ui(&root);
+                        ui.branch_field = None;
+                        ui.pr = None;
+                        ui.pr_read_at = None;
+                        ui.unpushed_without_upstream = None;
+                    }
+                    Err(reason) => this.toast("New branch", reason, cx),
+                }
+                this.refresh_now(cx);
+                this.set_git_busy(&root, None, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Fetch (`git fetch --prune origin`) or Pull (`git pull --ff-only`),
+    /// off the UI thread, then the tree is read again. A refusal is a toast
+    /// in git's words; a pull git refuses changed nothing. Never in a
+    /// capture.
+    pub(crate) fn sync_remote(&mut self, root: &Path, pull: bool, cx: &mut Context<Self>) {
+        if self.changes_ui(root).busy.is_some() {
+            return;
+        }
+        if crate::runtime::captures() {
+            crate::baaz_log!("changes: a capture reaches no remote");
+            return;
+        }
+        self.set_git_busy(root, Some(if pull { GitBusy::Pulling } else { GitBusy::Fetching }), cx);
+        let root = root.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let r = root.clone();
+            let result = cx.background_executor().spawn(async move { if pull { git_ops::pull_ff_only(&r) } else { git_ops::fetch(&r) } }).await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                this.changes_ui(&root).pr_read_at = None;
+                if let Err(reason) = result {
+                    this.toast(if pull { "Pull" } else { "Fetch" }, reason, cx);
+                }
+                this.refresh_now(cx);
+                this.set_git_busy(&root, None, cx);
+            });
+        })
+        .detach();
+    }
+
+    #[cfg(feature = "probe")]
+    /// `changes-branch:<name>`'s pane half: the capture's fixture tree on
+    /// `name`, tracking `origin/<name>` and level with it.
+    fn apply_fixture_branch(&mut self, root: &Path) {
+        let Some(branch) = self.changes_ui(root).fixture_branch.clone() else { return };
+        if let Some(Some(tree)) = self.cache.git.as_mut().filter(|slot| slot.root == root).map(|slot| &mut slot.value) {
+            tree.upstream = Some(format!("origin/{branch}"));
+            tree.branch = branch;
+            tree.ahead = 0;
+            tree.behind = 0;
+        }
     }
 
     /// Push the branch (setting its upstream the first time).
@@ -622,6 +879,66 @@ impl RightPane {
     }
 
     #[cfg(feature = "probe")]
+    /// `tick:`'s pane half: a changed row's tick set. No tree, or a path
+    /// that is not a changed row, is an `Err`.
+    pub(crate) fn step_tick(&mut self, root: &Path, path: &str, on: bool, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let tree = self.cache.git_for(root).flatten().ok_or("no git tree read for the Changes pane")?;
+        tree.change(path).ok_or_else(|| format!("no changed row `{path}`"))?;
+        self.set_ticks(root, vec![path.to_owned()], on, cx);
+        Ok(())
+    }
+
+    #[cfg(feature = "probe")]
+    /// `changes-branch:`'s pane half: only a capture's fixture tree moves.
+    pub(crate) fn step_fixture_branch(&mut self, root: &Path, name: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if !crate::runtime::captures() {
+            return Err("only a capture's fixture tree can change branch".into());
+        }
+        if name.is_empty() {
+            return Err("no branch name".into());
+        }
+        self.changes_ui(root).fixture_branch = Some(name.to_owned());
+        self.refresh_now(cx);
+        match self.cache.git_for(root).flatten() {
+            Some(tree) if tree.branch == name => Ok(()),
+            _ => Err("the fixture tree was not read: is the pane on Changes?".into()),
+        }
+    }
+
+    #[cfg(feature = "probe")]
+    /// `new-branch`'s pane half: the field open (idempotent). Not on the
+    /// default branch, or a foot with no branch line, is an `Err`.
+    pub(crate) fn step_new_branch(&mut self, root: &Path, prefix: String, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let tree = self.cache.git_for(root).flatten().ok_or("no git tree read for the Changes pane")?;
+        let ui = self.changes_ui(root);
+        if !on_default(&tree, ui) {
+            return Err(format!("`{}` is not the default branch: New branch… is not offered", tree.branch));
+        }
+        if !matches!(foot_for(&tree, ui), Foot::Commit | Foot::Push { .. } | Foot::Level) {
+            return Err("the foot has no branch line".into());
+        }
+        if ui.branch_field.is_none() {
+            self.open_new_branch(root, prefix, window, cx);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "probe")]
+    /// `amend:`'s pane half (a setter). No changes, or Amend not offered,
+    /// is an `Err`.
+    pub(crate) fn step_amend(&mut self, root: &Path, on: bool, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let tree = self.cache.git_for(root).flatten().ok_or("no git tree read for the Changes pane")?;
+        if tree.files.is_empty() {
+            return Err("no changes: there is no commit box".into());
+        }
+        if !self.changes_ui(root).amendable {
+            return Err("Amend is not offered: the last commit is on a remote".into());
+        }
+        self.set_amend(root, on, cx);
+        Ok(())
+    }
+
+    #[cfg(feature = "probe")]
     /// `changes-open`'s pane half: open the changed row `path` (idempotent).
     /// Not a changed row is an `Err`; a row already open succeeds.
     pub(crate) fn open_change_row(&mut self, root: &Path, path: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
@@ -723,6 +1040,44 @@ impl Harness {
         }
         self.select_right(crate::layout::RightKind::Changes, cx);
         self.with_right_pane(cx, |pane, cx| pane.step_scope(&root, scope, cx))
+    }
+
+    #[cfg(feature = "probe")]
+    /// `tick:<path>` / `untick:<path>`: that row's commit tick (a setter).
+    pub(crate) fn step_changes_tick(&mut self, rest: &str, on: bool, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let (root, _) = self.right_project(cx).ok_or("no project for the right pane")?;
+        self.select_right(crate::layout::RightKind::Changes, cx);
+        self.with_right_pane(cx, |pane, cx| pane.step_tick(&root, rest.trim(), on, cx))
+    }
+
+    #[cfg(feature = "probe")]
+    /// `changes-branch:<name>`: the capture's fixture tree on that branch.
+    pub(crate) fn step_changes_branch(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let (root, _) = self.right_project(cx).ok_or("no project for the right pane")?;
+        self.select_right(crate::layout::RightKind::Changes, cx);
+        self.with_right_pane(cx, |pane, cx| pane.step_fixture_branch(&root, rest.trim(), cx))
+    }
+
+    #[cfg(feature = "probe")]
+    /// `new-branch`: New branch…'s field open on the Changes foot.
+    pub(crate) fn step_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let (root, _) = self.right_project(cx).ok_or("no project for the right pane")?;
+        self.select_right(crate::layout::RightKind::Changes, cx);
+        let prefix = <crate::layout::Layout as crate::layout::LayoutGlobal>::get(cx).worktree_branch_prefix();
+        self.with_right_pane(cx, |pane, cx| pane.step_new_branch(&root, prefix, window, cx))
+    }
+
+    #[cfg(feature = "probe")]
+    /// `amend:<on|off>`: "Amend last commit" set.
+    pub(crate) fn step_changes_amend(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let on = match rest.trim() {
+            "on" => true,
+            "off" => false,
+            other => return Err(format!("`{other}` is not on or off")),
+        };
+        let (root, _) = self.right_project(cx).ok_or("no project for the right pane")?;
+        self.select_right(crate::layout::RightKind::Changes, cx);
+        self.with_right_pane(cx, |pane, cx| pane.step_amend(&root, on, cx))
     }
 
     #[cfg(feature = "probe")]
@@ -867,6 +1222,10 @@ pub(crate) fn changes_screen(
         Some(_) => scopes.revert_turn().map(Some),
     };
 
+    // docs/82 7.2: in All changes each row and section caption carries a
+    // tick for the commit; the other scopes have no commit box.
+    let ticked: Option<std::collections::HashSet<String>> = scoped.is_none().then(|| ticked_paths(&tree.files, session_edits, root, &ui.ticks).into_iter().collect());
+
     let mut list = row_list("right-changes-list").gap(Pixels::ZERO).label("Changes");
     let mut ix = 0usize;
     let mut sections: Vec<(SharedString, Vec<FileChange>)> = Vec::new();
@@ -885,7 +1244,34 @@ pub(crate) fn changes_screen(
     let mut first = true;
     let mut opened: Vec<(String, AnyElement)> = Vec::new();
     for (label, files) in sections {
-        list = list.item_static(ix, changes_caption(SharedString::from(format!("right-changes-cap-{ix}")), label, Some(files.len()), first, cx));
+        let caption = changes_caption(SharedString::from(format!("right-changes-cap-{ix}")), label.clone(), Some(files.len()), first, cx);
+        // An empty section ("This session 0") has nothing to tick: its
+        // caption keeps the tick column empty.
+        let caption: AnyElement = match &ticked {
+            Some(_) if files.is_empty() => h_flex().w_full().items_end().child(tick_slot(div())).child(div().flex_1().min_w(px(0.0)).child(caption)).into_any_element(),
+            Some(ticked) => {
+                let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+                let on = paths.iter().filter(|p| ticked.contains(*p)).count();
+                let state = if on == 0 { CheckboxState::Off } else if on == paths.len() { CheckboxState::On } else { CheckboxState::Mixed };
+                let r = root_buf.clone();
+                let tick = cx.listener(move |this: &mut RightPane, intent: &CheckboxIntent, _, cx| {
+                    let CheckboxIntent::Set(next) = intent;
+                    this.set_ticks(&r, paths.clone(), next.checked(), cx);
+                });
+                h_flex()
+                    .w_full()
+                    .items_end()
+                    .child(tick_slot(
+                        checkbox(SharedString::from(format!("right-changes-tick-all-{ix}")), state, false)
+                            .accessibility_label(format!("Commit every file in {label}"))
+                            .on_intent(move |intent, window, cx| tick(&intent, window, cx)),
+                    ).pb(px(scale::SP_2 + scale::SP_1)))
+                    .child(div().flex_1().min_w(px(0.0)).child(caption))
+                    .into_any_element()
+            }
+            None => caption.into_any_element(),
+        };
+        list = list.item_static(ix, caption);
         first = false;
         ix += 1;
         for change in files {
@@ -929,9 +1315,29 @@ pub(crate) fn changes_screen(
                     .child(div().flex_none().reveal_on_hover(false).child(button))
                     .into_any_element()
             };
-            let row = with_revert(row_el(id.clone(), cx), "row", cx);
+            // docs/82 7.2: the row's tick for the commit, before it.
+            let with_tick = |row: AnyElement, slot: &str, cx: &mut Context<RightPane>| -> AnyElement {
+                let Some(ticked) = &ticked else { return row };
+                let on = ticked.contains(&change.path);
+                let (r, path) = (root_buf.clone(), change.path.clone());
+                let tick = cx.listener(move |this: &mut RightPane, intent: &CheckboxIntent, _, cx| {
+                    let CheckboxIntent::Set(next) = intent;
+                    this.set_ticks(&r, vec![path.clone()], next.checked(), cx);
+                });
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .child(tick_slot(
+                        checkbox(SharedString::from(format!("right-changes-tick-{slot}:{}", change.path)), if on { CheckboxState::On } else { CheckboxState::Off }, false)
+                            .accessibility_label(format!("Commit {}", change.path))
+                            .on_intent(move |intent, window, cx| tick(&intent, window, cx)),
+                    ))
+                    .child(div().flex_1().min_w(px(0.0)).child(row))
+                    .into_any_element()
+            };
+            let row = with_tick(with_revert(row_el(id.clone(), cx), "row", cx), "row", cx);
             if open {
-                opened.push((change.path.clone(), with_revert(row_el(SharedString::from(format!("right-changes-sticky:{}", change.path)), cx), "sticky", cx)));
+                opened.push((change.path.clone(), with_tick(with_revert(row_el(SharedString::from(format!("right-changes-sticky:{}", change.path)), cx), "sticky", cx), "sticky", cx)));
             }
             // `Some(None)`: read, but there is no text diff (a binary file).
             let unreadable = matches!(diffs.get(&change.path), Some(None));
@@ -1011,7 +1417,8 @@ pub(crate) fn changes_screen(
 
     // The commit box, Push and the PR act on the working tree: All changes
     // only (rule 13).
-    let foot_el = scoped.is_none().then(|| foot_element(ui, &root_buf, &tree, session_edits, foot, agent, window, cx));
+    let n_ticked = ticked.as_ref().map_or(0, |t| t.len());
+    let foot_el = scoped.is_none().then(|| foot_element(ui, &root_buf, &tree, n_ticked, foot, agent, window, cx));
     let clean = match scoped {
         Some(list) => list.files.is_empty(),
         None => tree.files.is_empty(),
@@ -1118,6 +1525,12 @@ fn scope_row(root: &Path, labels: Vec<SharedString>, choices: Vec<crate::right_s
         .into_any_element()
 }
 
+/// The tick's column before a row or caption: the box centred in a
+/// `SP_6` slot.
+fn tick_slot(tick: impl IntoElement) -> gpui::Div {
+    h_flex().flex_none().w(px(scale::SP_6)).justify_center().child(tick)
+}
+
 fn loading_body(cx: &Context<RightPane>) -> gpui::Div {
     v_flex().pt(px(scale::SP_2)).px(px(LIST_INSET)).child(changes_caption("right-changes-loading-cap", "This session", None, true, cx)).children(SKELETON_WIDTHS.iter().map(|w| {
         h_flex()
@@ -1133,27 +1546,27 @@ fn loading_body(cx: &Context<RightPane>) -> gpui::Div {
     }))
 }
 
-/// The commit box (or the hook note over it, or the PR card).
+/// The commit box (or the hook note over it, or the PR card). `ticked`:
+/// how many files Commit takes. The branch line carries New branch… on the
+/// default branch, Fetch and Pull where a remote exists (docs/82 7.2).
 #[allow(clippy::too_many_arguments)]
-fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[String], foot: Foot, agent: &str, window: &mut Window, cx: &mut Context<RightPane>) -> AnyElement {
+fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, ticked: usize, foot: Foot, agent: &str, window: &mut Window, cx: &mut Context<RightPane>) -> AnyElement {
     let busy = ui.busy;
     let hook = ui.hook_failure.clone();
     let editor = ui.editor.clone();
     let message = ui.message.clone();
     let drafting = ui.drafting;
     let root_buf = root.to_path_buf();
+    let default = on_default(tree, ui);
+    // Pull carries how far behind the branch is: the branch's own suffix
+    // then leaves it out, so the line fits a narrow pane.
+    let pull = pull_offered(ui, tree);
+    let behind = if pull { 0 } else { tree.behind };
+    let level = (!pull).then(|| level_note(tree.behind));
     match foot {
         Foot::Commit => {
-            // The count is what Commit takes: the heading's files only.
-            let (heading, set) = commit_set(&tree.files, session_edits, root);
-            let n = set.len();
-            let label = if busy == Some(GitBusy::Committing) {
-                "Committing…".to_string()
-            } else if heading == "This session" && n < tree.files.len() {
-                format!("Commit {n} file{} from this session", if n == 1 { "" } else { "s" })
-            } else {
-                format!("Commit {n} file{}", if n == 1 { "" } else { "s" })
-            };
+            let amend = ui.amend && ui.amendable;
+            let label = commit_label(ticked, amend, busy == Some(GitBusy::Committing));
             let editing = editor.is_some();
             let focused = editor.as_ref().is_some_and(|e| gpui::Focusable::focus_handle(e.read(cx), cx).is_focused(window));
             let message_el: AnyElement = match editor {
@@ -1176,13 +1589,15 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
                     commit_message_view("right-commit-message", &shown, cx).on_click(cx.listener(move |this, _, window, cx| this.edit_commit_message(&r, window, cx))).into_any_element()
                 }
             };
-            let disabled = message.trim().is_empty() && !editing;
+            // Nothing ticked commits nothing; Amend with nothing ticked
+            // rewrites the message alone.
+            let disabled = (message.trim().is_empty() && !editing) || (ticked == 0 && !amend);
             let r = root_buf.clone();
             let commit = primary_action("right-commit", label, None, busy == Some(GitBusy::Committing), disabled || busy.is_some(), cx)
                 .when(!disabled && busy.is_none(), |b| b.on_click(cx.listener(move |this, _, _, cx| this.commit_changes(&r, cx))));
-            let box_el = commit_frame(focused, cx)
-                .child(message_el)
-                .child(h_flex().h(px(scale::H_MD)).gap(px(scale::SP_2)).items_center().child(branch_label(&tree.branch, ahead_behind(tree.ahead, tree.behind), cx)).child(div().flex_1()).child(commit));
+            let amend_el = ui.amendable.then(|| amend_row(amend, &root_buf, cx));
+            let line = branch_line(ui, &root_buf, tree, ahead_behind(tree.ahead, behind), default, Some(commit.into_any_element()), window, cx);
+            let box_el = commit_frame(focused, cx).child(message_el).children(amend_el).child(line);
             match hook {
                 Some(lines) => {
                     let who = agent;
@@ -1190,10 +1605,10 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
                     let l1 = lines.clone();
                     let l2 = lines.clone();
                     let actions = vec![
-                        text_action("right-hook-output", "Show full output", None, 24.0, cx)
+                        text_action("right-hook-output", "Show full output", None, scale::H_SM, cx)
                             .on_click(cx.listener(move |this, _, _, cx| this.show_hook_output(&r1, l1.clone(), cx)))
                             .into_any_element(),
-                        text_action("right-hook-ask", format!("Ask {who} to fix it"), None, 24.0, cx)
+                        text_action("right-hook-ask", format!("Ask {who} to fix it"), None, scale::H_SM, cx)
                             .on_click(cx.listener(move |this, _, _, cx| this.ask_to_fix_hook(&l2, cx)))
                             .into_any_element(),
                     ];
@@ -1205,39 +1620,148 @@ fn foot_element(ui: &ChangesUi, root: &Path, tree: &GitTree, session_edits: &[St
         Foot::Push { ahead } => {
             let r = root_buf.clone();
             let suffix = format!("· {ahead} commit{} not pushed", if ahead == 1 { "" } else { "s" });
-            commit_frame(false, cx)
-                .child(
-                    h_flex()
-                        .h(px(scale::H_MD))
-                        .items_center()
-                        .child(branch_label(&tree.branch, Some(suffix.into()), cx))
-                        .child(div().flex_1())
-                        .child(primary_action("right-push", "Push", None, busy == Some(GitBusy::Pushing), busy.is_some(), cx).on_click(cx.listener(move |this, _, _, cx| this.push_branch(&r, cx)))),
-                )
-                .into_any_element()
+            // On the default branch the foot leads with New branch… and
+            // Push names where it goes: never a silent push to the default
+            // branch (docs/82 7.2).
+            let primary = if default {
+                h_flex()
+                    .gap(px(scale::SP_2))
+                    .items_center()
+                    .child(
+                        text_action("right-push", format!("Push to {}", tree.branch), None, scale::H_SM, cx)
+                            .when(busy.is_none(), |b| b.on_click(cx.listener(move |this, _, _, cx| this.push_branch(&r, cx)))),
+                    )
+                    .child(new_branch_action(&root_buf, true, busy, cx))
+                    .into_any_element()
+            } else {
+                primary_action("right-push", "Push", None, busy == Some(GitBusy::Pushing), busy.is_some(), cx).on_click(cx.listener(move |this, _, _, cx| this.push_branch(&r, cx))).into_any_element()
+            };
+            commit_frame(false, cx).child(branch_line(ui, &root_buf, tree, Some(suffix.into()), false, Some(primary), window, cx)).into_any_element()
         }
         Foot::CreatePr => {
             let r = root_buf.clone();
-            commit_frame(false, cx)
-                .child(
-                    h_flex()
-                        .h(px(scale::H_MD))
-                        .items_center()
-                        .child(branch_label(&tree.branch, Some(level_note(tree.behind)), cx))
-                        .child(div().flex_1())
-                        .child(primary_action("right-create-pr", "Create PR", Some(IconName::PullRequest), false, busy.is_some(), cx).on_click(cx.listener(move |_, _, _, cx| cx.emit(RightPaneEvent::OpenPrForm(r.clone()))))),
-                )
-                .into_any_element()
+            let create = primary_action("right-create-pr", "Create PR", Some(IconName::PullRequest), false, busy.is_some(), cx).on_click(cx.listener(move |_, _, _, cx| cx.emit(RightPaneEvent::OpenPrForm(r.clone()))));
+            commit_frame(false, cx).child(branch_line(ui, &root_buf, tree, level, false, Some(create.into_any_element()), window, cx)).into_any_element()
         }
-        Foot::Level => commit_frame(false, cx)
-            .child(h_flex().h(px(scale::H_MD)).items_center().child(branch_label(&tree.branch, Some(level_note(tree.behind)), cx)))
-            .into_any_element(),
+        Foot::Level => commit_frame(false, cx).child(branch_line(ui, &root_buf, tree, level, default, None, window, cx)).into_any_element(),
         Foot::Pr(pr) => {
             let url = pr.url.clone();
-            let view = text_action("right-pr-view", "View", Some(IconName::External), 24.0, cx).on_click(cx.listener(move |_, _, _, cx| cx.emit(RightPaneEvent::ViewPullRequest(url.clone()))));
+            let view = text_action("right-pr-view", "View", Some(IconName::External), scale::H_SM, cx).on_click(cx.listener(move |_, _, _, cx| cx.emit(RightPaneEvent::ViewPullRequest(url.clone()))));
             pr_card("right-pr", pr.title.clone(), pr.number, pr_state(pr.state), pr.checks, view, cx).into_any_element()
         }
     }
+}
+
+/// The foot's branch line: the branch and `suffix`, then New branch… (a
+/// quiet action when `new_branch`), Fetch and — behind the upstream —
+/// Pull where a remote exists, then `primary` at the right. While New
+/// branch…'s field stands open, the field takes the line.
+#[allow(clippy::too_many_arguments)]
+fn branch_line(ui: &ChangesUi, root: &Path, tree: &GitTree, suffix: Option<SharedString>, new_branch: bool, primary: Option<AnyElement>, window: &mut Window, cx: &mut Context<RightPane>) -> AnyElement {
+    if let Some(field) = ui.branch_field.clone() {
+        return branch_field_row(field, root, ui.busy, window, cx);
+    }
+    let busy = ui.busy;
+    // The quiet actions carry their own padding: no gap between them, so
+    // the branch and its counts keep their room in a narrow pane.
+    let mut line = h_flex().h(px(scale::H_MD)).items_center().child(branch_label(&tree.branch, suffix, cx).mr(px(scale::SP_2)));
+    if new_branch {
+        line = line.child(new_branch_action(root, false, busy, cx));
+    }
+    if ui.has_remote || tree.upstream.is_some() {
+        let r = root.to_path_buf();
+        let fetch_label = if busy == Some(GitBusy::Fetching) { "Fetching…" } else { "Fetch" };
+        line = line.child(
+            text_action("right-changes-fetch", fetch_label, None, scale::H_SM, cx)
+                .aria_label("Fetch from origin")
+                .when(busy.is_none(), |b| b.on_click(cx.listener(move |this, _, _, cx| this.sync_remote(&r, false, cx)))),
+        );
+        if pull_offered(ui, tree) {
+            let r = root.to_path_buf();
+            let pull_label = if busy == Some(GitBusy::Pulling) { "Pulling…".to_owned() } else { format!("Pull ↓{}", tree.behind) };
+            line = line.child(
+                text_action("right-changes-pull", pull_label, None, scale::H_SM, cx)
+                    .aria_label(format!("Pull {} commit{} (fast-forward only)", tree.behind, if tree.behind == 1 { "" } else { "s" }))
+                    .when(busy.is_none(), |b| b.on_click(cx.listener(move |this, _, _, cx| this.sync_remote(&r, true, cx)))),
+            );
+        }
+    }
+    line.child(div().flex_1().min_w(px(scale::SP_2))).children(primary).into_any_element()
+}
+
+/// Whether the branch line offers Pull: a remote, an upstream, and the
+/// branch behind it.
+fn pull_offered(ui: &ChangesUi, tree: &GitTree) -> bool {
+    (ui.has_remote || tree.upstream.is_some()) && tree.upstream.is_some() && tree.behind > 0
+}
+
+/// "New branch…": a quiet action on the branch line, or the foot's primary
+/// (`primary`) where a push would land on the default branch.
+fn new_branch_action(root: &Path, primary: bool, busy: Option<GitBusy>, cx: &mut Context<RightPane>) -> AnyElement {
+    let r = root.to_path_buf();
+    let open = cx.listener(move |this: &mut RightPane, _: &gpui::ClickEvent, window, cx| {
+        let prefix = <crate::layout::Layout as crate::layout::LayoutGlobal>::get(cx).worktree_branch_prefix();
+        this.open_new_branch(&r, prefix, window, cx);
+    });
+    if primary {
+        primary_action("right-new-branch-open", "New branch…", Some(IconName::Branch), false, busy.is_some(), cx).when(busy.is_none(), |b| b.on_click(open)).into_any_element()
+    } else {
+        text_action("right-new-branch-open", "New branch…", None, scale::H_SM, cx).when(busy.is_none(), |b| b.on_click(open)).into_any_element()
+    }
+}
+
+/// New branch…'s name field on the branch line: ⏎ creates the branch, Esc
+/// (or Cancel) closes it. The keys are caught before the input sees them.
+fn branch_field_row(field: Entity<InputState>, root: &Path, busy: Option<GitBusy>, window: &mut Window, cx: &mut Context<RightPane>) -> AnyElement {
+    let focused = gpui::Focusable::focus_handle(field.read(cx), cx).is_focused(window);
+    let (keys_root, cancel_root) = (root.to_path_buf(), root.to_path_buf());
+    let keys = cx.listener(move |this: &mut RightPane, e: &gpui::KeyDownEvent, _, cx| match e.keystroke.key.as_str() {
+        "enter" => {
+            cx.stop_propagation();
+            this.create_new_branch(&keys_root, cx);
+        }
+        "escape" => {
+            cx.stop_propagation();
+            this.cancel_new_branch(&keys_root, cx);
+        }
+        _ => {}
+    });
+    let input = gpui_kit::base::input::Input::new(&field);
+    h_flex()
+        .gap(px(scale::SP_2))
+        .items_center()
+        .child(div().id("right-new-branch").flex_1().min_w(px(0.0)).capture_key_down(keys).child(well_input(input, scale::SP_7, focused, cx)))
+        .child(
+            text_action("right-new-branch-cancel", if busy == Some(GitBusy::Branching) { "Creating…" } else { "Cancel" }, None, scale::H_SM, cx)
+                .aria_label("Cancel the new branch")
+                .on_click(cx.listener(move |this, _, _, cx| this.cancel_new_branch(&cancel_root, cx))),
+        )
+        .into_any_element()
+}
+
+/// "Amend last commit" in the commit box, shown only while HEAD is not on
+/// a remote ([`git_ops::head_amendable`]).
+fn amend_row(on: bool, root: &Path, cx: &mut Context<RightPane>) -> AnyElement {
+    let r = root.to_path_buf();
+    let flip = cx.listener(move |this: &mut RightPane, intent: &CheckboxIntent, _, cx| {
+        let CheckboxIntent::Set(next) = intent;
+        this.set_amend(&r, next.checked(), cx);
+    });
+    let p = cx.aui().colors;
+    h_flex()
+        .h(px(scale::H_SM))
+        .px(px(scale::SP_2))
+        .gap(px(scale::SP_3))
+        .items_center()
+        .text_role(TextRole::Body)
+        .text_color(p.fg_muted)
+        .child(
+            checkbox("right-commit-amend", if on { CheckboxState::On } else { CheckboxState::Off }, false)
+                .accessibility_label("Amend last commit")
+                .on_intent(move |intent, window, cx| flip(&intent, window, cx)),
+        )
+        .child("Amend last commit")
+        .into_any_element()
 }
 
 /// The Create PR pushed view: its row and its body (docs/43 §2.6). `menu`:
@@ -1301,10 +1825,15 @@ fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, menu: bool, window:
             cx,
         ))
         .child(draft_checkbox("right-pr-draft", draft, cx).on_click(cx.listener(move |this, _, _, cx| {
-            if let Some(f) = this.changes_ui(&draft_root).form.as_mut() {
-                f.draft = !f.draft;
-            }
-            cx.notify();
+            this.update_changes(
+                &draft_root,
+                |ui| {
+                    if let Some(f) = ui.form.as_mut() {
+                        f.draft = !f.draft;
+                    }
+                },
+                cx,
+            );
         })));
     let cancel_root = root.to_path_buf();
     let create_root = root.to_path_buf();
@@ -1325,18 +1854,62 @@ fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, menu: bool, window:
 
 #[cfg(test)]
 mod tests {
-    /// docs/82 0.13: the box commits the "This session" files when the
-    /// session touched any, else "Other changes".
+    /// docs/82 7.2: the default ticks are the session's own files when it
+    /// touched any (docs/81 F E3), else every file; the person's ticks
+    /// override per path; Commit takes exactly the ticked paths.
     #[test]
-    fn the_commit_set_is_one_headings_files() {
-        let file = |path: &str| FileChange { path: path.into(), change: ChangeKind::Modified, added: 1, removed: 0 };
-        let files = vec![file("src/a.rs"), file("src/b.rs"), file("README.md")];
+    fn ticks_default_to_the_sessions_files_and_the_persons_ticks_win() {
+        let files = vec![change("src/a.rs"), change("src/b.rs"), change("README.md")];
         let root = Path::new("/repo");
-        let (heading, set) = commit_set(&files, &["src/a.rs".to_owned()], root);
-        assert_eq!((heading, set), ("This session", vec!["src/a.rs".to_owned()]));
-        let (heading, set) = commit_set(&files, &[], root);
-        assert_eq!(heading, "Other changes");
-        assert_eq!(set.len(), 3);
+        let mut ticks = std::collections::HashMap::new();
+        assert_eq!(ticked_paths(&files, &["src/a.rs".to_owned()], root, &ticks), vec!["src/a.rs".to_owned()], "the session's own");
+        assert_eq!(ticked_paths(&files, &[], root, &ticks).len(), 3, "no session edit: every file");
+        // The person ticks another file and unticks the session's.
+        ticks.insert("README.md".to_owned(), true);
+        ticks.insert("src/a.rs".to_owned(), false);
+        assert_eq!(ticked_paths(&files, &["src/a.rs".to_owned()], root, &ticks), vec!["README.md".to_owned()]);
+        // Without a session edit the unticked one stays out, the rest default in.
+        assert_eq!(ticked_paths(&files, &[], root, &ticks), vec!["src/b.rs".to_owned(), "README.md".to_owned()]);
+        // A path that leaves the tree drops its tick; back, it takes the default.
+        let mut kept = ticks.clone();
+        keep_ticks_in(&mut kept, &files[1..]);
+        assert!(!kept.contains_key("src/a.rs") && kept.contains_key("README.md"));
+        assert_eq!(ticked_paths(&files, &["src/a.rs".to_owned()], root, &kept), vec!["src/a.rs".to_owned(), "README.md".to_owned()]);
+        // Nothing ticked: Commit takes nothing (its button is disabled).
+        for f in &files {
+            ticks.insert(f.path.clone(), false);
+        }
+        assert!(ticked_paths(&files, &[], root, &ticks).is_empty());
+    }
+
+    #[test]
+    fn the_button_names_what_it_does() {
+        assert_eq!(commit_label(1, false, false), "Commit 1 file");
+        assert_eq!(commit_label(4, false, false), "Commit 4 files");
+        assert_eq!(commit_label(0, false, false), "Commit 0 files");
+        assert_eq!(commit_label(4, true, false), "Amend");
+        assert_eq!((commit_label(4, false, true).as_str(), commit_label(4, true, true).as_str()), ("Committing…", "Amending…"));
+    }
+
+    /// New branch… shows on the default branch and on a detached HEAD only.
+    #[test]
+    fn new_branch_is_offered_on_the_default_branch() {
+        let ui = ChangesUi { default_branch: Some("main".into()), ..ChangesUi::default() };
+        assert!(on_default(&tree(vec![], "main", Some("origin/main"), 0), &ui));
+        assert!(on_default(&tree(vec![], "HEAD", None, 0), &ui));
+        assert!(!on_default(&tree(vec![], "baaz/x", None, 0), &ui));
+    }
+
+    /// Unticking Amend gives back the message it replaced, unless the
+    /// person edited it since.
+    #[test]
+    fn unticking_amend_puts_the_message_back_if_untouched() {
+        let mut ui = ChangesUi { amend: true, message: "HEAD's".into(), amend_saved: Some("draft".into()), ..ChangesUi::default() };
+        untick_amend(&mut ui);
+        assert_eq!((ui.amend, ui.message.as_str(), ui.amend_saved.is_none()), (false, "draft", true));
+        let mut ui = ChangesUi { amend: true, message: "mine".into(), message_edited: true, amend_saved: Some("draft".into()), ..ChangesUi::default() };
+        untick_amend(&mut ui);
+        assert_eq!(ui.message, "mine");
     }
 
     use super::*;

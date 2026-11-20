@@ -12,7 +12,8 @@
 //!   refused, naming the files, and nothing changes.
 //! * [`revert_in_turn`] — the same for one file of that turn.
 //! * [`revert_to_head`] — one file back to `HEAD` (a file `HEAD` does not
-//!   have is removed, and unstaged when it was staged).
+//!   have is removed, and unstaged when it was staged; a staged rename's
+//!   old path comes back with it).
 //!
 //! Before any of them changes a file, the folder is snapshotted (the
 //! checkpoints' own [`crate::checkpoints::write_tree`], untracked files
@@ -314,31 +315,57 @@ pub fn revert_in_turn(dir: &Path, key: &str, pre: &str, post: &str, path: &str) 
 }
 
 /// Revert one file to `HEAD`: its content and its index entry go back to
-/// `HEAD`'s; a file `HEAD` does not have is removed (and unstaged).
+/// `HEAD`'s; a file `HEAD` does not have is removed (and unstaged). A
+/// staged rename's row is its new path: its old path goes back too, so the
+/// rename is undone whole (docs/82 7.2), not left as a deletion.
 /// [`Refusal::Nothing`] when the file already matches `HEAD`.
 pub fn revert_to_head(dir: &Path, key: &str, path: &str) -> Result<Applied, Refusal> {
     let top = top(dir)?;
-    let files = vec![path.to_owned()];
+    let mut files = vec![path.to_owned()];
     let head = checkpoints::head(&top);
-    let in_head = match &head {
-        Some(head) => held_by(&top, head, &files)?.contains(path),
-        None => false,
-    };
     let status = git_paths(&top, &["status", "--porcelain=v1", "-z", "--untracked-files=all"], &files)?;
     if status.trim_matches('\0').is_empty() {
         return Err(Refusal::Nothing);
     }
-    let staged = !git_paths(&top, &["ls-files", "-z"], &files)?.is_empty();
+    if let Some(head) = &head {
+        files.extend(rename_source(&top, head, path)?);
+    }
+    let in_head = match &head {
+        Some(head) => held_by(&top, head, &files)?,
+        None => HashSet::new(),
+    };
+    let staged: HashSet<String> = git_paths(&top, &["ls-files", "-z"], &files)?.split('\0').filter(|p| !p.is_empty()).map(str::to_owned).collect();
     guarded(&top, key, files.clone(), move |top| {
-        if in_head {
-            git_paths(top, &["restore", "--source=HEAD", "--staged", "--worktree"], &files).map(drop)
-        } else {
-            if staged {
-                git_paths(top, &["rm", "--cached", "-f", "-q"], &files)?;
-            }
-            remove(top, &files[0])
+        let (back, gone): (Vec<String>, Vec<String>) = files.iter().cloned().partition(|p| in_head.contains(p));
+        if !back.is_empty() {
+            git_paths(top, &["restore", "--source=HEAD", "--staged", "--worktree"], &back)?;
         }
+        let unstage: Vec<String> = gone.iter().filter(|p| staged.contains(*p)).cloned().collect();
+        if !unstage.is_empty() {
+            git_paths(top, &["rm", "--cached", "-f", "-q"], &unstage)?;
+        }
+        for path in &gone {
+            remove(top, path)?;
+        }
+        Ok(())
     })
+}
+
+/// The old path of a staged rename whose new path is `path`, if any.
+fn rename_source(top: &Path, head: &str, path: &str) -> Result<Option<String>, Refusal> {
+    let raw = git(top, &["diff", "--cached", "--name-status", "-M", "-z", head])?;
+    let mut fields = raw.split('\0');
+    while let Some(status) = fields.next() {
+        if status.starts_with('R') || status.starts_with('C') {
+            let (Some(old), Some(new)) = (fields.next(), fields.next()) else { break };
+            if new == path && status.starts_with('R') {
+                return Ok(Some(old.to_owned()));
+            }
+        } else if fields.next().is_none() {
+            break;
+        }
+    }
+    Ok(None)
 }
 
 /// Take an action back: each touched file as the safety snapshot held it

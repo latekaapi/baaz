@@ -6,8 +6,10 @@
 //! read never takes `.git/index.lock` from under the agent. A file's diff is
 //! read only when its row opens ([`read_file_diff`]), never the whole tree.
 //!
-//! Writes, only on the person's click: commit every listed file (no staging,
-//! owner 2026-10-17), push, and `gh pr create`. Tests never reach `gh` (the
+//! Writes, only on the person's click: commit exactly the ticked files (no
+//! staging, owner 2026-10-17; ticks docs/82 7.2) or amend them into an
+//! unpushed HEAD, a new branch, fetch, pull (fast-forward only), push, and
+//! `gh pr create`. Tests never reach `gh` (the
 //! seam returns nothing under `cfg(test)`); git runs only in temp repos.
 
 use std::collections::HashMap;
@@ -445,6 +447,115 @@ fn first_line(text: &str) -> String {
     text.lines().find(|l| !l.trim().is_empty()).unwrap_or("git failed").trim().to_string()
 }
 
+/// Git's reason for a refusal: its first `fatal:` / `error:` line without
+/// the prefix (a `hint:` block can come first), else its first line.
+pub fn git_reason(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("fatal: ").or_else(|| l.strip_prefix("error: ")))
+        .map(str::to_string)
+        .unwrap_or_else(|| first_line(text))
+}
+
+/// A refused or timed-out write's reason, from `what` and the job.
+fn write_result(job: Option<Finished>, what: &str) -> Result<(), String> {
+    match job {
+        Some(f) if f.ok => Ok(()),
+        Some(f) => Err(git_reason(&f.text)),
+        None => Err(format!("{what} timed out.")),
+    }
+}
+
+/// A fetch or pull may wait on the network this long.
+pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// New branch… (docs/82 7.2): `git switch -c <name>` from where HEAD is,
+/// the working tree's changes carried over. A name git refuses
+/// (`check-ref-format --branch`) or one that exists is refused in git's
+/// words and nothing changes. Blocking: run it off the UI thread.
+pub fn create_branch(root: &Path, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("A branch needs a name.".into());
+    }
+    let deadline = Instant::now() + READ_TIMEOUT;
+    write_result(spawn("git", root, &["check-ref-format", "--branch", name], None, true).and_then(|j| j.finish(deadline)), "Checking the name")?;
+    let deadline = Instant::now() + WRITE_TIMEOUT;
+    write_result(spawn("git", root, &["switch", "-c", name], None, true).and_then(|j| j.finish(deadline)), "Creating the branch")
+}
+
+/// Fetch: `git fetch --prune origin`, so `behind` is the remote's now.
+pub fn fetch(root: &Path) -> Result<(), String> {
+    let deadline = Instant::now() + NETWORK_TIMEOUT;
+    write_result(spawn("git", root, &["fetch", "--prune", "origin"], None, true).and_then(|j| j.finish(deadline)), "The fetch")
+}
+
+/// Pull, fast-forward only: `git pull --ff-only`. A branch that diverged,
+/// or local changes the pull would overwrite, is refused by git with
+/// nothing changed; its reason comes back.
+pub fn pull_ff_only(root: &Path) -> Result<(), String> {
+    let deadline = Instant::now() + NETWORK_TIMEOUT;
+    write_result(spawn("git", root, &["pull", "--ff-only", "--no-rebase"], None, true).and_then(|j| j.finish(deadline)), "The pull")
+}
+
+/// Whether "Amend last commit" may be offered: HEAD exists and no remote
+/// branch holds it (`branch -r --contains HEAD` is empty) — a pushed
+/// commit is never rewritten, even on a branch with no upstream that was
+/// cut from a pushed one.
+pub fn head_amendable(root: &Path) -> bool {
+    let deadline = Instant::now() + READ_TIMEOUT;
+    let head = git_read(root, &["rev-parse", "--verify", "--quiet", "HEAD"]);
+    let remote = git_read(root, &["branch", "-r", "--contains", "HEAD", "--format=%(refname)"]);
+    let has_head = head.and_then(|j| j.finish(deadline)).is_some_and(|f| f.ok);
+    let on_remote = remote.and_then(|j| j.finish(deadline)).map(|f| !f.ok || !f.text.trim().is_empty());
+    has_head && on_remote == Some(false)
+}
+
+/// HEAD's whole message (what Amend starts from), `None` when unreadable.
+pub fn head_message(root: &Path) -> Option<String> {
+    let deadline = Instant::now() + READ_TIMEOUT;
+    git_read(root, &["log", "-1", "--format=%B", "HEAD"]).and_then(|j| j.finish(deadline)).filter(|f| f.ok).map(|f| f.text.trim_end().to_string())
+}
+
+/// Whether `origin` is a remote here (Fetch and Pull are offered only then).
+pub fn has_origin(root: &Path) -> bool {
+    let deadline = Instant::now() + READ_TIMEOUT;
+    git_read(root, &["remote"]).and_then(|j| j.finish(deadline)).filter(|f| f.ok).is_some_and(|f| f.text.lines().any(|l| l.trim() == "origin"))
+}
+
+/// Amend the last commit with `message`, taking exactly `paths` into it —
+/// the same guarantee as [`commit_paths`]: `git add -A -- <paths>`, then
+/// `git commit --amend --only -F - -- <paths>`, so HEAD's own change stays,
+/// the listed paths join it, and nothing else in the tree or the index
+/// does. No paths rewrites the message alone. The caller offers this only
+/// while [`head_amendable`]; it is checked again here. Blocking.
+pub fn amend_paths(root: &Path, message: &str, paths: &[String]) -> CommitOutcome {
+    if !head_amendable(root) {
+        return CommitOutcome::Failed("The last commit is on the remote: it is not rewritten.".into());
+    }
+    let deadline = Instant::now() + WRITE_TIMEOUT;
+    if !paths.is_empty() {
+        let add_args: Vec<&str> = ["add", "-A", "--"].into_iter().chain(paths.iter().map(String::as_str)).collect();
+        let Some(add) = spawn("git", root, &add_args, None, true).and_then(|j| j.finish(deadline)) else {
+            return CommitOutcome::Failed("git add timed out".into());
+        };
+        if !add.ok {
+            return CommitOutcome::Failed(first_line(&add.text));
+        }
+    }
+    let args: Vec<&str> = ["commit", "--amend", "--only", "-F", "-", "--"].into_iter().chain(paths.iter().map(String::as_str)).collect();
+    let Some(out) = spawn("git", root, &args, Some(message), true).and_then(|j| j.finish(deadline)) else {
+        return CommitOutcome::Failed("The commit timed out.".into());
+    };
+    if out.ok {
+        return CommitOutcome::Done;
+    }
+    if has_commit_hook(root) {
+        return CommitOutcome::HookFailed(out.text.lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect());
+    }
+    CommitOutcome::Failed(git_reason(&out.text))
+}
+
 /// Push the branch, setting its upstream on `origin` the first time.
 pub fn push(root: &Path, branch: &str, has_upstream: bool) -> Result<(), String> {
     let deadline = Instant::now() + WRITE_TIMEOUT;
@@ -818,6 +929,173 @@ mod tests {
             CommitOutcome::HookFailed(lines) => assert!(lines.iter().any(|l| l.contains("unused variable")), "{lines:?}"),
             other => panic!("expected a hook failure, got {other:?}"),
         }
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "T")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "T")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A local bare `origin` with `main` pushed, a clone of it to work in
+    /// (`work`, tracking `origin/main`) and a second clone (`other`) that
+    /// stands for someone else pushing. Nothing touches the network.
+    struct Remote {
+        _dir: Scratch,
+        work: std::path::PathBuf,
+        other: std::path::PathBuf,
+    }
+
+    fn remote_repos() -> Remote {
+        let dir = Scratch::new("remote");
+        let (origin, work, other) = (dir.path().join("origin.git"), dir.path().join("work"), dir.path().join("other"));
+        git_in(dir.path(), &["init", "-q", "--bare", "-b", "main", "origin.git"]);
+        git_in(dir.path(), &["clone", "-q", origin.to_str().unwrap(), "work"]);
+        git_in(&work, &["config", "user.email", "t@example.com"]);
+        git_in(&work, &["config", "user.name", "T"]);
+        git_in(&work, &["switch", "-q", "-c", "main"]);
+        std::fs::write(work.join("a.txt"), "one\n").unwrap();
+        git_in(&work, &["add", "-A"]);
+        git_in(&work, &["commit", "-q", "-m", "first"]);
+        git_in(&work, &["push", "-q", "-u", "origin", "main"]);
+        git_in(dir.path(), &["clone", "-q", origin.to_str().unwrap(), "other"]);
+        git_in(&other, &["config", "user.email", "o@example.com"]);
+        git_in(&other, &["config", "user.name", "O"]);
+        Remote { _dir: dir, work, other }
+    }
+
+    /// Someone else pushes a commit to `main` from the other clone.
+    fn push_from_other(r: &Remote, file: &str) {
+        std::fs::write(r.other.join(file), "theirs\n").unwrap();
+        git_in(&r.other, &["add", "-A"]);
+        git_in(&r.other, &["commit", "-q", "-m", "theirs"]);
+        git_in(&r.other, &["push", "-q", "origin", "main"]);
+    }
+
+    #[test]
+    fn a_new_branch_carries_the_changes_and_refuses_bad_or_taken_names() {
+        let r = remote_repos();
+        std::fs::write(r.work.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(r.work.join("new.txt"), "new\n").unwrap();
+        let before = read_tree(&r.work).unwrap().files;
+        let bad = create_branch(&r.work, "bad..name").unwrap_err();
+        assert!(bad.contains("not a valid branch name"), "{bad}");
+        let taken = create_branch(&r.work, "main").unwrap_err();
+        assert!(taken.contains("already exists"), "{taken}");
+        assert_eq!(read_tree(&r.work).unwrap().branch, "main", "a refusal changed nothing");
+        create_branch(&r.work, "baaz/feature").unwrap();
+        let after = read_tree(&r.work).unwrap();
+        assert_eq!(after.branch, "baaz/feature");
+        assert_eq!(after.upstream, None);
+        assert_eq!(after.files, before, "the working tree came along");
+        assert!(!head_amendable(&r.work), "HEAD is main's pushed commit: no amend on the new branch");
+    }
+
+    #[test]
+    fn fetch_updates_behind_and_pull_fast_forwards() {
+        let r = remote_repos();
+        assert!(has_origin(&r.work));
+        push_from_other(&r, "b.txt");
+        assert_eq!(read_tree(&r.work).unwrap().behind, 0, "not fetched yet");
+        fetch(&r.work).unwrap();
+        assert_eq!(read_tree(&r.work).unwrap().behind, 1);
+        // A local change elsewhere does not stop a fast-forward.
+        std::fs::write(r.work.join("a.txt"), "mine\n").unwrap();
+        pull_ff_only(&r.work).unwrap();
+        let tree = read_tree(&r.work).unwrap();
+        assert_eq!((tree.ahead, tree.behind), (0, 0));
+        assert_eq!(std::fs::read_to_string(r.work.join("b.txt")).unwrap(), "theirs\n");
+        assert_eq!(std::fs::read_to_string(r.work.join("a.txt")).unwrap(), "mine\n", "the local change stayed");
+    }
+
+    #[test]
+    fn pull_refuses_a_diverged_branch_and_changes_nothing() {
+        let r = remote_repos();
+        push_from_other(&r, "b.txt");
+        std::fs::write(r.work.join("c.txt"), "mine\n").unwrap();
+        git_in(&r.work, &["add", "-A"]);
+        git_in(&r.work, &["commit", "-q", "-m", "mine"]);
+        std::fs::write(r.work.join("a.txt"), "edited\n").unwrap();
+        fetch(&r.work).unwrap();
+        let head = git_in(&r.work, &["rev-parse", "HEAD"]);
+        let before = read_tree(&r.work).unwrap();
+        assert_eq!((before.ahead, before.behind), (1, 1));
+        let reason = pull_ff_only(&r.work).unwrap_err();
+        assert!(!reason.is_empty() && !reason.starts_with("hint:"), "{reason}");
+        assert_eq!(git_in(&r.work, &["rev-parse", "HEAD"]), head, "HEAD untouched");
+        assert_eq!(read_tree(&r.work).unwrap(), before, "the working tree untouched");
+        assert_eq!(std::fs::read_to_string(r.work.join("a.txt")).unwrap(), "edited\n");
+    }
+
+    #[test]
+    fn pull_refuses_when_local_changes_are_in_the_way() {
+        let r = remote_repos();
+        // They change a.txt; the person has an uncommitted edit to it.
+        std::fs::write(r.other.join("a.txt"), "theirs\n").unwrap();
+        git_in(&r.other, &["commit", "-q", "-am", "theirs"]);
+        git_in(&r.other, &["push", "-q", "origin", "main"]);
+        fetch(&r.work).unwrap();
+        std::fs::write(r.work.join("a.txt"), "mine\n").unwrap();
+        let head = git_in(&r.work, &["rev-parse", "HEAD"]);
+        assert!(pull_ff_only(&r.work).is_err());
+        assert_eq!(git_in(&r.work, &["rev-parse", "HEAD"]), head);
+        assert_eq!(std::fs::read_to_string(r.work.join("a.txt")).unwrap(), "mine\n");
+    }
+
+    #[test]
+    fn amend_takes_only_the_ticked_paths_into_an_unpushed_head() {
+        let r = remote_repos();
+        assert!(!head_amendable(&r.work), "HEAD is pushed: never offered");
+        assert!(matches!(amend_paths(&r.work, "x", &[]), CommitOutcome::Failed(_)), "and refused if asked");
+        std::fs::write(r.work.join("b.txt"), "b\n").unwrap();
+        git_in(&r.work, &["add", "-A"]);
+        git_in(&r.work, &["commit", "-q", "-m", "Add b"]);
+        assert!(head_amendable(&r.work), "ahead of the upstream");
+        assert_eq!(head_message(&r.work).as_deref(), Some("Add b"));
+        let parent = git_in(&r.work, &["rev-parse", "HEAD~1"]);
+        std::fs::write(r.work.join("a.txt"), "ticked\n").unwrap();
+        std::fs::write(r.work.join("c.txt"), "ticked new\n").unwrap();
+        std::fs::write(r.work.join("d.txt"), "not ticked\n").unwrap();
+        // Something staged by hand, outside the ticked set.
+        std::fs::write(r.work.join("e.txt"), "staged\n").unwrap();
+        git_in(&r.work, &["add", "e.txt"]);
+        let ticked = vec!["a.txt".to_owned(), "c.txt".to_owned()];
+        assert_eq!(amend_paths(&r.work, "Add b, change a\n\nBody.", &ticked), CommitOutcome::Done);
+        assert_eq!(git_in(&r.work, &["rev-parse", "HEAD~1"]), parent, "HEAD was rewritten, not added to");
+        assert_eq!(head_message(&r.work).as_deref(), Some("Add b, change a\n\nBody."));
+        let in_head = git_in(&r.work, &["show", "--name-only", "--format=", "HEAD"]);
+        let mut in_head: Vec<&str> = in_head.lines().collect();
+        in_head.sort();
+        assert_eq!(in_head, vec!["a.txt", "b.txt", "c.txt"], "HEAD's own change kept, the ticked paths joined it");
+        let left: Vec<String> = read_tree(&r.work).unwrap().files.into_iter().map(|f| f.path).collect();
+        assert_eq!(left, vec!["d.txt".to_owned(), "e.txt".to_owned()], "the rest stays uncommitted");
+        // Pushed, it is not offered again.
+        git_in(&r.work, &["push", "-q"]);
+        assert!(!head_amendable(&r.work));
+    }
+
+    #[test]
+    fn an_empty_repo_offers_no_amend_and_a_local_commit_does() {
+        let dir = Scratch::new("empty");
+        git_in(dir.path(), &["init", "-q", "-b", "main"]);
+        assert!(!head_amendable(dir.path()), "no HEAD");
+        assert!(!has_origin(dir.path()));
+        let repo = scratch_repo();
+        assert!(head_amendable(repo.path()), "a commit no remote holds");
+    }
+
+    #[test]
+    fn git_reason_skips_hints() {
+        assert_eq!(git_reason("hint: Diverging branches can't be fast-forwarded\nfatal: Not possible to fast-forward, aborting.\n"), "Not possible to fast-forward, aborting.");
+        assert_eq!(git_reason("something odd\n"), "something odd");
     }
 
     #[test]

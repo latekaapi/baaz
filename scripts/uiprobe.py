@@ -384,6 +384,18 @@ ENTRIES = {
                                       "--steps", "mode:browse;tab-new:https://example.com;toast:Saved · 3 files|/tmp/baaz-downloads"]},
     "right-changes":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:changes"]},
+    # Task 7.2: a row unticked — its box empty, its section's tick-all
+    # mixed, the button "Commit 4 files"; New branch…'s field open on the
+    # default branch (`changes-branch:main` puts the fixture tree there,
+    # level with origin/main, so Amend is not offered); "Amend last commit"
+    # ticked on the fixture's unpushed branch (↑2), the message HEAD's
+    # (a fixture message: captures read no HEAD). No baselines yet.
+    "right-changes-untick": {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "right-width:400;right:changes;untick:docs/02-app.md"]},
+    "right-changes-new-branch": {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "right-width:400;right:changes;changes-branch:main;new-branch"]},
+    "right-changes-amend":  {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "right-width:400;right:changes;amend:on"]},
     "right-files":          {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "right-width:400;right:files"]},
     # The Files tree scrolled a little: the pane row's fade is back over

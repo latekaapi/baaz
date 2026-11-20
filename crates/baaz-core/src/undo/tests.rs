@@ -301,3 +301,24 @@ fn a_turn_that_changed_nothing_has_nothing_to_undo() {
     assert_eq!(undo_turn(&root, "k", &pre, &post), Err(Refusal::Nothing));
     assert_eq!(turn_files(&root, &pre, &post), Ok(Vec::new()));
 }
+
+/// docs/82 7.2: All changes offers Revert on every row kind — a deleted
+/// file comes back, and a renamed file's row (its new path) puts the
+/// original back under its old name, the index clean.
+#[test]
+fn revert_file_to_head_for_a_deleted_and_a_renamed_file() {
+    let scratch = Scratch::new("kinds");
+    let root = repo(&scratch);
+    std::fs::remove_file(root.join("b.txt")).expect("delete");
+    let deleted = revert_to_head(&root, "k", "b.txt").expect("reverted");
+    assert_eq!(read(&root, "b.txt"), "bee\n", "the deleted file is back");
+    run(&root, &["mv", "a.txt", "moved.txt"]);
+    let renamed = revert_to_head(&root, "k", "moved.txt").expect("reverted");
+    assert!(!root.join("moved.txt").exists(), "the new name is gone");
+    assert_eq!(read(&root, "a.txt"), "one\ntwo\nthree\nfour\nfive\n", "the old name is back");
+    assert_eq!(run(&root, &["status", "--porcelain"]), "", "nothing left staged or changed");
+    restore(&root, &renamed).expect("back");
+    assert!(root.join("moved.txt").exists() && !root.join("a.txt").exists(), "Undo puts the rename back");
+    restore(&root, &deleted).expect("back");
+    assert!(!root.join("b.txt").exists());
+}

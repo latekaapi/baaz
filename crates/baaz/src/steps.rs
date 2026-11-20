@@ -131,6 +131,11 @@
 //! | `quote-lines` | the pane's selection bar's Quote: the held lines go to the open session's composer as a quote with their path and range; fails when no lines are held, their view closed, or no session is open, free |
 //! | `undo-turn:last` | the confirm for the open session's newest undoable turn (docs/82 6.4), through the session menu's path; a capture (which takes no checkpoints and runs in the owner's repository) puts up the confirm from fixture data — the newest agent turn that edited files — and its button cannot apply; no session, another payload or nothing to undo fails the step, free |
 //! | `revert-file:<path>` | the confirm for that changed file in All changes, back to `HEAD` (docs/82 6.4), through the row's path; a capture puts it up from fixture data and its button cannot apply; no session or project, or no such changed row, fails the step, free |
+//! | `tick:<path>` | tick that changed file for the commit in All changes (docs/82 7.2; a setter, never a toggle); no tree read or no such changed row fails the step, free |
+//! | `untick:<path>` | untick it (the same setter, off); the same failures, free |
+//! | `changes-branch:<name>` | capture aid: the capture's fixture tree on that branch, tracking `origin/<name>` and level with it (so `main` is the default branch); outside a capture, or empty, fails the step, free |
+//! | `new-branch` | open New branch…'s name field on the Changes foot (docs/82 7.2; idempotent); not on the default branch, or a foot without the branch line, fails the step, free |
+//! | `amend:<on\|off>` | set "Amend last commit" in the commit box (docs/82 7.2; a setter); no changes, or Amend not offered (HEAD on a remote), fails the step, free |
 //! | `changes-scope:<all\|session\|last>` | the Changes pane on that scope (docs/82 6.3): a capture loads the fixture checkpoint index (two finished turns over the fixture tree) — no refs are read or written; no open session or an unknown word fails the step, free |
 //! | `tasks-fixture` (or `tasks-fixture:<session_id>`) | the Tasks view's capture fixture (docs/82 6.5): four tasks on that session, else the open one — running on :5173, exited 0, exited 1, stopped — with fixed durations and no process behind any; no session, or one that already has tasks, fails the step, free |
 //! | `tasks-row:<session_id>` | the sidebar row's "N running" click: that session opens with the right pane on Tasks; a session with nothing running fails the step, free |
@@ -425,6 +430,11 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "select-lines", run: |this, rest, _, cx| this.with_right_pane(cx, |pane, cx| pane.step_select_lines(rest, cx)) },
     WindowVerb { verb: "quote-lines", run: |this, _, _, cx| this.with_right_pane(cx, |pane, cx| pane.quote_held_lines(cx)) },
     WindowVerb { verb: "changes-scope", run: |this, rest, _, cx| this.step_changes_scope(rest, cx) },
+    WindowVerb { verb: "tick", run: |this, rest, _, cx| this.step_changes_tick(rest, true, cx) },
+    WindowVerb { verb: "untick", run: |this, rest, _, cx| this.step_changes_tick(rest, false, cx) },
+    WindowVerb { verb: "changes-branch", run: |this, rest, _, cx| this.step_changes_branch(rest, cx) },
+    WindowVerb { verb: "new-branch", run: |this, _, window, cx| this.step_new_branch(window, cx) },
+    WindowVerb { verb: "amend", run: |this, rest, _, cx| this.step_changes_amend(rest, cx) },
     WindowVerb { verb: "tasks-fixture", run: |this, rest, _, cx| this.step_tasks_fixture(rest, cx) },
     WindowVerb { verb: "tasks-row", run: |this, rest, window, cx| this.step_tasks_row(rest, window, cx) },
     WindowVerb { verb: "undo-turn", run: |this, rest, _, cx| this.step_undo_turn(rest, cx) },
