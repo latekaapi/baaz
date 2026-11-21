@@ -109,12 +109,12 @@ fn webview_dependency_rides_with_aui() {
 }
 
 /// The pane renders the library's `webview_pane` for the session's state —
-/// never the old chrome-only placeholder — and keeps role Group + "Browser".
+/// never the old chrome-only placeholder — and keeps role Group + "Page".
 #[test]
 fn browser_pane_renders_the_session_webview() {
     let right = source("right.rs");
     assert!(right.contains("aui_webview::webview_pane(\"right-browser\""), "pane renders webview_pane");
-    assert!(right.contains(".aria_label(\"Browser\")"), "pane keeps its accessible label");
+    assert!(right.contains(".aria_label(\"Page\")"), "pane keeps its accessible label");
     assert!(right.contains("handle_browser_intent"), "intents forward to the harness");
     assert!(
         !right.contains("no web engine"),

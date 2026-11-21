@@ -168,7 +168,7 @@ actions!(
         ShowRightChanges,
         /// Show Files in the right pane (⌘⌥E).
         ShowRightFiles,
-        /// Show Browser in the right pane (⌘⇧B).
+        /// Show the Page in the right pane (⌘⇧B).
         ShowRightBrowser,
         /// Switch between Sessions and Browse (⌥⌘B).
         ToggleBrowseMode,

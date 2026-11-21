@@ -1702,9 +1702,9 @@ mod tests {
                 harness.palette_query(cx).expect("the palette's field").update(cx, |field, cx| field.set_value(String::new(), window, cx));
             })
         });
-        vc.simulate_input("brow");
+        vc.simulate_input("page");
         vc.run_until_parked();
-        assert!(rows(vc) > 0, "/browser no longer matches");
+        assert!(rows(vc) > 0, "/page no longer matches");
         let labels = aui::data::take_ax_labels();
         aui::data::arm_ax_probe(false);
         assert!(!labels.iter().any(|label| label == "Nothing matches"), "an empty line beside rows: {labels:?}");
@@ -1847,8 +1847,8 @@ mod tests {
         assert_eq!(selected(vc), Some(0), "the selection escaped the filtered rows");
         vc.simulate_keystrokes("escape");
         assert_eq!(selected(vc), None, "escape did not dismiss the query palette");
-        // Enter acts on the SELECTED row: filtered to `/browser`, Enter opens
-        // the right pane on Browser — row 0 of the unfiltered list (`/model`)
+        // Enter acts on the SELECTED row: filtered to `/page`, Enter opens
+        // the right pane on the Page — row 0 of the unfiltered list (`/model`)
         // would have done nothing observable.
         vc.simulate_keystrokes("cmd-k");
         vc.update(|window, cx| {
@@ -1856,7 +1856,7 @@ mod tests {
                 harness.palette_query(cx).expect("the palette's field").update(cx, |field, cx| field.set_value(String::new(), window, cx));
             })
         });
-        vc.simulate_input("brow");
+        vc.simulate_input("page");
         assert_eq!(selected(vc), Some(0));
         vc.simulate_keystrokes("enter");
         let (open, kind) =
@@ -1996,12 +1996,12 @@ mod tests {
     }
 
     /// The Commands filter reads the slash and the description,
-    /// case-insensitively: `brow` is `/browser`, `reasoning` is a
+    /// case-insensitively: `/pag` is `/page`, `reasoning` is a
     /// description word only, nonsense is nothing, empty is all 24.
     #[test]
     fn the_command_filter_matches_slash_and_description() {
-        assert_eq!(filter_commands("brow", None), vec![Command::RightBrowser]);
-        assert_eq!(filter_commands("BROW", None), vec![Command::RightBrowser]);
+        assert_eq!(filter_commands("/pag", None), vec![Command::RightBrowser]);
+        assert_eq!(filter_commands("/PAG", None), vec![Command::RightBrowser]);
         assert_eq!(filter_commands("reasoning", None), vec![Command::Effort]);
         assert!(filter_commands("zzz-no-such-command", None).is_empty());
         assert_eq!(filter_commands("", None).len(), 25, "an empty query lists every command");
@@ -2009,8 +2009,8 @@ mod tests {
     }
 
     /// `Commands` owns a query editor, and the drawn rows follow it: the
-    /// field opens empty with all 24 rows, and setting it to `brow`
-    /// leaves `/browser` alone — the same rows the keyboard walks.
+    /// field opens empty with all 24 rows, and setting it to `/pag`
+    /// leaves `/page` alone — the same rows the keyboard walks.
     #[gpui::test]
     fn the_command_palette_has_a_query_field_and_filters(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("commands-query");
@@ -2029,15 +2029,15 @@ mod tests {
         assert_eq!(empty, 25, "an empty query lists every command");
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
-                harness.palette_query(cx).expect("the palette's field").update(cx, |field, cx| field.set_value("brow", window, cx));
+                harness.palette_query(cx).expect("the palette's field").update(cx, |field, cx| field.set_value("/pag", window, cx));
             });
         });
         let rows = vc.update(|_, cx| {
             let app: &gpui::App = cx;
             baaz.read(app).palette_rows(PaletteKind::Commands, app)
         });
-        assert_eq!(rows.len(), 1, "only /browser matches `brow`");
-        assert!(rows[0].0.as_ref() == "/browser", "the row is the slash command");
+        assert_eq!(rows.len(), 1, "only /page matches `/pag`");
+        assert!(rows[0].0.as_ref() == "/page", "the row is the slash command");
         restore_state(state);
     }
 

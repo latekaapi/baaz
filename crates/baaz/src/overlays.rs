@@ -625,7 +625,8 @@ pub enum Command {
     Help,
     /// Open the Skills page.
     Skills,
-    /// Show the browser in the right pane.
+    /// Show the session's Page in the right pane (`/page`; `/browser`
+    /// still parses onto it).
     RightBrowser,
     /// Show session edits and working-tree changes in the right pane.
     RightGit,
@@ -746,7 +747,7 @@ impl Command {
             Command::Project => "/project",
             Command::Logout => "/logout",
             Command::Help => "/help",
-            Command::RightBrowser => "/browser",
+            Command::RightBrowser => "/page",
             Command::RightGit => "/changes",
             Command::RightFiles => "/files",
             Command::Terminal => "/terminal",
@@ -777,7 +778,7 @@ impl Command {
             Command::Project => "Add or switch project",
             Command::Logout => "Log out and forget the saved login",
             Command::Help => "Show every command",
-            Command::RightBrowser => "Show the browser in the right pane",
+            Command::RightBrowser => "Show the Page in the right pane",
             Command::RightGit => "Show session edits and working-tree changes in the right pane",
             Command::RightFiles => "Show the file tree in the right pane",
             Command::Terminal => "Toggle the terminal dock",
@@ -798,8 +799,10 @@ impl Command {
 
     /// Older spellings that still parse, each onto the command that
     /// replaced it; none lists a row of its own. `/diff` is `/changes`;
-    /// `/handoff` is `/continue` (docs/07 §1a: one verb, Continue in…).
-    pub const ALIASES: [(&'static str, Command); 2] = [("/diff", Command::RightGit), ("/handoff", Command::Handoff)];
+    /// `/handoff` is `/continue` (docs/07 §1a: one verb, Continue in…);
+    /// `/browser` is `/page` (one name for the pane's web view).
+    pub const ALIASES: [(&'static str, Command); 3] =
+        [("/diff", Command::RightGit), ("/handoff", Command::Handoff), ("/browser", Command::RightBrowser)];
 
     /// Parse a whole typed line into a command and whatever followed it.
     ///
@@ -972,6 +975,7 @@ mod tests {
         assert_eq!(Command::parse_line("/diff"), Some((Command::RightGit, "")));
         assert_eq!(Command::parse("/changes"), Some(Command::RightGit));
         assert_eq!(Command::parse("/handoff"), Some(Command::Handoff), "the older spelling of /continue");
+        assert_eq!(Command::parse("/browser"), Some(Command::RightBrowser), "the older spelling of /page");
         for (alias, _) in Command::ALIASES {
             assert!(Command::ALL.iter().all(|command| command.slash() != alias), "{alias} lists no palette row of its own");
         }

@@ -575,7 +575,7 @@ pub(crate) fn render(
             ),
             BrowserPlaceholder::Loading => loading_state(
                 "right-browser-loading",
-                "Browser",
+                "Page",
                 "Opening the page",
                 "The webview is being attached.",
             ),
@@ -1095,16 +1095,16 @@ fn loading_state(
     empty_state(id, pane, heading, detail)
 }
 
-/// The closed Browser pane (B7): the last page snapshot stays in the
+/// The closed Page (B7): the last page snapshot stays in the
 /// native view while the column slides out, so gpui draws this still
 /// marker underneath — never the "Opening the page" loading placeholder.
 /// Carries the same role and label as every pane state.
 fn closed_browser_state() -> AnyElement {
     empty_state(
         "right-browser-closed",
-        "Browser",
-        "Browser",
-        "The browser pane is closed.",
+        "Page",
+        "Page",
+        "The Page is closed.",
     )
 }
 
@@ -2283,7 +2283,7 @@ fn file_preview_pane(
 
 /// The browser pane (Z7a): the library's `webview_pane` for the active
 /// session's [`WebviewState`](aui_webview::WebviewState) — nav row, page and
-/// annotations panel — over role Group labelled "Browser". The nav controls
+/// annotations panel — over role Group labelled "Page". The nav controls
 /// come labelled from the library. Intents forward to the harness: out as
 /// [`RightPaneEvent::BrowserIntent`](crate::right_pane::RightPaneEvent), into
 /// [`Harness::handle_browser_intent`] — screenshots and annotations land in
@@ -2301,7 +2301,7 @@ fn browser_pane(
     let column = v_flex()
         .id("right-browser-pane")
         .role(gpui::Role::Group)
-        .aria_label("Browser")
+        .aria_label("Page")
         .size_full();
     // D6: the session has one page — no tab strip in the pane.
     column.child(pane).into_any_element()

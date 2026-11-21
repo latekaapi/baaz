@@ -626,7 +626,7 @@ mod tests {
     fn the_commands_query_matches_slash_and_description() {
         let all: Vec<Command> = Command::ALL.to_vec();
         assert_eq!(command_matches(&all, "").len(), all.len());
-        let browse = command_matches(&all, " BROW ");
-        assert!(browse.iter().any(|at| all[*at] == Command::RightBrowser));
+        let page = command_matches(&all, " /PAG ");
+        assert!(page.iter().any(|at| all[*at] == Command::RightBrowser));
     }
 }
