@@ -12,9 +12,10 @@ wins and this file is out of date.
 Baaz is a native macOS app for running coding agents. It drives three agent
 CLIs as child processes: Muse Code (`muse serve`), Claude Code (`claude`) and
 Codex (`codex app-server`). It shows each session as a transcript with a
-composer, lists sessions in a sidebar grouped by project, and adds a right
-pane (Browser, Changes, Files), a terminal dock and a Chromium-based browser
-mode (Browse).
+composer, lists sessions in a sidebar grouped by project, and adds the
+session's workspace pane (Changes, Files, Page, Terminal, Tasks; the terminal
+can also dock at the bottom) and a Chromium-based browser mode (Browse).
+§1a lists the concepts a person has to hold to use it.
 
 The code lives in two repositories:
 
@@ -24,18 +25,67 @@ The code lives in two repositories:
 | `agentic-ui` (sibling checkout `../agentic-ui`) | the UI library: `aui` (components, screens, shell), `aui-protocol` (the neutral session model), `aui-tokens`, `aui-motion`, `aui-icons`, `aui-terminal` (pty and TUI backends), `aui-webview` (the pane, WKWebView via wry), `aui-cef` (the Chromium backend), plus the `aui-gallery` binary |
 
 The root `Cargo.toml` pins every `aui*` crate to one git tag of
-`agentic-ui` (currently `v0.7.0`) and pins gpui (`gpui-pre =0.3.3`) to the
+`agentic-ui` (currently `v0.7.6`) and pins gpui (`gpui-pre =0.3.12`) to the
 version the library resolves. To build against the local library checkout,
 a git-ignored `.cargo/config.toml` patches the eight `aui*` crates to
 `../agentic-ui/crates/*`; `CONTRIBUTING.md` has the snippet. A library change
 ships by tagging `agentic-ui`, then bumping the tag here.
 
-The workspace members are `baaz`, `provider`, `provider-muse`,
-`provider-claude-code`, `provider-codex`, `provider-acp`, `muse-client`,
-`muse-adapter`, `session-store` and `mcp-bridge`. `crates/baaz-cef-helper` is its own
+The workspace members are `baaz`, `baaz-core` (plain data, stores and
+functions with no window), `baaz-browser-core` (the browser's engine with no
+window: tabs and Spaces, history, bookmarks, site settings, the agent page
+tools), `provider`, `provider-runtime` (the child-process layer every
+adapter stands on), `provider-muse`,
+`provider-claude-code`, `provider-codex`, `provider-acp`, `transcript-core`
+(one transcript builder under every provider's fold),
+`muse-client`, `muse-adapter`, `session-store` and `mcp-bridge`.
+`crates/baaz-cef-helper` is its own
 workspace on purpose: building it pulls in CEF, so only
 `scripts/bundle.sh` builds it. The `cef` feature of `baaz` is off by
 default; without it the browser pane uses WKWebView.
+
+## 1a. The concepts a person holds
+
+Every noun a daily user has to keep in their head, and the one mechanism
+that carries it. Target: at most 25 (docs/82 8.9). A word on screen that is
+not here, or a second way to do what a row here does, is a defect against
+this list, not a new concept. Settings (⌘,), the palette (⌘K, every command
+by name) and the slash list are ways to reach these, not concepts of their
+own. Verbs (Fork, Continue in…, Quote, Send to session, Keep this tab) act
+on a concept; they are listed under it.
+
+| # | Concept | What it is | Its one mechanism |
+|---|---|---|---|
+| 1 | Project | A folder you work in. | Add project (pick or drop a folder); its sessions group under it in the sidebar. Sessions in no project sit in the last group, Unfiled. |
+| 2 | Session | One conversation with one agent, in a project. | A sidebar row. Everything done to a session is in its one menu (the row's ⋯, a right-click, the header's ⋯): Rename, Pin, Fork, Continue in…, Move to project, Reveal folder, Archive, Delete…. What you add to it (a quote, a screenshot, a page) lands as a chip in its composer. |
+| 3 | Provider | The agent a session runs on: Claude Code, Codex or Muse. | The composer's provider chip; once the session has turns the same chip reads "Continue in…". Set up in Settings › Providers, listed in one order everywhere. |
+| 4 | Model | Which model the provider uses. | The composer's model chip. |
+| 5 | Effort | How hard the model thinks. | The composer's effort chip, shown only where the provider has one. |
+| 6 | Mode | How far the agent may go without asking: Ask, Auto, Full access. | The composer's mode chip; an approval card when it asks. |
+| 7 | Plan | The agent plans and waits for your go before it acts. | ⇧Tab or `/plan`; a Plan pill shows while it is on. |
+| 8 | Needs you | Sessions waiting on an answer from you. | The Needs you count (the sidebar's row, Browse's footer, the Dock badge); ⌘⇧J goes to the next one. |
+| 9 | Archive | A session set aside, still on disk. | Archive in the session's menu; Settings › Archived brings it back. |
+| 10 | Worktree | A session working on its own branch checkout of the project. | The composer's "Own worktree" chip (a project can make it the default). |
+| 11 | Workspace pane | The session's right side, kept per session. | Its tab row: Changes, Files, Page, Terminal, Tasks; a second view can stack below. The header's buttons open the same tabs. |
+| 12 | Changes | What changed in the folder: tick, commit, branch, push. | The Changes view. Select lines → Quote. |
+| 13 | Files | The session's folder. | The Files view. Select lines in a preview → Quote. |
+| 14 | Page | The session's own browser tab. | The Page view; "Open in Browse" shows the same page full size, "Back to the session's Page" returns it. |
+| 15 | Terminal | Shells in the session's folder. | One region: a tab in the pane or docked at the bottom (⌃`). |
+| 16 | Tasks | Processes the agent or Run started. | The Tasks view, shown while there are any. |
+| 17 | Pull request | The session's PR on GitHub. | Create PR in Changes; then a PR card in the session with checks and comments, each with Send to agent. |
+| 18 | Browse | Your own browser. | The Sessions \| Browse switch (⌥⌘B). Its footer keeps the Needs you count and the way back to your last session. |
+| 19 | Tab | One open page: yours, or a session's (under that session, "N pages"). | A row in Browse's sidebar. Keep this tab makes a session's tab yours; Send page to session goes the other way. |
+| 20 | Space | A set of your tabs, optionally with its own sign-ins. | The Space strip in Browse's footer. |
+| 21 | Field | The one place to type in Browse: an address, a search, a command. | ⌘L. |
+| 22 | Ask | Ask an agent about this page, in place. | ⌘J, the ✦ button and the Field's Ask all open the same agent window (a line that can grow to a card or a column); Continue in… moves it into a session. |
+| 23 | Bookmarks and History | Pages you saved and pages you visited. | The Bookmarks & History page (⇧⌘Y, ⌘Y); ⌘D saves a bookmark. |
+| 24 | Site settings | What a site may use, whether agents may act there, its zoom. | The site's page in Settings › Browser; answering a site's ask with Always… writes to it. |
+| 25 | Skill | A Muse skill pack. | The Skills page, shown only when Muse is set up. |
+
+What is left out on purpose: Peek and Split (⇧-click, ⌥-click) are two
+ways a tab opens beside the page, not concepts; the agent cursor is a
+signal, not something you act on; Downloads and ad blocking are the
+browser's ordinary furniture.
 
 ## 2. Processes and threads
 
