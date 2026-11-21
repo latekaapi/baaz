@@ -4,30 +4,34 @@
 //! refresh skipped the filesystem. Production has no counter: [`note_io`]
 //! compiles to nothing.
 
+// Per thread: the tests run in parallel, and a process-wide count picked
+// up other tests' reads (right::tests::unchanged_expanded_directories_are_not_reread
+// saw 4 for 3 in Stage 8's gate). gpui's test dispatcher runs background
+// work on the test's own thread, so a background read still counts (the
+// app's purity tests assert one does).
 #[cfg(any(test, feature = "test-support"))]
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// Blocking reads (`git` spawns, `read_dir` calls) since process start or
-/// the last [`reset_io_count`].
-#[cfg(any(test, feature = "test-support"))]
-static RENDER_IO_COUNT: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// Blocking reads (`git` spawns, `read_dir` calls) on this thread since
+    /// it started or the last [`reset_io_count`].
+    static RENDER_IO_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Count one blocking read toward [`io_count`] in test builds; nothing in
 /// production, where the counter does not exist.
 pub fn note_io() {
     #[cfg(any(test, feature = "test-support"))]
-    RENDER_IO_COUNT.fetch_add(1, Ordering::Relaxed);
+    RENDER_IO_COUNT.with(|count| count.set(count.get() + 1));
 }
 
-/// How many blocking reads have run since process start (or the last
-/// [`reset_io_count`]).
+/// How many blocking reads have run on this thread since it started (or
+/// the last [`reset_io_count`]).
 #[cfg(any(test, feature = "test-support"))]
 pub fn io_count() -> usize {
-    RENDER_IO_COUNT.load(Ordering::Relaxed)
+    RENDER_IO_COUNT.with(std::cell::Cell::get)
 }
 
-/// Zero [`io_count`].
+/// Zero [`io_count`] for this thread.
 #[cfg(any(test, feature = "test-support"))]
 pub fn reset_io_count() {
-    RENDER_IO_COUNT.store(0, Ordering::Relaxed);
+    RENDER_IO_COUNT.with(|count| count.set(0));
 }

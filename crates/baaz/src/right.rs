@@ -16,8 +16,6 @@ use aui::util::ScrollAxisLock as _;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use aui::data::button;
@@ -53,17 +51,23 @@ pub(crate) const PREVIEW_MAX_BYTES: u64 = 1024 * 1024;
 /// 1 MB note must not turn into ten thousand elements.
 const PREVIEW_MD_BLOCKS_CAP: usize = 300;
 
-/// Directory listings served from [`DirListCache`] without a `read_dir`.
 #[cfg(test)]
-static DIR_CACHE_HITS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    // Directory listings served from [`DirListCache`] without a `read_dir`.
+    // Per thread, like `render_io`'s count: parallel tests must not see
+    // (or reset) each other's.
+    static DIR_CACHE_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
-/// Directory entries collected from `read_dir` before sorting, bounded by
-/// the walk cap: the test hook that proves a huge directory is read bounded.
 #[cfg(test)]
-static WALK_COLLECTED: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    // Directory entries collected from `read_dir` before sorting, bounded by
+    // the walk cap: the test hook that proves a huge directory is read bounded.
+    static WALK_COLLECTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
-/// How many blocking reads [`run_git`] and the file walk have done since
-/// process start (or the last [`reset_io_count`]).
+/// How many blocking reads [`run_git`] and the file walk have done on this
+/// thread since it started (or the last [`reset_io_count`]).
 #[cfg(test)]
 pub(crate) fn io_count() -> usize {
     crate::render_io::io_count()
@@ -73,14 +77,14 @@ pub(crate) fn io_count() -> usize {
 /// start (or the last [`reset_io_count`]).
 #[cfg(test)]
 pub(crate) fn cache_hit_count() -> usize {
-    DIR_CACHE_HITS.load(Ordering::Relaxed)
+    DIR_CACHE_HITS.with(std::cell::Cell::get)
 }
 
 /// How many directory entries the walk collected since process start (or
 /// the last [`reset_io_count`]).
 #[cfg(test)]
 pub(crate) fn walk_collected_count() -> usize {
-    WALK_COLLECTED.load(Ordering::Relaxed)
+    WALK_COLLECTED.with(std::cell::Cell::get)
 }
 
 /// Zero [`io_count`], [`cache_hit_count`] and [`walk_collected_count`]; the
@@ -88,8 +92,8 @@ pub(crate) fn walk_collected_count() -> usize {
 #[cfg(test)]
 pub(crate) fn reset_io_count() {
     crate::render_io::reset_io_count();
-    DIR_CACHE_HITS.store(0, Ordering::Relaxed);
-    WALK_COLLECTED.store(0, Ordering::Relaxed);
+    DIR_CACHE_HITS.with(|count| count.set(0));
+    WALK_COLLECTED.with(|count| count.set(0));
 }
 
 pub(crate) use crate::render_io::note_io;
@@ -99,7 +103,7 @@ use crate::layout::LayoutGlobal as _;
 /// builds; nothing in production.
 fn note_cache_hit() {
     #[cfg(test)]
-    DIR_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+    DIR_CACHE_HITS.with(|count| count.set(count.get() + 1));
 }
 
 /// Count one collected directory entry toward [`walk_collected_count`] in
@@ -108,7 +112,7 @@ fn note_cache_hit() {
 /// since the last reset): the bound the walk keeps however big the folder.
 fn note_collected(held: usize) {
     #[cfg(test)]
-    WALK_COLLECTED.fetch_max(held, Ordering::Relaxed);
+    WALK_COLLECTED.with(|count| count.set(count.get().max(held)));
     #[cfg(not(test))]
     let _ = held;
 }
