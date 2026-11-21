@@ -2771,42 +2771,6 @@ impl Harness {
         Some(menu.into_any_element())
     }
 
-    /// The extensions popover (B2a-H5): stock CEF exposes no extension
-    /// list, so a fixed message — Manage opens chrome://extensions, the
-    /// Store opens the Chrome Web Store, each in a new tab.
-    pub(crate) fn render_browse_extensions(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Extensions) {
-            return None;
-        }
-        let p = cx.aui().colors;
-        let mut menu = self.browse_popover("browse-extensions", "Extensions", cx);
-        // R4 spike (11 Nov): Chromium here can list extensions but cannot run
-        // their popups or pages, so Baaz does not offer installing them yet;
-        // ad and tracker blocking is built in instead (board R4Daily 4c).
-        menu = menu.child(
-            div()
-                .w_full()
-                .px(cx.aui().metrics.item_px)
-                .py(px(scale::SP_2))
-                .role_in(TextRole::Body, cx)
-                .text_color(p.fg_muted)
-                .child("Chrome extensions don’t run in Baaz yet. Ads and trackers are blocked without one."),
-        );
-        let settings = self.browse_menu_row(
-            "browse-extensions-adblock",
-            "Ad blocking settings",
-            None,
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.dismiss_browse_popovers(cx);
-                this.open_browse_settings(cx);
-            }),
-            cx,
-        );
-        menu = menu.child(settings);
-        let _ = window;
-        Some(menu.into_any_element())
-    }
-
     /// The bar (canvas "Baaz v3", chrome revised 2026-10-13): the sidebar
     /// toggle past the window's lights, the mode switch at the sidebar's
     /// edge, the title slot (the session title; in Browse, closed only, the
@@ -3365,13 +3329,11 @@ impl Harness {
             .flatten();
         // The sidebar's downloads popover draws in the overlay window, over the live page.
         let downloads = (!self.browser.read(cx).downloads_overlay_wanted(cx)).then(|| self.render_browse_downloads(window, cx)).flatten();
-        // The footer's extensions popover draws in the overlay window too.
-        let extensions = (!self.browser.read(cx).downloads_overlay_wanted(cx)).then(|| self.render_browse_extensions(window, cx)).flatten();
         // A click outside the popovers dismisses them, like the tab menu:
         // the catcher is a sibling below the popovers in the same relative
         // column, so popover clicks still land on the popovers.
         let scrim: Option<AnyElement> =
-            (downloads.is_some() || extensions.is_some()).then(|| {
+            downloads.is_some().then(|| {
                 let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
                     this.dismiss_browse_popovers(cx);
                 });
@@ -3406,7 +3368,6 @@ impl Harness {
             .children(omnibox)
             .children(scrim)
             .children(downloads)
-            .children(extensions)
             .children(peek);
         // Flat (docs/83 §3): this fills the shell's centre column edge to
         // edge; the native page's rect and its square corners match

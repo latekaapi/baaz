@@ -126,7 +126,6 @@
 //! | `download:<name>` | script an active download (`done:<name>` lands it) on the shown tab and open the popover; empty fails the step, free |
 //! | `crashed:<reason>` | script a renderer crash on the shown tab, so the Baaz error page shows (empty is "the page crashed (-1)"), free |
 //! | `page-actions` | open the page controls' ⋯ on the shown tab (the library's page menu with its offers); it draws in the overlay window, which a main-window shot does not show; no page fails the step, free |
-//! | `extensions` | open the Browse extensions popover on the shown tab, free |
 //! | `site-set:<origin>\|<key>=<value>,…` | keep site settings for `origin` (capture-only store): `camera=allow`, `microphone=block`, `zoom=125`… (docs/82 8.6); a bad origin, key or value fails the step, free |
 //! | `zoom:<in\|out\|reset>` | step the shown Browse page's zoom, kept for its site, as ⌘= ⌘- ⌘0 do; no page, an engine that cannot zoom, or a level that did not move fails the step, free |
 //! | `agent-drive:<x>,<y>\|<label>` | the session whose tab Browse shows runs a page tool on it that never ends, having last acted at `x`,`y` (the page's CSS pixels) as `label` (`clicking “Next”`): the agent cursor and the driving bar on the real activity path (docs/82 8.6); it sends nothing anywhere. No shown page, a tab that is no session's, or a bad point fails the step, free |
@@ -460,7 +459,6 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "page-expand", run: |this, _, window, cx| this.step_page_expand(window, cx) },
     WindowVerb { verb: "page-collapse", run: |this, _, window, cx| this.step_page_collapse(window, cx) },
     WindowVerb { verb: "send-page", run: |this, rest, window, cx| this.step_send_page(rest, window, cx) },
-    WindowVerb { verb: "extensions", run: |this, rest, window, cx| this.step_extensions(rest, window, cx) },
     WindowVerb { verb: "site-set", run: |this, rest, _, cx| this.step_site_set(rest, cx) },
     WindowVerb { verb: "zoom", run: |this, rest, _, cx| this.step_zoom(rest, cx) },
     WindowVerb { verb: "library", run: |this, rest, window, cx| this.step_library(rest, window, cx) },

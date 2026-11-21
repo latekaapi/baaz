@@ -18,14 +18,6 @@ impl Harness {
         self.browser.update(cx, |browser, _| browser.downloads_anchor = anchor);
     }
 
-    /// The footer's extensions button (R4): its popover above it.
-    pub(crate) fn toggle_browse_extensions(&mut self, anchor: Option<gpui::Bounds<gpui::Pixels>>, cx: &mut Context<Self>) {
-        let open = !self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Extensions);
-        self.dismiss_browse_popovers(cx);
-        self.overlays.update(cx, |o, cx| o.set(crate::overlay_stack::Layer::Extensions, open, cx));
-        self.browser.update(cx, |browser, _| browser.downloads_anchor = anchor);
-    }
-
     /// Cancel the download `id` on its owning tab's page.
     pub(crate) fn cancel_browse_download(&mut self, tab: TabId, id: u32, cx: &mut Context<Self>) {
         if let Some(state) = self.browser.read(cx).states.get(&tab).cloned() {
@@ -101,12 +93,12 @@ impl BrowserView {
         self.download_started.retain(|key, _| live.contains(key));
     }
 
-    /// Whether a footer popover (downloads or extensions, R4) wants its
+    /// Whether the footer's downloads popover (R4) wants its
     /// overlay window: opened from its button. An empty downloads list
     /// still opens (it says so).
     pub(crate) fn downloads_overlay_wanted(&self, cx: &gpui::App) -> bool {
         crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse
-            && (self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Downloads) || self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Extensions))
+            && self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Downloads)
             && self.downloads_anchor.is_some()
     }
 }

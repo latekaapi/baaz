@@ -98,8 +98,6 @@ pub(crate) enum Layer {
     Bookmark(gpui::Entity<crate::overlay::BookmarkView>),
     /// Browse's downloads popover.
     Downloads,
-    /// Browse's extensions popover.
-    Extensions,
     /// The right pane's Files row menu.
     FilesMenu(crate::right_files::FilesMenu),
     /// The right pane's Page row Recent pages menu.
@@ -153,7 +151,6 @@ pub(crate) enum LayerKind {
     SiteInfo,
     Bookmark,
     Downloads,
-    Extensions,
     FilesMenu,
     PageMenu,
     AssistantMenu,
@@ -185,7 +182,6 @@ impl Layer {
             Layer::SiteInfo => LayerKind::SiteInfo,
             Layer::Bookmark(_) => LayerKind::Bookmark,
             Layer::Downloads => LayerKind::Downloads,
-            Layer::Extensions => LayerKind::Extensions,
             Layer::FilesMenu(_) => LayerKind::FilesMenu,
             Layer::PageMenu => LayerKind::PageMenu,
             Layer::AssistantMenu => LayerKind::AssistantMenu,

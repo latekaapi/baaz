@@ -420,7 +420,6 @@ impl Harness {
         }
         self.overlays.update(cx, |o, cx| o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Downloads), cx));
         self.browser.update(cx, |browser, _| browser.downloads_rendered = false);
-        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::Extensions, cx); });
         Ok(())
     }
 
@@ -562,18 +561,6 @@ impl Harness {
         if !self.send_tab_page(tab, selection, window, cx) {
             return Err(if selection { "the page has no selection".into() } else { "the tab shows no page".into() });
         }
-        Ok(())
-    }
-
-    /// `extensions`: open the extensions popover on the shown tab. No
-    /// shown tab is an `Err`. Free.
-    pub(crate) fn step_extensions(&mut self, _rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        self.set_mode(crate::layout::Mode::Browse, window, cx);
-        if self.browse_centre_page(window, cx).is_none() {
-            return Err("no page is open in Browse".into());
-        }
-        self.overlays.update(cx, |o, cx| o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Extensions), cx));
-        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::Downloads, cx); });
         Ok(())
     }
 

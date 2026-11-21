@@ -695,7 +695,6 @@ impl Harness {
                 self.invalidate_list(cx);
             }
             // Disabled while Baaz reads no PR data: never reported.
-            ViewOption::TogglePrStatus => {}
             ViewOption::ToggleSearchAll => self.toggle_search_scope(cx),
             ViewOption::ClearEmpty => {
                 self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
@@ -726,7 +725,6 @@ impl Harness {
             BrowseIntent::NewTab => self.new_browse_sidebar_tab(window, cx),
             BrowseIntent::PageMenu(anchor) => self.toggle_browse_page_menu(anchor, window, cx),
             BrowseIntent::Downloads(anchor) => self.toggle_browse_downloads(anchor, cx),
-            BrowseIntent::Extensions(anchor) => self.toggle_browse_extensions(anchor, cx),
             BrowseIntent::Page(action) => self.browse_page_action(action, window, cx),
             BrowseIntent::OpenPin(id) | BrowseIntent::SelectTab(id) => {
                 if let Some(id) = browse_tab_id(&id) {

@@ -10,8 +10,7 @@ impl Harness {
     pub(crate) fn dismiss_browse_popovers(&mut self, cx: &mut Context<Self>) -> bool {
         use crate::overlay_stack::LayerKind;
         let open = self.overlays.update(cx, |o, cx| {
-            // Close all three: no short circuit.
-            [LayerKind::Downloads, LayerKind::Extensions].map(|kind| o.close(kind, cx).is_some()).contains(&true)
+            o.close(LayerKind::Downloads, cx).is_some()
         });
         self.browser.update(cx, |browser, _| browser.downloads_rendered = false);
         if open {

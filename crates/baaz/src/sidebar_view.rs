@@ -1221,8 +1221,6 @@ impl SidebarPane {
                 show_archived: list.show_archived,
                 // Baaz reads no PR data yet: the row stays, disabled, "Soon"
                 // (owner 2026-10-11).
-                show_pr_status: false,
-                pr_status_available: false,
                 search_all_projects: layout.search_all_projects,
             },
             // Settings › Sidebar › "Show a summary line" (docs/83 §4).

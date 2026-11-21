@@ -369,11 +369,6 @@ impl Harness {
                 let focus = state.read(cx).focus_handle().clone();
                 window.focus(&focus, cx);
             }
-            WebviewIntent::Console => {
-                self.overlays.update(cx, |overlays, cx| {
-                    overlays.toast("Browser", "Console is not available yet.", cx);
-                });
-            }
             WebviewIntent::Screenshot => {
                 let key = self.browser_key(cx);
                 let state = self.browser_for(&key, false, window, cx);

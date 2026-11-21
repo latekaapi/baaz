@@ -279,7 +279,7 @@ impl BrowserView {
             cx.emit(BrowserEvent::CentreSwitched { left: self.last_centre_shown, shown: centre_shown });
         }
         if switched || !in_browse {
-            self.overlays.update(cx, |o, cx| o.close_all(&[LayerKind::Downloads, LayerKind::Extensions], cx));
+            self.overlays.update(cx, |o, cx| o.close_all(&[LayerKind::Downloads], cx));
         }
         // However the downloads popover closed (a switch, its toggle,
         // Escape off the overlay stack), it has not rendered for its next
@@ -306,12 +306,11 @@ impl BrowserView {
             self.overlays.update(cx, |o, cx| { o.close(LayerKind::Downloads, cx); });
             self.downloads_rendered = false;
         }
-        if self.overlays.read(cx).stack.is_open(LayerKind::Extensions) && centre_shown.is_none() {
-            self.overlays.update(cx, |o, cx| { o.close(LayerKind::Extensions, cx); });
-        }
         let chrome_popover_open = in_browse
-            && ((self.overlays.read(cx).stack.is_open(LayerKind::Downloads) && !self.downloads_overlay_wanted(cx) && centre_shown.is_some() && !self.browse_downloads(cx).is_empty())
-                || (self.overlays.read(cx).stack.is_open(LayerKind::Extensions) && centre_shown.is_some() && !self.downloads_overlay_wanted(cx)));
+            && self.overlays.read(cx).stack.is_open(LayerKind::Downloads)
+            && !self.downloads_overlay_wanted(cx)
+            && centre_shown.is_some()
+            && !self.browse_downloads(cx).is_empty();
         // A crashed page hides the find strip: the highlight stops and the
         // strip closes, so the error page owns the rect alone. First, so
         // the stored rect below never reserves a row for a strip that just

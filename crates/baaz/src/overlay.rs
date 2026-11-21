@@ -1315,11 +1315,7 @@ impl Harness {
             OverlayKind::Bookmark => self.render_bookmark_popover(cx),
             OverlayKind::Downloads => {
                 self.hosting_overlay = true;
-                let list = if self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::Extensions) {
-                    self.render_browse_extensions(window, cx)
-                } else {
-                    self.render_browse_downloads(window, cx)
-                };
+                let list = self.render_browse_downloads(window, cx);
                 self.hosting_overlay = false;
                 let above = self.browser.read(cx).downloads_anchor.is_some_and(|a| a.top() > window.bounds().size.height / 2.0);
                 let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
