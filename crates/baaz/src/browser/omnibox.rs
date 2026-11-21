@@ -212,23 +212,19 @@ impl Harness {
         }
     }
 
-    /// Ask the agent about `query` (the omnibox's Ask row, ⌘↵): a new
-    /// session in this project with the text as its first prompt draft —
-    /// never sent, never navigated. The draft rides
-    /// [`BrowserView::pending_ask_draft`],
-    /// keyed by the session id `new_session_in` creates (or the draft id
-    /// it reuses) — and lands when that session's view lands (see
-    /// `activate`), never on whatever `self.active` happens to be right
-    /// now. Any early return in `new_session_in` drops it, so no unrelated
-    /// resume ever takes it.
+    /// The Field's Ask (its Ask row, ⌘↵): the one Ask (docs/82 8.2) —
+    /// the ⌘J line opens on the page shown and asks `query` there in
+    /// place, as the line's own submit would. Never a session, never a
+    /// draft; "Continue in a session…" is the card's second step. With no
+    /// page shown (a new tab) it still asks on the line, with no page.
     pub(crate) fn browse_ask(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         let query = query.trim().to_owned();
         if query.is_empty() {
             return;
         }
         self.leave_browse_address(window, cx);
-        self.browser.update(cx, |browser, _| browser.pending_ask_draft = Some(crate::app::PendingAsk { target: None, query }));
-        self.new_session(window, cx);
+        self.open_agent_line(window, cx);
+        self.ask_browser_chat(&query, true, false, window, cx);
         cx.notify();
     }
 
@@ -639,22 +635,5 @@ impl BrowserView {
             .as_ref()
             .map(|input| input.read(cx).value().to_string())
             .unwrap_or_default()
-    }
-
-    /// Key the armed Ask draft to `session`: the id `new_session_in`
-    /// created (or the draft id it reused). Called on every path that opens
-    /// the Ask's session, before its view lands — so `activate` takes the
-    /// draft only for this session.
-    pub(crate) fn key_pending_ask(&mut self, session: &str) {
-        if let Some(pending) = self.pending_ask_draft.as_mut() {
-            pending.target = Some(session.to_owned());
-        }
-    }
-
-    /// Drop the armed Ask draft: every early return in `new_session_in`
-    /// (a switch already pending, no params, a failed or async-never-landing
-    /// provider open) drops it, so no unrelated resume ever takes it.
-    pub(crate) fn drop_pending_ask(&mut self) {
-        self.pending_ask_draft = None;
     }
 }

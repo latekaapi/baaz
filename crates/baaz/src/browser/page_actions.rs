@@ -73,19 +73,20 @@ impl Harness {
         self.dismiss_browse_popovers(cx);
     }
 
-    /// Screenshot the shown tab into the active session's draft (the ⋯
-    /// menu): the same capture-or-pend path the library intent takes, read
-    /// off the centre page instead of the pane's. The popover closes
-    /// first, so the page it covered is visible in the capture; the
-    /// pending capture keys to the shown tab, never the session key, so a
-    /// switch can never misattribute it.
-    pub(crate) fn capture_browse_screenshot(&mut self, cx: &mut Context<Self>) {
+    /// Screenshot the shown tab (the ⋯ menu, the Field's command): the
+    /// same capture-or-pend path the library intent takes, read off the
+    /// centre page instead of the pane's. Browse shows no composer, so the
+    /// picture goes through "Add to which session?" (docs/82 8.2). The
+    /// popover closes first, so the page it covered is visible in the
+    /// capture; the pending capture keys to the shown tab, never the
+    /// session key, so a switch can never misattribute it.
+    pub(crate) fn capture_browse_screenshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss_browse_popovers(cx);
         let shown = self.browser.read(cx).browse_centre_shown(cx);
         if let Some(state) = self.browse_centre_state(cx) {
             state.update(cx, |state, _cx| state.capture());
             match state.read(cx).screenshot().map(<[u8]>::to_vec) {
-                Some(bytes) => self.attach_browser_screenshot(bytes, cx),
+                Some(bytes) => self.attach_browser_screenshot(bytes, window, cx),
                 None => {
                     if let Some(id) = shown {
                         self.browser.update(cx, |browser, _| browser.shot_pending.insert(screenshot_tab_key(id)));

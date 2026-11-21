@@ -346,18 +346,38 @@ impl crate::browser::BrowserView {
 }
 
 impl Harness {
-    /// ⌘J: open the line on the page on screen, or close it.
-    pub(crate) fn toggle_agent_line(&mut self, cx: &mut Context<Self>) {
+    /// ⌘J: open the line on the page on screen ([`Self::open_agent_line`]),
+    /// or close it.
+    pub(crate) fn toggle_agent_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.browser.read(cx).browse_centre_shown(cx).is_none() {
             return;
         }
+        if self.browser.read(cx).agent_window.line_ui == LineUi::Closed {
+            self.open_agent_line(window, cx);
+        } else {
+            self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Closed, None, cx));
+        }
+    }
+
+    /// The one Ask (docs/82 8.2): ⌘J, the ✦ button and the Field's Ask all
+    /// open the line here, on the page shown, ready to type. "This page"
+    /// stands again each time — unless no page is shown (a new tab), where
+    /// the line asks with no page. A line already open stays as it is.
+    /// Browse only; with no tab at all, Browse's own blank tab opens first.
+    pub(crate) fn open_agent_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
+            return;
+        }
+        if self.browser.read(cx).browse_centre_shown(cx).is_none() {
+            self.ensure_browse_tab(window, cx);
+        }
+        if self.browser.read(cx).agent_window.line_ui != LineUi::Closed {
+            return;
+        }
+        let page = self.page_on_screen(cx).is_some_and(|(_, _, url)| !url.is_empty() && url != crate::browser::tabs::BLANK) && !self.browse_centre_tab_blank(cx);
         self.browser.update(cx, |browser, cx| {
-            let opening = browser.agent_window.line_ui == LineUi::Closed;
-            // "This page" stands again each time the line opens.
-            if opening {
-                browser.agent_window.line_page_chip = true;
-            }
-            browser.set_agent_line(if opening { LineUi::Ask } else { LineUi::Closed }, Some(opening), cx);
+            browser.agent_window.line_page_chip = page;
+            browser.set_agent_line(LineUi::Ask, Some(true), cx);
         });
     }
 

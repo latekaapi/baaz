@@ -190,11 +190,12 @@ impl Harness {
         // ⌘-, ⇧- and ⌥-clicks the page script reported: new tabs, a Peek,
         // a Split (the Peek and Split build their page with the window).
         self.drain_link_gestures(window, cx);
-        // A Screenshot whose bytes were not there yet attaches on arrival.
+        // A Screenshot whose bytes were not there yet goes on arrival.
         // Pending captures key to the tab they were taken on
-        // ([`screenshot_tab_key`]): the bytes attach to the active
-        // session's draft only while that tab still shows, so a switch
-        // can never misattribute them.
+        // ([`screenshot_tab_key`]): the bytes go only while that tab still
+        // shows, so a switch can never misattribute them — to the visible
+        // composer, else through the "Add to which session?" picker
+        // (docs/82 8.2).
         let active_key = self.browser_key(cx);
         let shown_now = self.browser.read(cx).browse_centre_shown(cx);
         let pending: Vec<String> = self.browser.read(cx).shot_pending.iter().cloned().collect();
@@ -209,7 +210,7 @@ impl Harness {
                 if let Some(bytes) = ready {
                     if shown_now == Some(id) {
                         self.browser.update(cx, |browser, _| browser.shot_pending.remove(&key));
-                        self.attach_browser_screenshot(bytes, cx);
+                        self.attach_browser_screenshot(bytes, window, cx);
                     }
                 }
                 continue;
@@ -226,7 +227,7 @@ impl Harness {
             if let Some(bytes) = bytes {
                 if key == active_key {
                     self.browser.update(cx, |browser, _| browser.shot_pending.remove(&key));
-                    self.attach_browser_screenshot(bytes, cx);
+                    self.attach_browser_screenshot(bytes, window, cx);
                 }
             }
         }

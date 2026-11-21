@@ -259,22 +259,25 @@ fn suggestions_pickup_and_row_presses() {
     assert!(leave.contains("focus_root"), "leaving falls back to the root, never a dead handle");
 }
 
-/// Ask drafts into the session that lands: `browse_ask` arms the question
-/// and starts the session without touching `active`; `new_session_in`
-/// keys it by the created (or reused) session id and drops it on every
-/// early return; `activate` writes it into the keyed view only (appending
-/// over reused text) — never sent, never navigated. ⌘↵ rides the input's
-/// own binding, so the commit never also fires.
+/// One Ask (docs/82 8.2): the Field's Ask opens the ⌘J line and asks
+/// there in place — never a session, never a draft, never `active`, never a
+/// navigation. ⌘↵ rides the input's own binding, so the commit never also
+/// fires. What a page sends a session it is not showing (a parcel) is keyed
+/// by that session's id: `new_session_in` drops an untargeted one on every
+/// early return, every open path keys it, and `activate` lands it in the
+/// keyed view only (appending over reused text) — never sent.
 #[test]
-fn ask_draft_lands_on_arrival_never_sent() {
+fn one_ask_asks_in_place_and_parcels_land_on_arrival() {
     let browser = browser_source();
     let ask = fn_body(&browser, "browse_ask");
-    assert!(ask.contains("PendingAsk { target: None, query }"), "Ask arms the unkeyed question");
-    assert!(!ask.contains("self.active"), "Ask never touches whatever is active right now");
-    assert!(!ask.contains("set_draft"), "Ask never writes a draft immediately");
-    for banned in ["submit", ".send(", "navigate", "start_turn"] {
-        assert!(!ask.contains(banned), "Ask never sends and never navigates ({banned})");
+    assert!(ask.contains("self.open_agent_line(window, cx)"), "the Field's Ask opens the line");
+    assert!(ask.contains("self.ask_browser_chat("), "and asks there");
+    for banned in ["new_session", "parcels", "self.active", "set_draft", "navigate"] {
+        assert!(!ask.contains(banned), "the Field's Ask starts no session and drafts nothing ({banned})");
     }
+    let star = fn_body(&browser, "browse_ask_page");
+    assert!(star.contains("self.open_agent_line(window, cx)"), "✦ opens the same line");
+    assert!(!star.contains("browse_ask("), "✦ asks nothing by itself");
     let focus = fn_body(&browser, "focus_browse_address_with");
     assert!(
         focus.contains("PressEnter { secondary: true"),
@@ -286,18 +289,20 @@ fn ask_draft_lands_on_arrival_never_sent() {
     assert!(!input.contains("platform"), "no parent ⌘↵ arm doubles the Ask");
     let open = source("app/sessions/open.rs");
     let new = fn_body(&open, "new_session_in");
-    assert!(new.contains("browser.drop_pending_ask()"), "an early return drops the draft");
+    assert!(new.contains("browser.drop_untargeted_parcels()"), "an early return drops a new session's parcel");
     assert!(
-        open.contains("browser.key_pending_ask("),
-        "every open path keys the draft to its session"
+        open.contains("browser.key_pending_parcels("),
+        "every open path keys a waiting parcel to its session"
     );
     let activate = fn_body(&open, "activate");
-    assert!(
-        activate.contains("ask.target.as_deref() == Some(session_id.as_str())"),
-        "only the keyed session's landing takes the question"
-    );
-    assert!(activate.contains("ask_draft_text"), "reused text appends on a new line");
-    assert!(activate.contains("view.set_draft(next, window, cx)"), "the draft lands, never sent");
+    assert!(activate.contains("self.land_parcels(&session_id, &view, window, cx)"), "a landing takes its own parcels");
+    let land = fn_body(&browser, "take_parcels_for");
+    assert!(land.contains("pending.target.as_deref() == Some(session)"), "only the keyed session's landing takes them");
+    let apply = fn_body(&browser, "apply_parcel");
+    assert!(apply.contains("append_draft_line"), "reused text appends on a new line");
+    for banned in ["submit", ".send(", "start_turn"] {
+        assert!(!apply.contains(banned), "a parcel is never sent ({banned})");
+    }
 }
 
 /// The held session tab clears everywhere it must: sidebar and new-tab

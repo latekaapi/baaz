@@ -5,7 +5,12 @@
 //! The chat stays usable; its tabs move to the target's task folder; the
 //! target gets the chat's context as an **unsent draft** in its composer
 //! (the chat's last answer and the pages it used), so nothing runs and no
-//! turn is spent until the person sends it.
+//! turn is spent until the person sends it. The person stays on the page: a
+//! toast says where it went, with Open (docs/82 8.2).
+//!
+//! The same picker, centred over the window, asks "Add to which session?"
+//! for a screenshot, a page's notes, a quote or terminal output when no
+//! composer is on screen ([`crate::browser::Parcel`]).
 
 use gpui::{div, prelude::*, Context, Window};
 
@@ -39,6 +44,29 @@ pub(crate) struct HandoffDelegate {
     candidates: HandoffCandidates,
     /// The sessions and the projects the query leaves, in order.
     matches: (Vec<usize>, Vec<usize>),
+    /// Where it stands and what it is for.
+    seat: PickerSeat,
+}
+
+/// Where the picker stands, which says what it is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PickerSeat {
+    /// Under the agent card's header: the card's hand-off.
+    Card,
+    /// Centred over the window like the palette, on a scrim: "Add to which
+    /// session?" for what is bound for a composer no one can see (docs/82
+    /// 8.2), its footnote naming what goes.
+    Attach(&'static str),
+}
+
+/// The attach picker's footnote for `noun` ([`crate::browser::Parcel::noun`]).
+fn attach_note(noun: &str) -> &'static str {
+    match noun {
+        "Notes" => "Add these notes to which session? They wait in its composer, unsent.",
+        "Quote" => "Add this quote to which session? It waits in its composer, unsent.",
+        "Terminal output" => "Add this output to which session? It waits in its composer, unsent.",
+        _ => "Add this screenshot to which session? It waits in its composer, unsent.",
+    }
 }
 
 impl HandoffDelegate {
@@ -94,19 +122,39 @@ impl crate::picker::PickerDelegate for HandoffDelegate {
         let projects = rows.split_off(self.matches.0.len().min(rows.len()));
         let Some(field) = frame.field.clone() else { return div().into_any_element() };
         let (select, hover, dismiss) = (frame.select.clone(), frame.hover.clone(), frame.dismiss.clone());
-        let picker = aui::browse::handoff::handoff_picker("handoff-picker", &field, rows, projects, frame.selected).on_intent(
+        let id = if self.seat == PickerSeat::Card { "handoff-picker" } else { "attach-picker" };
+        let picker = aui::browse::handoff::handoff_picker(id, &field, rows, projects, frame.selected).on_intent(
             move |intent, window, cx| match intent {
                 HandoffIntent::Choose(row) => select(&row, window, cx),
                 HandoffIntent::Hover(index) => hover(index, window, cx),
                 HandoffIntent::Close => dismiss(window, cx),
             },
         );
-        // Under the card's header, its right edge 70 in from the card's
-        // (the ↗ sits left of Dock and Close).
-        frame
-            .keyed(div().absolute().top(gpui::px(crate::overlay::SHADOW_PAD + 44.0)).right(gpui::px(crate::overlay::SHADOW_PAD + 62.0)))
-            .child(picker)
-            .into_any_element()
+        match self.seat {
+            // Under the card's header, its right edge 70 in from the card's
+            // (the ↗ sits left of Dock and Close).
+            PickerSeat::Card => frame
+                .keyed(div().absolute().top(gpui::px(crate::overlay::SHADOW_PAD + 44.0)).right(gpui::px(crate::overlay::SHADOW_PAD + 62.0)))
+                .child(picker)
+                .into_any_element(),
+            // Centred, its top at 18 % of the window like the palette
+            // (docs/83 §7), on the scrim: a click there cancels — nothing
+            // is attached anywhere.
+            PickerSeat::Attach(note) => {
+                let dismiss = frame.dismiss.clone();
+                let layer = aui::interact::dismiss_layer("attach-picker-scrim", "Cancel: add to no session", move |window, cx| dismiss(window, cx));
+                aui::overlay::popover_layer(
+                    frame.keyed(layer).bg(aui::overlay::scrim()).child(
+                        aui::util::v_flex()
+                            .size_full()
+                            .items_center()
+                            .child(div().flex_none().w_full().h(gpui::relative(aui_tokens::scale::PALETTE_TOP)))
+                            .child(picker.note(note)),
+                    ),
+                )
+                .into_any_element()
+            }
+        }
     }
 }
 
@@ -222,7 +270,7 @@ impl Harness {
             view.update(cx, |picker, cx| picker.dismiss(cx));
             return;
         }
-        let delegate = HandoffDelegate { candidates: self.handoff_candidates(cx), matches: (Vec::new(), Vec::new()) };
+        let delegate = HandoffDelegate { candidates: self.handoff_candidates(cx), matches: (Vec::new(), Vec::new()), seat: PickerSeat::Card };
         let view = cx.new(|cx| crate::picker::Picker::with_own_field(delegate, "Find a session or project", cx));
         let picked = cx.subscribe(&view, |this: &mut Self, _, event: &crate::picker::Picked<HandoffTarget>, cx| {
             let target = event.0.clone();
@@ -246,9 +294,51 @@ impl Harness {
         Some(view.into_any_element())
     }
 
+    /// "Add to which session?" (docs/82 8.2): the hand-off picker's rows,
+    /// centred over the window, holding `parcel` in its overlay entry until
+    /// a pick delivers it ([`Self::attach_picked`]). Escape or a click away
+    /// drops the entry and the parcel with it: nothing is attached. A
+    /// picker already open gives way to this one.
+    pub(crate) fn open_attach_picker(&mut self, parcel: crate::browser::Parcel, cx: &mut Context<Self>) {
+        let seat = PickerSeat::Attach(attach_note(parcel.noun()));
+        let delegate = HandoffDelegate { candidates: self.handoff_candidates(cx), matches: (Vec::new(), Vec::new()), seat };
+        let view = cx.new(|cx| crate::picker::Picker::with_own_field(delegate, "Add to which session?", cx));
+        let picked = cx.subscribe(&view, |this: &mut Self, _, event: &crate::picker::Picked<HandoffTarget>, cx| {
+            let target = event.0.clone();
+            this.run_on_main(cx, move |this, window, cx| this.attach_picked(target, window, cx));
+        });
+        let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::AttachPicker(Box::new(parcel))).keep(picked);
+        self.push_overlay_view(entry, &view, cx);
+    }
+
+    /// The open attach picker's view.
+    pub(crate) fn attach_picker_view(&self, cx: &gpui::App) -> Option<gpui::Entity<HandoffPicker>> {
+        self.overlays.read(cx).stack.view_as::<HandoffPicker>(crate::overlay_stack::LayerKind::AttachPicker)
+    }
+
+    /// The attach picker for this frame, its candidates pushed first (it
+    /// draws right after, in this same frame), or `None` when none is open.
+    pub(crate) fn compose_attach_picker(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let view = self.attach_picker_view(cx)?;
+        let candidates = self.handoff_candidates(cx);
+        view.update(cx, |picker, cx| picker.push_facts(cx, |delegate| delegate.candidates = candidates));
+        Some(view.into_any_element())
+    }
+
+    /// The row ids the attach picker would list now, for the hosted
+    /// modal's print: a row landing redraws the panel.
+    pub(crate) fn attach_picker_print(&self, cx: &gpui::App) -> Option<Vec<gpui::SharedString>> {
+        self.attach_picker_view(cx)?;
+        let candidates = self.handoff_candidates(cx);
+        Some(candidates.sessions.iter().chain(&candidates.projects).map(|c| c.row.id.clone()).collect())
+    }
+
     /// Hand the browser chat off to `target`: its tabs move to the target's
-    /// task folder, the target opens in Sessions with the chat's context as
-    /// an unsent draft, and the chat records the handoff (board 3b).
+    /// task folder, the target gets the chat's context as an unsent draft
+    /// ([`crate::browser::Parcel::Text`]), a toast says where it went with
+    /// Open, and the chat records the handoff (board 3b). The person stays
+    /// on the page; a new session opens in its project, there being no new
+    /// session without opening one.
     pub(crate) fn hand_off_browser_chat(&mut self, target: HandoffTarget, window: &mut Window, cx: &mut Context<Self>) {
         self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::HandoffPicker, cx); });
         let Some(chat) = self.registry.browser_chat().cloned() else { return };
@@ -268,31 +358,22 @@ impl Harness {
             }
         }
         let draft = handoff_draft(&title, answer.as_deref(), &pages);
-        // The target: an existing session, or a new one in the project.
-        let (target_id, target_label, project_label) = match &target {
+        // The target: an existing session (its chain's head, where it
+        // opens), or a new one in the project.
+        let (target_label, project_label) = match &target {
             HandoffTarget::Session(id) => {
-                let label = self.session_list.read(cx).sessions.iter().find(|e| &e.id == id).map(|e| e.label.clone()).unwrap_or_default();
-                let project = self.project_name_for(id, cx).unwrap_or_default();
-                self.browser.update(cx, |browser, _| browser.pending_ask_draft = Some(crate::app::PendingAsk { target: Some(id.clone()), query: draft }));
-                self.set_mode(crate::layout::Mode::Sessions, window, cx);
-                if self.active_id(cx).as_deref() != Some(id.as_str()) {
-                    self.resume(id.clone(), window, cx);
-                } else if let Some(view) = self.active.clone() {
-                    // Already on screen: the draft goes straight into its composer.
-                    let text = self.browser.update(cx, |browser, _| browser.pending_ask_draft.take().map(|p| p.query).unwrap_or_default());
-                    let existing = view.read(cx).draft_text(cx);
-                    let next = crate::browser::toolbar::ask_draft_text(&existing, &text);
-                    view.update(cx, |view, cx| view.set_draft(next, window, cx));
-                }
-                (Some(id.clone()), label, project)
+                let head = self.chain_head(id, cx);
+                let label = self.session_list.read(cx).sessions.iter().find(|e| e.id == head).map(|e| e.label.clone()).unwrap_or_default();
+                (label, self.project_name_for(&head, cx).unwrap_or_default())
             }
             HandoffTarget::Project(project) => {
-                let name = self.session_list.read(cx).projects.find(project).map(|p| p.name.clone()).unwrap_or_default();
-                self.browser.update(cx, |browser, _| browser.pending_ask_draft = Some(crate::app::PendingAsk { target: None, query: draft }));
-                self.new_session_in(Some(project.clone()), window, cx);
-                (self.active_id(cx), "a new session".to_owned(), name)
+                ("a new session".to_owned(), self.session_list.read(cx).projects.find(project).map(|p| p.name.clone()).unwrap_or_default())
             }
         };
+        // Its tabs follow the draft — when the session is known now; a new
+        // session whose open is still in flight leaves them with the chat
+        // (never on whatever `active` happens to be).
+        let target_id = self.deliver_parcel(target, crate::browser::Parcel::Text(draft), window, cx);
         if let Some(target_id) = target_id.as_ref() {
             for (tab, _, _) in &tabs {
                 self.browser.update(cx, |browser, _| browser.tabs.move_to(*tab, Owner::Session(target_id.clone())));

@@ -128,6 +128,8 @@
 //! | `crashed:<reason>` | script a renderer crash on the shown tab, so the Baaz error page shows (empty is "the page crashed (-1)"), free |
 //! | `more-menu` | open the Browse ⋯ page-actions menu on the shown tab, free |
 //! | `extensions` | open the Browse extensions popover on the shown tab, free |
+//! | `browse-ask:<text>` | Browse: the Field's Ask with `text` — the ⌘J line opens on the shown page and asks there (docs/82 8.2); scripted lanes only (the browser chat's lane sends nothing anywhere), so it reaches no model; empty text, no page, live lanes or no line fail the step |
+//! | `shot-pick` | a page screenshot landing where the window stands (a 1-px fixture picture; the scripted page takes none): with no composer on screen (Browse, Settings) "Add to which session?" opens; no picker (a composer on screen took it) fails the step, free: nothing attaches until a pick |
 //! | `fixture-session:<name>` | capture aid: park a local session row plus one session tab carrying `https://example.com`, and carry it into Browse (the offline `browse-from-session` shot), free |
 //! | `page-menu` | open the Page row's Recent pages menu (`page-menu:off` closes it), free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
@@ -437,6 +439,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "download", run: |this, rest, window, cx| this.step_download(rest, window, cx) },
     WindowVerb { verb: "crashed", run: |this, rest, window, cx| this.step_crashed(rest, window, cx) },
     WindowVerb { verb: "more-menu", run: |this, rest, window, cx| this.step_more_menu(rest, window, cx) },
+    WindowVerb { verb: "browse-ask", run: |this, rest, window, cx| this.step_browse_ask(rest, window, cx) },
+    WindowVerb { verb: "shot-pick", run: |this, rest, window, cx| this.step_shot_pick(rest, window, cx) },
     WindowVerb { verb: "extensions", run: |this, rest, window, cx| this.step_extensions(rest, window, cx) },
     WindowVerb {
         verb: "fixture-session",
@@ -543,7 +547,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     // do; `browser-chat-fixture:<answer|steps|draft>` makes a read-only
     // browser chat with a canned transcript and points the line at it;
     // `handoff-picker` opens the card's picker.
-    WindowVerb { verb: "agent-line", run: |this, _, _, cx| { this.toggle_agent_line(cx); Ok(()) } },
+    WindowVerb { verb: "agent-line", run: |this, _, window, cx| { this.toggle_agent_line(window, cx); Ok(()) } },
     WindowVerb { verb: "agent-card", run: |this, _, _, cx| { this.toggle_agent_card(cx); Ok(()) } },
     WindowVerb { verb: "agent-column", run: |this, _, _, cx| { this.toggle_agent_column(cx); Ok(()) } },
     WindowVerb { verb: "browser-chat-fixture", run: |this, rest, window, cx| this.step_browser_chat_fixture(rest, window, cx) },

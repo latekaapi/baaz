@@ -159,6 +159,7 @@ fn offences(body: &str) -> Vec<String> {
 /// composes from, directly or through each other. A helper render reaches
 /// that is missing here fails [`render_reaches_only_listed_helpers`].
 const RENDER_HELPERS: &[&str] = &[
+    "compose_attach_picker",
     "compose_sidebar",
     "compose_terminal_dock",
     "render_bar_chrome",

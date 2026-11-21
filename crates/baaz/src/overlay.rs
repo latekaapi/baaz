@@ -414,7 +414,7 @@ impl Render for OverlayView {
                 let k = &event.keystroke;
                 let cmd = k.modifiers.platform && !k.modifiers.control && !k.modifiers.alt;
                 let _ = baaz.update(cx, |baaz, cx| match (cmd, k.modifiers.shift, k.key.as_str()) {
-                    (true, false, "j") => baaz.toggle_agent_line(cx),
+                    (true, false, "j") => baaz.run_on_main(cx, |baaz, window, cx| baaz.toggle_agent_line(window, cx)),
                     (true, false, "e") => baaz.toggle_agent_card(cx),
                     (true, true, "e") => baaz.toggle_agent_column(cx),
                     (false, false, "escape") => baaz.escape_agent_window(kind, cx),
@@ -1125,10 +1125,13 @@ impl Harness {
             dialog.title.hash(&mut hasher);
             dialog.detail.hash(&mut hasher);
         }
+        // The attach picker is its own view too: only the rows the root
+        // pushes in are this print's to see.
+        self.attach_picker_print(cx).hash(&mut hasher);
         hasher.finish()
     }
 
-    /// Whether Browse's modal (a palette or a dialog) draws in the overlay
+    /// Whether Browse's modal (a palette, a dialog or the attach picker) draws in the overlay
     /// window rather than the main one: its entry on the overlay stack is a
     /// `Modal`, which the panel hosts in Browse (one host per mode, so a page
     /// loading under an open palette never moves it).
@@ -1136,7 +1139,7 @@ impl Harness {
         use crate::overlay_stack::LayerKind;
         let browse = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
         let stack = &self.overlays.read(cx).stack;
-        [LayerKind::Palette, LayerKind::Dialog].into_iter().any(|kind| stack.hosted_in_panel(kind, browse))
+        [LayerKind::Palette, LayerKind::Dialog, LayerKind::AttachPicker].into_iter().any(|kind| stack.hosted_in_panel(kind, browse))
     }
 
     /// The handle the hosted modal's keyboard belongs to: the palette's own
@@ -1145,6 +1148,9 @@ impl Harness {
         use gpui::Focusable as _;
         let overlays = self.overlays.read(cx);
         if let Some(view) = self.palette_view(cx) {
+            return Some(view.focus_handle(cx));
+        }
+        if let Some(view) = self.attach_picker_view(cx) {
             return Some(view.focus_handle(cx));
         }
         let _ = overlays;
@@ -1216,7 +1222,7 @@ impl Harness {
                 // The same elements the main window draws, their listeners
                 // routed back to it (`main_listener`).
                 self.hosting_overlay = true;
-                let modal = self.compose_palette(cx).or_else(|| self.compose_dialog(cx));
+                let modal = self.compose_palette(cx).or_else(|| self.compose_attach_picker(cx)).or_else(|| self.compose_dialog(cx));
                 self.hosting_overlay = false;
                 Some(div().size_full().relative().children(modal).into_any_element())
             }
@@ -1551,9 +1557,10 @@ impl Harness {
             OverlayKind::Downloads => {
                 self.dismiss_browse_popovers(cx);
             }
-            // The hosted modals' own dismissal, palette then dialog.
+            // The hosted modals' own dismissal, palette, attach picker,
+            // then dialog.
             OverlayKind::Modal => {
-                for kind in [crate::overlay_stack::LayerKind::Palette, crate::overlay_stack::LayerKind::Dialog] {
+                for kind in [crate::overlay_stack::LayerKind::Palette, crate::overlay_stack::LayerKind::AttachPicker, crate::overlay_stack::LayerKind::Dialog] {
                     let view = self.overlays.read(cx).stack.view(kind);
                     if let Some(view) = view {
                         self.dismiss_overlay_view(view.entity_id(), cx);

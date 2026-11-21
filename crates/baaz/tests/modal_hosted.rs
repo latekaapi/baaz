@@ -66,7 +66,10 @@ fn a_hosted_modal_does_not_hide_the_page() {
     assert!(browser.contains("self.overlays.read(cx).stack.covers_page(cx)"), "the page's overlay cover is the stack's");
     let stack = source("overlay_stack.rs");
     assert!(stack.contains("open.covers_page && open.host.resolve(browse) == Host::Main"), "an entry in the overlay window covers nothing");
-    assert!(stack.contains("Layer::Dialog(_) | Layer::Palette(_) => Host::Modal"), "the dialog and the palette follow the mode");
+    assert!(
+        stack.contains("Layer::Dialog(_) | Layer::Palette(_) | Layer::AttachPicker(_) => Host::Modal"),
+        "the dialog, the palette and the attach picker follow the mode"
+    );
     assert!(stack.contains("Host::Modal if browse => Host::Panel"), "Browse hosts a modal in the overlay window");
 }
 
@@ -77,8 +80,8 @@ fn the_main_window_skips_a_hosted_palette() {
     // Plan 4.6: the palette and the dialog are their own views; the root
     // composes them (facts pushed, then the view) only where it hosts them.
     assert!(
-        app.contains("if modal_hosted { None } else { self.compose_palette(cx) }"),
-        "the main window does not also draw the hosted palette"
+        app.contains("if modal_hosted { None } else { self.compose_palette(cx).or_else(|| self.compose_attach_picker(cx)) }"),
+        "the main window does not also draw the hosted palette or attach picker"
     );
     assert!(
         app.contains("if modal_hosted { None } else { self.compose_dialog(cx) }"),

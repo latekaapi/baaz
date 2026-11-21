@@ -1150,10 +1150,11 @@ impl Harness {
 
     /// The newest toast as the stack's chip, with `+n` while more wait. The
     /// same [`ToastData`](aui::feedback::ToastData) as ever: toasts wait for
-    /// a press, never a clock. One action exists, and it is Undo — one
-    /// hidden row, one "Clear empty" batch, one archived session, one
-    /// import, or one undone turn or reverted file — whichever the newest
-    /// toast was for.
+    /// a press, never a clock. Two actions exist: Open, which takes the
+    /// person to the session a screenshot, notes or a hand-off went to
+    /// (docs/82 8.2), and Undo — one hidden row, one "Clear empty" batch,
+    /// one archived session, one import, or one undone turn or reverted
+    /// file — whichever the newest toast was for.
     fn render_toast_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let toasts = self.overlays.read(cx).toasts.clone();
         let newest = toasts.last()?.clone();
@@ -1175,8 +1176,12 @@ impl Harness {
             .on_close(close);
         if let Some(first) = newest.actions.first() {
             let action = newest_id;
-            let act = self.main_listener(cx, move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.undo_newest(cx);
+            let open = crate::overlays::toast_open_target(&first.id).map(str::to_owned);
+            let act = self.main_listener(cx, move |this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                match open.clone() {
+                    Some(session) => this.open_parcel_target(session, window, cx),
+                    None => this.undo_newest(cx),
+                }
                 this.overlays.update(cx, |overlays, cx| overlays.dismiss_toast(&action, cx));
             });
             chip = chip.action(first.label.clone(), act);

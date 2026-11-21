@@ -242,15 +242,14 @@ pub(crate) struct BrowserView {
     /// debounced): held while [`Self::browse_find`] is `Some`, dropped
     /// with it. Never persists.
     pub(crate) browse_find_sub: Option<gpui::Subscription>,
-    /// The Ask question waiting for its session (B2a-H4d): `browse_ask`
-    /// arms this and starts the session; `activate` writes it into the
-    /// landed view's draft (appending on a new line over reused text) —
-    /// never sent, never on the wrong session. Keyed by the session id
-    /// `new_session_in` creates (or the draft id it reuses): `None` while
-    /// an async open is in flight — never taken by an unrelated landing —
-    /// and dropped on every early return. Taken on landing. Never
-    /// persists.
-    pub(crate) pending_ask_draft: Option<crate::app::PendingAsk>,
+    /// Content picked for a session whose view has not landed (docs/82
+    /// 8.2, [`super::parcels`]): a screenshot, a page's notes, a hand-off.
+    /// `activate` writes each into its own session's composer — never sent,
+    /// never on the wrong session. Keyed by session id; a new session's
+    /// parcel is untargeted while its open is in flight (never taken by an
+    /// unrelated landing) and dropped on every early return. Taken on
+    /// landing. Never persists.
+    pub(crate) parcels: Vec<super::parcels::PendingParcel>,
     /// The omnibox row Tab completed into the field (B2a-H4d): completing
     /// remembers the completed ROW's identity, not an index into a
     /// re-ranked list — Enter opens this row even after the ranking moved
@@ -396,7 +395,7 @@ impl BrowserView {
             browse_address_page_focus: false,
             browse_find: None,
             browse_find_sub: None,
-            pending_ask_draft: None,
+            parcels: Vec::new(),
             browse_completed: None,
             browse_completed_text: None,
             pending_external_urls: Vec::new(),

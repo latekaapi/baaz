@@ -145,10 +145,11 @@ impl Harness {
         // The palette takes the keyboard as it opens, so the arrows and the
         // return reach it rather than the composer under it: its query
         // field where it has one (the keys bubble from the field to the
-        // palette's own menu context), else the palette itself. The overlay
-        // window focuses a hosted palette itself.
-        if let (false, Some(view)) = (self.modal_overlay_wanted(cx), self.palette_view(cx)) {
-            let focus = view.focus_handle(cx);
+        // palette's own menu context), else the palette itself. The attach
+        // picker takes it the same way. The overlay window focuses a hosted
+        // one itself.
+        let modal = self.palette_view(cx).map(|view| view.focus_handle(cx)).or_else(|| self.attach_picker_view(cx).map(|view| view.focus_handle(cx)));
+        if let (false, Some(focus)) = (self.modal_overlay_wanted(cx), modal) {
             if !focus.is_focused(window) {
                 window.focus(&focus, cx);
             }

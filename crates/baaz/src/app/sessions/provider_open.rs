@@ -270,7 +270,7 @@ impl Harness {
                         "provider open failed for a stale ask ({}): {error}",
                         provider_id.label()
                     );
-                    this.browser.update(cx, |browser, _| browser.drop_pending_ask());
+                    this.browser.update(cx, |browser, _| browser.drop_untargeted_parcels());
                     return;
                 }
                 // No switch is coming: release the session verbs waiting on
@@ -330,12 +330,13 @@ impl Harness {
                 provider_id.as_str()
             );
             provider.shutdown();
-            self.browser.update(cx, |browser, _| browser.drop_pending_ask());
+            self.browser.update(cx, |browser, _| browser.drop_untargeted_parcels());
             return;
         }
-        // The Ask's session just earned its id: key the draft to it before
-        // the view lands, so `activate` takes it here — and only here.
-        self.browser.update(cx, |browser, _| browser.key_pending_ask(&session_id));
+        // A waiting parcel's session just earned its id: key the parcel to
+        // it before the view lands, so `activate` hands it over here — and
+        // only here.
+        self.browser.update(cx, |browser, _| browser.key_pending_parcels(&session_id));
         self.load_menu_sources(std::path::PathBuf::from(workspace.clone()), cx);
         // The terminal relay's route lands here too: the ack's session id
         // is what the lane serves from now on — for Codex that is the
@@ -536,7 +537,7 @@ impl Harness {
             provider_id.as_str(),
             cx,
         );
-        self.browser.update(cx, |browser, _| browser.key_pending_ask(&request_id));
+        self.browser.update(cx, |browser, _| browser.key_pending_parcels(&request_id));
         let host = SessionHost {
             provider_id: provider_id.as_str().to_owned(),
             workspace: workspace.clone(),
@@ -750,7 +751,7 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         self.open_state.forget_opening(provisional);
-        self.browser.update(cx, |browser, _| browser.drop_pending_ask());
+        self.browser.update(cx, |browser, _| browser.drop_untargeted_parcels());
         let reason = failed.error.to_string();
         let Some(view) = self.find_view(provisional, cx) else {
             cx.notify();
@@ -783,7 +784,7 @@ impl Harness {
     /// Move everything the window keyed by a provider draft's provisional
     /// id onto the id its child minted (Codex's thread id): the parked
     /// view's slot, the drafts and unsent names, the selection and reveal,
-    /// the Ask waiting on it, a per-session override (the pane state a
+    /// the parcels waiting on it, a per-session override (the pane state a
     /// toggle wrote meanwhile), any session browser tabs, and a browser
     /// chat's line state, used pages and reveal (docs/81 A F4). The view
     /// renames itself in `attach_provider`. The draft has no row, no
@@ -798,11 +799,7 @@ impl Harness {
         self.terminal_dock.update(cx, |dock, _| dock.forget_provider(old));
         // An armed reveal (and its wait for a row) follows the real id.
         self.sidebar_pane.update(cx, |pane, _| pane.rekey_reveal(old, new));
-        self.browser.update(cx, |browser, _| {
-            if let Some(ask) = browser.pending_ask_draft.as_mut().filter(|ask| ask.target.as_deref() == Some(old)) {
-                ask.target = Some(new.to_owned());
-            }
-        });
+        self.browser.update(cx, |browser, _| browser.rekey_parcels(old, new));
         if let Some(meta) = self.session_list.update(cx, |list, _| list.overrides.remove(old)) {
             self.session_list.update(cx, |list, _| list.overrides.insert(new.to_owned(), meta));
             crate::sessions::write(&self.session_list.read(cx).overrides);
@@ -870,8 +867,9 @@ impl Harness {
         self.park_active(cx);
         self.resubscribe_live_views(cx);
         self.open_state.switch_pending = false;
-        // A failed open lands no session: the Ask has nowhere to go.
-        self.browser.update(cx, |browser, _| browser.drop_pending_ask());
+        // A failed open lands no session: a parcel waiting on it has
+        // nowhere to go.
+        self.browser.update(cx, |browser, _| browser.drop_untargeted_parcels());
         if let Some(id) = session_id.clone() {
             self.open_state.pending_id = Some(id.clone());
             self.restore_right_for_session(&id, cx);

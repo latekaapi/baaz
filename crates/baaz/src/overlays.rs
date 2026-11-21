@@ -233,6 +233,15 @@ pub struct Palette {
 /// a root with an open view is never the one dropped.
 pub(crate) const MAX_CACHED_ROOTS: usize = 8;
 
+/// The prefix of an Open toast action's id; the session id follows.
+const OPEN_ACTION: &str = "open:";
+
+/// The session an Open toast action takes the person to, from its id
+/// ([`Overlays::toast_open`]); `None` for any other action (Undo).
+pub(crate) fn toast_open_target(action: &str) -> Option<&str> {
+    action.strip_prefix(OPEN_ACTION).filter(|session| !session.is_empty())
+}
+
 /// The floating state of the window.
 #[derive(Default)]
 pub struct Overlays {
@@ -431,9 +440,9 @@ impl Overlays {
 
     /// Show a note carrying one action, and return the toast's id.
     ///
-    /// The one action that exists is Undo: for what the window took away
-    /// without asking (a hidden session), and for what it put back after
-    /// asking (an archive, an undone turn, a reverted file).
+    /// Undo is for what the window took away without asking (a hidden
+    /// session), and for what it put back after asking (an archive, an
+    /// undone turn, a reverted file); Open is [`Self::toast_open`]'s.
     pub fn toast_with_action(
         &mut self,
         title: impl Into<String>,
@@ -448,6 +457,17 @@ impl Overlays {
                     .kind(ToastKind::Neutral)
                     .action(ToastAction::new(label.to_lowercase(), label).primary())
             },
+            cx,
+        )
+    }
+
+    /// Show where something went (docs/82 8.2: a screenshot, notes, a
+    /// hand-off) with Open, which takes the person to `session`. The
+    /// action's id carries the session ([`toast_open_target`]).
+    pub fn toast_open(&mut self, title: impl Into<String>, body: impl Into<String>, session: &str, cx: &mut gpui::Context<Self>) -> String {
+        let action = format!("{OPEN_ACTION}{session}");
+        self.push_toast(
+            |id| ToastData::new(id, title.into(), body.into()).kind(ToastKind::Neutral).action(ToastAction::new(action, "Open").primary()),
             cx,
         )
     }

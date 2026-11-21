@@ -126,7 +126,7 @@ impl Harness {
         // claimed it for its replacement (see [`OpenState::admit_new`]).
         if !self.open_state.admit_new() {
             crate::baaz_log!("new: a session is already opening; keeping it");
-            self.browser.update(cx, |browser, _| browser.drop_pending_ask());
+            self.browser.update(cx, |browser, _| browser.drop_untargeted_parcels());
             return;
         }
         if switch_cancelled {
@@ -192,10 +192,11 @@ impl Harness {
                     // draft in the project root when a worktree is wanted,
                     // and the reverse.
                     let wanted = self.new_provider_id(cx);
-                    // The Ask rides only this reused draft: key it before
-                    // the view lands, so `activate` takes it here — and
-                    // only here.
-                    self.browser.update(cx, |browser, _| browser.key_pending_ask(&draft_id));
+                    // A parcel waiting for this new session (docs/82 8.2)
+                    // rides only this reused draft: key it before the view
+                    // lands, so `activate` hands it over here — and only
+                    // here.
+                    self.browser.update(cx, |browser, _| browser.key_pending_parcels(&draft_id));
                     if wanted.is_some_and(|wanted| self.draft_serves(&draft_id, wanted, worktree.in_worktree(), cx))
                         && self.open_draft(&draft_id, window, cx)
                     {
@@ -275,7 +276,7 @@ impl Harness {
         // flight owns the next session unless a provider switch claimed it.
         if !self.open_state.admit_new() {
             crate::baaz_log!("new: a session is already opening; keeping it");
-            self.browser.update(cx, |browser, _| browser.drop_pending_ask());
+            self.browser.update(cx, |browser, _| browser.drop_untargeted_parcels());
             return;
         }
         self.new_session_in_root_open(root, window, cx, None);
@@ -395,12 +396,12 @@ impl Harness {
     fn open_local_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.current_project_id() else {
             crate::baaz_log!("new: no current project; starting nothing");
-            self.browser.update(cx, |browser, _| browser.drop_pending_ask());
+            self.browser.update(cx, |browser, _| browser.drop_untargeted_parcels());
             return;
         };
         if self.session_list.read(cx).projects.find(&id).is_none() {
             crate::baaz_log!("new: no current project; starting nothing");
-            self.browser.update(cx, |browser, _| browser.drop_pending_ask());
+            self.browser.update(cx, |browser, _| browser.drop_untargeted_parcels());
             return;
         }
         let moving = self.open_state.pending_draft.take();
@@ -423,9 +424,10 @@ impl Harness {
             && !self.providers.shared_ready()
             && matches!(self.wire, crate::app::Wire::Connecting | crate::app::Wire::Reconnecting);
         view.read(cx).runtime().clone().update(cx, |rt, cx| rt.set_muse_starting(starting, cx));
-        // The Ask's session is this draft: key the draft to it before the
-        // view lands, so `activate` takes it here — and only here.
-        self.browser.update(cx, |browser, _| browser.key_pending_ask(&draft_id));
+        // A waiting parcel's session is this draft: key the parcel to it
+        // before the view lands, so `activate` hands it over here — and
+        // only here.
+        self.browser.update(cx, |browser, _| browser.key_pending_parcels(&draft_id));
         self.activate(view, false, window, cx);
         // No row exists for a draft, so the empty state and the later
         // `turn/started` row read the project straight from the store.
@@ -1123,23 +1125,13 @@ impl Harness {
                 view.focus_composer(window, cx);
             });
         }
-        // The omnibox Ask (B2a-H4d): the question lands in the session that
-        // just landed — keyed by its id, never by `self.active` — as a
-        // draft only, never sent. An unrelated landing (or one while an
-        // async open is still in flight, with no key yet) leaves it armed;
-        // an early return in `new_session_in` dropped it already. A reused
-        // draft that already holds text keeps it, with the question
-        // appended on a new line.
-        let ask = self
-            .browser.read(cx).pending_ask_draft
-            .clone()
-            .filter(|ask| ask.target.as_deref() == Some(session_id.as_str()));
-        if let Some(ask) = ask {
-            self.browser.update(cx, |browser, _| browser.pending_ask_draft = None);
-            let existing = view.read(cx).draft_text(cx);
-            let next = crate::browser::toolbar::ask_draft_text(&existing, &ask.query);
-            view.update(cx, |view, cx| view.set_draft(next, window, cx));
-        }
+        // What a page sent this session while its view was away (docs/82
+        // 8.2: a picked screenshot, notes, a hand-off) lands now — keyed by
+        // its id, never by `self.active` — as a draft only, never sent. An
+        // unrelated landing (or one while an async open is still in flight,
+        // with no key yet) leaves it waiting; an early return in
+        // `new_session_in` dropped a new session's already.
+        self.land_parcels(&session_id, &view, window, cx);
         #[cfg(feature = "probe")]
         self.send_scripted(window, cx);
         // No `maybe_run_steps` here: activations fire on every swap,

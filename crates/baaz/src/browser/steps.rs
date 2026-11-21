@@ -359,6 +359,51 @@ impl Harness {
         Ok(())
     }
 
+    /// `browse-ask:<text>`: the Field's Ask (its Ask row, ⌘↵) with `text`,
+    /// through [`Self::browse_ask`] — the one Ask (docs/82 8.2): the line
+    /// opens on the shown page and asks there. Only on scripted lanes
+    /// (`--no-connect`, a capture): the ask goes to a browser chat whose
+    /// lane sends nothing anywhere, so it reaches no model. Empty text, no
+    /// page, live lanes, or a line that did not open fail the step.
+    pub(crate) fn step_browse_ask(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let text = rest.trim();
+        if text.is_empty() {
+            return Err("browse-ask needs the question (`browse-ask:<text>`)".into());
+        }
+        if !crate::runtime::lanes_scripted() {
+            return Err("browse-ask asks a browser chat: scripted lanes only (--no-connect)".into());
+        }
+        self.set_mode(crate::layout::Mode::Browse, window, cx);
+        if self.browse_centre_page(window, cx).is_none() {
+            return Err("no page is open in Browse".into());
+        }
+        self.browse_ask(text, window, cx);
+        if self.browser.read(cx).agent_window.line_ui == crate::app::agent_window::LineUi::Closed {
+            return Err("the line did not open".into());
+        }
+        Ok(())
+    }
+
+    /// `shot-pick`: a page screenshot landing where the window stands
+    /// ([`Self::attach_browser_screenshot`], what Screenshot reaches once
+    /// the page answers) with a 1-px fixture picture, since the scripted
+    /// page takes none. With no composer on screen (Browse, Settings, no
+    /// session) "Add to which session?" opens; no picker (a composer on
+    /// screen took it) fails the step. Free: nothing is attached until a
+    /// pick.
+    pub(crate) fn step_shot_pick(&mut self, _rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x60, 0x00, 0x02, 0x00,
+            0x00, 0x05, 0x00, 0x01, 0x7a, 0x5e, 0xab, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        self.attach_browser_screenshot(PNG.to_vec(), window, cx);
+        if self.attach_picker_view(cx).is_none() {
+            return Err("no picker opened: a composer on screen took the picture".into());
+        }
+        Ok(())
+    }
+
     /// `extensions`: open the extensions popover on the shown tab. No
     /// shown tab is an `Err`. Free.
     pub(crate) fn step_extensions(&mut self, _rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {

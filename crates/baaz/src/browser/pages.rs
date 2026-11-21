@@ -344,34 +344,18 @@ impl Harness {
         state
     }
 
-    /// Attach `bytes` (a page screenshot) to the active session's composer
-    /// draft as an image chip, keeping a durable copy under temp/attachments.
-    /// No active session: a toast, never a lossy drop into the void.
-    pub(super) fn attach_browser_screenshot(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
-        self.attach_browser_shot_named("browser-screenshot", bytes, cx);
-    }
-
-    /// [`Self::attach_browser_screenshot`] with the chip's name.
-    pub(super) fn attach_browser_shot_named(&mut self, name: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
-        let _path = write_screenshot_temp(&bytes);
-        match self.active.clone() {
-            Some(view) => {
-                view.update(cx, |view, cx| {
-                    view.attach_screenshot(name.to_owned(), bytes, cx);
-                });
-                cx.notify();
-            }
-            None => {
-                self.overlays.update(cx, |overlays, cx| {
-                    overlays.toast("Browser", "No open session to attach the screenshot to.", cx);
-                });
-            }
-        }
+    /// A page screenshot's `bytes`, toward a composer (docs/82 8.2): the
+    /// active session's when it is on screen, else the "Add to which
+    /// session?" picker — never a composer the person cannot see. The
+    /// chip keeps a durable copy under temp/attachments.
+    pub(crate) fn attach_browser_screenshot(&mut self, bytes: Vec<u8>, window: &mut Window, cx: &mut Context<Self>) {
+        self.send_parcel(Parcel::Screenshot { name: "browser-screenshot".to_owned(), bytes }, window, cx);
     }
 
     /// One [`WebviewIntent`]: what the pane asks the app to do. Screenshots
-    /// and annotations land in the active session's composer draft as
-    /// attachments and text; nothing here ever auto-sends.
+    /// and annotations land in a composer draft as attachments and text —
+    /// the visible one, else the session the person picks
+    /// ([`Self::send_parcel`]); nothing here ever auto-sends.
     pub(crate) fn handle_browser_intent(
         &mut self,
         intent: WebviewIntent,
@@ -395,7 +379,7 @@ impl Harness {
                 let state = self.browser_for(&key, false, window, cx);
                 state.update(cx, |state, _cx| state.capture());
                 match state.read(cx).screenshot().map(<[u8]>::to_vec) {
-                    Some(bytes) => self.attach_browser_screenshot(bytes, cx),
+                    Some(bytes) => self.attach_browser_screenshot(bytes, window, cx),
                     None => {
                         self.browser.update(cx, |browser, _| browser.shot_pending.insert(key));
                     }
@@ -412,40 +396,16 @@ impl Harness {
                 pins,
                 page_size,
             } => {
-                // The screenshot still rides as an image the agent can see;
-                // the batch (D4) remembers it, the pins and the notes so the
-                // sent turn draws as one annotation turn.
-                let session = self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone());
-                let shot_path = match (&screenshot, &session) {
-                    (Some(bytes), Some(session)) => crate::sent::save_picture(session, "png", bytes),
-                    _ => None,
+                // The notes' own page: the centre's in Browse, else the
+                // pane's. It empties once they land.
+                let page = if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
+                    self.browse_centre_state(cx)
+                } else {
+                    let key = self.browser_key(cx);
+                    Some(self.browser_for(&key, false, window, cx))
                 };
-                if let Some(bytes) = screenshot {
-                    self.attach_browser_shot_named(ANNOTATION_SHOT_NAME, bytes, cx);
-                }
-                let batch = annotation_batch(&annotations, &url, &pins, page_size, shot_path);
-                let block = annotations_draft_block(&annotations, &url);
-                match self.active.clone() {
-                    Some(view) => {
-                        view.update(cx, |view, cx| {
-                            view.append_draft_block(block, window, cx);
-                            view.runtime().clone().update(cx, |rt, cx| rt.set_annotation_draft(batch, cx));
-                        });
-                        // The batch now lives in the composer: the panel
-                        // empties, as the spec's "the batch becomes the
-                        // annotation turn" means (owner 2026-10-21: the
-                        // list stayed after Send). Annotate stays on.
-                        let key = self.browser_key(cx);
-                        let state = self.browser_for(&key, false, window, cx);
-                        state.update(cx, |state, cx| state.clear_annotations(cx));
-                        cx.notify();
-                    }
-                    None => {
-                        self.overlays.update(cx, |overlays, cx| {
-                            overlays.toast("Browser", "No open session to attach the annotations to.", cx);
-                        });
-                    }
-                }
+                let notes = NotesParcel { annotations, screenshot, url, pins, page_size, page: page.map(|page| page.downgrade()) };
+                self.send_parcel(Parcel::Annotations(Box::new(notes)), window, cx);
             }
         }
     }

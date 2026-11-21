@@ -986,11 +986,11 @@ impl Harness {
                     crate::baaz_log!("undo: revert not asked ({why})");
                 }
             }
+            // The visible composer takes it; with none on screen (Browse,
+            // Settings), "Add to which session?" (docs/82 8.2).
             RightPaneEvent::Quote { text, lang, lines, location } => {
-                if let Some(view) = self.active.clone() {
-                    // The session owns its quotes and redraws itself.
-                    view.update(cx, |view, cx| view.add_quote(text.clone(), None, Some((lang.clone(), *lines)), location.clone(), window, cx));
-                }
+                let quote = crate::browser::Parcel::Quote { text: text.clone(), lang: lang.clone(), lines: *lines, location: location.clone() };
+                self.send_parcel(quote, window, cx);
             }
             RightPaneEvent::CommitDraftWanted { root, files } => self.draft_commit_for_pane(root, files, cx),
             RightPaneEvent::OpenPrForm(root) => self.open_pr_form(root, window, cx),

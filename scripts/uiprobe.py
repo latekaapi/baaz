@@ -372,6 +372,25 @@ ENTRIES = {
                                       "--steps", "mode:browse;tab-new:https://example.com;download:big.zip;wait:200"]},
     "browse-more-menu":     {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://example.com;more-menu"]},
+    # docs/82 8.2, one Ask: the Field's Ask (`browse-ask:`, the ✦ path
+    # too) opens the ⌘J line on the shown page with the question asked
+    # there in place — no session, no draft. Scripted lanes: the browser
+    # chat's lane sends nothing anywhere. `browse-shot-picker`: a Browse
+    # screenshot with no composer on screen opens "Add to which session?"
+    # over the page (`shot-pick` lands a fixture picture: the scripted page
+    # takes none); the P6 sidebar fixture gives it session rows to list.
+    # CAUTION: in Browse the line and the picker draw in overlay windows
+    # (over the native page), and a shot renders the main window only, so
+    # these two show the page without them — like `browse-omnibox`'s Field.
+    # They pin that the script runs (a failed step exits 1), not the look.
+    # `settings-shot-picker` is the same picker where the main window hosts
+    # it (Settings open, no composer on screen): that one shows it.
+    "browse-ask-line":      {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;browse-ask:What is the refund window?;wait:300"]},
+    "browse-shot-picker":   {"shot": ["--no-connect", "--login", "signed-in", *P6_SIDEBAR,
+                                      "--steps", "mode:browse;tab-new:https://example.com;shot-pick"]},
+    "settings-shot-picker": {"shot": ["--no-connect", "--login", "signed-in", *P6_SIDEBAR,
+                                      "--steps", "settings:general;shot-pick"]},
     "browse-crashed":       {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://example.com;crashed:the page crashed (-1);wait:200"]},
     # R3: a toast over a live Browse page — the header chip, not the

@@ -71,6 +71,10 @@ mod omnibox;
 pub(crate) use omnibox::OmniboxStep;
 mod page_actions;
 mod pages;
+mod parcels;
+pub(crate) use parcels::{NotesParcel, Parcel};
+#[cfg(test)]
+pub(crate) use parcels::PendingParcel;
 mod permissions;
 #[cfg(feature = "probe")]
 mod steps;

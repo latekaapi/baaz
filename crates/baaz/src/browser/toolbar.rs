@@ -701,14 +701,14 @@ impl BackForward {
     }
 }
 
-/// The Ask draft text for `query` over `existing`: an empty composer takes
-/// the question as is, otherwise the question appends on a new line —
-/// never replacing, never sent.
-pub(crate) fn ask_draft_text(existing: &str, query: &str) -> String {
+/// The draft text for `text` arriving over `existing` (a hand-off's draft,
+/// docs/82 8.2): an empty composer takes it as is, otherwise it appends on
+/// a new line — never replacing, never sent.
+pub(crate) fn append_draft_line(existing: &str, text: &str) -> String {
     if existing.trim().is_empty() {
-        query.to_owned()
+        text.to_owned()
     } else {
-        format!("{}\n{query}", existing.trim_end())
+        format!("{}\n{text}", existing.trim_end())
     }
 }
 
@@ -988,11 +988,11 @@ mod tests {
     }
 
     #[test]
-    fn ask_draft_appends_on_a_new_line() {
-        assert_eq!(ask_draft_text("", "what is this page?"), "what is this page?");
-        assert_eq!(ask_draft_text("   ", "what is this page?"), "what is this page?");
+    fn an_arriving_draft_appends_on_a_new_line() {
+        assert_eq!(append_draft_line("", "what is this page?"), "what is this page?");
+        assert_eq!(append_draft_line("   ", "what is this page?"), "what is this page?");
         assert_eq!(
-            ask_draft_text("summarise this", "what is this page?"),
+            append_draft_line("summarise this", "what is this page?"),
             "summarise this\nwhat is this page?"
         );
     }

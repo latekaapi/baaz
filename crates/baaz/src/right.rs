@@ -2284,7 +2284,8 @@ fn file_preview_pane(
 /// come labelled from the library. Intents forward to the harness: out as
 /// [`RightPaneEvent::BrowserIntent`](crate::right_pane::RightPaneEvent), into
 /// [`Harness::handle_browser_intent`] — screenshots and annotations land in
-/// the active session's composer draft, Console toasts.
+/// the composer on screen, else the session the person picks (docs/82
+/// 8.2); Console toasts.
 fn browser_pane(
     state: &Entity<aui_webview::WebviewState>,
     cx: &mut Context<RightPane>,

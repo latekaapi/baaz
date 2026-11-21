@@ -7,7 +7,7 @@
 use aui::screens::sidebar::{BrowseMenu, BrowseNaming, FolderAction, SpaceAction, TabAction, TaskFolderAction};
 use gpui::{ClipboardItem, Context, Focusable, Window};
 
-use super::tabs::{self, TabId};
+use super::tabs::TabId;
 use super::{Owner, HOME_KEY};
 use crate::app::Harness;
 use super::BrowserView;
@@ -107,7 +107,7 @@ impl Harness {
             PageAction::CopyLink => self.copy_shown_browse_link(cx),
             PageAction::OpenInSafari => self.open_browse_in_safari(cx),
             PageAction::Annotate => self.toggle_browse_annotate(cx),
-            PageAction::Screenshot => self.capture_browse_screenshot(cx),
+            PageAction::Screenshot => self.capture_browse_screenshot(window, cx),
             PageAction::DevTools => self.open_browse_devtools(cx),
             PageAction::Settings => self.open_browse_settings(cx),
         }
@@ -201,18 +201,10 @@ impl Harness {
         }
     }
 
-    /// The Ask button: a new session with the page as its unsent draft
-    /// (the omnibox Ask's path), until the agent line lands (docs/27 R3).
+    /// The ✦ Ask button: the one Ask (docs/82 8.2) — the ⌘J line opens on
+    /// the page shown, ready to type. Never a session, never a draft.
     pub(crate) fn browse_ask_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let shown = self.browser.read(cx).browse_centre_shown(cx).and_then(|id| self.browser.read(cx).tabs.get(id)).map(|tab| (tab.title.clone(), tab.url.clone()));
-        let query = match shown {
-            Some((title, url)) if url != tabs::BLANK && !url.is_empty() => {
-                let title = tabs::tab_label(&title, &url);
-                format!("About this page, {title} ({url}): ")
-            }
-            _ => "About this page: ".to_owned(),
-        };
-        self.browse_ask(&query, window, cx);
+        self.open_agent_line(window, cx);
     }
 
     /// A tab menu row.

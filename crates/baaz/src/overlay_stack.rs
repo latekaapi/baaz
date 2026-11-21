@@ -56,9 +56,10 @@ pub(crate) enum Host {
     /// In an overlay window ([`crate::overlay`]), above the live page: it
     /// covers nothing.
     Panel,
-    /// Where the mode puts a modal (the dialog, the palette): the main
-    /// window in Sessions, the overlay window in Browse — over the live
-    /// page, so a page loading under an open palette never moves it.
+    /// Where the mode puts a modal (the dialog, the palette, the attach
+    /// picker): the main window in Sessions, the overlay window in Browse —
+    /// over the live page, so a page loading under an open palette never
+    /// moves it.
     Modal,
 }
 
@@ -117,6 +118,10 @@ pub(crate) enum Layer {
     DefaultProviderMenu,
     /// The agent card's hand-off picker.
     HandoffPicker,
+    /// "Add to which session?" (docs/82 8.2): the hand-off picker's rows
+    /// for a page's screenshot or notes when no composer is on screen. It
+    /// holds what goes, so closing it unpicked attaches nothing anywhere.
+    AttachPicker(Box<crate::browser::Parcel>),
     /// The Muse sign-in sheet.
     MuseSheet,
     /// A provider's setup sheet.
@@ -161,6 +166,7 @@ pub(crate) enum LayerKind {
     ConnectMenu,
     DefaultProviderMenu,
     HandoffPicker,
+    AttachPicker,
     MuseSheet,
     SetupSheet,
     ImportSheet,
@@ -193,6 +199,7 @@ impl Layer {
             Layer::ConnectMenu => LayerKind::ConnectMenu,
             Layer::DefaultProviderMenu => LayerKind::DefaultProviderMenu,
             Layer::HandoffPicker => LayerKind::HandoffPicker,
+            Layer::AttachPicker(_) => LayerKind::AttachPicker,
             Layer::MuseSheet => LayerKind::MuseSheet,
             Layer::SetupSheet(_) => LayerKind::SetupSheet,
             Layer::ImportSheet(_) => LayerKind::ImportSheet,
@@ -209,7 +216,7 @@ impl Layer {
     /// Whether this layer, drawn in the main window, covers the native page.
     ///
     /// The covers are the ones the page has always hidden under: the dialog,
-    /// the palette, every menu but the sidebar footer's account menu (it
+    /// the palette (and the attach picker, a modal like it), every menu but the sidebar footer's account menu (it
     /// stays inside the sidebar column), the two sign-in sheets. The rest draw where no page is (the pane's Files view,
     /// the Settings page, the sidebar) or in an overlay window over the live
     /// page. Browse's chrome popovers (downloads, extensions, ⋯) move between
@@ -218,7 +225,7 @@ impl Layer {
     /// (`BrowserView::occlude`), and they say nothing here.
     fn covers_page(&self) -> bool {
         match self {
-            Layer::Dialog(_) | Layer::Palette(_) | Layer::MuseSheet | Layer::SetupSheet(_) => true,
+            Layer::Dialog(_) | Layer::Palette(_) | Layer::AttachPicker(_) | Layer::MuseSheet | Layer::SetupSheet(_) => true,
             Layer::Menu(menu) => menu.kind != MenuKind::Account,
             _ => false,
         }
@@ -237,6 +244,7 @@ impl Layer {
         match self {
             Layer::Dialog(_)
             | Layer::Palette(_)
+            | Layer::AttachPicker(_)
             | Layer::MuseSheet
             | Layer::SetupSheet(_)
             | Layer::ImportSheet(_)
@@ -260,16 +268,16 @@ impl Layer {
     /// The rest (a sheet, a rename) hand their own close to a deliberate
     /// focus, which a free-only restore leaves alone.
     fn reclaims_keyboard(&self) -> bool {
-        matches!(self, Layer::Dialog(_) | Layer::Palette(_) | Layer::Menu(_))
+        matches!(self, Layer::Dialog(_) | Layer::Palette(_) | Layer::AttachPicker(_) | Layer::Menu(_))
     }
 
     /// Where this layer draws: the panels Browse floats over its page draw
-    /// in an overlay window, the dialog and the palette where the mode puts
-    /// them, everything else in the main window.
+    /// in an overlay window, the modals (the dialog, the palette, the attach
+    /// picker) where the mode puts them, everything else in the main window.
     fn host(&self) -> Host {
         match self {
             Layer::BrowseMenu(_) | Layer::SiteInfo | Layer::Bookmark(_) | Layer::PageMenu | Layer::HandoffPicker => Host::Panel,
-            Layer::Dialog(_) | Layer::Palette(_) => Host::Modal,
+            Layer::Dialog(_) | Layer::Palette(_) | Layer::AttachPicker(_) => Host::Modal,
             _ => Host::Main,
         }
     }

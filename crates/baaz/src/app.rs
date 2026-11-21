@@ -536,7 +536,7 @@ pub fn set_menus(cx: &mut App) {
 pub(crate) mod agent_window;
 mod browser_chat;
 mod registry;
-mod browser_handoff;
+pub(crate) mod browser_handoff;
 mod find;
 pub(crate) mod sessions;
 mod list;
@@ -599,18 +599,6 @@ impl std::fmt::Display for OpenFailed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.error.fmt(f)
     }
-}
-
-/// The Ask question waiting for its session (B2a-H4d): the query plus the
-/// session id it belongs to — `None` while an async open is in flight, so
-/// an unrelated landing never takes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PendingAsk {
-    /// The session id `new_session_in` created (or the draft id it reused),
-    /// or `None` until an async open lands and keys it.
-    pub target: Option<String>,
-    /// The question, as an unsent draft only.
-    pub query: String,
 }
 
 /// The lease notice: another window holds this session, so this one is
@@ -2252,16 +2240,14 @@ impl Harness {
                     self.set_dialog(cx, dialog);
                 }
             }
-            // `set_draft` only: the draft is never sent from here. An
-            // occupied composer is appended to, never clobbered.
             terminal::TerminalDockEvent::Move(place) => self.move_terminal(*place, window, cx),
+            // `set_draft` only: the draft is never sent from here. An
+            // occupied composer is appended to, never clobbered. The visible
+            // composer takes it; with none on screen (Browse, Settings),
+            // "Add to which session?" (docs/82 8.2).
             terminal::TerminalDockEvent::Ask { command, output } => {
-                if let Some(view) = self.active.clone() {
-                    view.update(cx, |view, cx| {
-                        let existing = view.draft_text(cx);
-                        view.set_draft(terminal::intents::build_ask_draft(command, output, &existing), window, cx);
-                    });
-                }
+                let ask = crate::browser::Parcel::TerminalOutput { command: command.clone(), output: output.clone() };
+                self.send_parcel(ask, window, cx);
             }
         }
     }
@@ -2943,8 +2929,8 @@ impl Harness {
             "browse-more-screenshot",
             "Screenshot",
             None,
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.capture_browse_screenshot(cx);
+            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                this.capture_browse_screenshot(window, cx);
             }),
             cx,
         );
@@ -4875,7 +4861,7 @@ impl Render for Harness {
             .or_else(|| if connect_owns_sheets { None } else { self.compose_setup_sheet(cx) })
             .or_else(|| if connect_owns_sheets { None } else { self.render_import_sheet(cx) })
             .or_else(|| self.compose_chrome_import(cx));
-        let palette = if modal_hosted { None } else { self.compose_palette(cx) };
+        let palette = if modal_hosted { None } else { self.compose_palette(cx).or_else(|| self.compose_attach_picker(cx)) };
         // Mid-drag the overlay covers the window, so the drag survives the
         // pointer outrunning the 6 px strip; moves alone would go silent.
         // One overlay, not two: the two drags never run together, so it
@@ -4975,7 +4961,7 @@ impl Render for Harness {
                 ))
                 .on_action(cx.listener(|this, _: &OpenModelMenu, _, cx| this.open_picker(MenuKind::Model, cx)))
                 .on_action(cx.listener(|this, _: &OpenEffortMenu, _, cx| this.open_picker(MenuKind::Effort, cx)))
-                .on_action(cx.listener(|this, _: &ToggleAgentLine, _, cx| this.toggle_agent_line(cx)))
+                .on_action(cx.listener(|this, _: &ToggleAgentLine, window, cx| this.toggle_agent_line(window, cx)))
                 .on_action(cx.listener(|this, _: &ToggleAgentCard, _, cx| this.toggle_agent_card(cx)))
                 .on_action(cx.listener(|this, _: &ToggleAgentColumn, _, cx| this.toggle_agent_column(cx)))
                 .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
@@ -6454,129 +6440,6 @@ mod tests {
         );
         restore_state(state);
     }
-
-
-    /// Adopt the hermetic dir as a project and point at it, so `new`
-    /// opens a local draft there — what the Ask tests start sessions on.
-    fn adopt_test_project(
-        vc: &mut gpui::VisualTestContext,
-        baaz: &gpui::Entity<Harness>,
-        dir: &std::path::Path,
-    ) {
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                let id = h.session_list.update(cx, |list, _| list.projects.add(dir).id.clone());
-                h.session_list.update(cx, |list, _| list.projects.current = Some(id.clone()));
-                h.current_project = Some(id);
-            })
-        });
-    }
-
-    /// B2a-H4d(1): an Ask drafts into the session it started — never
-    /// whatever is open. While an unrelated session is open, `browse_ask`
-    /// starts the new session and the draft lands only there; a `new`
-    /// refused by a switch already in flight drops the draft, leaving no
-    /// session with it.
-    #[gpui::test]
-    fn ask_draft_is_keyed_to_its_session(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let state = hermetic_state("ask-keyed");
-        let vc = cx.add_empty_window();
-        let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
-        });
-        adopt_test_project(&mut *vc, &baaz, &state.2);
-        open_test_session(&mut *vc, &baaz, &state.2);
-        let unrelated = vc.update(|_, cx| baaz.read(cx).active.clone().expect("a session is open"));
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_ask("what is this page?", window, cx)));
-        vc.run_until_parked();
-        let landed = vc.update(|_, cx| {
-            let h = baaz.read(cx);
-            let active = h.active.clone().expect("the Ask opened a session");
-            let active_id = active.read(cx).rt(cx).session_id.clone();
-            assert_ne!(active_id, "s-1", "the Ask starts a new session, never reuses the open one");
-            assert_eq!(active.read(cx).draft_text(cx), "what is this page?");
-            assert!(h.browser.read(cx).pending_ask_draft.is_none(), "the landed draft is taken");
-            assert_eq!(unrelated.read(cx).draft_text(cx), "", "the unrelated session keeps no draft");
-            active_id
-        });
-        // A `new` refused by a switch already in flight drops the draft:
-        // no session gets it.
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, _| h.open_state.switch_pending = true);
-        });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_ask("a second question", window, cx)));
-        vc.update(|_, cx| {
-            let h = baaz.read(cx);
-            assert!(h.browser.read(cx).pending_ask_draft.is_none(), "the refused Ask leaves nothing armed");
-            let active = h.active.clone().expect("the session is still open");
-            assert_eq!(active.read(cx).rt(cx).session_id, landed, "no session opened");
-            assert_eq!(
-                active.read(cx).draft_text(cx),
-                "what is this page?",
-                "the refused question appends nowhere"
-            );
-            assert_eq!(unrelated.read(cx).draft_text(cx), "", "the unrelated session still keeps no draft");
-        });
-        restore_state(state);
-    }
-
-    /// B2a-H4d(1): an armed Ask waits for its keyed session. Landing an
-    /// unrelated session first leaves the draft armed and that session's
-    /// draft untouched; only the keyed session's landing takes it.
-    #[gpui::test]
-    fn ask_draft_waits_for_its_keyed_session(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let state = hermetic_state("ask-waits");
-        let vc = cx.add_empty_window();
-        let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
-        });
-        open_test_session(&mut *vc, &baaz, &state.2);
-        let view_a = vc.update(|_, cx| baaz.read(cx).active.clone().expect("a session is open"));
-        let view_b = vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                let host = crate::session::SessionHost {
-                    provider_id: "echo".to_owned(),
-                    workspace: state.2.to_string_lossy().into_owned(),
-                    overlays: h.overlays.clone(),
-                    capture: crate::runtime::CaptureToken::default(),
-                    terminal_host: None,
-                };
-                cx.new(|cx| crate::session::SessionView::new("s-2".to_owned(), host, window, cx))
-            })
-        });
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                h.browser.update(cx, |browser, _| {
-                    browser.pending_ask_draft = Some(crate::app::PendingAsk {
-                        target: Some("s-2".to_owned()),
-                        query: "keyed question".to_owned(),
-                    })
-                });
-            });
-        });
-        // An unrelated landing takes nothing.
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.activate(view_a.clone(), false, window, cx)));
-        vc.update(|_, cx| {
-            let h = baaz.read(cx);
-            assert_eq!(view_a.read(cx).draft_text(cx), "", "the unrelated landing takes no draft");
-            assert!(
-                h.browser.read(cx).pending_ask_draft.as_ref().is_some_and(|ask| ask.query == "keyed question"),
-                "the draft stays armed for its session"
-            );
-        });
-        // Its own session's landing takes it, once.
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.activate(view_b.clone(), false, window, cx)));
-        vc.update(|_, cx| {
-            let h = baaz.read(cx);
-            assert_eq!(view_b.read(cx).draft_text(cx), "keyed question");
-            assert!(h.browser.read(cx).pending_ask_draft.is_none(), "the landed draft is taken");
-            assert_eq!(view_a.read(cx).draft_text(cx), "", "the unrelated draft stays empty");
-        });
-        restore_state(state);
-    }
-
 
 
     /// B2a-H4d(4): the back-history render is pure. With the menu open but
