@@ -87,7 +87,23 @@ pub fn write_own_mcp_config(dir: &Path, session_id: &str, servers: &serde_json::
     let path = own_mcp_config_path(dir, session_id);
     let text = serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": servers })).map_err(io::Error::other)?;
     let temporary = path.with_extension(format!("tmp{}", std::process::id()));
-    std::fs::write(&temporary, text.as_bytes())?;
+    // Owner-only, like the `~/.claude.json` it copies: a server's `env` and
+    // `headers` often hold tokens.
+    let written = {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temporary)
+            .and_then(|mut file| file.write_all(text.as_bytes()))
+    };
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
     match std::fs::rename(&temporary, &path) {
         Ok(()) => Ok(path),
         Err(error) => {
@@ -241,6 +257,11 @@ mod tests {
         let back: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
         assert_eq!(back["mcpServers"]["linear"]["type"], "http");
         assert!(back["mcpServers"].get("baaz").is_none());
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the copy is owner-only, like ~/.claude.json");
+        }
         assert!(write_own_mcp_config(&dir, "../x", &serde_json::Map::new()).is_err(), "a pathy id refuses");
         let _ = std::fs::remove_dir_all(&dir);
     }
