@@ -225,7 +225,7 @@ fn newtab_placeholder_and_dropdown_anchors() {
     let overlay = source("overlay.rs");
     let in_window = fn_body(&overlay, "render_field_in_window");
     assert!(
-        in_window.contains("palette_width") && in_window.contains("palette_top") && in_window.contains("self.field_panel(window, cx)"),
+        in_window.contains("palette_width") && in_window.contains("palette_top") && in_window.contains("self.field_panel(cx)"),
         "the in-window Field is the palette-sized, centred panel"
     );
 }

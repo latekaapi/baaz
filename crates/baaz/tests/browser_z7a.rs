@@ -159,13 +159,14 @@ fn per_session_state_and_verbs_are_wired() {
 }
 
 /// Intents land in the draft, never auto-send: screenshots attach as images,
-/// annotations append text, Console toasts.
+/// annotations append text; no Console intent is left that only toasts
+/// (docs/82 8.9, rule 13).
 #[test]
 fn intents_land_in_the_draft() {
     let browser = browser_source();
     assert!(browser.contains("attach_screenshot"), "Screenshot attaches the PNG to the draft");
     assert!(browser.contains("append_draft_block"), "SendAnnotations appends pin text to the draft");
-    assert!(browser.contains("Console is not available yet"), "Console toasts");
+    assert!(!browser.contains("Console is not available yet"), "no dead Console toast");
     assert!(browser.contains("annotations_draft_block"), "pin text is built by the pure helper");
     let composer = source("session/composer.rs");
     assert!(composer.contains("fn attach_screenshot"), "image-attach entry point exists");

@@ -800,7 +800,6 @@ impl Harness {
                 self.sidebar_intent(intent, window, cx);
             }
         }
-        cx.notify();
     }
 
     /// The right pane's view menu (docs/83 §6), anchored under the tab
