@@ -44,13 +44,25 @@ const ADAPTER_CRATES: [&str; 6] =
 /// written, why it is not a store Baaz keeps by session)`. A new one is a
 /// new store until it is listed here with its reason — and one keyed by
 /// session id belongs in `baaz.db` instead.
-const ADAPTER_JSON: [(&str, &str, &str); 4] = [
+const ADAPTER_JSON: [(&str, &str, &str); 8] = [
     (
         "provider-claude-code/src/terminal.rs",
         "{session_id}.json",
         "the CLI's own --mcp-config input, rewritten at every spawn and never read back by Baaz",
     ),
     ("provider-claude-code/src/home.rs", "settings.json", "the CLI's own settings, linked from the owner's ~/.claude"),
+    (
+        "provider-claude-code/src/terminal.rs",
+        ".claude.json",
+        "the CLI's own config, read (never written) for Settings › MCP's list (docs/82 8.8)",
+    ),
+    (
+        "provider-claude-code/src/terminal.rs",
+        "settings.json",
+        "the CLI's own settings (linked from ~/.claude), read for Settings › MCP's plugin list",
+    ),
+    ("provider-claude-code/src/terminal.rs", "mcp-claude.json", "a recorded fixture the MCP list reads in tests and captures"),
+    ("provider-claude-code/src/terminal.rs", "mcp-settings.json", "a recorded fixture the MCP list reads in tests and captures"),
     ("provider-codex/src/home.rs", "auth.json", "the CLI's own credentials, linked from the owner's ~/.codex"),
     ("provider-runtime/src/ledger.rs", "children.json", "the live-children ledger (docs/82 5.1), keyed by pid for crash cleanup"),
 ];

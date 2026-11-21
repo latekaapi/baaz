@@ -268,8 +268,7 @@ impl Harness {
             // Settings › Shortcuts' "Open keymap" — installs on the way
             // back, and the Shortcuts rows show it. One stat per regain.
             if crate::keymap::changed_since_install() {
-                crate::app::bind_keys(cx);
-                self.settings_page.update(cx, |page, cx| page.keymap_reloaded(cx));
+                self.settings_page.update(cx, |page, cx| page.reinstall_keymap(cx));
             }
         } else {
             // A release outside the window never reaches the overlay: a drag

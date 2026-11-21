@@ -63,7 +63,7 @@
 //! [`crate::keymap::effective_bindings`], cached on the page
 //! ([`SettingsPage::shortcuts`], re-read on open, after every edit, and when
 //! the window regains focus with the keymap file changed —
-//! [`SettingsPage::keymap_reloaded`]), its edits go through
+//! [`SettingsPage::reinstall_keymap`]), its edits go through
 //! [`SettingsPage::handle_shortcut`], and "Open keymap"
 //! ([`SettingsPage::open_keymap`]) hands the file to the person's editor.
 
@@ -994,11 +994,13 @@ impl SettingsPage {
         self.shortcuts = crate::keymap::effective_bindings();
     }
 
-    /// The keymap file changed outside Baaz and the root reinstalled it
-    /// (a regained window focus, `Harness::on_window_activation`): the rows
-    /// show the file as it is now, and a recording on a row the edit moved
-    /// stops.
-    pub(crate) fn keymap_reloaded(&mut self, cx: &mut Context<Self>) {
+    /// The keymap file changed — Restore defaults removed it, or it was
+    /// edited outside Baaz (a regained window focus,
+    /// `Harness::on_window_activation`): install it, show the rows as the
+    /// file is now, and stop a recording on a row the change may have
+    /// moved.
+    pub(crate) fn reinstall_keymap(&mut self, cx: &mut Context<Self>) {
+        crate::app::bind_keys(cx);
         self.refresh_shortcuts();
         self.recording = None;
         cx.notify();
@@ -1008,7 +1010,7 @@ impl SettingsPage {
     /// [`crate::keymap::TEMPLATE`] first when it does not exist, opened in
     /// the editor Settings › General › "Open files in" names (macOS's
     /// default app for `.json` when none is chosen). Edits install when the
-    /// window next regains focus ([`Self::keymap_reloaded`]). A test or a
+    /// window next regains focus ([`Self::reinstall_keymap`]). A test or a
     /// capture (state isolated: the file is ignored there) launches
     /// nothing.
     pub(crate) fn open_keymap(&mut self, cx: &mut Context<Self>) {
@@ -1128,7 +1130,7 @@ impl SettingsPage {
     }
 
     /// Data › Export…: the native folder panel (directories only, the one
-    /// Add project and Downloads use), then [`crate::data_export::export_into`]
+    /// Add project and Downloads use), then [`baaz_core::data_export::export_into`]
     /// off the UI thread into a new `Baaz export <date time>` folder there,
     /// and a toast naming where it went (or what failed). Cancel does
     /// nothing. A test or a capture opens no panel and writes nothing.
@@ -1149,7 +1151,7 @@ impl SettingsPage {
             let Some(parent) = paths.into_iter().next() else { return };
             let support = crate::store::support_dir();
             let stamp = chrono::Local::now().format("%Y-%m-%d %H%M").to_string();
-            let done = cx.background_executor().spawn(async move { crate::data_export::export_into(&support, &parent, &stamp) }).await;
+            let done = cx.background_executor().spawn(async move { baaz_core::data_export::export_into(&support, &parent, &stamp) }).await;
             let _ = this.update(cx, |this, cx| {
                 let (title, body) = match done {
                     Ok(done) => (
@@ -2121,7 +2123,7 @@ impl SettingsPage {
 
     /// Data (docs/82 8.8): where Baaz keeps its data (the folder, with
     /// Reveal in Finder, and what each file holds), Export (a new folder
-    /// of the person's own data, [`crate::data_export`]), and the two
+    /// of the person's own data, [`baaz_core::data_export`]), and the two
     /// histories with Clear…, each through its confirm dialog that names
     /// what goes.
     fn settings_data_page(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2390,9 +2392,7 @@ impl SettingsPage {
         let differs = shortcuts_differ_from_defaults(bindings);
         let restore = cx.listener(|this: &mut Self, _: &(), _, cx| {
             crate::keymap::restore_defaults();
-            this.refresh_shortcuts();
-            crate::app::bind_keys(cx);
-            cx.notify();
+            this.reinstall_keymap(cx);
         });
         let mut column = settings_sections_stack();
         let mut header_row = h_flex().w_full().flex_none().items_center().gap(px(scale::SP_3));

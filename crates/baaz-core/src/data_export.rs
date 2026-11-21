@@ -18,18 +18,19 @@
 //! the sessions), caches and logs. Baaz keeps no API key in its folder; a
 //! key lives in the Keychain or with the provider's own CLI.
 //!
-//! The copy blocks: [`crate::settings::SettingsPage::export_data`] runs it on
-//! the background executor. Pure over its two directories, so tests drive it
-//! against temp dirs.
+//! The copy blocks: the app's Settings page (`SettingsPage::export_data`)
+//! runs it on the background executor. Pure over its two directories, so
+//! tests drive it against temp dirs. It lives here, beside the database
+//! modules, because the app names no SQLite of its own (the db ratchet).
 
 use std::path::{Path, PathBuf};
 
 /// The SQLite databases an export snapshots, relative to the support dir.
-pub(crate) const DATABASES: &[&str] = &["baaz.db", "Browser/browser.db"];
+pub const DATABASES: &[&str] = &["baaz.db", "Browser/browser.db"];
 
 /// The JSON files an export copies when they exist, relative to the
 /// support dir.
-pub(crate) const FILES: &[&str] = &["layout.json", "projects.json", "keymap.json"];
+pub const FILES: &[&str] = &["layout.json", "projects.json", "keymap.json"];
 
 /// The README an export carries.
 const README: &str = "This folder is an export of your Baaz data.
@@ -47,7 +48,7 @@ Transcripts the providers keep in their own folders are not copied.
 
 /// What one export wrote.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Exported {
+pub struct Exported {
     /// The new folder.
     pub folder: PathBuf,
     /// The files it holds, relative to the folder, README first.
@@ -58,7 +59,7 @@ pub(crate) struct Exported {
 /// `parent`, named `Baaz export <stamp>` (` 2`, ` 3`… when taken). A
 /// source that does not exist is skipped; a failed copy stops the export
 /// and says which file.
-pub(crate) fn export_into(support: &Path, parent: &Path, stamp: &str) -> Result<Exported, String> {
+pub fn export_into(support: &Path, parent: &Path, stamp: &str) -> Result<Exported, String> {
     let folder = free_folder(parent, &format!("Baaz export {stamp}"));
     std::fs::create_dir_all(&folder).map_err(|error| format!("could not create {}: {error}", folder.display()))?;
     std::fs::write(folder.join("README.txt"), README).map_err(|error| format!("README.txt: {error}"))?;
