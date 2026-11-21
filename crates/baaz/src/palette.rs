@@ -410,7 +410,14 @@ impl Harness {
         match kind {
             PaletteKind::Commands => {
                 let provider = self.active_provider(cx);
-                PaletteRows::Commands(Command::ALL.into_iter().filter(|command| provider.is_none_or(|id| command.offered_on(id))).collect())
+                let skills = crate::skills_page::skills_offered(cx);
+                PaletteRows::Commands(
+                    Command::ALL
+                        .into_iter()
+                        .filter(|command| provider.is_none_or(|id| command.offered_on(id)))
+                        .filter(|command| *command != Command::Skills || skills)
+                        .collect(),
+                )
             }
             PaletteKind::Resume => PaletteRows::Plain(
                 self.visible_sessions(cx)

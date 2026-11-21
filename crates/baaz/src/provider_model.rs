@@ -192,8 +192,9 @@ impl ProviderStatusModel {
     /// Re-read the statuses at once (the connect screen opening, a login
     /// sample): the rows start from the cache, stamped. Its callers are the
     /// root's, which redraws.
-    pub(crate) fn reload(&mut self) {
+    pub(crate) fn reload(&mut self, cx: &mut gpui::App) {
         self.statuses = initial_connect_statuses();
+        crate::skills_page::note_statuses(&self.statuses, cx);
         self.stamp = status_stamp();
     }
 
@@ -228,6 +229,7 @@ impl ProviderStatusModel {
             fresh
         };
         self.statuses = fresh;
+        crate::skills_page::note_statuses(&self.statuses, cx);
         self.sync_banners();
         self.new_provider.follow(&self.statuses);
         cx.notify();

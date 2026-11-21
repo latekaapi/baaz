@@ -596,7 +596,14 @@ impl Harness {
         match command {
             Command::Skills => {
                 let _ = window;
-                self.open_skills(cx);
+                // Typed `/skills` reaches here even where no menu lists it.
+                if crate::skills_page::skills_offered(cx) {
+                    self.open_skills(cx);
+                } else {
+                    self.overlays.update(cx, |overlays, cx| {
+                        overlays.toast("Skills isn\u{2019}t set up", "Set it up in Settings \u{203A} Providers.", cx)
+                    });
+                }
                 true
             }
             Command::NextWaiting => {
@@ -2009,7 +2016,8 @@ mod tests {
     }
 
     /// `Commands` owns a query editor, and the drawn rows follow it: the
-    /// field opens empty with all 24 rows, and setting it to `/pag`
+    /// field opens empty with every row it offers (24: no Skills without
+    /// the provider that manages them), and setting it to `/pag`
     /// leaves `/page` alone — the same rows the keyboard walks.
     #[gpui::test]
     fn the_command_palette_has_a_query_field_and_filters(cx: &mut gpui::TestAppContext) {
@@ -2026,7 +2034,7 @@ mod tests {
             let app: &gpui::App = cx;
             baaz.read(app).palette_rows(PaletteKind::Commands, app).len()
         });
-        assert_eq!(empty, 25, "an empty query lists every command");
+        assert_eq!(empty, 24, "an empty query lists every command but Skills, which nothing here sets up");
         vc.update(|window, cx| {
             baaz.update(cx, |harness, cx| {
                 harness.palette_query(cx).expect("the palette's field").update(cx, |field, cx| field.set_value("/pag", window, cx));

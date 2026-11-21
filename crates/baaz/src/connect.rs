@@ -1094,7 +1094,7 @@ impl Harness {
     /// closing the screen lands back on it.
     pub(crate) fn open_connect_screen(&mut self, cx: &mut Context<Self>) {
         self.close_muse_sheet_entry(cx);
-        self.provider_model.update(cx, |model, _| model.reload());
+        self.provider_model.update(cx, |model, cx| model.reload(cx));
         self.connect_screen.update(cx, |screen, _| screen.show());
         cx.notify();
     }

@@ -836,7 +836,11 @@ impl Harness {
         // stored pick while it can start one, else the first that can run
         // in the one provider order — following the statuses until the person picks.
         let explicit = args.provider_explicit.then(|| args.provider.clone());
-        let provider_model = cx.new(|_| crate::provider_model::ProviderStatusModel::new(overlays.clone(), explicit));
+        let provider_model = cx.new(|cx| {
+            let model = crate::provider_model::ProviderStatusModel::new(overlays.clone(), explicit);
+            crate::skills_page::note_statuses(&model.statuses, cx);
+            model
+        });
         let connect_screen = cx.new(|cx| crate::connect::ConnectScreen::new(provider_model.clone(), overlays.clone(), cx));
         let setup = cx.new(|cx| crate::setup::SetupHost::new(provider_model.clone(), overlays.clone(), cx));
         let settings_page = cx.new(|cx| crate::settings::SettingsPage::new(provider_model.clone(), overlays.clone(), window, cx));

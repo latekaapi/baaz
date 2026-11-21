@@ -2451,6 +2451,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             .into_iter()
             .filter(|c| c.slash().trim_start_matches('/').to_lowercase().starts_with(&needle))
             .filter(|c| c.offered_on(self.runtime.read(cx).provider_kind()))
+            .filter(|c| *c != Command::Skills || crate::skills_page::skills_offered(cx))
             .collect();
         // D64: the menu shares the page's catalog — Off hidden — then the
         // menu's own prefix match and the F7 command-name shadow rule.

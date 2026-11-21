@@ -693,7 +693,7 @@ impl Harness {
             LoginSample::Connect => {
                 self.connect_screen.update(cx, |screen, _| screen.show_first_run());
                 self.close_muse_sheet_entry(cx);
-                self.provider_model.update(cx, |model, _| model.reload());
+                self.provider_model.update(cx, |model, cx| model.reload(cx));
                 // The sample is a first run: the import offer may stand
                 // under the rows (a capture scans only a fixture home).
                 self.import.first_run = true;

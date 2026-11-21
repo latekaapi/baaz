@@ -73,6 +73,9 @@ pub(crate) struct SidebarFacts {
     pub(crate) account: Account,
     /// How many skills are on: the Skills row's count (D54).
     pub(crate) skills_on: usize,
+    /// Whether the Skills row shows at all
+    /// ([`crate::skills_page::skills_offered`]).
+    pub(crate) skills_offered: bool,
     /// The Sessions caption's view menu stands open.
     pub(crate) view_menu_open: bool,
     /// The session whose row menu stands open (its `⋯`, or a right-click).
@@ -111,6 +114,7 @@ impl Default for SidebarFacts {
                 usage: Vec::new(),
             },
             skills_on: 0,
+            skills_offered: false,
             view_menu_open: false,
             row_menu: None,
             row_menu_offers: RowMenuOffers::default(),
@@ -1141,12 +1145,13 @@ impl SidebarPane {
             draft: self.rename.read(cx).value().to_string().into(),
         });
         // The Skills row wears the on-count (D54): how many skills are on;
-        // the screen draws none at zero (docs/83 §4). Automations is gone
-        // until the feature exists (plan stage P).
-        let mut nav = vec![
-            NavItem { id: NAV_PROJECTS.into(), label: "Add project".into(), icon: IconName::Folder, count: None, active: false },
-            NavItem { id: NAV_SKILLS.into(), label: "Skills".into(), icon: IconName::Slash, count: Some(facts.skills_on as u32), active: false },
-        ];
+        // the screen draws none at zero (docs/83 §4). It shows only while the
+        // Skills page works ([`crate::skills_page::skills_offered`], rule
+        // 13). Automations is gone until the feature exists (plan stage P).
+        let mut nav = vec![NavItem { id: NAV_PROJECTS.into(), label: "Add project".into(), icon: IconName::Folder, count: None, active: false }];
+        if facts.skills_offered {
+            nav.push(NavItem { id: NAV_SKILLS.into(), label: "Skills".into(), icon: IconName::Slash, count: Some(facts.skills_on as u32), active: false });
+        }
         // "Needs you" (task 3.4): first among the nav rows while anything
         // waits on the person, and while its filter is on (so it can be
         // turned off when the last one is answered).
@@ -3017,6 +3022,35 @@ mod tests {
         );
 
         assert_eq!(root_notifies.get(), 0, "no list change notified the root");
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// docs/82 8.9 (rule 13): the Skills nav row shows only while the
+    /// Skills page works — the provider that manages skills set up — and
+    /// goes again when it is not.
+    #[gpui::test]
+    fn the_skills_row_shows_only_while_skills_are_set_up(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("skills-nav");
+        let (baaz, pane, vc) = rooted_window(cx, args);
+        let has_skills = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| {
+                baaz.update(cx, |h, cx| {
+                    h.push_sidebar_facts(cx);
+                });
+                pane.read(cx).model(cx).nav.iter().any(|item| item.id.as_ref() == NAV_SKILLS)
+            })
+        };
+        vc.update(|_, cx| crate::skills_page::note_statuses(&[], cx));
+        assert!(!has_skills(vc), "no Skills row while nothing manages skills");
+        vc.update(|_, cx| {
+            let mut muse = crate::provider_status::ProviderStatus::checking(crate::providers::ProviderId::Muse);
+            muse.installed = crate::provider_status::Installed::Yes { version: "1".into(), path: "/x/muse".into() };
+            crate::skills_page::note_statuses(&[muse], cx);
+        });
+        assert!(has_skills(vc), "the Skills row once it is set up");
+        vc.update(|_, cx| crate::skills_page::note_statuses(&[], cx));
+        assert!(!has_skills(vc), "and gone again when it is not");
         b3c_teardown(&dir, guard, old);
     }
 

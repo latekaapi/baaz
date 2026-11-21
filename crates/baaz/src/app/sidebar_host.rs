@@ -78,6 +78,7 @@ impl Harness {
             current_project: self.current_project.clone(),
             account: self.sidebar_account(account_menu_open, cx),
             skills_on: self.skills_page.read(cx).catalog.on_count(),
+            skills_offered: crate::skills_page::skills_offered(cx),
             view_menu_open: self.overlays.read(cx).is_open(MenuKind::ViewOptions),
             row_menu: self.open_row_menu(cx),
             row_menu_offers: self.open_row_menu(cx).map(|id| self.row_menu_offers(&id, cx)).unwrap_or_default(),

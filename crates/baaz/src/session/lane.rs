@@ -4156,7 +4156,10 @@ mod tests {
                     Command::Compact => supported(id, C::CompactSession),
                     Command::Fork => supported(id, C::ForkSession),
                     Command::Plan => descriptor.plan != PlanMode::None,
-                    Command::Skills => descriptor.has(T::ManagedSkills),
+                    // The Skills page runs the provider that manages
+                    // skills, not the session's: the menus gate it on that
+                    // provider being set up (`skills_page::skills_offered`).
+                    Command::Skills => true,
                     Command::Logout => descriptor.has(T::AccountOnConnection),
                     Command::Mode => supported(id, C::SessionConfig) && !descriptor.modes.is_empty(),
                     Command::Model | Command::Effort => supported(id, C::ModelCatalog),
@@ -4224,7 +4227,8 @@ mod tests {
     /// session's own provider — the managed catalog on Muse, what Claude
     /// Code's `init` listed on Claude Code, none on Codex — never Muse's
     /// list on another provider; `/skills` (the managed page) is offered
-    /// from Muse sessions only.
+    /// on every provider while the provider that manages skills is set up,
+    /// and on none while it is not (docs/82 8.9, rule 13).
     #[gpui::test]
     fn the_slash_menu_lists_the_session_providers_own_skills(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -4258,11 +4262,18 @@ mod tests {
                 let (commands, skills) = view.read(cx).command_rows("", cx);
                 let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
                 assert_eq!(names, expect, "{provider_id}: the session provider's own skills");
-                assert_eq!(
-                    commands.contains(&crate::overlays::Command::Skills),
-                    provider_id == "meta",
-                    "{provider_id}: the managed Skills page is Muse's"
+                assert!(
+                    !commands.contains(&crate::overlays::Command::Skills),
+                    "{provider_id}: no /skills while the Skills page is not set up"
                 );
+            });
+            vc.update(|_, cx| {
+                let mut set_up = crate::provider_status::ProviderStatus::checking(ProviderId::Muse);
+                set_up.installed = crate::provider_status::Installed::Yes { version: "1.4.13".into(), path: "/x/muse".into() };
+                crate::skills_page::note_statuses(&[set_up], cx);
+                let (commands, _) = view.read(cx).command_rows("", cx);
+                assert!(commands.contains(&crate::overlays::Command::Skills), "{provider_id}: /skills once it is set up");
+                crate::skills_page::note_statuses(&[], cx);
             });
         }
     }

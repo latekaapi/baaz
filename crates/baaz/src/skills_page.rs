@@ -11,7 +11,10 @@
 //! Entry points: the sidebar's "Skills" nav row (with the on-count), ⌘K
 //! "Skills" ([`Command::Skills`](crate::overlays::Command)), and `/skills`
 //! typed as a whole draft in the composer — intercepted, never sent. Esc or
-//! selecting a session returns.
+//! selecting a session returns. All three show only while the provider
+//! that manages skills is set up ([`skills_offered`], rule 13), on any
+//! session's provider: the page runs that provider's CLI, not the
+//! session's.
 //!
 //! The list, sections, meter, rows and detail pane are the K1 library
 //! components (`aui::skills`): this file owns state and intents only.
@@ -388,6 +391,40 @@ pub(crate) enum SkillsPageEvent {
 
 /// The Skills page: its state, its fields and its background CLI calls. The
 /// library components are stateless and read it each frame.
+/// Whether the Skills page works here (docs/07 §1a, Skill; rule 13): the
+/// provider that manages skills ([`provider::ProviderTrait::ManagedSkills`])
+/// is set up — installed and switched on. Not yet probed, not installed or
+/// off: no Skills row, no ⌘K "Skills", no `/skills`, whatever provider the
+/// open session runs on.
+pub(crate) fn skills_set_up(statuses: &[crate::provider_status::ProviderStatus]) -> bool {
+    statuses.iter().any(|status| {
+        status.provider.has(provider::ProviderTrait::ManagedSkills)
+            && status.enabled
+            && matches!(status.installed, crate::provider_status::Installed::Yes { .. })
+    })
+}
+
+/// [`skills_set_up`] over the window's statuses, published by their one
+/// owner ([`crate::provider_model::ProviderStatusModel`]) each time they
+/// change, so a session's `/` menu reads it without the root.
+struct SkillsOffered(bool);
+
+impl gpui::Global for SkillsOffered {}
+
+/// Publish whether the Skills page is offered, from `statuses`.
+pub(crate) fn note_statuses(statuses: &[crate::provider_status::ProviderStatus], cx: &mut gpui::App) {
+    let offered = skills_set_up(statuses);
+    if cx.try_global::<SkillsOffered>().map(|g| g.0) != Some(offered) {
+        cx.set_global(SkillsOffered(offered));
+    }
+}
+
+/// Whether the Skills page is offered now ([`note_statuses`]); false until
+/// the statuses are first published.
+pub(crate) fn skills_offered(cx: &gpui::App) -> bool {
+    cx.try_global::<SkillsOffered>().is_some_and(|offered| offered.0)
+}
+
 pub(crate) struct SkillsPage {
     /// Whether the centre column shows the page instead of the transcript.
     pub(crate) open: bool,
@@ -2823,6 +2860,31 @@ fn skill_scope_chip(skill: &Skill) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The Skills page is offered only while the provider that manages
+    /// skills is installed and on (docs/82 8.9, rule 13): not before its
+    /// probe lands, not when missing, not when switched off; the other
+    /// providers' statuses never offer it.
+    #[test]
+    fn skills_are_offered_only_while_their_provider_is_set_up() {
+        use crate::provider_status::{Installed, ProviderStatus};
+        use crate::providers::ProviderId;
+        let with = |id: ProviderId, installed: Installed, enabled: bool| {
+            let mut status = ProviderStatus::checking(id);
+            status.installed = installed;
+            status.enabled = enabled;
+            status
+        };
+        let yes = || Installed::Yes { version: "1".into(), path: "/x".into() };
+        assert!(super::skills_set_up(&[with(ProviderId::Muse, yes(), true)]));
+        assert!(!super::skills_set_up(&[with(ProviderId::Muse, yes(), false)]), "switched off");
+        assert!(!super::skills_set_up(&[with(ProviderId::Muse, Installed::No, true)]), "not installed");
+        assert!(!super::skills_set_up(&[with(ProviderId::Muse, Installed::Unknown, true)]), "not probed yet");
+        assert!(
+            !super::skills_set_up(&[with(ProviderId::ClaudeCode, yes(), true), with(ProviderId::Codex, yes(), true)]),
+            "another provider set up offers nothing"
+        );
+    }
     use super::*;
 
     fn catalog() -> SkillsCatalog {
