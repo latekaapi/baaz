@@ -656,6 +656,36 @@ pub struct Layout {
     /// to the default when the editor is no longer installed.
     #[serde(rename = "openIn", default, skip_serializing_if = "Option::is_none")]
     pub open_in: Option<String>,
+    /// The first run's one-time hints (docs/82 8.7): the four regions
+    /// named on the first composer. `NotYet` in an old file, so a person
+    /// who never met the first run never sees the regions strip.
+    #[serde(rename = "onboarding", default)]
+    pub onboarding: Onboarding,
+}
+
+/// Where one one-time hint stands (docs/82 8.7): never asked for, showing
+/// until it is answered or dismissed, or done for good.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Once {
+    /// Nothing has asked for it yet.
+    #[default]
+    NotYet,
+    /// It shows wherever it belongs until it is answered or dismissed.
+    Due,
+    /// Answered or dismissed: it never shows again.
+    Done,
+}
+
+/// The first run's one-time hints (docs/82 8.7), kept with the other
+/// window preferences in `layout.json`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Onboarding {
+    /// The strip naming the window's four regions on the first composer:
+    /// `Due` once the first run's folder step leads into it, `Done` when
+    /// "Got it" or Escape dismisses it.
+    #[serde(default, deserialize_with = "crate::store::lenient")]
+    pub regions: Once,
 }
 
 impl Layout {
@@ -980,6 +1010,7 @@ impl Default for Layout {
             worktree_branch_prefix: None,
             archive_on_merge: false,
             open_in: None,
+            onboarding: Onboarding::default(),
         }
     }
 }
@@ -1286,5 +1317,23 @@ mod tests {
         let chosen =
             Layout { download_dir: Some(PathBuf::from("/tmp/baaz-picked")), ..Layout::default() };
         assert_eq!(browser_download_dir(&chosen), PathBuf::from("/tmp/baaz-picked"));
+    }
+
+    /// docs/82 8.7: a layout without the key never shows a first-run hint
+    /// (a returning person never met the first run); a stored state reads
+    /// back; an unknown value is read as never asked, losing nothing else.
+    #[test]
+    fn the_first_run_hints_are_kept_and_tolerant() {
+        let old: Layout = serde_json::from_str("{\"sidebar_width\":300.0}").expect("an old file");
+        assert_eq!(old.onboarding.regions, Once::NotYet);
+        let stored = Layout { onboarding: Onboarding { regions: Once::Due }, ..Layout::default() };
+        let text = serde_json::to_string(&stored).expect("encodes");
+        assert!(text.contains("\"onboarding\":{\"regions\":\"due\""), "{text}");
+        let back: Layout = serde_json::from_str(&text).expect("decodes");
+        assert_eq!(back.onboarding.regions, Once::Due);
+        let odd: Layout =
+            serde_json::from_str("{\"sidebar_width\":300.0,\"onboarding\":{\"regions\":\"later\"}}").expect("tolerant");
+        assert_eq!(odd.onboarding.regions, Once::NotYet);
+        assert_eq!(odd.sidebar_width, Some(300.0));
     }
 }

@@ -90,7 +90,7 @@ fn calls(code: &str) -> Vec<String> {
 fn escape_has_no_overlay_rung() {
     let app = source("app.rs");
     let cancel = body(&app, "    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {");
-    const ALLOWED: [&str; 27] = [
+    const ALLOWED: [&str; 29] = [
         // The stack.
         "pop_overlay",
         // The Settings page's own Back (recording → search → sub-page → close).
@@ -120,6 +120,10 @@ fn escape_has_no_overlay_rung() {
         "map",
         "unwrap_or",
         "notify",
+        // The first run's regions strip (docs/82 8.7): in the session
+        // column's flow, like the selection and the card field — no overlay.
+        "is_some",
+        "dismiss_regions_strip",
         // The turn.
         "as_ref",
         "is_some_and",

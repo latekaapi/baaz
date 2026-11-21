@@ -937,6 +937,12 @@ ENTRIES.update({
                                          "--steps", "connect-continue"],
                                 "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": D5_CLAUDE_CONNECTED,
                                         "BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-first-run-state-")}},
+    # Then a folder dropped on the step (the throwaway `acme-web` repo): the
+    # new Claude Code draft in it, with the four regions named once.
+    "first-run-regions":       {"shot": ["--no-connect", "--login", "connect", "--no-project",
+                                         "--steps", f"connect-continue;first-run-folder:{_NEW_ROW_REPO};wait:300"],
+                                "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": D5_CLAUDE_CONNECTED,
+                                        "BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-first-run-state-")}},
 })
 
 D5_ENTRIES = [

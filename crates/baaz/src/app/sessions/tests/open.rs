@@ -360,7 +360,8 @@ fn an_unfiled_session_never_starts_in_the_launch_directory(cx: &mut gpui::TestAp
 /// docs/82 8.7: the first run's Continue leads to "Where will you work?";
 /// a dropped folder becomes the current project and the new session starts
 /// in it, and "Not now" starts it in the default workspace — never in the
-/// launch directory (`/` from Finder) — on the per-lane providers.
+/// launch directory (`/` from Finder) — on the per-lane providers. Either
+/// way the first composer names the four regions, and Escape ends that.
 #[gpui::test]
 fn the_first_runs_folder_step_opens_the_composer_where_it_says(cx: &mut gpui::TestAppContext) {
     use crate::onboarding::FolderIntent;
@@ -382,6 +383,7 @@ fn the_first_runs_folder_step_opens_the_composer_where_it_says(cx: &mut gpui::Te
                 harness.session_list.update(cx, |list, _| list.projects.current = None);
                 harness.session_list.update(cx, |list, _| list.projects.projects.clear());
                 harness.provider_model.update(cx, |model, _| model.point_new_provider(provider));
+                crate::layout::Layout::update(cx, |layout| layout.onboarding.regions = crate::layout::Once::NotYet);
                 harness.connect_screen.update(cx, |screen, _| screen.show_first_run());
                 harness.finish_connect(cx);
                 assert!(harness.connect_open(cx), "Continue leads to the folder step");
@@ -403,6 +405,17 @@ fn the_first_runs_folder_step_opens_the_composer_where_it_says(cx: &mut gpui::Te
                 projects::default_workspace().to_string_lossy().into_owned()
             };
             assert_eq!(workspace.as_deref(), Some(want.as_str()), "{provider:?}: the composer opens where the step said");
+            assert_eq!(
+                crate::layout::Layout::get(cx).onboarding.regions,
+                crate::layout::Once::Due,
+                "the first composer names the four regions"
+            );
+        });
+        // Escape ends the strip for good; a second Escape reaches past it.
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.cancel(window, cx)));
+        vc.update(|_, cx| {
+            assert_eq!(crate::layout::Layout::get(cx).onboarding.regions, crate::layout::Once::Done, "Escape dismisses it");
+            assert!(baaz.update(cx, |harness, cx| !harness.dismiss_regions_strip(cx)), "nothing left to dismiss");
         });
         lane_restore(state);
     }

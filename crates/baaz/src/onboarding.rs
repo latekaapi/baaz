@@ -1,15 +1,24 @@
 //! The first run after Connect (docs/82 8.7; docs/81 F A4, A6): one calm
-//! step asks where the person will work, and the composer opens there.
+//! step asks where the person will work, and the composer opens there with
+//! the window's four regions named once.
 //!
-//! The folder step is the connect screen's second step
-//! ([`crate::connect::ConnectStep::Folder`]), shown only after the first
-//! run's Continue (or Skip): "Where will you work?" — choose a folder (the
-//! folder panel, as Add project), drop one on the step, or "Not now". A
-//! folder becomes a project and a new session opens in it on the default
-//! provider; "Not now" opens the new session where any new session with no
-//! folder chosen starts — the current project when the launch adopted one,
-//! else `~/baaz-sessions` on **every** provider (docs/82 0.9;
-//! `Harness::unfiled_workspace`), never `/`.
+//! - **The folder step** is the connect screen's second step
+//!   ([`crate::connect::ConnectStep::Folder`]), shown only after the first
+//!   run's Continue (or Skip): "Where will you work?" — choose a folder
+//!   (the folder panel, as Add project), drop one on the step, or "Not
+//!   now". A folder becomes a project and a new session opens in it on the
+//!   default provider; "Not now" opens the new session where any new
+//!   session with no folder chosen starts — the current project when the
+//!   launch adopted one, else `~/baaz-sessions` on **every** provider
+//!   (docs/82 0.9; `Harness::unfiled_workspace`), never `/`.
+//! - **The regions strip** ([`regions_strip`]) stands at the top of the
+//!   session column while [`crate::layout::Onboarding::regions`] is `Due` —
+//!   set by the folder step, so only a first run ever sees it — and names
+//!   the sidebar, the conversation and its composer, the workspace pane and
+//!   Browse. "Got it" or Escape ends it for good.
+//!
+//! The state is the layout store's ([`crate::layout::Onboarding`]): a
+//! relaunch keeps what was shown, and nothing shows twice.
 
 use std::path::PathBuf;
 
@@ -17,9 +26,10 @@ use aui::data::button;
 use aui::util::{h_flex, v_flex};
 use aui_icons::{icon, IconName};
 use aui_tokens::{scale, ActiveAui, AuiStyled, TextRole};
-use gpui::{div, prelude::*, px, AnyElement, App, Context, ExternalPaths, Window};
+use gpui::{div, prelude::*, px, AnyElement, App, Context, ExternalPaths, SharedString, Window};
 
 use crate::app::Harness;
+use crate::layout::{LayoutGlobal as _, Once};
 
 /// The folder step's column width: the connect screen's card width, so
 /// the two steps read as one screen.
@@ -146,10 +156,107 @@ pub(crate) fn folder_step(
         .into_any_element()
 }
 
+/// One region the strip names: its glyph, its name, and what it holds.
+struct Region {
+    glyph: IconName,
+    name: &'static str,
+    holds: &'static str,
+}
+
+/// The four regions, in reading order across the window: the sidebar on
+/// the left, the conversation in the middle, the workspace pane on the
+/// right, and Browse (the sidebar's mode switch, ⌥⌘B).
+const REGIONS: [Region; 4] = [
+    Region { glyph: IconName::Sidebar, name: "Sidebar", holds: "Your projects and their sessions, on the left." },
+    Region { glyph: IconName::Edit, name: "Conversation", holds: "Ask here: the composer is at the bottom." },
+    Region {
+        glyph: IconName::PanelRight,
+        name: "Workspace pane",
+        holds: "Changes · Files · Page · Terminal · Tasks, from the header's buttons.",
+    },
+    Region { glyph: IconName::Globe, name: "Browse", holds: "Your own tabs: the globe at the top of the sidebar, ⌥⌘B." },
+];
+
+/// The strip's accessible name, also what a screen reader hears for the
+/// whole of it.
+pub(crate) const REGIONS_LABEL: &str = "Where things are in the window";
+
+/// The four regions named once (docs/82 8.7): one strip at the top of the
+/// session column on the first composer, the four side by side, and "Got
+/// it". `dismiss` ends it for good (Escape does too, through the root's
+/// cancel).
+pub(crate) fn regions_strip(dismiss: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static, cx: &App) -> AnyElement {
+    let p = cx.aui().colors;
+    let mut row = h_flex().flex_1().min_w_0().items_start().gap(px(scale::SP_6));
+    for (ix, region) in REGIONS.iter().enumerate() {
+        row = row.child(
+            v_flex()
+                .id(("regions-strip-region", ix))
+                .flex_1()
+                .min_w_0()
+                .gap(px(scale::SP_1))
+                .role(gpui::Role::Label)
+                .aria_label(SharedString::from(format!("{}: {}", region.name, region.holds)))
+                .child(
+                    h_flex()
+                        .gap(px(scale::SP_3))
+                        .items_center()
+                        .child(icon(region.glyph).size(px(scale::ICON_SM)).color(p.fg_muted))
+                        .child(div().text_role(TextRole::Body).text_color(p.ink).child(region.name)),
+                )
+                .child(div().text_role(TextRole::Caption).text_color(p.fg_muted).child(region.holds)),
+        );
+    }
+    h_flex()
+        .id("regions-strip")
+        .w_full()
+        .flex_none()
+        .items_center()
+        .gap(px(scale::SP_6))
+        .px(px(scale::SP_6))
+        .py(px(scale::SP_4))
+        .bg(p.surface_1)
+        .border_b_1()
+        .border_color(p.line)
+        .role(gpui::Role::Group)
+        .aria_label(REGIONS_LABEL)
+        .child(row)
+        .child(
+            button("regions-strip-done", "Got it")
+                .sm()
+                .accessibility_label("Got it: hide where things are")
+                .on_click(dismiss),
+        )
+        .into_any_element()
+}
+
 impl Harness {
+    /// The regions strip for this frame: on the session column while it is
+    /// due (docs/82 8.7).
+    pub(crate) fn render_regions_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if crate::layout::Layout::get(cx).onboarding.regions != Once::Due {
+            return None;
+        }
+        let dismiss = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+            this.dismiss_regions_strip(cx);
+        });
+        Some(regions_strip(dismiss, cx))
+    }
+
+    /// End the regions strip for good ("Got it", Escape). `false` when it
+    /// was not showing.
+    pub(crate) fn dismiss_regions_strip(&mut self, cx: &mut Context<Self>) -> bool {
+        if crate::layout::Layout::get(cx).onboarding.regions != Once::Due {
+            return false;
+        }
+        // The root observes the layout store: the update redraws it.
+        crate::layout::Layout::update(cx, |layout| layout.onboarding.regions = Once::Done);
+        true
+    }
+
     /// The first run's folder step answered (docs/82 8.7): the screen goes,
-    /// a chosen or dropped `folder` becomes the current project, and a new
-    /// session opens — in the folder, or
+    /// a chosen or dropped `folder` becomes the current project, the
+    /// regions strip is due, and a new session opens — in the folder, or
     /// where a session with no folder chosen starts (the current project,
     /// else `~/baaz-sessions` on every provider; never `/`).
     pub(crate) fn finish_first_run(&mut self, folder: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
@@ -157,6 +264,11 @@ impl Harness {
         if let Some(folder) = folder {
             self.adopt_root(&folder, cx);
         }
+        crate::layout::Layout::update(cx, |layout| {
+            if layout.onboarding.regions == Once::NotYet {
+                layout.onboarding.regions = Once::Due;
+            }
+        });
         self.new_session(window, cx);
         // Links from other apps that waited behind the screen open now.
         self.drain_external_soon(cx);
@@ -214,5 +326,17 @@ mod tests {
     fn not_now_says_where_the_session_starts() {
         assert!(skip_line(Some("acme-web"), "~/baaz-sessions").contains("keeps you in acme-web"));
         assert!(skip_line(None, "~/baaz-sessions").contains("starts in ~/baaz-sessions"));
+    }
+
+    /// The strip names four regions, the workspace pane with all five of
+    /// its views (8.1 made the terminal one of them).
+    #[test]
+    fn the_strip_names_the_four_regions_once() {
+        let names: Vec<&str> = REGIONS.iter().map(|region| region.name).collect();
+        assert_eq!(names, ["Sidebar", "Conversation", "Workspace pane", "Browse"]);
+        let pane = REGIONS[2].holds;
+        for view in ["Changes", "Files", "Page", "Terminal", "Tasks"] {
+            assert!(pane.contains(view), "the pane names {view}");
+        }
     }
 }

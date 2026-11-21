@@ -3894,9 +3894,13 @@ impl Harness {
                 // like the band so typing never rebuilds the transcript; the
                 // list gives up its height while it stands.
                 let find = view.update(cx, |view, cx| view.render_find_bar(window, cx));
+                // The four regions named once, on the first run's first
+                // composer (docs/82 8.7), above everything in the column.
+                let regions = self.render_regions_strip(cx);
                 v_flex()
                     .size_full()
                     .relative()
+                    .children(regions)
                     .children(find)
                     .child(div().w_full().flex_1().min_h(px(0.0)).child(transcript))
                     .child(band)
@@ -5259,6 +5263,12 @@ impl Harness {
         if field {
             // The view redrew itself; the composer's focus rides the settle.
             self.arm_composer_focus(cx);
+            return;
+        }
+        // The first run's regions strip (docs/82 8.7) is the last thing
+        // Escape takes back before the running turn: it is no overlay, but
+        // it stands over the column until it is dismissed.
+        if self.active.is_some() && self.dismiss_regions_strip(cx) {
             return;
         }
         let empty = self.active.as_ref().is_some_and(|a| a.read(cx).draft_is_empty(cx));
