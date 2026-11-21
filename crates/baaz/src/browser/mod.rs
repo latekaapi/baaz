@@ -447,14 +447,12 @@ pub(crate) enum FieldAction {
     ClearHistory,
     /// ⌘D: bookmark the shown page.
     Bookmark,
-    /// Browse bookmarks in the Field (the scoped view).
-    Bookmarks,
     /// Allow (or block again) ads on the shown page's site.
     AdsHere,
 }
 
 /// What the Field finds by name (docs/27 §4.4): the page's own commands.
-const FIELD_COMMANDS: [(&str, &str, FieldAction); 20] = [
+const FIELD_COMMANDS: [(&str, &str, FieldAction); 19] = [
     ("new-tab", "New tab", FieldAction::Page(aui::screens::sidebar::PageAction::NewTab)),
     ("find", "Find in page", FieldAction::Page(aui::screens::sidebar::PageAction::Find)),
     ("copy-link", "Copy link", FieldAction::Page(aui::screens::sidebar::PageAction::CopyLink)),
@@ -466,9 +464,9 @@ const FIELD_COMMANDS: [(&str, &str, FieldAction); 20] = [
     ("forget-site", "Never remember this site", FieldAction::ForgetSite),
     ("clear-history", "Clear history…", FieldAction::ClearHistory),
     ("bookmark", "Bookmark this page", FieldAction::Bookmark),
-    ("bookmarks", "Bookmarks", FieldAction::Bookmarks),
-    // docs/82 8.6: the pages that list and edit them, and the site's own.
-    ("manage-bookmarks", "Manage bookmarks", FieldAction::Page(aui::screens::sidebar::PageAction::Bookmarks)),
+    // docs/82 8.6: the Bookmarks & History page (one row each — docs/07
+    // §1a, Bookmarks and History), and the site's own page.
+    ("bookmarks", "Bookmarks", FieldAction::Page(aui::screens::sidebar::PageAction::Bookmarks)),
     ("history", "History", FieldAction::Page(aui::screens::sidebar::PageAction::History)),
     ("site-settings", "Site settings…", FieldAction::Page(aui::screens::sidebar::PageAction::SiteSettings)),
     ("ads-here", "Allow ads on this site", FieldAction::AdsHere),

@@ -1310,7 +1310,7 @@ impl Harness {
                 let menu = browse_menu("overlay-browse-menu", &browse, Some(on_intent), window, cx)?;
                 Some(div().p(gpui::px(SHADOW_PAD)).child(menu).into_any_element())
             }
-            OverlayKind::Field => Some(self.render_field(window, cx)),
+            OverlayKind::Field => Some(self.render_field(cx)),
             OverlayKind::SiteInfo => Some(self.render_site_info(cx)),
             OverlayKind::Bookmark => self.render_bookmark_popover(cx),
             OverlayKind::Downloads => {
@@ -1362,9 +1362,9 @@ impl Harness {
     /// "centred, as prototype"). Baaz keeps its own ranking and activation;
     /// the rows only borrow the component's kinds for their glyph and group.
     /// ↑/↓ move, Tab completes, Enter opens, Escape leaves.
-    fn render_field(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_field(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let p = cx.aui().colors;
-        let panel = self.field_panel(window, cx);
+        let panel = self.field_panel(cx);
         let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
             this.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx));
         });
@@ -1385,7 +1385,7 @@ impl Harness {
     /// keys and intents — for the overlay window ([`Self::render_field`])
     /// and for the main window when the sidebar is hidden
     /// ([`Self::render_field_in_window`]): one Field, two hosts.
-    pub(crate) fn field_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn field_panel(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         use aui::browse::field::{field, FieldIntent, FieldModel, FieldRow, FieldRowKind};
         let p = cx.aui().colors;
         let omni = self.browse_suggestions(cx);
@@ -1401,7 +1401,6 @@ impl Harness {
                     crate::browser::SuggestKind::Command => FieldRowKind::Command { id: index.to_string().into() },
                     crate::browser::SuggestKind::History => FieldRowKind::History { url: row.suggestion.complete.clone().unwrap_or_default().into() },
                     crate::browser::SuggestKind::Bookmark => FieldRowKind::Bookmark { url: row.suggestion.complete.clone().unwrap_or_default().into() },
-                    crate::browser::SuggestKind::Folder => FieldRowKind::Folder { id: index.to_string().into() },
                 };
                 // Every row confirms with ↩ unless Baaz names another key; an
                 // empty hint drew an empty keycap.
@@ -1439,17 +1438,8 @@ impl Harness {
         let baaz = cx.entity().downgrade();
         let hover = baaz.clone();
         let index_of = move |row: &FieldRow| rows.iter().position(|r| r == row);
-        let scoped = self.browser.read(cx).field_scope.is_some();
-        if scoped != self.browser.read(cx).placeholder_scoped {
-            self.browser.update(cx, |browser, _| browser.placeholder_scoped = scoped);
-            if let Some(input) = self.browser.read(cx).browse_address.clone() {
-                let text = if scoped { "Search bookmarks" } else { crate::browser::FIELD_PLACEHOLDER };
-                input.update(cx, |input, cx| input.set_placeholder(text, window, cx));
-            }
-        }
         let mut panel = field("browse-field", &model)
-            .scope(scoped.then(|| gpui::SharedString::from("Bookmarks")))
-            .placeholder(if scoped { "Search bookmarks" } else { "Search or type a URL" })
+            .placeholder("Search or type a URL")
             .on_hover(move |shown, _, cx| {
                 let Some(&index) = order.get(shown) else { return };
                 let _ = hover.update(cx, |this, cx| this.browser.update(cx, |browser, cx| browser.move_omnibox(crate::browser::OmniboxStep::Hover(index), cx)));
@@ -1463,10 +1453,9 @@ impl Harness {
                     }
                     FieldIntent::Complete => this.run_on_main(cx, |this, window, cx| this.complete_omnibox(window, cx)),
                     FieldIntent::Close => this.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
-                    FieldIntent::Unscope => {
-                        this.browser.update(cx, |browser, cx| browser.move_omnibox(crate::browser::OmniboxStep::Scope(None), cx));
-                    }
-                    FieldIntent::SearchExact(_) => {}
+                    // Baaz never scopes the Field (one Bookmarks row opens
+                    // the Bookmarks & History page instead).
+                    FieldIntent::Unscope | FieldIntent::SearchExact(_) => {}
                 });
             });
         if let Some(input) = input {
@@ -1479,18 +1468,6 @@ impl Harness {
                     .role(gpui::Role::Dialog)
                     .aria_label("Open a page, switch tab or ask")
                     .on_key_down(keys)
-                    // ⌫ on an empty query in the Bookmarks scope: up a folder,
-                    // or out. Captured before the input, which eats ⌫.
-                    // (The input binds ⌫ as an action, which runs before any
-                    // key listener, so this captures the action itself.)
-                    .capture_action(cx.listener(|this: &mut Self, _: &gpui_kit::base::input::Backspace, _, cx| {
-                        if this.browser.read(cx).field_scope.is_some()
-                            && this.browser.read(cx).browse_address_text(cx).is_empty()
-                            && this.field_scope_up(cx)
-                        {
-                            cx.stop_propagation();
-                        }
-                    }))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(panel)
             .into_any_element()
@@ -1508,7 +1485,7 @@ impl Harness {
         let win = window.viewport_size();
         let width = aui::overlay::palette_width(win.width);
         let top = aui::overlay::palette_top(win.height);
-        let panel = self.field_panel(window, cx);
+        let panel = self.field_panel(cx);
         Some(
             aui::overlay::popover_layer(
                 gpui::anchored()

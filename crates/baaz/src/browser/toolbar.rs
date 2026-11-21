@@ -209,8 +209,6 @@ pub(crate) enum SuggestKind {
     History,
     /// A bookmark (R4).
     Bookmark,
-    /// A bookmarks folder, in the scoped Bookmarks view (R4).
-    Folder,
     /// The default "search with <engine>" row, always last.
     Search,
 }
@@ -249,8 +247,6 @@ pub(crate) enum OmniTarget {
     Command(String),
     /// Load this history (or bookmark) URL.
     History(String),
-    /// Open this bookmarks folder in the scoped view.
-    Folder(i64),
     /// Load this search URL.
     Search(String),
 }
@@ -315,44 +311,6 @@ pub(crate) struct BookmarkHit {
     pub url: String,
     /// Its folder's path (`Other › Learning`): the row's right-hand word.
     pub folder: String,
-}
-
-/// The rows of the scoped Bookmarks view: with no query, the folders at
-/// this level then the bookmarks in it (the top level: recently added);
-/// with a query, matching bookmarks anywhere.
-pub(crate) fn rank_bookmarks_scope(
-    query: &str,
-    folders: &[(i64, String, u64)],
-    marks: &[BookmarkHit],
-) -> Vec<OmniRow> {
-    let mut rows = Vec::new();
-    if query.trim().is_empty() {
-        for (id, name, count) in folders {
-            rows.push(OmniRow {
-                suggestion: Suggestion {
-                    kind: SuggestKind::Folder,
-                    title: name.clone(),
-                    hint: count.to_string(),
-                    complete: None,
-                    detail: None,
-                },
-                target: OmniTarget::Folder(*id),
-            });
-        }
-    }
-    for mark in marks {
-        rows.push(OmniRow {
-            suggestion: Suggestion {
-                kind: SuggestKind::Bookmark,
-                title: if mark.title.is_empty() { display_url(&mark.url) } else { mark.title.clone() },
-                hint: mark.folder.clone(),
-                complete: Some(mark.url.clone()),
-                detail: Some(display_url(&mark.url)),
-            },
-            target: OmniTarget::History(mark.url.clone()),
-        });
-    }
-    rows
 }
 
 /// An address as a row shows it: no scheme, no `www.`, no trailing `/`.
@@ -924,17 +882,5 @@ mod tests {
             "the bookmarked page's history row folds into the bookmark; a bookmark open as a tab shows as the tab"
         );
         assert_eq!(rows[2].suggestion.hint, "Bookmarks bar");
-    }
-
-    #[test]
-    fn the_scoped_view_lists_folders_then_bookmarks_and_a_query_drops_folders() {
-        let folders = vec![(1, "Bookmarks bar".to_owned(), 2), (2, "Other".to_owned(), 0)];
-        let marks = vec![BookmarkHit { title: "HN".to_owned(), url: "https://news.ycombinator.com/".to_owned(), folder: "Bookmarks bar".to_owned() }];
-        let rows = rank_bookmarks_scope("", &folders, &marks);
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].target, OmniTarget::Folder(1));
-        assert_eq!(rows[0].suggestion.hint, "2");
-        assert_eq!(rows[2].target, OmniTarget::History("https://news.ycombinator.com/".to_owned()));
-        assert_eq!(rank_bookmarks_scope("hn", &folders, &marks).len(), 1);
     }
 }

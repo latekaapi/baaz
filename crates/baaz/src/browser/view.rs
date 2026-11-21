@@ -150,11 +150,6 @@ pub(crate) struct BrowserView {
     pub cosmetic_pass: HashMap<TabId, (String, u8, std::time::Instant)>,
     /// A wake-up is armed for the shown tab's dwell, at this page.
     pub dwell_armed: Option<(TabId, String)>,
-    /// The Field's scope (R4 board 1c): `Some(folder)` while it shows only
-    /// bookmarks, `None` inside means the top level.
-    pub field_scope: Option<Option<i64>>,
-    /// The Field's input wears the scoped placeholder.
-    pub placeholder_scoped: bool,
     /// R4: the open Peek, if any.
     pub peek: Option<peek_split::Peek>,
     /// R4: the open Split, if any.
@@ -372,8 +367,6 @@ impl BrowserView {
             cosmetic_injects: std::collections::HashSet::new(),
             cosmetic_pass: HashMap::new(),
             dwell_armed: None,
-            field_scope: None,
-            placeholder_scoped: false,
             peek: None,
             split: None,
             split_ratio: 0.5,

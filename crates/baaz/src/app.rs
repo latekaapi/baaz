@@ -3735,11 +3735,6 @@ impl Harness {
                 {
                     Some("Bookmarks")
                 }
-                crate::browser::SuggestKind::Folder
-                    if !matches!(last_kind, Some(crate::browser::SuggestKind::Folder)) =>
-                {
-                    Some("Folders")
-                }
                 crate::browser::SuggestKind::History
                     if !matches!(last_kind, Some(crate::browser::SuggestKind::History)) =>
                 {

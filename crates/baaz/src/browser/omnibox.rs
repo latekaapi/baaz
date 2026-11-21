@@ -189,9 +189,7 @@ impl Harness {
         if let Some(target) = self.browser.read(cx).browse_completed.clone() {
             return self.activate_omnibox_target(target, window, cx);
         }
-        // In the Bookmarks scope ↩ always opens the highlighted row (a
-        // folder or a bookmark): the typed text only filters there.
-        if self.browser.read(cx).browse_omnibox_moved || self.browser.read(cx).field_scope.is_some() {
+        if self.browser.read(cx).browse_omnibox_moved {
             let rows = self.browse_suggestions(cx);
             if rows.is_empty() {
                 return;
@@ -248,9 +246,6 @@ impl Harness {
     /// stay inside this project and out of the hidden list.
     pub(crate) fn browse_suggestions(&self, cx: &gpui::App) -> Vec<OmniRow> {
         let query = self.browser.read(cx).browse_address_text(cx);
-        if let Some(folder) = self.browser.read(cx).field_scope {
-            return self.browser.read(cx).data.read(cx).bookmark_scope_rows(&query, folder);
-        }
         if query.trim().is_empty() || !self.browser.read(cx).tabs_loaded {
             return Vec::new();
         }
@@ -301,19 +296,6 @@ impl Harness {
         toolbar::rank_omnibox(&query, &tabs, &sessions, &commands, &history, &marks, crate::layout::Layout::get(cx).search_engine)
     }
 
-    /// ⌫ on an empty query in the scoped view: up one folder, or out of
-    /// the scope at the top. Returns whether it did anything.
-    pub(crate) fn field_scope_up(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(folder) = self.browser.read(cx).field_scope else { return false };
-        let scope = match folder {
-            Some(id) => {
-                Some(self.browser.read(cx).data.read(cx).folder_parent(id))
-            }
-            None => None,
-        };
-        self.browser.update(cx, |browser, cx| browser.move_omnibox(OmniboxStep::Scope(scope), cx));
-        true
-    }
 
 
     /// Move the omnibox highlight by `delta`, wrapping over the rows the
@@ -393,19 +375,7 @@ impl Harness {
                     Some(FieldAction::ClearHistory) => self.ask_clear_history(cx),
                     Some(FieldAction::Bookmark) => self.bookmark_shown_page(window, cx),
                     Some(FieldAction::AdsHere) => self.toggle_ads_here(window, cx),
-                    Some(FieldAction::Bookmarks) => {
-                        // Back into the Field, scoped (the leave above closed it).
-                        self.browser.update(cx, |browser, _| browser.field_scope = Some(None));
-                        self.focus_browse_address_with("", window, cx);
-                        self.browser.update(cx, |browser, _| browser.field_scope = Some(None));
-                    }
                     None => {}
-                }
-            }
-            OmniTarget::Folder(id) => {
-                self.browser.update(cx, |browser, cx| browser.move_omnibox(OmniboxStep::Scope(Some(Some(id))), cx));
-                if let Some(input) = self.browser.read(cx).browse_address.clone() {
-                    input.update(cx, |input, cx| input.set_value("", window, cx));
                 }
             }
             OmniTarget::Tab(id) => {
@@ -531,15 +501,13 @@ pub(crate) enum OmniboxStep {
     Hover(usize),
     /// A Tab completion of `row` at `index`.
     Complete { index: usize, row: crate::browser::OmniTarget },
-    /// The folder scope.
-    Scope(Option<Option<i64>>),
 }
 
 impl BrowserView {
-    /// Move the omnibox's highlight (or its scope) — the field's one owner
+    /// Move the omnibox's highlight — the field's one owner
     /// method — and redraw the rows when anything moved (or the text did).
     pub(crate) fn move_omnibox(&mut self, step: OmniboxStep, cx: &mut Context<Self>) {
-        let before = (self.browse_omnibox_selected, self.browse_omnibox_moved, self.browse_completed.clone(), self.browse_completed_text.clone(), self.field_scope);
+        let before = (self.browse_omnibox_selected, self.browse_omnibox_moved, self.browse_completed.clone(), self.browse_completed_text.clone());
         // A reset always redraws: it follows typing (and a fresh focus), and
         // the rows are the typed text's.
         let typed = matches!(step, OmniboxStep::Reset { .. });
@@ -569,19 +537,12 @@ impl BrowserView {
                 self.browse_completed = Some(row);
                 false
             }
-            // Scoped to a bookmarks folder (`Some(None)` the top,
-            // `Some(Some(id))` a folder) or unscoped, back on top.
-            OmniboxStep::Scope(scope) => {
-                self.field_scope = scope;
-                self.browse_omnibox_selected = 0;
-                false
-            }
         };
         if forget {
             self.browse_completed = None;
             self.browse_completed_text = None;
         }
-        let after = (self.browse_omnibox_selected, self.browse_omnibox_moved, self.browse_completed.clone(), self.browse_completed_text.clone(), self.field_scope);
+        let after = (self.browse_omnibox_selected, self.browse_omnibox_moved, self.browse_completed.clone(), self.browse_completed_text.clone());
         if typed || before != after {
             cx.notify();
         }
@@ -623,8 +584,6 @@ impl BrowserView {
     /// [`Self::leave_browse_address`], for the project-adoption paths that
     /// own no window.
     pub(crate) fn drop_browse_address(&mut self, cx: &mut Context<Self>) {
-        self.field_scope = None;
-        self.placeholder_scoped = false;
         if self.browse_address.is_some() {
             self.browse_address = None;
             self.browse_address_sub = None;

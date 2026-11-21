@@ -42,7 +42,7 @@ use gpui::{Context, Task};
 use super::bookmarks::{self, Bookmark, Folder};
 use super::chrome_import::{self, Imported};
 use super::history::{self, BrowserDb, HistorySink, Visit};
-use super::toolbar::{BookmarkHit, HistoryHit, OmniRow};
+use super::toolbar::{BookmarkHit, HistoryHit};
 
 use baaz_browser_core::history::{UI_THREAD, IN_JOB};
 
@@ -465,12 +465,6 @@ impl BrowserData {
             .collect()
     }
 
-    /// A folder's parent (`None` at the top level or when unknown).
-    pub(crate) fn folder_parent(&self, id: i64) -> Option<i64> {
-        let id = self.resolve(id);
-        self.front.folders.iter().find(|f| f.id == id).and_then(|f| f.parent)
-    }
-
     /// Bookmarks whose title or address contains `query` (ASCII case
     /// folded, like SQLite's `LIKE`), newest first.
     pub(crate) fn search_bookmarks(&self, query: &str, limit: usize) -> Vec<Bookmark> {
@@ -496,13 +490,6 @@ impl BrowserData {
         rows.into_iter().map(|(_, m)| m.mark.clone()).collect()
     }
 
-    /// The newest bookmarks.
-    pub(crate) fn recent_bookmarks(&self, limit: usize) -> Vec<Bookmark> {
-        let mut rows: Vec<(usize, &Mark)> = self.front.marks.iter().enumerate().collect();
-        rows.sort_by_key(|(at, m)| std::cmp::Reverse((m.mark.added_ms, *at)));
-        rows.into_iter().take(limit).map(|(_, m)| m.mark.clone()).collect()
-    }
-
     /// The Field's bookmark rows for `query`.
     pub(crate) fn bookmark_hits(&self, query: &str) -> Vec<BookmarkHit> {
         let all = self.folders();
@@ -510,28 +497,6 @@ impl BrowserData {
             .into_iter()
             .map(|mark| BookmarkHit { folder: bookmarks::folder_path(&all, mark.folder), title: mark.title, url: mark.url })
             .collect()
-    }
-
-    /// The scoped Bookmarks view's rows (board 1c): folders at this level,
-    /// then this folder's bookmarks (the top level: recently added); a
-    /// query searches every bookmark.
-    pub(crate) fn bookmark_scope_rows(&self, query: &str, folder: Option<i64>) -> Vec<OmniRow> {
-        let folder = folder.map(|id| self.resolve(id));
-        let all = self.folders();
-        let folders: Vec<(i64, String, u64)> =
-            all.iter().filter(|f| f.parent == folder).map(|f| (f.id, f.name.clone(), f.count)).collect();
-        let marks = if !query.trim().is_empty() {
-            self.search_bookmarks(query, 50)
-        } else if let Some(folder) = folder {
-            self.in_folder(folder)
-        } else {
-            self.recent_bookmarks(8)
-        };
-        let marks: Vec<BookmarkHit> = marks
-            .into_iter()
-            .map(|mark| BookmarkHit { folder: bookmarks::folder_path(&all, mark.folder), title: mark.title, url: mark.url })
-            .collect();
-        super::toolbar::rank_bookmarks_scope(query, &folders, &marks)
     }
 
     /// The Field's history rows for `query`: the last search's rows for it,
@@ -1039,8 +1004,6 @@ mod tests {
             assert_eq!(bookmarks::folder_path(&all, learning), "Other › Learning");
             assert_eq!(all.iter().find(|f| f.id == bookmarks::OTHER).unwrap().count, 2, "one bookmark and one folder");
             assert!(data.search_bookmarks("%", 10).is_empty(), "% is literal");
-            assert_eq!(data.recent_bookmarks(1)[0].title, "Hacker News");
-            assert_eq!(data.folder_parent(learning), Some(bookmarks::OTHER));
         });
         cx.run_until_parked();
         // The same answers once every id is a row id.

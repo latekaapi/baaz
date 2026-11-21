@@ -336,20 +336,6 @@ impl Harness {
         Ok(())
     }
 
-    /// `bookmarks`: enter Browse and open the address field scoped to
-    /// bookmarks. No page in the centre to anchor the field is an `Err`.
-    /// Free.
-    pub(crate) fn step_bookmarks(&mut self, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        self.set_mode(crate::layout::Mode::Browse, window, cx);
-        self.ensure_tabs_loaded(cx);
-        if self.browse_centre_page(window, cx).is_none() {
-            return Err("no page is open in Browse".into());
-        }
-        self.focus_browse_address_with("", window, cx);
-        self.browser.update(cx, |browser, cx| browser.move_omnibox(super::OmniboxStep::Scope(Some(None)), cx));
-        Ok(())
-    }
-
     /// `omnibox:<text>`: enter Browse, focus the address field and type
     /// `text` — the `browse-omnibox` capture aid; the dropdown stays open
     /// on the typed text. No page in the centre is an `Err`. Free.
