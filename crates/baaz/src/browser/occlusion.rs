@@ -71,7 +71,7 @@ pub(crate) struct BrowserVisibility {
     /// the Field's rows draw there when it has no overlay window (the
     /// sidebar closed). The page shows its screenshot stand-in under them.
     pub omnibox_open: bool,
-    /// A Browse chrome popover (downloads, extensions, ⋯) stands open. They
+    /// A Browse chrome popover (downloads, extensions) stands open. They
     /// draw in the main window, over the page, so the page shows its
     /// stand-in, like the omnibox above.
     pub chrome_popover_open: bool,
@@ -279,7 +279,7 @@ impl BrowserView {
             cx.emit(BrowserEvent::CentreSwitched { left: self.last_centre_shown, shown: centre_shown });
         }
         if switched || !in_browse {
-            self.overlays.update(cx, |o, cx| o.close_all(&[LayerKind::Downloads, LayerKind::Extensions, LayerKind::More], cx));
+            self.overlays.update(cx, |o, cx| o.close_all(&[LayerKind::Downloads, LayerKind::Extensions], cx));
         }
         // However the downloads popover closed (a switch, its toggle,
         // Escape off the overlay stack), it has not rendered for its next
@@ -290,11 +290,10 @@ impl BrowserView {
         self.last_centre_shown = centre_shown;
         // B2a-H5: covering is honest — a popover covers the page only while
         // it actually renders. A flag whose popover cannot render (no
-        // downloads, no centre state) clears instead of blanking the page
+        // downloads, no shown tab) clears instead of blanking the page
         // under an invisible popover; the downloads flag clears only once
         // it rendered, so a scripted download's first frame never closes
         // its own capture.
-        let centre_has_state = centre_shown.is_some_and(|id| self.states.contains_key(&id));
         let downloads_empty = self.browse_downloads(cx).is_empty();
         if self.overlays.read(cx).stack.is_open(LayerKind::Downloads) && centre_shown.is_some() && !downloads_empty {
             self.downloads_rendered = true;
@@ -310,13 +309,9 @@ impl BrowserView {
         if self.overlays.read(cx).stack.is_open(LayerKind::Extensions) && centre_shown.is_none() {
             self.overlays.update(cx, |o, cx| { o.close(LayerKind::Extensions, cx); });
         }
-        if self.overlays.read(cx).stack.is_open(LayerKind::More) && !centre_has_state {
-            self.overlays.update(cx, |o, cx| { o.close(LayerKind::More, cx); });
-        }
         let chrome_popover_open = in_browse
             && ((self.overlays.read(cx).stack.is_open(LayerKind::Downloads) && !self.downloads_overlay_wanted(cx) && centre_shown.is_some() && !self.browse_downloads(cx).is_empty())
-                || (self.overlays.read(cx).stack.is_open(LayerKind::Extensions) && centre_shown.is_some() && !self.downloads_overlay_wanted(cx))
-                || (self.overlays.read(cx).stack.is_open(LayerKind::More) && centre_has_state));
+                || (self.overlays.read(cx).stack.is_open(LayerKind::Extensions) && centre_shown.is_some() && !self.downloads_overlay_wanted(cx)));
         // A crashed page hides the find strip: the highlight stops and the
         // strip closes, so the error page owns the rect alone. First, so
         // the stored rect below never reserves a row for a strip that just

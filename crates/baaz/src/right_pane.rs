@@ -92,6 +92,8 @@ pub(crate) struct RightFacts {
     pub settings_open: bool,
     /// The session's live page, when one exists (the root builds it).
     pub page: Option<Entity<aui_webview::WebviewState>>,
+    /// What the Page's nav row offers for that page's tab (docs/82 8.3).
+    pub page_offers: aui::workbench::PageNavExtras,
     /// The window's lifecycle runs: signed in, or a live launch. An offline
     /// or replayed capture that is still signed out reconciles nothing per
     /// frame (the root's frame never did), so no read and no file watch
@@ -697,7 +699,7 @@ impl Render for RightPane {
                 &self.cache,
                 project,
                 &session_edits,
-                right::BrowserPane { state: None, window: &mut *window },
+                right::BrowserPane { state: None, window: &mut *window, offers: Default::default() },
                 &self.terminal,
                 right_open,
                 width,
@@ -777,7 +779,7 @@ impl RightPane {
             &self.cache,
             self.facts.project.clone(),
             &edits,
-            right::BrowserPane { state: page, window },
+            right::BrowserPane { state: page, window, offers: self.facts.page_offers },
             &self.terminal,
             right_open,
             self.resize.width,
@@ -903,6 +905,10 @@ impl Harness {
             pending_neutral: self.pending_right_neutral(cx),
             settings_open: self.settings_open(cx),
             page: self.existing_browser(cx),
+            page_offers: self.pane_tab(cx).map_or_else(Default::default, |tab| {
+                let offers = self.tab_offers(tab, cx);
+                aui::workbench::PageNavExtras { send_page: offers.send_page, keep_tab: offers.keep }
+            }),
             live: matches!(self.auth, crate::login::Auth::SignedIn(_)) || !(self.args.offline || self.args.replay.is_some()),
         }
     }

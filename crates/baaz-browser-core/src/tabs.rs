@@ -395,30 +395,39 @@ impl Tabs {
         groups
     }
 
-    /// Hand `id` to another owner, keeping its space. The old owner's
-    /// active pointer falls back to its newest remaining tab (or is
-    /// cleared); the new owner's active pointer moves onto the tab.
-    /// False for an unknown tab. (Next tasks: handing session tabs to the
-    /// person in Browse mode.)
-    pub fn move_to(&mut self, id: TabId, owner: Owner) -> bool {
+    /// The one ownership move (docs/82 8.3): hand `id` to `owner` — a
+    /// session's tab kept by the person ("Keep this tab"), or a tab handed
+    /// to a session (a browser chat's hand-off, a provider's renamed id).
+    /// The tab keeps its id, URL, title, pin and favicon, so its live page
+    /// and its back/forward history (both keyed by id) stay with it; it
+    /// leaves any folder (a person's folder means nothing to a session, and
+    /// a task folder is the session itself). `space` places it: `Some` for
+    /// the person's current space, `None` to keep the one it has. The old
+    /// owner's active pointer falls back to its newest remaining tab (or is
+    /// cleared); the new owner's moves onto the tab. False for an unknown
+    /// tab; true and nothing changed when it already is `owner`'s there.
+    pub fn move_to(&mut self, id: TabId, owner: Owner, space: Option<&str>) -> bool {
         let index = match self.tabs.iter().position(|tab| tab.id == id) {
             Some(index) => index,
             None => return false,
         };
         let old = self.tabs[index].owner.clone();
-        if old == owner {
+        let old_space = self.tabs[index].space.clone();
+        let new_space = space.map(str::to_owned).or_else(|| old_space.clone());
+        if old == owner && new_space == old_space {
             return true;
         }
         self.tabs[index].owner = owner.clone();
+        self.tabs[index].space = new_space.clone();
+        self.tabs[index].folder = None;
         // The old owner falls back like a close; the new owner selects.
-        let space = self.tabs[index].space.clone();
         let siblings: Vec<TabId> = self
             .tabs
             .iter()
-            .filter(|tab| tab.owner == old)
+            .filter(|tab| tab.owner == old && tab.space == old_space)
             .map(|tab| tab.id)
             .collect();
-        let key = active_key(&old, space.as_deref());
+        let key = active_key(&old, old_space.as_deref());
         match siblings.last() {
             Some(id) => {
                 self.active.insert(key, *id);
@@ -427,7 +436,7 @@ impl Tabs {
                 self.active.remove(&key);
             }
         }
-        self.active.insert(active_key(&owner, space.as_deref()), id);
+        self.active.insert(active_key(&owner, new_space.as_deref()), id);
         self.bump();
         true
     }
@@ -1139,11 +1148,67 @@ mod tests {
     fn moving_hands_the_tab_to_the_new_owner() {
         let mut model = tabs();
         let id = model.open(None, session("s"), "https://a.example/", None);
-        assert!(model.move_to(id, Owner::Person));
+        assert!(model.move_to(id, Owner::Person, None));
         assert!(model.tabs_of(&session("s")).is_empty());
         assert_eq!(model.active_of(&session("s"), None), None);
         assert_eq!(model.active_of(&Owner::Person, None), Some(id));
-        assert!(!model.move_to(TabId(404), Owner::Person));
+        assert!(!model.move_to(TabId(404), Owner::Person, None));
+    }
+
+    /// Keep this tab (docs/82 8.3): a session's tab becomes the person's in
+    /// the current space, out of the task folder, with its id, URL, title
+    /// and pin — the session falls back to its next tab.
+    #[test]
+    fn keeping_a_session_tab_keeps_everything_but_the_owner() {
+        let mut model = tabs();
+        let older = model.open(Some("p".to_owned()), session("s"), "https://older.example/", None);
+        let kept = model.open(Some("p".to_owned()), session("s"), "https://kept.example/", None);
+        model.set_url_title(kept, "https://kept.example/page", "Kept page");
+        model.set_pinned(kept, true);
+        let before = model.get(kept).cloned().expect("the tab");
+        assert!(model.move_to(kept, Owner::Person, Some("work")));
+        let after = model.get(kept).cloned().expect("still there");
+        assert_eq!(after.id, before.id, "same id: the live page and its history stay keyed to it");
+        assert_eq!((after.url.as_str(), after.title.as_str(), after.pinned), ("https://kept.example/page", "Kept page", true));
+        assert_eq!(after.owner, Owner::Person);
+        assert_eq!(after.space.as_deref(), Some("work"), "into the person's current space");
+        assert_eq!(after.folder, None);
+        let task: Vec<TabId> = model.session_tabs(None).into_iter().flat_map(|(_, tabs)| tabs.into_iter().map(|t| t.id)).collect();
+        assert!(!task.contains(&kept), "the task folder no longer lists it");
+        assert_eq!(model.active_of(&session("s"), Some("p")), Some(older), "the session falls back to its next tab");
+        assert_eq!(model.active_of(&Owner::Person, Some("work")), Some(kept), "the person's space shows it");
+    }
+
+    /// The reverse move (a hand-off): a person's tab goes to a session,
+    /// leaves the person's folder, keeps id, URL and pin and its space.
+    #[test]
+    fn handing_a_person_tab_to_a_session_leaves_its_folder() {
+        let mut model = tabs();
+        let id = model.open(Some("p".to_owned()), Owner::Person, "https://a.example/", None);
+        let folder = model.add_folder("p", "Reading");
+        model.set_folder(id, Some(&folder));
+        model.set_pinned(id, true);
+        assert!(model.move_to(id, session("s"), None));
+        let tab = model.get(id).expect("the tab");
+        assert_eq!((tab.owner.clone(), tab.space.as_deref(), tab.folder.as_deref(), tab.pinned), (session("s"), Some("p"), None, true));
+        assert_eq!(tab.url, "https://a.example/");
+        assert!(model.person_ids_in("p", Some(&folder)).is_empty(), "its old folder no longer holds it");
+        assert_eq!(model.active_of(&session("s"), Some("p")), Some(id));
+        assert_eq!(model.active_of(&Owner::Person, Some("p")), None);
+    }
+
+    /// A kept tab survives the store: the move persists.
+    #[test]
+    fn a_kept_tab_round_trips_through_the_store() {
+        let mut model = tabs();
+        let id = model.open(Some("p".to_owned()), session("s"), "https://kept.example/", None);
+        assert!(model.move_to(id, Owner::Person, Some("p")));
+        let json = serde_json::to_string(&model).unwrap();
+        let back: Tabs = serde_json::from_str(&json).unwrap();
+        let tab = back.get(id).expect("the kept tab");
+        assert_eq!((tab.owner.clone(), tab.url.as_str()), (Owner::Person, "https://kept.example/"));
+        assert_eq!(back.active_of(&Owner::Person, Some("p")), Some(id));
+        assert!(back.tabs_of(&session("s")).is_empty());
     }
 
     #[test]

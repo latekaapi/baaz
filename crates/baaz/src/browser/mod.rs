@@ -72,6 +72,9 @@ pub(crate) use omnibox::OmniboxStep;
 mod page_actions;
 mod pages;
 mod parcels;
+mod tab_moves;
+#[cfg(test)]
+pub(crate) use tab_moves::page_draft;
 pub(crate) use parcels::{NotesParcel, Parcel};
 #[cfg(test)]
 pub(crate) use parcels::PendingParcel;
@@ -449,7 +452,7 @@ pub(crate) enum FieldAction {
 }
 
 /// What the Field finds by name (docs/27 §4.4): the page's own commands.
-const FIELD_COMMANDS: [(&str, &str, FieldAction); 13] = [
+const FIELD_COMMANDS: [(&str, &str, FieldAction); 17] = [
     ("new-tab", "New tab", FieldAction::Page(aui::screens::sidebar::PageAction::NewTab)),
     ("find", "Find in page", FieldAction::Page(aui::screens::sidebar::PageAction::Find)),
     ("copy-link", "Copy link", FieldAction::Page(aui::screens::sidebar::PageAction::CopyLink)),
@@ -463,7 +466,26 @@ const FIELD_COMMANDS: [(&str, &str, FieldAction); 13] = [
     ("bookmark", "Bookmark this page", FieldAction::Bookmark),
     ("bookmarks", "Bookmarks", FieldAction::Bookmarks),
     ("ads-here", "Allow ads on this site", FieldAction::AdsHere),
+    // docs/82 8.3: listed only where they work (`field_command_offered`).
+    ("send-page", "Send page to session…", FieldAction::Page(aui::screens::sidebar::PageAction::SendPage)),
+    ("send-selection", "Send selection to session…", FieldAction::Page(aui::screens::sidebar::PageAction::SendSelection)),
+    ("keep-tab", "Keep this tab", FieldAction::Page(aui::screens::sidebar::PageAction::Keep)),
+    ("collapse", "Back to the session's Page", FieldAction::Page(aui::screens::sidebar::PageAction::Collapse)),
 ];
+
+/// Whether the Field lists `action` for a page that offers `offers`
+/// (rule 13): the page-and-session commands only where they work; every
+/// other command always.
+pub(crate) fn field_command_offered(action: FieldAction, offers: aui::screens::sidebar::MenuOffers) -> bool {
+    use aui::screens::sidebar::PageAction;
+    match action {
+        FieldAction::Page(PageAction::SendPage) => offers.send_page,
+        FieldAction::Page(PageAction::SendSelection) => offers.send_selection,
+        FieldAction::Page(PageAction::Keep) => offers.keep,
+        FieldAction::Page(PageAction::Collapse) => offers.collapse,
+        _ => true,
+    }
+}
 
 
 /// Whether the line's activity `label` is the agent typing into the page

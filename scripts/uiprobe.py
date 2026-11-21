@@ -370,8 +370,23 @@ ENTRIES = {
                                       "--steps", "mode:browse;tab-new:https://example.com;permission:camera,microphone;wait:200"]},
     "browse-downloads":     {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://example.com;download:big.zip;wait:200"]},
+    # The page controls' real ⋯ (the library's page menu, docs/82 8.3; Baaz's
+    # own copy was reachable only from a probe verb and is gone). It draws
+    # in the overlay window over the page, which a shot of the main window
+    # does not show: this pins that the menu opens (a failed step exits 1),
+    # not its look — the gallery's `screens/sidebar-browse-page-offers` is.
     "browse-more-menu":     {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "mode:browse;tab-new:https://example.com;more-menu"]},
+                                      "--steps", "mode:browse;tab-new:https://example.com;page-actions"]},
+    # docs/82 8.3: a session's task-folder tab right-clicked in Browse (Keep
+    # this tab, Send page to session…). The menu draws in the overlay
+    # window, so the shot shows the session's tab shown and its row lit,
+    # not the menu (the gallery's `screens/sidebar-browse-tab-offers` does).
+    "browse-tab-menu-session": {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "fixture-session:Fix ledger chart;tab-menu:shown"]},
+    # docs/82 8.3: the Page at two sizes — the session's Page opened in
+    # Browse and brought back: the Page still shows the same URL.
+    "right-page-expand":    {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "new;right-width:400;right:browser;browse:https://example.com;page-expand;page-collapse"]},
     # docs/82 8.2, one Ask: the Field's Ask (`browse-ask:`, the ✦ path
     # too) opens the ⌘J line on the shown page with the question asked
     # there in place — no session, no draft. Scripted lanes: the browser

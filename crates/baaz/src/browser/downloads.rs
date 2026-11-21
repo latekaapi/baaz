@@ -6,7 +6,7 @@ use crate::layout::LayoutGlobal as _;
 
 impl Harness {
 
-    /// Dismiss every Browse chrome popover (downloads, extensions, ⋯):
+    /// Dismiss every Browse chrome popover (downloads, extensions):
     /// row activation, the toggle press, click-outside, Escape and tab
     /// switches all land here. Answers whether one stood open.
     /// The sidebar's downloads button (D4): opens the downloads popover

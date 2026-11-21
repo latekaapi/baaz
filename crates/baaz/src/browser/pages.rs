@@ -386,6 +386,22 @@ impl Harness {
                 }
             }
             WebviewIntent::Annotate(_) => {}
+            // docs/82 8.3, the Page's nav row: its tab — the centre's in
+            // Browse, else the Page pane's.
+            WebviewIntent::SendPage | WebviewIntent::KeepTab => {
+                let tab = if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
+                    self.browser.read(cx).browse_centre_shown(cx)
+                } else {
+                    self.pane_tab(cx)
+                };
+                if let Some(tab) = tab {
+                    if intent == WebviewIntent::SendPage {
+                        self.send_tab_page(tab, false, window, cx);
+                    } else {
+                        self.keep_tab(tab, cx);
+                    }
+                }
+            }
             // D6 (docs/43 §2.7): the nav row's "open in Browse" carries the
             // session's page into Browse, full width.
             WebviewIntent::OpenInBrowse => self.carry_session_tab_to_browse(window, cx),

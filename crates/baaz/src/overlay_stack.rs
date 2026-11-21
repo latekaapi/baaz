@@ -100,10 +100,6 @@ pub(crate) enum Layer {
     Downloads,
     /// Browse's extensions popover.
     Extensions,
-    // Opened only by a probe step.
-    #[cfg_attr(not(feature = "probe"), allow(dead_code))]
-    /// Browse's ⋯ popover.
-    More,
     /// The right pane's Files row menu.
     FilesMenu(crate::right_files::FilesMenu),
     /// The right pane's Page row Recent pages menu.
@@ -158,7 +154,6 @@ pub(crate) enum LayerKind {
     Bookmark,
     Downloads,
     Extensions,
-    More,
     FilesMenu,
     PageMenu,
     AssistantMenu,
@@ -191,7 +186,6 @@ impl Layer {
             Layer::Bookmark(_) => LayerKind::Bookmark,
             Layer::Downloads => LayerKind::Downloads,
             Layer::Extensions => LayerKind::Extensions,
-            Layer::More => LayerKind::More,
             Layer::FilesMenu(_) => LayerKind::FilesMenu,
             Layer::PageMenu => LayerKind::PageMenu,
             Layer::AssistantMenu => LayerKind::AssistantMenu,
@@ -219,7 +213,7 @@ impl Layer {
     /// the palette (and the attach picker, a modal like it), every menu but the sidebar footer's account menu (it
     /// stays inside the sidebar column), the two sign-in sheets. The rest draw where no page is (the pane's Files view,
     /// the Settings page, the sidebar) or in an overlay window over the live
-    /// page. Browse's chrome popovers (downloads, extensions, ⋯) move between
+    /// page. Browse's chrome popovers (downloads, extensions) move between
     /// the overlay window and the main window with the sidebar, so the view
     /// that draws them says what they cover, honestly, frame by frame
     /// (`BrowserView::occlude`), and they say nothing here.

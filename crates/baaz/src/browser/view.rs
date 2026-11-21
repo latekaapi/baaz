@@ -105,7 +105,7 @@ pub(crate) struct BrowserView {
     /// closing) revokes that origin's "while visiting" grants.
     pub permission_origins: HashMap<TabId, String>,
     /// The window's overlay stack ([`crate::overlay_stack`]): which Browse
-    /// chrome popover (downloads, extensions, ⋯), Browse menu, site
+    /// chrome popover (downloads, extensions), Browse menu, site
     /// information or bookmark popover stands open lives there, not here.
     pub(crate) overlays: gpui::Entity<crate::overlays::Overlays>,
     /// Where the sidebar's downloads button is (D4), in window
@@ -136,6 +136,13 @@ pub(crate) struct BrowserView {
     pub recorder: history::Recorder,
     /// Page-word reads in flight: request id → (tab, url, title).
     pub text_reads: HashMap<u64, (TabId, String, String)>,
+    /// Selection reads in flight (docs/82 8.3), by request id: the tab
+    /// whose page was asked for its selected text.
+    pub(crate) selection_reads: HashMap<u64, TabId>,
+    /// Each live page's selected text, as its last answer gave it: what
+    /// "Send selection to session…" sends, and whether it is offered. Asked
+    /// again whenever a menu or the Field opens on the tab. Never persists.
+    pub(crate) selections: HashMap<TabId, String>,
     /// The next page-word request id (a range no other caller uses).
     pub next_text_read: u64,
     /// Ad-box scans in flight: request id → (tab, url) (`adblock` cosmetics).
@@ -364,6 +371,8 @@ impl BrowserView {
             data,
             recorder: history::Recorder::default(),
             text_reads: HashMap::new(),
+            selection_reads: HashMap::new(),
+            selections: HashMap::new(),
             next_text_read: 1 << 62,
             cosmetic_reads: HashMap::new(),
             cosmetic_injects: std::collections::HashSet::new(),

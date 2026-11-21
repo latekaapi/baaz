@@ -821,7 +821,7 @@ impl Harness {
         let owner = crate::browser::Owner::Session(old.to_owned());
         let tabs: Vec<_> = self.browser.read(cx).tabs.tabs_of(&owner).iter().map(|tab| tab.id).collect();
         for tab in tabs {
-            self.browser.update(cx, |bv, _| bv.tabs.move_to(tab, crate::browser::Owner::Session(new.to_owned())));
+            self.browser.update(cx, |bv, _| bv.tabs.move_to(tab, crate::browser::Owner::Session(new.to_owned()), None));
         }
         cx.notify();
     }

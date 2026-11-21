@@ -200,6 +200,8 @@ pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, 
     let has_recent = !state.read(cx).recent_pages().is_empty();
     let mut pane = aui_webview::webview_pane("right-browser", state)
         .agent(SharedString::from(agent.to_string()))
+        .send_page(browser.offers.send_page)
+        .keep_tab(browser.offers.keep_tab)
         .on_intent(move |intent, _window, cx| {
             let _ = weak.update(cx, |_, cx| cx.emit(crate::right_pane::RightPaneEvent::BrowserIntent(intent)));
         });

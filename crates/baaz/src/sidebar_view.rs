@@ -1892,7 +1892,7 @@ mod tests {
                 let id = h.browser.read(cx).tabs.tabs.first().map(|tab| tab.id).expect("a tab");
                 h.open_browse_menu(
                     aui::screens::sidebar::BrowseMenu {
-                        target: aui::screens::sidebar::BrowseMenuTarget::Tab { id: format!("tab-{}", id.0).into(), pinned: false, in_folder: false },
+                        target: aui::screens::sidebar::BrowseMenuTarget::Tab { id: format!("tab-{}", id.0).into(), pinned: false, in_folder: false, offers: Default::default() },
                         at: gpui::point(gpui::px(10.0), gpui::px(10.0)),
                     },
                     cx,

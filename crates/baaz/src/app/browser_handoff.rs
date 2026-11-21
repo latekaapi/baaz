@@ -65,6 +65,8 @@ fn attach_note(noun: &str) -> &'static str {
         "Notes" => "Add these notes to which session? They wait in its composer, unsent.",
         "Quote" => "Add this quote to which session? It waits in its composer, unsent.",
         "Terminal output" => "Add this output to which session? It waits in its composer, unsent.",
+        "Page" => "Add this page to which session? It waits in its composer, unsent.",
+        "Selection" => "Add the selection to which session? It waits in its composer, unsent.",
         _ => "Add this screenshot to which session? It waits in its composer, unsent.",
     }
 }
@@ -149,7 +151,7 @@ impl crate::picker::PickerDelegate for HandoffDelegate {
                             .size_full()
                             .items_center()
                             .child(div().flex_none().w_full().h(gpui::relative(aui_tokens::scale::PALETTE_TOP)))
-                            .child(picker.note(note)),
+                            .child(picker.note(note).headings("Recent sessions", "New session in")),
                     ),
                 )
                 .into_any_element()
@@ -376,7 +378,7 @@ impl Harness {
         let target_id = self.deliver_parcel(target, crate::browser::Parcel::Text(draft), window, cx);
         if let Some(target_id) = target_id.as_ref() {
             for (tab, _, _) in &tabs {
-                self.browser.update(cx, |browser, _| browser.tabs.move_to(*tab, Owner::Session(target_id.clone())));
+                self.browser.update(cx, |browser, _| browser.tabs.move_to(*tab, Owner::Session(target_id.clone()), None));
             }
             self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
         }

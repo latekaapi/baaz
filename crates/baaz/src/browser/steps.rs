@@ -77,16 +77,23 @@ impl Harness {
         Ok(())
     }
 
-    /// `tab-menu:<n>`: open the n-th person tab's right-click menu
-    /// (1-based, on-screen order). An unparseable or out-of-range `n` is
-    /// an `Err`. Free.
+    /// `tab-menu:<n|shown>`: open the n-th person tab's right-click menu
+    /// (1-based, on-screen order), or `shown`, the tab Browse shows (a
+    /// session's task-folder tab too, with Keep this tab). Its offers fill
+    /// in as they draw (`browse_menu_now`). An unparseable or out-of-range
+    /// `n`, or no shown tab, is an `Err`. Free.
     pub(crate) fn step_tab_menu(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        let id = self.browse_tab_at(rest, cx).ok_or_else(|| format!("no person tab `{rest}`"))?;
+        let id = if rest.trim() == "shown" {
+            self.browser.read(cx).browse_centre_shown(cx).ok_or("no tab is shown in Browse")?
+        } else {
+            self.browse_tab_at(rest, cx).ok_or_else(|| format!("no person tab `{rest}`"))?
+        };
         let (pinned, in_folder) = self.browser.read(cx).tabs.get(id).map_or((false, false), |tab| (tab.pinned, tab.folder.is_some()));
-        // A right-click lands mid-sidebar at a fixed height: the menu
-        // seats at the pointer, so the capture shows it over the page.
+        // A right-click lands mid-sidebar at a fixed height: the menu seats
+        // at the pointer. It draws in the overlay window over the page, so
+        // a shot of the main window shows the row lit but not the menu.
         let menu = aui::screens::sidebar::BrowseMenu {
-            target: aui::screens::sidebar::BrowseMenuTarget::Tab { id: format!("tab-{}", id.0).into(), pinned, in_folder },
+            target: aui::screens::sidebar::BrowseMenuTarget::Tab { id: format!("tab-{}", id.0).into(), pinned, in_folder, offers: Default::default() },
             at: gpui::point(gpui::px(150.0), gpui::px(300.0)),
         };
         self.open_browse_menu(menu, cx);
@@ -327,7 +334,6 @@ impl Harness {
         self.overlays.update(cx, |o, cx| o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Downloads), cx));
         self.browser.update(cx, |browser, _| browser.downloads_rendered = false);
         self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::Extensions, cx); });
-        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::More, cx); });
         Ok(())
     }
 
@@ -345,18 +351,21 @@ impl Harness {
         Ok(())
     }
 
-    /// `more-menu`: open the ⋯ page-actions menu on the shown tab, so the
-    /// `browse-more-menu` capture shows it. No shown tab is an `Err`.
-    /// Free.
-    pub(crate) fn step_more_menu(&mut self, _rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+    /// `page-actions`: open the page controls' ⋯ on the shown tab — the
+    /// real one, the library's page menu (`BrowseMenuTarget::Page`) with the
+    /// offers the page has, through the button's own path. It draws in the
+    /// overlay window over the page, which a shot of the main window does
+    /// not show. No shown page is an `Err`. Free.
+    pub(crate) fn step_page_actions(&mut self, _rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         if self.browse_centre_page(window, cx).is_none() {
             return Err("no page is open in Browse".into());
         }
-        self.overlays.update(cx, |o, cx| o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::More), cx));
-        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::Downloads, cx); });
-        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::Extensions, cx); });
-        Ok(())
+        self.toggle_browse_page_menu(None, window, cx);
+        match self.overlays.read(cx).stack.browse_menu() {
+            Some(menu) if matches!(menu.target, aui::screens::sidebar::BrowseMenuTarget::Page { .. }) => Ok(()),
+            _ => Err("the page menu did not open".into()),
+        }
     }
 
     /// `browse-ask:<text>`: the Field's Ask (its Ask row, ⌘↵) with `text`,
@@ -404,6 +413,71 @@ impl Harness {
         Ok(())
     }
 
+    /// The tab a page verb acts on: Browse's shown tab, else the Page
+    /// pane's.
+    fn page_verb_tab(&self, cx: &gpui::App) -> Option<TabId> {
+        if crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse {
+            self.browser.read(cx).browse_centre_shown(cx)
+        } else {
+            self.pane_tab(cx)
+        }
+    }
+
+    /// `keep-tab:<id|shown>`: Keep this tab on tab `id` (its number) or the
+    /// one shown (Browse's, else the Page's) — the menus' own path. A tab
+    /// that is no session's, or none, fails the step. Free.
+    pub(crate) fn step_keep_tab(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        self.ensure_tabs_loaded(cx);
+        let tab = match rest.trim() {
+            "shown" | "" => self.page_verb_tab(cx).ok_or("no tab is shown")?,
+            n => TabId(n.parse::<u64>().map_err(|_| format!("`{n}` is no tab id (`keep-tab:<id|shown>`)"))?),
+        };
+        if !self.keep_tab(tab, cx) {
+            return Err(format!("tab {} is no session's tab", tab.0));
+        }
+        Ok(())
+    }
+
+    /// `page-expand`: the Page's "Open in Browse" — the session's tab full
+    /// width in Browse, the same page (no reload). No session tab on the
+    /// Page fails the step. Free.
+    pub(crate) fn step_page_expand(&mut self, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        self.carry_session_tab_to_browse(window, cx);
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.browser.read(cx).browse_session_tab.is_none() {
+            return Err("no session tab on the Page to open in Browse".into());
+        }
+        Ok(())
+    }
+
+    /// `page-collapse`: "Back to the session's Page" from Browse showing a
+    /// session's tab. Browse showing no project session's tab fails the
+    /// step. Free.
+    pub(crate) fn step_page_collapse(&mut self, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if !self.collapse_to_session_page(window, cx) {
+            return Err("Browse shows no session's tab".into());
+        }
+        Ok(())
+    }
+
+    /// `send-page:<what>`: Send page (`what` empty) or selection
+    /// (`selection`) to session… for
+    /// the page shown (Browse's, else the Page's), through the composer
+    /// router: the composer on screen takes it, else "Add to which
+    /// session?" opens. Drafts only, never sends. No page (or no selection)
+    /// fails the step. Free.
+    pub(crate) fn step_send_page(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let selection = match rest.trim() {
+            "" => false,
+            "selection" => true,
+            other => return Err(format!("`{other}`: `send-page` or `send-page:selection`")),
+        };
+        let tab = self.page_verb_tab(cx).ok_or("no page is shown")?;
+        if !self.send_tab_page(tab, selection, window, cx) {
+            return Err(if selection { "the page has no selection".into() } else { "the tab shows no page".into() });
+        }
+        Ok(())
+    }
+
     /// `extensions`: open the extensions popover on the shown tab. No
     /// shown tab is an `Err`. Free.
     pub(crate) fn step_extensions(&mut self, _rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
@@ -413,7 +487,6 @@ impl Harness {
         }
         self.overlays.update(cx, |o, cx| o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Extensions), cx));
         self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::Downloads, cx); });
-        self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::More, cx); });
         Ok(())
     }
 

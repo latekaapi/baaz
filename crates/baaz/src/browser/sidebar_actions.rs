@@ -62,6 +62,16 @@ impl Harness {
     /// taking the next click.
     pub(crate) fn open_browse_menu(&mut self, menu: BrowseMenu, cx: &mut Context<Self>) {
         self.browser.update(cx, |browser, cx| browser.set_naming(None, cx));
+        // Its page is asked for a selection now: "Send selection to
+        // session…" shows once the answer lands (`browse_menu_now`).
+        let asked = match &menu.target {
+            aui::screens::sidebar::BrowseMenuTarget::Tab { id, .. } => crate::sidebar_view::browse_tab_id(id),
+            aui::screens::sidebar::BrowseMenuTarget::Page { .. } => self.browser.read(cx).browse_centre_shown(cx),
+            _ => None,
+        };
+        if let Some(tab) = asked {
+            self.browser.update(cx, |browser, cx| browser.ask_selection(tab, cx));
+        }
         self.overlays.update(cx, |o, cx| o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::BrowseMenu(menu)), cx));
     }
 
@@ -89,6 +99,7 @@ impl Harness {
             safari: self.browse_safari_url(cx).is_some(),
             devtools: page.supports(aui_webview::BackendFeature::DevTools),
             annotating: page.annotating(),
+            offers: self.shown_page_offers(cx),
         };
         let mut menu = BrowseMenu { target, at: window.mouse_position() };
         if let Some(anchor) = anchor {
@@ -110,6 +121,19 @@ impl Harness {
             PageAction::Screenshot => self.capture_browse_screenshot(window, cx),
             PageAction::DevTools => self.open_browse_devtools(cx),
             PageAction::Settings => self.open_browse_settings(cx),
+            PageAction::SendPage | PageAction::SendSelection => {
+                if let Some(tab) = self.browser.read(cx).browse_centre_shown(cx) {
+                    self.send_tab_page(tab, action == PageAction::SendSelection, window, cx);
+                }
+            }
+            PageAction::Keep => {
+                if let Some(tab) = self.browser.read(cx).browse_centre_shown(cx) {
+                    self.keep_tab(tab, cx);
+                }
+            }
+            PageAction::Collapse => {
+                self.collapse_to_session_page(window, cx);
+            }
         }
     }
 
@@ -241,6 +265,12 @@ impl Harness {
                 self.browser.update(cx, |browser, cx| browser.tabs_changed(cx));
             }
             TabAction::Close => self.browse_sidebar_tab(tab, true, window, cx),
+            TabAction::SendPage | TabAction::SendSelection => {
+                self.send_tab_page(tab, action == TabAction::SendSelection, window, cx);
+            }
+            TabAction::Keep => {
+                self.keep_tab(tab, cx);
+            }
             TabAction::CloseOthers => {
                 let others: Vec<TabId> = self.browser.read(cx).space_person_tabs(false).into_iter().filter(|id| *id != tab).collect();
                 self.close_tabs(others, window, cx);

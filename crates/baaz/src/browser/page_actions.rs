@@ -11,7 +11,7 @@ impl Harness {
         use crate::overlay_stack::LayerKind;
         let open = self.overlays.update(cx, |o, cx| {
             // Close all three: no short circuit.
-            [LayerKind::Downloads, LayerKind::Extensions, LayerKind::More].map(|kind| o.close(kind, cx).is_some()).contains(&true)
+            [LayerKind::Downloads, LayerKind::Extensions].map(|kind| o.close(kind, cx).is_some()).contains(&true)
         });
         self.browser.update(cx, |browser, _| browser.downloads_rendered = false);
         if open {
@@ -47,19 +47,6 @@ impl Harness {
             }
         }
         self.dismiss_browse_popovers(cx);
-    }
-
-    /// Step the shown tab's zoom along Chrome's ladder (the ⋯ menu's –/+
-    /// row): `delta` is a direction, not points — positive climbs one
-    /// rung, negative drops one, zero holds.
-    pub(crate) fn browse_zoom_step(&mut self, delta: i16, cx: &mut Context<Self>) {
-        if delta == 0 {
-            return;
-        }
-        if let Some(state) = self.browse_centre_state(cx) {
-            let next = toolbar::zoom_step(state.read(cx).zoom(), delta > 0);
-            state.update(cx, |state, _| state.set_zoom(next));
-        }
     }
 
     /// Toggle annotate mode on the shown tab (the ⋯ menu): Browse hides

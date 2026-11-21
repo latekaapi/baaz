@@ -1,6 +1,7 @@
 //! What leaves a page or the right pane for a session's composer (docs/82
 //! 8.2): a page's screenshot, its notes (Annotate's Send), a browser chat's
-//! hand-off, a quote from the pane, a terminal block's Ask.
+//! hand-off, a quote from the pane, a terminal block's Ask, a page or its
+//! selection (docs/82 8.3).
 //!
 //! No path writes into a composer the person cannot see. Where the active
 //! session's composer is on screen — Sessions, a session open, no full page
@@ -35,6 +36,9 @@ pub(crate) enum Parcel {
     Quote { text: String, lang: String, lines: usize, location: Option<crate::session::QuoteLocation> },
     /// A terminal block's Ask: its command and output, quoted in the draft.
     TerminalOutput { command: String, output: String },
+    /// A page sent to a session (docs/82 8.3): its title and address, and
+    /// the selected text when the selection was sent.
+    Page { title: String, url: String, selection: Option<String> },
 }
 
 /// Annotate's Send, held until it lands: the parts the batch is built from
@@ -64,6 +68,8 @@ impl Parcel {
             Parcel::Annotations(_) => "Notes",
             Parcel::Quote { .. } => "Quote",
             Parcel::TerminalOutput { .. } => "Terminal output",
+            Parcel::Page { selection: Some(_), .. } => "Selection",
+            Parcel::Page { selection: None, .. } => "Page",
         }
     }
 }
@@ -217,6 +223,10 @@ impl Harness {
             Parcel::Quote { text, lang, lines, location } => {
                 // The session owns its quotes and redraws itself.
                 view.update(cx, |view, cx| view.add_quote(text, None, Some((lang, lines)), location, window, cx));
+            }
+            Parcel::Page { title, url, selection } => {
+                let block = super::tab_moves::page_draft(&title, &url, selection.as_deref());
+                view.update(cx, |view, cx| view.append_draft_block(block, window, cx));
             }
             Parcel::TerminalOutput { command, output } => {
                 let existing = view.read(cx).draft_text(cx);

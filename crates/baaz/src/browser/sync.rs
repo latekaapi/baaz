@@ -385,7 +385,7 @@ impl BrowserView {
     /// Run the page reconcile again after `wait` unless an earlier run is
     /// already due: what no page reports on its own (the dwell, the
     /// cosmetics' second pass, an answer from a hidden page) comes due here.
-    fn reconcile_after(&mut self, wait: std::time::Duration, cx: &mut Context<Self>) {
+    pub(super) fn reconcile_after(&mut self, wait: std::time::Duration, cx: &mut Context<Self>) {
         let due = std::time::Instant::now() + wait;
         if self.reconcile_timer.as_ref().is_some_and(|(at, _)| *at <= due) {
             return;
@@ -489,12 +489,13 @@ impl BrowserView {
         // drain serves every script Baaz runs here (page words, ad-box
         // scans, stylesheet installs): taking a page's answers takes all of
         // them, so each is routed by its request id, never dropped.
-        let pending = !self.text_reads.is_empty() || !self.cosmetic_reads.is_empty() || !self.cosmetic_injects.is_empty();
+        let pending = !self.text_reads.is_empty() || !self.cosmetic_reads.is_empty() || !self.cosmetic_injects.is_empty() || !self.selection_reads.is_empty();
         if pending {
             let states: Vec<(TabId, Entity<WebviewState>)> = self.states.iter().map(|(id, state)| (*id, state.clone())).collect();
             for (id, state) in states {
                 let waiting = self.text_reads.values().any(|(tab, _, _)| *tab == id)
                     || self.cosmetic_reads.values().any(|(tab, _)| *tab == id)
+                    || self.selection_reads.values().any(|tab| *tab == id)
                     || !self.cosmetic_injects.is_empty();
                 if !waiting {
                     continue;
@@ -502,6 +503,12 @@ impl BrowserView {
                 let answers = state.update(cx, |state, _| state.take_eval_results());
                 for (request, answer) in answers {
                     if self.cosmetic_injects.remove(&request) {
+                        continue;
+                    }
+                    if let Some(tab) = self.selection_reads.remove(&request) {
+                        if tab == id {
+                            self.land_selection(tab, answer, cx);
+                        }
                         continue;
                     }
                     if let Some((tab, url)) = self.cosmetic_reads.remove(&request) {

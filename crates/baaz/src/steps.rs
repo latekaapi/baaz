@@ -112,7 +112,7 @@
 //! | `tab-select:<n>` | select the n-th tab of the shown strip (1-based); unknown or out-of-range fails the step, free |
 //! | `tab-close:<n>` | close the n-th tab of the shown strip (1-based), activating its neighbour; unknown or out-of-range fails the step, free |
 //! | `tab-pin:<n>` | pin (or unpin, when already pinned) the n-th person tab of the current project (1-based, on-screen order); unknown or out-of-range fails the step, free |
-//! | `tab-menu:<n>` | open the n-th person tab's right-click menu (1-based, on-screen order); unknown or out-of-range fails the step, free |
+//! | `tab-menu:<n\|shown>` | open the n-th person tab's right-click menu (1-based, on-screen order), or the shown tab's (a session's tab offers Keep this tab); it draws in the overlay window, which a main-window shot does not show; unknown or out-of-range fails the step, free |
 //! | `tab-discard-now` | drop every hidden tab's live page at once (audible and agent-active pages are spared); the live-check hook, free |
 //! | `history:<url>\|<title>\|<days ago>\|<words>` | seed one page into the (in-memory, capture-only) history, visited `days ago`, with the page's `words` kept for search when given; free |
 //! | `bookmark:<url>\|<title>\|<folder name>` | seed one bookmark (capture-only store) into the named folder, made at the top level when new (default: Bookmarks bar); free |
@@ -126,9 +126,13 @@
 //! | `permission:<kinds>` | script a permission ask (`camera,microphone`) on the shown tab, so the strip shows; unknown kinds fail the step, free |
 //! | `download:<name>` | script an active download (`done:<name>` lands it) on the shown tab and open the popover; empty fails the step, free |
 //! | `crashed:<reason>` | script a renderer crash on the shown tab, so the Baaz error page shows (empty is "the page crashed (-1)"), free |
-//! | `more-menu` | open the Browse ⋯ page-actions menu on the shown tab, free |
+//! | `page-actions` | open the page controls' ⋯ on the shown tab (the library's page menu with its offers); it draws in the overlay window, which a main-window shot does not show; no page fails the step, free |
 //! | `extensions` | open the Browse extensions popover on the shown tab, free |
 //! | `browse-ask:<text>` | Browse: the Field's Ask with `text` — the ⌘J line opens on the shown page and asks there (docs/82 8.2); scripted lanes only (the browser chat's lane sends nothing anywhere), so it reaches no model; empty text, no page, live lanes or no line fail the step |
+//! | `keep-tab:<id\|shown>` | Keep this tab on tab `id` or the one shown (Browse's, else the Page's): the session's tab becomes the person's, same page (docs/82 8.3); a tab that is no session's fails the step, free |
+//! | `page-expand` | the Page's "Open in Browse": the session's tab full width in Browse, the same page; no session tab on the Page fails the step, free |
+//! | `page-collapse` | "Back to the session's Page" from Browse showing a session's tab: Sessions, that session, its Page on the tab; no session tab shown fails the step, free |
+//! | `send-page:<what>` | Send page to session… (`what` empty) or Send selection (`selection`) for the page shown, through the composer router (the composer on screen, else the picker); drafts only; no page or no selection fails the step, free |
 //! | `shot-pick` | a page screenshot landing where the window stands (a 1-px fixture picture; the scripted page takes none): with no composer on screen (Browse, Settings) "Add to which session?" opens; no picker (a composer on screen took it) fails the step, free: nothing attaches until a pick |
 //! | `fixture-session:<name>` | capture aid: park a local session row plus one session tab carrying `https://example.com`, and carry it into Browse (the offline `browse-from-session` shot), free |
 //! | `page-menu` | open the Page row's Recent pages menu (`page-menu:off` closes it), free |
@@ -438,9 +442,13 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "permission", run: |this, rest, window, cx| this.step_permission(rest, window, cx) },
     WindowVerb { verb: "download", run: |this, rest, window, cx| this.step_download(rest, window, cx) },
     WindowVerb { verb: "crashed", run: |this, rest, window, cx| this.step_crashed(rest, window, cx) },
-    WindowVerb { verb: "more-menu", run: |this, rest, window, cx| this.step_more_menu(rest, window, cx) },
+    WindowVerb { verb: "page-actions", run: |this, rest, window, cx| this.step_page_actions(rest, window, cx) },
     WindowVerb { verb: "browse-ask", run: |this, rest, window, cx| this.step_browse_ask(rest, window, cx) },
     WindowVerb { verb: "shot-pick", run: |this, rest, window, cx| this.step_shot_pick(rest, window, cx) },
+    WindowVerb { verb: "keep-tab", run: |this, rest, _, cx| this.step_keep_tab(rest, cx) },
+    WindowVerb { verb: "page-expand", run: |this, _, window, cx| this.step_page_expand(window, cx) },
+    WindowVerb { verb: "page-collapse", run: |this, _, window, cx| this.step_page_collapse(window, cx) },
+    WindowVerb { verb: "send-page", run: |this, rest, window, cx| this.step_send_page(rest, window, cx) },
     WindowVerb { verb: "extensions", run: |this, rest, window, cx| this.step_extensions(rest, window, cx) },
     WindowVerb {
         verb: "fixture-session",

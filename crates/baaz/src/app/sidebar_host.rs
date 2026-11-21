@@ -80,7 +80,7 @@ impl Harness {
             skills_on: self.skills_page.read(cx).catalog.on_count(),
             view_menu_open: self.overlays.read(cx).is_open(MenuKind::ViewOptions),
             row_menu: self.open_row_menu(cx),
-            browse_menu: self.overlays.read(cx).stack.browse_menu().cloned(),
+            browse_menu: self.browse_menu_now(cx),
             renaming: self.renaming(cx),
             browse,
             minute,
@@ -409,7 +409,7 @@ impl Harness {
             // The column owns its header hover; it lays it over this.
             hovered_today_header: false,
             editing,
-            menu: self.overlays.read(cx).stack.browse_menu().cloned(),
+            menu: self.browse_menu_now(cx),
         }
     }
 

@@ -19,3 +19,4 @@ mod new_row;
 mod checkpoints;
 mod undo;
 mod one_ask;
+mod page_moves;

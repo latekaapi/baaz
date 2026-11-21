@@ -2785,160 +2785,6 @@ impl Harness {
         Some(menu.into_any_element())
     }
 
-    /// The ⋯ page-actions menu (B2a-H5): New tab, Find in page, the Zoom
-    /// row, Open in
-    /// Safari, Copy link, Developer tools (hidden when unsupported),
-    /// Browser settings — and Annotate and Screenshot, which Browse keeps
-    /// reachable here since it hides the library's nav row. No
-    /// Print/History/Bookmarks: none of those exist yet.
-    fn render_browse_more(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::More) {
-            return None;
-        }
-        let state = self.browse_centre_state(cx)?;
-        let zoom = state.read(cx).zoom();
-        let devtools = state.read(cx).supports(aui_webview::BackendFeature::DevTools);
-        let zoomable = state.read(cx).supports(aui_webview::BackendFeature::Zoom);
-        let annotate_on = state.read(cx).annotating();
-        let mut menu = self.browse_popover("browse-more", "More", cx);
-        let new_tab = self.browse_menu_row(
-            "browse-more-new-tab",
-            "New tab",
-            Some("⌘T"),
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                this.dismiss_browse_popovers(cx);
-                this.new_browser_tab(window, cx);
-            }),
-            cx,
-        );
-        menu = menu.child(new_tab);
-        let find = self.browse_menu_row(
-            "browse-more-find",
-            "Find in page",
-            Some("⌘F"),
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                this.dismiss_browse_popovers(cx);
-                this.open_browse_find(window, cx);
-            }),
-            cx,
-        );
-        menu = menu.child(find);
-        let zoom_out = self.browse_chrome_button(
-            "browse-more-zoom-out",
-            "–",
-            "Zoom out",
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.browse_zoom_step(-1, cx);
-            }),
-            cx,
-        );
-        let zoom_reset = self.browse_chrome_button(
-            "browse-more-zoom-reset",
-            &format!("{zoom}%"),
-            "Reset zoom",
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                if let Some(state) = this.browse_centre_state(cx) {
-                    state.update(cx, |state, _| state.set_zoom(100));
-                }
-            }),
-            cx,
-        );
-        let zoom_in = self.browse_chrome_button(
-            "browse-more-zoom-in",
-            "+",
-            "Zoom in",
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.browse_zoom_step(1, cx);
-            }),
-            cx,
-        );
-        // Hidden when the engine cannot zoom (Chrome-style CEF today:
-        // Chromium's own ⌘+/⌘− still zoom a focused page).
-        menu = menu.when(zoomable, |menu| menu.child(
-            h_flex()
-                .id("browse-more-zoom")
-                .w_full()
-                .h(px(MENU_ROW_H))
-                .flex_none()
-                .items_center()
-                .px(cx.aui().metrics.item_px)
-                .gap(px(scale::SP_2))
-                .role(gpui::Role::Group)
-                .aria_label("Zoom")
-                .child(zoom_out)
-                .child(zoom_reset)
-                .child(zoom_in),
-        ));
-        // "Open in Safari" is an http(s) operation: any other scheme
-        // hides the row instead of opening nothing.
-        if self.browse_safari_url(cx).is_some() {
-            let safari = self.browse_menu_row(
-                "browse-more-safari",
-                "Open in Safari",
-                None,
-                cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                    this.open_browse_in_safari(cx);
-                }),
-                cx,
-            );
-            menu = menu.child(safari);
-        }
-        let copy = self.browse_menu_row(
-            "browse-more-copy",
-            "Copy link",
-            Some("⇧⌘C"),
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.copy_shown_browse_link(cx);
-            }),
-            cx,
-        );
-        menu = menu.child(copy);
-        if devtools {
-            let tools = self.browse_menu_row(
-                "browse-more-devtools",
-                "Developer tools",
-                Some("⌥⌘I"),
-                cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                    this.open_browse_devtools(cx);
-                }),
-                cx,
-            );
-            menu = menu.child(tools);
-        }
-        let settings = self.browse_menu_row(
-            "browse-more-settings",
-            "Browser settings",
-            None,
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.open_browse_settings(cx);
-            }),
-            cx,
-        );
-        menu = menu.child(settings);
-        let annotate = self.browse_menu_row(
-            "browse-more-annotate",
-            "Annotate",
-            Some(if annotate_on { "On" } else { "Off" }),
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.toggle_browse_annotate(cx);
-            }),
-            cx,
-        );
-        menu = menu.child(annotate);
-        let shot = self.browse_menu_row(
-            "browse-more-screenshot",
-            "Screenshot",
-            None,
-            cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
-                this.capture_browse_screenshot(window, cx);
-            }),
-            cx,
-        );
-        menu = menu.child(shot);
-        let _ = window;
-        Some(menu.into_any_element())
-    }
-
     /// The bar (canvas "Baaz v3", chrome revised 2026-10-13): the sidebar
     /// toggle past the window's lights, the mode switch at the sidebar's
     /// edge, the title slot (the session title; in Browse, closed only, the
@@ -3464,12 +3310,11 @@ impl Harness {
         let downloads = (!self.browser.read(cx).downloads_overlay_wanted(cx)).then(|| self.render_browse_downloads(window, cx)).flatten();
         // The footer's extensions popover draws in the overlay window too.
         let extensions = (!self.browser.read(cx).downloads_overlay_wanted(cx)).then(|| self.render_browse_extensions(window, cx)).flatten();
-        let more = self.render_browse_more(window, cx);
         // A click outside the popovers dismisses them, like the tab menu:
         // the catcher is a sibling below the popovers in the same relative
         // column, so popover clicks still land on the popovers.
         let scrim: Option<AnyElement> =
-            (downloads.is_some() || extensions.is_some() || more.is_some()).then(|| {
+            (downloads.is_some() || extensions.is_some()).then(|| {
                 let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| {
                     this.dismiss_browse_popovers(cx);
                 });
@@ -3504,7 +3349,6 @@ impl Harness {
             .children(scrim)
             .children(downloads)
             .children(extensions)
-            .children(more)
             .children(peek);
         // Flat (docs/83 §3): this fills the shell's centre column edge to
         // edge; the native page's rect and its square corners match
@@ -7769,7 +7613,7 @@ mod tests {
                             &pane.cache,
                             project.clone(),
                             &[],
-                            crate::right::BrowserPane { state: None, window: &mut *window },
+                            crate::right::BrowserPane { state: None, window: &mut *window, offers: Default::default() },
                             &terminal,
                             true,
                             400.0,

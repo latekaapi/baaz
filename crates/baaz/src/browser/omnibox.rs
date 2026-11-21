@@ -79,6 +79,11 @@ impl Harness {
         self.browser.update(cx, |browser, _| browser.browse_omnibox_moved = false);
         self.browser.update(cx, |browser, _| browser.browse_completed = None);
         self.browser.update(cx, |browser, _| browser.browse_completed_text = None);
+        // "Send selection to session…" is listed once the page says what is
+        // selected (docs/82 8.3).
+        if let Some(tab) = self.browser.read(cx).browse_centre_shown(cx) {
+            self.browser.update(cx, |browser, cx| browser.ask_selection(tab, cx));
+        }
         let page_focus = self.browse_centre_state(cx).is_some_and(|state| state.read(cx).holds_keyboard());
         self.browser.update(cx, |browser, _| browser.browse_address_page_focus = page_focus);
         // The page lets go of the keyboard as the field opens, as find does: a
@@ -284,8 +289,12 @@ impl Harness {
             .filter(|entry| !entry.archived && !entry.hidden && entry.project == current)
             .map(|entry| (entry.id.clone(), entry.label.clone(), recency_ms(&entry.updated)))
             .collect();
-        let commands: Vec<(String, String)> =
-            FIELD_COMMANDS.iter().map(|(id, title, _)| ((*id).to_owned(), (*title).to_owned())).collect();
+        let offers = self.shown_page_offers(cx);
+        let commands: Vec<(String, String)> = FIELD_COMMANDS
+            .iter()
+            .filter(|(_, _, action)| field_command_offered(*action, offers))
+            .map(|(id, title, _)| ((*id).to_owned(), (*title).to_owned()))
+            .collect();
         let data = self.browser.read(cx).data.read(cx);
         let history = data.history_hits(&query);
         let marks = data.bookmark_hits(&query);

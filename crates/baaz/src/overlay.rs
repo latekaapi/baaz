@@ -507,7 +507,7 @@ impl Harness {
             let size = gpui::size(width + pad * 2.0, room + pad * 2.0);
             return Some((OverlayKind::Downloads, Bounds::new(origin, size)));
         }
-        let menu = self.overlays.read(cx).stack.browse_menu()?;
+        let menu = &self.browse_menu_now(cx)?;
         let space = self.browser.read(cx).browse_space().unwrap_or_default();
         let folders = self.browser.read(cx).tabs.folders_in(&space).len();
         let size = browse_menu_size(menu, folders, cx);
@@ -1094,7 +1094,7 @@ impl Harness {
     fn overlay_print(&self, cx: &App) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        format!("{:?}", self.overlays.read(cx).stack.browse_menu()).hash(&mut hasher);
+        format!("{:?}", self.browse_menu_now(cx)).hash(&mut hasher);
         self.browser.read(cx).tabs.generation.hash(&mut hasher);
         self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::SiteInfo).hash(&mut hasher);
         // The bookmark popover is its own view: its edits redraw the panel

@@ -169,7 +169,6 @@ const RENDER_HELPERS: &[&str] = &[
     "render_browse_empty",
     "render_browse_extensions",
     "render_browse_find",
-    "render_browse_more",
     "render_browse_newtab",
     "render_browse_permission",
     "render_centre",

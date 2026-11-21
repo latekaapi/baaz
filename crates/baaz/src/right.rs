@@ -547,6 +547,9 @@ pub(crate) struct BrowserPane<'a> {
     pub state: Option<&'a Entity<aui_webview::WebviewState>>,
     /// The window the pane's screens request frames on.
     pub window: &'a mut Window,
+    /// What the Page's nav row offers for the tab it shows (docs/82 8.3):
+    /// Send page to session, Keep this tab — only where they work.
+    pub offers: aui::workbench::PageNavExtras,
 }
 
 #[allow(clippy::too_many_arguments)]
