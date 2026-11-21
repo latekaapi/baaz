@@ -232,6 +232,9 @@
 //! | `handoff-picker` | open the agent card's handoff picker (R3 board 3a), free |
 //! | `setup:<provider>:<install\|signin\|update>` | open the D5 setup sheet as its button would (`claude-code`, `codex`); deterministic runs show a scripted terminal with the typed command, never a shell; a kind the provider has no command for fails the step, free |
 //! | `connect-menu` | open the "New sessions start in" menu: the connect screen's footer, else Settings › Providers' (fails when neither is up), free |
+//! | `connect-continue` | the connect screen's Continue as its button does: on a first run, on to "Where will you work?" (docs/82 8.7); the screen down, already on that step, or no provider Connected fails the step, free |
+//! | `first-run-folder:<path>` | drop the folder `path` on the first run's folder step: it becomes the current project and a new session opens in it on the default provider (no turn); the step not showing or a path that is no folder fails the step, free |
+//! | `first-run-skip` | the folder step's "Not now": a new session opens where an unfoldered one starts (the current project, else `~/baaz-sessions`); the step not showing fails the step, free |
 //! | `codex-login:<waiting\|device\|failed>` | put Codex's sign-in in that state with sample values (example.invalid link, a sample code) — no app-server, no browser; captures only, free |
 //! | `muse-sheet` | raise Muse's sign-in sheet over the screen, free |
 //! | `launch-failed:<provider>[:<crashed\|not-installed\|signed-out\|too-old>]` | land the typed "Couldn't start" view (docs/71 §3) for that provider with sample words and a sample stderr well, as a failed open would; no child, no turn; unknown parts fail the step, free |
@@ -591,6 +594,10 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     // and the connect screen's footer menu. Both run on the connect screen too.
     WindowVerb { verb: "setup", run: |this, rest, window, cx| this.step_setup(rest, window, cx) },
     WindowVerb { verb: "connect-menu", run: |this, _, _, cx| this.step_connect_menu(cx) },
+    // docs/82 8.7: the first run's Continue, then its folder step.
+    WindowVerb { verb: "connect-continue", run: |this, _, _, cx| this.step_connect_continue(cx) },
+    WindowVerb { verb: "first-run-folder", run: |this, rest, window, cx| this.step_first_run_folder(Some(rest), window, cx) },
+    WindowVerb { verb: "first-run-skip", run: |this, _, window, cx| this.step_first_run_folder(None, window, cx) },
     WindowVerb { verb: "codex-login", run: |this, rest, _, cx| this.provider_model.update(cx, |model, cx| model.step_codex_login(rest, cx)) },
     WindowVerb { verb: "muse-sheet", run: |this, _, _, cx| { this.open_muse_sheet(cx); Ok(()) } },
     WindowVerb { verb: "launch-failed", run: |this, rest, _, cx| this.step_launch_failed(rest, cx) },

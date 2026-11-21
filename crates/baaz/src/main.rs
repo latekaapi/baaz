@@ -74,6 +74,7 @@ use baaz_core::list_cache;
 mod log;
 mod login;
 mod mascot;
+mod onboarding;
 mod native_lights;
 mod newtab_ground;
 mod open_in;

@@ -1200,7 +1200,7 @@ impl Harness {
         let first_run = crate::connect::decide_launch(crate::provider_status::first_run_at_boot())
             == crate::connect::LaunchDecision::Connect;
         if first_run {
-            this.connect_screen.update(cx, |screen, _| screen.show());
+            this.connect_screen.update(cx, |screen, _| screen.show_first_run());
         }
         // P7: the first-run connect screen offers the import once a
         // provider is Connected; its counts come from a background scan.

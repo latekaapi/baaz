@@ -929,6 +929,16 @@ ENTRIES.update({
                                         "BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-import-state-")}},
 })
 
+# docs/82 8.7: the first run after Continue. "Where will you work?" with
+# Claude Code Connected and nothing adopted (`--no-project`: a Finder launch
+# adopts nothing), so its "Not now" line names the default workspace.
+ENTRIES.update({
+    "first-run-folder":        {"shot": ["--no-connect", "--login", "connect", "--no-project",
+                                         "--steps", "connect-continue"],
+                                "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": D5_CLAUDE_CONNECTED,
+                                        "BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-first-run-state-")}},
+})
+
 D5_ENTRIES = [
     "connect-first-run", "connect-checking", "connect-all-missing", "connect-all-signed-out",
     "connect-too-old", "connect-menu", "setup-sheet-install", "setup-sheet-signin",

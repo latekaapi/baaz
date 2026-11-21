@@ -10,6 +10,9 @@
 //! provider still probing never reads Not installed ([`headline_for`]).
 //! Continue enables once any provider is Connected ([`continue_enabled`]);
 //! Continue and Skip both set `onboarding_completed` ([`complete_onboarding`]).
+//! On a first run they lead to the screen's second step, "Where will you
+//! work?" ([`ConnectStep::Folder`], [`crate::onboarding`]); reopened from
+//! Settings, they close the screen.
 //!
 //! Row actions: Muse Sign in opens Muse's sign-in sheet; Codex Sign in runs
 //! `account/login/start` on a short-lived app-server ([`run_codex_login`]);
@@ -684,6 +687,19 @@ pub(crate) struct ConnectFacts {
     /// The P7 import offer for the assist line (first run only), which
     /// stands there while Codex is not signing in.
     pub import_assist: Vec<aui::screens::AssistRun>,
+    /// The folder step's line saying where "Not now" starts the session
+    /// ([`crate::onboarding::skip_line`]).
+    pub skip_line: String,
+}
+
+/// Which step the screen shows (docs/82 8.7).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ConnectStep {
+    /// "Connect your providers": the rows, the picker, Continue and Skip.
+    #[default]
+    Providers,
+    /// "Where will you work?": the first run's step after Continue.
+    Folder,
 }
 
 /// What the connect screen asks of the root.
@@ -697,6 +713,8 @@ pub(crate) enum ConnectEvent {
     SetDefault(ProviderId),
     /// The import offer's Import… link.
     OpenImportSheet,
+    /// The folder step's choice: choose, drop or not now.
+    Folder(crate::onboarding::FolderIntent),
 }
 
 /// The first-run Connect your providers screen (task 4.4): a region entity
@@ -718,6 +736,11 @@ pub(crate) struct ConnectScreen {
     model: Entity<ProviderStatusModel>,
     /// What the root told the screen (see [`ConnectFacts`]).
     pub(crate) facts: ConnectFacts,
+    /// Whether this standing is the first run's: then Continue and Skip
+    /// lead to the folder step instead of closing the screen.
+    first_run: bool,
+    /// Which step shows.
+    pub(crate) step: ConnectStep,
     /// The screen's focus: the region contract's; its rows' buttons take
     /// the keyboard as they are pressed.
     focus: gpui::FocusHandle,
@@ -731,7 +754,16 @@ impl ConnectScreen {
     /// The screen, shut, over `model`.
     pub(crate) fn new(model: Entity<ProviderStatusModel>, overlays: Entity<crate::overlays::Overlays>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&model, |_, _, cx| cx.notify());
-        ConnectScreen { open: false, overlays, model, facts: ConnectFacts::default(), focus: cx.focus_handle(), _observe: observe }
+        ConnectScreen {
+            open: false,
+            overlays,
+            model,
+            facts: ConnectFacts::default(),
+            first_run: false,
+            step: ConnectStep::Providers,
+            focus: cx.focus_handle(),
+            _observe: observe,
+        }
     }
 
     /// Whether the footer's menu stands open (an entry on the overlay stack).
@@ -752,10 +784,32 @@ impl ConnectScreen {
         });
     }
 
-    /// Stand the screen up over the shell (or at boot). The root re-reads
-    /// the statuses and redraws.
+    /// Stand the screen up over the shell (Settings' "Set up
+    /// providers…"): Continue closes it again. The root re-reads the
+    /// statuses and redraws.
     pub(crate) fn show(&mut self) {
         self.open = true;
+        self.first_run = false;
+        self.step = ConnectStep::Providers;
+    }
+
+    /// Stand the screen up for a first run: Continue (or Skip) leads to
+    /// the folder step.
+    pub(crate) fn show_first_run(&mut self) {
+        self.show();
+        self.first_run = true;
+    }
+
+    /// After Continue or Skip: the folder step on a first run (`true`),
+    /// else nothing (`false`, the root closes the screen).
+    pub(crate) fn to_folder_step(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.first_run || self.step == ConnectStep::Folder {
+            return false;
+        }
+        // The root redraws the screen (it composes it uncached).
+        self.step = ConnectStep::Folder;
+        self.set_menu(false, cx);
+        true
     }
 
     /// Leave it: Continue/Skip. The menu never outlives the screen.
@@ -817,9 +871,12 @@ impl Focusable for ConnectScreen {
 }
 
 impl Region for ConnectScreen {
-    /// "Connect your providers": the screen's own heading.
+    /// The step's own heading.
     fn title(&self, _cx: &App) -> SharedString {
-        "Connect your providers".into()
+        match self.step {
+            ConnectStep::Providers => "Connect your providers".into(),
+            ConnectStep::Folder => "Where will you work?".into(),
+        }
     }
 
     /// Nothing: the screen owns the whole window and draws its own footer.
@@ -837,8 +894,19 @@ impl Render for ConnectScreen {
     /// The first-run Connect your providers screen (D5 B1): rows from the
     /// status service (Checking until probes land) in the board's order, the
     /// footer's default picker over the Connected providers, Continue
-    /// (enabled once any provider is Connected) and Skip.
+    /// (enabled once any provider is Connected) and Skip. On a first run,
+    /// the folder step after them ([`crate::onboarding::folder_step`]).
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.step == ConnectStep::Folder {
+            let weak = cx.entity().downgrade();
+            return crate::onboarding::folder_step(
+                self.facts.skip_line.clone(),
+                move |intent, _window, cx| {
+                    let _ = weak.update(cx, |_, cx| cx.emit(ConnectEvent::Folder(intent)));
+                },
+                cx,
+            );
+        }
         let model = self.model.read(cx);
         let rows = build_rows(&model.statuses, &model.codex_login);
         // With no pick, the first in the one order stands (as at boot).
@@ -850,9 +918,14 @@ impl Render for ConnectScreen {
         let assist = if codex.is_empty() { self.facts.import_assist.clone() } else { codex };
         let weak = cx.entity().downgrade();
         let mark = crate::mascot::connect_mascot(window, cx);
-        connect_providers("connect", rows).mark(mark).default_picker(picker).assist(assist).on_intent(move |intent, _window, cx| {
-            let _ = weak.update(cx, |this, cx| this.intent(intent, cx));
-        })
+        connect_providers("connect", rows)
+            .mark(mark)
+            .default_picker(picker)
+            .assist(assist)
+            .on_intent(move |intent, _window, cx| {
+                let _ = weak.update(cx, |this, cx| this.intent(intent, cx));
+            })
+            .into_any_element()
     }
 }
 
@@ -866,7 +939,20 @@ impl Harness {
 
     /// What the connect screen needs from the root now (see [`ConnectFacts`]).
     pub(crate) fn connect_facts(&self, cx: &App) -> ConnectFacts {
-        ConnectFacts { new_provider: self.new_provider_id(cx), import_assist: self.import_connect_assist(cx) }
+        let current = self.current_project(cx).map(|project| project.name.clone());
+        // A capture keeps its default workspace in its own state dir, a
+        // temp path that changes per run: it names the folder a person's
+        // run uses, so the shot is the same every time.
+        let default_workspace = if crate::runtime::captures() {
+            "~/baaz-sessions".to_owned()
+        } else {
+            crate::layout::tilde_path(&crate::projects::default_workspace())
+        };
+        ConnectFacts {
+            new_provider: self.new_provider_id(cx),
+            import_assist: self.import_connect_assist(cx),
+            skip_line: crate::onboarding::skip_line(current.as_deref(), &default_workspace),
+        }
     }
 
     /// The connect screen for this frame — facts pushed, then its view
@@ -900,6 +986,7 @@ impl Harness {
                 self.provider_model.update(cx, |model, _| model.choose_new_provider(id));
             }
             ConnectEvent::OpenImportSheet => self.open_import_sheet(cx),
+            ConnectEvent::Folder(intent) => self.on_folder_intent(intent.clone(), window, cx),
         }
         cx.notify();
     }
@@ -965,14 +1052,19 @@ impl Harness {
         self.push_overlay_view(entry, &view, cx);
     }
 
-    /// Leave the connect screen: Continue and Skip both set
-    /// `onboarding_completed`, so this launch and the next open the shell.
+    /// Continue or Skip: both set `onboarding_completed`, so the next
+    /// launch opens the shell. On a first run the screen moves on to the
+    /// folder step ([`crate::onboarding`]), which opens the shell itself;
+    /// reopened from Settings, the screen closes here.
     pub(crate) fn finish_connect(&mut self, cx: &mut Context<Self>) {
         complete_onboarding();
-        self.connect_screen.update(cx, |screen, cx| screen.dismiss(cx));
         self.close_muse_sheet_entry(cx);
+        let folder_step = self.connect_screen.update(cx, |screen, cx| screen.to_folder_step(cx));
+        if !folder_step {
+            self.connect_screen.update(cx, |screen, cx| screen.dismiss(cx));
+        }
         // New sessions start where the footer said: the stored pick while it
-        // is Connected, else the first Connected in the board's order.
+        // is Connected, else the first Connected in the one provider order.
         let statuses = crate::provider_status::live_statuses();
         let current = self.new_provider_id(cx);
         if let Some(id) = current.and_then(|current| connect_default(&statuses, current)) {
@@ -982,6 +1074,11 @@ impl Harness {
         } else if !current.is_some_and(|current| crate::settings_providers::usable_provider(&statuses, current)) {
             let id = crate::settings_providers::live_default_new_provider();
             self.provider_model.update(cx, |model, _| model.choose_new_provider(id));
+        }
+        if folder_step {
+            // The screen stands for its second step; links from other apps
+            // keep waiting behind it.
+            return;
         }
         // Links from other apps that waited behind the screen open now.
         self.drain_external_soon(cx);
@@ -1000,6 +1097,55 @@ impl Harness {
         self.provider_model.update(cx, |model, _| model.reload());
         self.connect_screen.update(cx, |screen, _| screen.show());
         cx.notify();
+    }
+
+    #[cfg(feature = "probe")]
+    /// `connect-continue`: the connect screen's Continue, as its button
+    /// does — on a first run, on to the folder step. An `Err` when the
+    /// screen is down, already on its folder step, or Continue is shut (no
+    /// provider Connected).
+    pub(crate) fn step_connect_continue(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let screen = self.connect_screen.read(cx);
+        if !screen.open {
+            return Err("the connect screen is not up".to_owned());
+        }
+        if screen.step != ConnectStep::Providers {
+            return Err("the connect screen is past its providers".to_owned());
+        }
+        let statuses = self.provider_model.read(cx).statuses.clone();
+        if !build_rows(&statuses, &CodexLogin::Idle).iter().any(|row| row.connected) {
+            return Err("Continue is shut: no provider is Connected".to_owned());
+        }
+        self.finish_connect(cx);
+        Ok(())
+    }
+
+    #[cfg(feature = "probe")]
+    /// `first-run-folder:<path>` / `first-run-skip`: the folder step's drop
+    /// of `path` / its "Not now", as the step does (docs/82 8.7). An `Err`
+    /// when the step is not showing, or the path is no folder.
+    pub(crate) fn step_first_run_folder(
+        &mut self,
+        folder: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> crate::steps::StepResult {
+        let screen = self.connect_screen.read(cx);
+        if !screen.open || screen.step != ConnectStep::Folder {
+            return Err("the first run's folder step is not showing".to_owned());
+        }
+        let intent = match folder {
+            Some(path) => {
+                let path = std::path::PathBuf::from(path.trim());
+                if !path.is_dir() {
+                    return Err(format!("{} is no folder", path.display()));
+                }
+                crate::onboarding::FolderIntent::Drop(path)
+            }
+            None => crate::onboarding::FolderIntent::Skip,
+        };
+        self.on_folder_intent(intent, window, cx);
+        Ok(())
     }
 
     #[cfg(feature = "probe")]
@@ -1741,7 +1887,10 @@ mod tests {
         vc.update(|_, cx| {
             baaz.update(cx, |harness, cx| {
                 harness.finish_connect(cx);
-                assert!(!harness.connect_open(cx), "Continue/Skip lands in the shell");
+                // A first run moves on to "Where will you work?" (docs/82
+                // 8.7); the folder step opens the shell.
+                assert!(harness.connect_open(cx), "the screen stands for its folder step");
+                assert_eq!(harness.connect_screen.read(cx).step, ConnectStep::Folder);
             })
         });
         assert!(

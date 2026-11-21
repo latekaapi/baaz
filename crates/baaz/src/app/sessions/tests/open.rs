@@ -357,6 +357,57 @@ fn an_unfiled_session_never_starts_in_the_launch_directory(cx: &mut gpui::TestAp
     }
 }
 
+/// docs/82 8.7: the first run's Continue leads to "Where will you work?";
+/// a dropped folder becomes the current project and the new session starts
+/// in it, and "Not now" starts it in the default workspace — never in the
+/// launch directory (`/` from Finder) — on the per-lane providers.
+#[gpui::test]
+fn the_first_runs_folder_step_opens_the_composer_where_it_says(cx: &mut gpui::TestAppContext) {
+    use crate::onboarding::FolderIntent;
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    for (provider, drop) in [(ProviderId::ClaudeCode, true), (ProviderId::Codex, false)] {
+        let state = lane_state(&format!("first-run-folder-{}", provider.as_str()));
+        let folder = state.2.join("acme-web");
+        std::fs::create_dir_all(&folder).expect("the dropped folder");
+        // A project's root is canonical (`/private/var/…` on macOS).
+        let folder = folder.canonicalize().expect("the folder exists");
+        let vc = cx.add_empty_window();
+        let baaz = lane_harness(vc, &state.2);
+        vc.update(|_, cx| {
+            baaz.update(cx, |harness, cx| {
+                harness.providers = harness.providers.with_opens_of(&parking_factory());
+                harness.args.workspace = std::path::PathBuf::from("/");
+                harness.args.workspace_explicit = false;
+                harness.current_project = None;
+                harness.session_list.update(cx, |list, _| list.projects.current = None);
+                harness.session_list.update(cx, |list, _| list.projects.projects.clear());
+                harness.provider_model.update(cx, |model, _| model.point_new_provider(provider));
+                harness.connect_screen.update(cx, |screen, _| screen.show_first_run());
+                harness.finish_connect(cx);
+                assert!(harness.connect_open(cx), "Continue leads to the folder step");
+                assert_eq!(harness.connect_screen.read(cx).step, crate::connect::ConnectStep::Folder);
+                assert!(harness.active.is_none(), "no session before the step is answered");
+            });
+        });
+        let intent = if drop { FolderIntent::Drop(folder.clone()) } else { FolderIntent::Skip };
+        vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.on_folder_intent(intent, window, cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let harness = baaz.read(cx);
+            assert!(!harness.connect_open(cx), "the step answered, the shell is up");
+            let workspace = harness.active.clone().map(|view| view.read(cx).rt(cx).workspace_for_tests().to_owned());
+            let want = if drop {
+                assert_eq!(harness.current_project(cx).map(|p| p.root.clone()), Some(folder.clone()), "the drop is the project");
+                folder.to_string_lossy().into_owned()
+            } else {
+                projects::default_workspace().to_string_lossy().into_owned()
+            };
+            assert_eq!(workspace.as_deref(), Some(want.as_str()), "{provider:?}: the composer opens where the step said");
+        });
+        lane_restore(state);
+    }
+}
+
 /// docs/82 0.14: ⌘Q with a parked session's turn running asks first and
 /// names it; with nothing running it quits without asking.
 #[gpui::test]

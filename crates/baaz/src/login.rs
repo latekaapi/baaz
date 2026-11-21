@@ -691,7 +691,7 @@ impl Harness {
             // The first-run Connect your providers screen, for captures:
             // rows from the scripted statuses, all Checking when unset.
             LoginSample::Connect => {
-                self.connect_screen.update(cx, |screen, _| screen.show());
+                self.connect_screen.update(cx, |screen, _| screen.show_first_run());
                 self.close_muse_sheet_entry(cx);
                 self.provider_model.update(cx, |model, _| model.reload());
                 // The sample is a first run: the import offer may stand
