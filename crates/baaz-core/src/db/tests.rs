@@ -401,3 +401,17 @@ fn forgetting_offers_only_the_transcript_in_baazs_home() {
     assert!(crate::sessions::forget_plan(&dir, "codex", "c-1", false).transcript.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Settings › Data › Prompt history (docs/82 8.8): Clear forgets every
+/// workspace's prompts and nothing else.
+#[test]
+fn clearing_prompt_history_forgets_every_workspace_and_nothing_else() {
+    let mut conn = super::open_memory();
+    super::history::replace(&mut conn, "/work/a", &["one".to_owned(), "two".to_owned()]).expect("a");
+    super::history::replace(&mut conn, "/work/b", &["three".to_owned()]).expect("b");
+    let meta_before = count(&conn, "meta");
+    assert_eq!(super::history::clear_all(&conn).expect("clear"), 3);
+    assert!(super::history::read(&conn, "/work/a").unwrap().is_empty());
+    assert!(super::history::read(&conn, "/work/b").unwrap().is_empty());
+    assert_eq!(count(&conn, "meta"), meta_before, "only prompt history goes");
+}

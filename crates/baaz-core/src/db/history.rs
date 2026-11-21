@@ -20,6 +20,13 @@ pub fn replace(conn: &mut Connection, workspace: &str, entries: &[String]) -> ru
     tx.commit()
 }
 
+/// Forget every workspace's prompts (Settings › Data › Prompt history,
+/// docs/82 8.8). Returns how many were removed.
+pub fn clear_all(conn: &Connection) -> rusqlite::Result<usize> {
+    super::check_writer("clear prompt history");
+    conn.execute("DELETE FROM prompt_history", [])
+}
+
 /// [`replace`] inside a caller's transaction (the importer's).
 pub(crate) fn write(conn: &Connection, workspace: &str, entries: &[String]) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM prompt_history WHERE workspace_path = ?1", params![workspace])?;

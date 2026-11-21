@@ -50,6 +50,15 @@ pub fn append(workspace: &str, text: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// Forget every prompt kept, in every workspace, on the writer
+/// (Settings › Data › Prompt history, docs/82 8.8): what ↑ in a composer
+/// walks. Sessions and their transcripts are untouched. Blocks; returns how
+/// many prompts went, `None` when the database did not answer.
+pub fn clear_all() -> Option<usize> {
+    crate::db::call(crate::db::path(), |db| crate::db::history::clear_all(&db.conn))
+        .and_then(|cleared| cleared.map_err(|error| crate::baaz_log!("db: prompt history not cleared ({error})")).ok())
+}
+
 /// `entries` with `text` appended (unless it repeats one of the last few),
 /// cut to the newest [`CAP`].
 fn appended(entries: &mut Vec<String>, text: &str) {

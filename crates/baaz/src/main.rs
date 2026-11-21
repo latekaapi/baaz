@@ -53,6 +53,7 @@ use baaz_core::conn;
 use baaz_core::db;
 mod default_browser;
 mod details;
+mod data_export;
 mod dialogs;
 mod external_urls;
 use baaz_core::files;

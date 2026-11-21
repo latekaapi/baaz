@@ -124,7 +124,7 @@ fn providers_page_has_close_and_setup_row() {
 }
 
 /// Every Settings page has a probe entry: General, Git & worktrees, MCP,
-/// Providers, one provider sub-page (Codex), Shortcuts and Archived.
+/// Data, Providers, one provider sub-page (Codex), Shortcuts and Archived.
 #[test]
 fn probe_entries_cover_every_settings_page() {
     let probe = read_repo("scripts/uiprobe.py");
@@ -132,6 +132,7 @@ fn probe_entries_cover_every_settings_page() {
         "\"settings-general\"",
         "\"settings-git\"",
         "\"settings-mcp\"",
+        "\"settings-data\"",
         "\"settings-providers\"",
         "\"settings-provider-codex\"",
         "\"settings-shortcuts\"",
@@ -139,6 +140,7 @@ fn probe_entries_cover_every_settings_page() {
         "settings:general",
         "settings:git",
         "settings:mcp",
+        "settings:data",
         "settings:providers/codex",
         "settings:shortcuts",
         "settings:archived",

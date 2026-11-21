@@ -168,6 +168,7 @@ pub(crate) const SETTINGS_SECTIONS: &[(&str, &str)] = &[
     ("providers", "Providers"),
     ("mcp", "MCP"),
     ("shortcuts", "Shortcuts"),
+    ("data", "Data"),
     ("archived", "Archived"),
 ];
 
@@ -183,6 +184,7 @@ pub(crate) fn settings_blurb(section: &str) -> &'static str {
         "providers" => "Turn providers on or off and manage their accounts.",
         "mcp" => "The MCP servers each provider's sessions can reach. Read from each provider's own files.",
         "shortcuts" => "Click a keycap to rebind it, or edit the keymap file. Changes apply live.",
+        "data" => "Where Baaz keeps your data, a copy of it, and the histories you can clear.",
         "archived" => "Sessions you archived, grouped by project.",
         _ if is_provider_subpage(section) => "Account and sign-in for this provider.",
         _ if site_subpage_origin(section).is_some() => "What this site may do, kept from your answers. Changes apply to its next ask.",
@@ -291,6 +293,7 @@ pub(crate) fn settings_breadcrumb(section: &str) -> Vec<String> {
         "providers" => crumbs.push("Providers".to_owned()),
         "mcp" => crumbs.push("MCP".to_owned()),
         "shortcuts" => crumbs.push("Shortcuts".to_owned()),
+        "data" => crumbs.push("Data".to_owned()),
         "archived" => crumbs.push("Archived".to_owned()),
         _ => crumbs.push("General".to_owned()),
     }
@@ -325,6 +328,7 @@ pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
         "group_branch" => Some("sidebar"),
         "notify_needs_you" | "notify_done" | "notify_failed" | "notify_sound" | "notify_badge" => Some("notifications"),
         "search-engine" | "download-dir" => Some("browser"),
+        "data-folder" | "export-data" | "clear-browsing-history" | "clear-prompt-history" => Some("data"),
         _ if crate::settings_providers::parse_enabled_row(id).is_some() => Some("providers"),
         _ if id.starts_with("use-own-mcp:") => Some("mcp"),
         _ if id.starts_with("provider-card:") => Some("providers/*"),
@@ -593,7 +597,7 @@ pub(crate) struct SettingsFacts {
     pub default_browser: Option<String>,
     /// Browser: Make default was pressed and macOS has not confirmed.
     pub default_browser_pending: bool,
-    /// Browser › Your data: how many pages history holds.
+    /// Data › History: how many pages browsing history holds.
     pub history_pages: u64,
     /// Browser › Your data: the sites history never records.
     pub excluded_sites: Vec<String>,
@@ -637,8 +641,10 @@ pub(crate) enum SettingsEvent {
     OpenImportSheet,
     /// Archived: Unarchive this session.
     Unarchive(String),
-    /// Browser › Your data: Clear…
+    /// Data › History › Browsing history: Clear… (the Browse confirm).
     ClearHistory,
+    /// Data › History › Prompt history: Clear… (its own confirm).
+    ClearPromptHistory,
     /// Browser › Your data: Import from Chrome.
     ImportChrome,
     /// Browser › Your data: record this site again.
@@ -1111,6 +1117,57 @@ impl SettingsPage {
         }));
     }
 
+    /// Data › Reveal in Finder: Baaz's folder, selected in Finder. A test
+    /// or a capture opens nothing.
+    pub(crate) fn reveal_data_folder(&mut self, _cx: &mut Context<Self>) {
+        if cfg!(test) || crate::runtime::captures() {
+            crate::baaz_log!("reveal data folder: refused in a test or capture");
+            return;
+        }
+        crate::open_in::reveal_folder(crate::store::support_dir());
+    }
+
+    /// Data › Export…: the native folder panel (directories only, the one
+    /// Add project and Downloads use), then [`crate::data_export::export_into`]
+    /// off the UI thread into a new `Baaz export <date time>` folder there,
+    /// and a toast naming where it went (or what failed). Cancel does
+    /// nothing. A test or a capture opens no panel and writes nothing.
+    pub(crate) fn export_data(&mut self, cx: &mut Context<Self>) {
+        if cfg!(test) || crate::runtime::captures() {
+            crate::baaz_log!("export data: refused in a test or capture");
+            return;
+        }
+        cx.activate(true);
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Export here".into()),
+        });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(parent) = paths.into_iter().next() else { return };
+            let support = crate::store::support_dir();
+            let stamp = chrono::Local::now().format("%Y-%m-%d %H%M").to_string();
+            let done = cx.background_executor().spawn(async move { crate::data_export::export_into(&support, &parent, &stamp) }).await;
+            let _ = this.update(cx, |this, cx| {
+                let (title, body) = match done {
+                    Ok(done) => (
+                        "Data exported".to_owned(),
+                        format!("{} files in {}", done.files.len(), crate::layout::tilde_path(&done.folder)),
+                    ),
+                    Err(error) => {
+                        crate::baaz_log!("export data: {error}");
+                        ("Export failed".to_owned(), error)
+                    }
+                };
+                this.overlays.update(cx, |overlays, cx| {
+                    overlays.toast(title, body, cx);
+                });
+            });
+        }));
+    }
+
     /// The Settings nav in the sidebar column: Back, a rule, then one flat
     /// list row per page (provider sub-pages nested under Providers while
     /// it is selected), a rule before Archived.
@@ -1263,6 +1320,7 @@ impl SettingsPage {
             "providers" => self.settings_providers_overview(window, cx),
             "mcp" => self.settings_mcp_page(cx),
             "shortcuts" => self.settings_shortcuts_page(window, cx),
+            "data" => self.settings_data_page(cx),
             "archived" => self.settings_archived_page(cx),
             _ if is_provider_subpage(&section) => self.settings_provider_subpage(window, cx),
             _ if site_subpage_origin(&section).is_some() => self.settings_site_page(cx),
@@ -1754,17 +1812,10 @@ impl SettingsPage {
         self.settings_group("Agents", rows, cx)
     }
 
-    /// R4 "Your data" (board R4Daily 2a): history's size and Clear…, and
-    /// the sites history never records, each with Remove. (Import from
-    /// Chrome joins this group.)
+    /// R4 "Your data" (board R4Daily 2a): Import from Chrome and the sites
+    /// history never records, each with Remove. History's size and Clear…
+    /// moved to Settings › Data › History (8.8).
     fn settings_browser_data_group(&self, cx: &mut Context<Self>) -> AnyElement {
-        let pages = self.facts.history_pages;
-        let summary = format!(
-            "{} · kept {} days · never from an agent’s tabs",
-            if pages == 1 { "1 page".to_owned() } else { format!("{pages} pages") },
-            crate::browser::history::KEEP_DAYS
-        );
-        let clear = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(SettingsEvent::ClearHistory));
         let import = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(SettingsEvent::ImportChrome));
         let mut rows = vec![
             settings_row("Import from Chrome")
@@ -1773,14 +1824,6 @@ impl SettingsPage {
                     button("settings-browser-import-open", "Import…")
                         .accessibility_label("Import bookmarks and history from Chrome")
                         .on_click(move |e, w, cx| import(e, w, cx)),
-                )
-                .into_any_element(),
-            settings_row("History")
-                .description(summary)
-                .control(
-                    button("settings-history-clear", "Clear…")
-                        .accessibility_label("Clear browsing history")
-                        .on_click(move |e, w, cx| clear(e, w, cx)),
                 )
                 .into_any_element(),
         ];
@@ -2074,6 +2117,67 @@ impl SettingsPage {
                 .note("Links from other apps open as person tabs in Browse."),
         )
         .into_any_element()
+    }
+
+    /// Data (docs/82 8.8): where Baaz keeps its data (the folder, with
+    /// Reveal in Finder, and what each file holds), Export (a new folder
+    /// of the person's own data, [`crate::data_export`]), and the two
+    /// histories with Clear…, each through its confirm dialog that names
+    /// what goes.
+    fn settings_data_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        let reveal = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.reveal_data_folder(cx));
+        let place = settings_row("Baaz folder")
+            .description(data_folder_label())
+            .control(
+                button("settings-data-reveal", "Reveal in Finder")
+                    .accessibility_label("Reveal the Baaz folder in Finder")
+                    .on_click(reveal),
+            )
+            .into_any_element();
+        let export = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.export_data(cx));
+        let export = settings_row("Export your data")
+            .description("A new folder with your sessions, prompt history, projects, settings, shortcuts and the browser's history and bookmarks. Never sign-ins, cookies or keys.")
+            .control(
+                button("settings-data-export", "Export…")
+                    .accessibility_label("Export your Baaz data to a folder")
+                    .on_click(export),
+            )
+            .into_any_element();
+        let pages = self.facts.history_pages;
+        let browsing = format!(
+            "{} · kept {} days · never from an agent’s tabs",
+            if pages == 1 { "1 page".to_owned() } else { format!("{pages} pages") },
+            crate::browser::history::KEEP_DAYS
+        );
+        let clear_browsing = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(SettingsEvent::ClearHistory));
+        let clear_prompts = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(SettingsEvent::ClearPromptHistory));
+        let histories = vec![
+            settings_row("Browsing history")
+                .description(browsing)
+                .control(
+                    button("settings-history-clear", "Clear…")
+                        .accessibility_label("Clear browsing history")
+                        .on_click(clear_browsing),
+                )
+                .into_any_element(),
+            settings_row("Prompt history")
+                .description("The messages you sent, kept per project for ↑ in the composer. Sessions stay.")
+                .control(
+                    button("settings-prompt-history-clear", "Clear…")
+                        .accessibility_label("Clear prompt history")
+                        .on_click(clear_prompts),
+                )
+                .into_any_element(),
+        ];
+        settings_sections_stack()
+            .child(section("Where it lives").rows(vec![place]).note(
+                "baaz.db holds sessions, prompt history and usage; layout.json your settings; projects.json your projects; \
+                 Browser/browser.db the browser's history, bookmarks and site settings; search.db the search index. \
+                 Providers keep their transcripts in their own folders.",
+            ))
+            .child(self.settings_group("Export", vec![export], cx))
+            .child(self.settings_group("History", histories, cx))
+            .into_any_element()
     }
 
     /// Sidebar: the branch name — plus the note that grouping and
@@ -2455,6 +2559,44 @@ impl SettingsPage {
 
 impl Harness {
 
+    /// Data › Prompt history › Clear…: ask first, naming what goes.
+    pub(crate) fn ask_clear_prompt_history(&mut self, cx: &mut Context<Self>) {
+        self.set_dialog(
+            cx,
+            crate::overlays::Dialog {
+                title: "Clear prompt history?".to_owned(),
+                detail: "Every message kept for ↑ in the composer, in every project. Sessions and their transcripts stay. This can’t be undone.".to_owned(),
+                kind: aui::overlay::DialogKind::Warning,
+                primary: "Clear prompt history",
+                action: crate::overlays::DialogAction::ClearPromptHistory,
+                archive_target: None,
+            },
+        );
+    }
+
+    /// Clear prompt history now (confirmed): the database's rows go off
+    /// the UI thread, then every live session's composer re-reads its
+    /// (now empty) history — the runtimes are the only holders of a copy
+    /// ([`crate::session::SessionRuntime::load_history`]).
+    pub(crate) fn clear_prompt_history_now(&mut self, cx: &mut Context<Self>) {
+        let task = cx.background_executor().spawn(async move { baaz_core::history::clear_all() });
+        cx.spawn(async move |this, cx| {
+            let cleared = task.await;
+            let _ = this.update(cx, |this, cx| {
+                for runtime in this.registry.runtimes(this.active.as_ref(), cx) {
+                    runtime.update(cx, |rt, cx| rt.load_history(cx));
+                }
+                let (title, body) = match cleared {
+                    Some(1) => ("Prompt history cleared", "1 message forgotten".to_owned()),
+                    Some(n) => ("Prompt history cleared", format!("{n} messages forgotten")),
+                    None => ("Prompt history not cleared", "The database did not answer; nothing changed.".to_owned()),
+                };
+                this.overlays.update(cx, |o, cx| o.toast(title, body, cx));
+            });
+        })
+        .detach();
+    }
+
     /// The active session id for the page's restore record, if any.
     fn settings_active_id(&self, cx: &mut Context<Self>) -> Option<String> {
         self.active.as_ref().map(|view| view.read(cx).rt(cx).session_id.clone())
@@ -2790,11 +2932,13 @@ impl Harness {
                     })
                     .collect();
             }
+            "data" => {
+                facts.history_pages = self.browser.read(cx).data.read(cx).history_len();
+            }
             "browser" => {
                 facts.default_browser = self.default_browser_handler(cx).map(str::to_owned);
                 facts.default_browser_pending = self.browser.read(cx).default_browser_confirm_pending;
                 let data = self.browser.read(cx).data.read(cx);
-                facts.history_pages = data.history_len();
                 facts.excluded_sites = data.excluded().to_vec();
                 facts.sites = data.sites().clone();
             }
@@ -2875,6 +3019,7 @@ impl Harness {
             SettingsEvent::OpenImportSheet => self.open_import_sheet(cx),
             SettingsEvent::Unarchive(id) => self.unarchive_session(id.clone(), cx),
             SettingsEvent::ClearHistory => self.ask_clear_history(cx),
+            SettingsEvent::ClearPromptHistory => self.ask_clear_prompt_history(cx),
             SettingsEvent::ImportChrome => self.open_chrome_import(cx),
             SettingsEvent::IncludeSite(site) => {
                 self.browser.read(cx).data.clone().update(cx, |data, cx| data.include(site, cx));
@@ -2904,6 +3049,17 @@ impl Harness {
             }
             SettingsEvent::OpenChromiumSettings => self.open_chromium_settings(window, cx),
         }
+    }
+}
+
+/// Data › Baaz folder's line: the folder this run keeps its data in, with
+/// the home shortened to `~`. A capture runs on a throwaway folder whose
+/// name changes every run, so it shows the folder a real run uses.
+pub(crate) fn data_folder_label() -> String {
+    if crate::runtime::captures() {
+        tilde_path(&crate::store::default_support_dir())
+    } else {
+        tilde_path(&crate::store::support_dir())
     }
 }
 
@@ -3307,7 +3463,7 @@ mod tests {
     #[test]
     fn browser_section_is_registered() {
         let ids: Vec<&str> = SETTINGS_SECTIONS.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, ["general", "appearance", "sidebar", "notifications", "git", "browser", "providers", "mcp", "shortcuts", "archived"]);
+        assert_eq!(ids, ["general", "appearance", "sidebar", "notifications", "git", "browser", "providers", "mcp", "shortcuts", "data", "archived"]);
         assert_eq!(normalize_settings_target("browser", ""), "browser");
         assert_eq!(normalize_settings_target("BROWSER", ""), "browser");
         assert_eq!(normalize_settings_target("search-engine", ""), "browser");
@@ -3340,6 +3496,18 @@ mod tests {
             })
             .collect();
         assert!(!general.contains(&"archive_on_merge".to_owned()), "the pull-request switch lives on Git & worktrees only");
+    }
+
+    /// Task 8.8: Data is a section — the folder, Export and both
+    /// histories' Clear… — reached by its row ids too.
+    #[test]
+    fn data_section_is_registered() {
+        assert_eq!(normalize_settings_target("data", ""), "data");
+        for id in ["data-folder", "export-data", "clear-browsing-history", "clear-prompt-history"] {
+            assert_eq!(normalize_settings_target(id, ""), "data", "{id}");
+        }
+        assert_eq!(settings_breadcrumb("data"), vec!["Settings".to_owned(), "Data".to_owned()]);
+        assert!(settings_target_known("data"));
     }
 
     /// Task 3.5: Notifications is a section (after Sidebar), its switches

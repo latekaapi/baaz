@@ -226,6 +226,7 @@ impl Render for DialogView {
                 | DialogAction::ProviderSignOut
                 | DialogAction::DeleteSpace
                 | DialogAction::ClearHistory
+                | DialogAction::ClearPromptHistory
                 | DialogAction::TrashTranscript
                 | DialogAction::DeleteSession
                 | DialogAction::UndoChanges
@@ -931,6 +932,11 @@ impl Harness {
             self.clear_history_now(cx);
             return;
         }
+        if action == DialogAction::ClearPromptHistory {
+            self.close_dialog(cx);
+            self.clear_prompt_history_now(cx);
+            return;
+        }
         // The transcript's paths rode the dialog: only this button moves
         // them, and only to the Trash.
         if action == DialogAction::TrashTranscript {
@@ -991,6 +997,7 @@ impl Harness {
             | DialogAction::MigrateSessions
             | DialogAction::DeleteSpace
             | DialogAction::ClearHistory
+            | DialogAction::ClearPromptHistory
             | DialogAction::SpaceSignIns
             | DialogAction::TrashTranscript
             | DialogAction::DeleteSession

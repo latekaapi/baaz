@@ -517,6 +517,12 @@ ENTRIES = {
     # never the person's files and never a CLI. Offline, idempotent.
     "settings-mcp":         {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "settings:mcp"]},
+    # Task 8.8: Settings › Data — the folder (the real run's path, never the
+    # capture's throwaway one) with Reveal, Export…, and Clear… for browsing
+    # and prompt history. Nothing is clicked: a capture opens no panel and
+    # clears nothing. Offline, idempotent.
+    "settings-data":        {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "settings:data"]},
     # Settings › Appearance (task 2.9): the theme choice and the summary
     # line. `-light` switches the theme by the page's own setter
     # (`settings-set:theme=light`), not by `--theme`, so it proves the live
