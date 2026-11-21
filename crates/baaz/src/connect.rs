@@ -802,7 +802,7 @@ impl ConnectScreen {
 
     /// After Continue or Skip: the folder step on a first run (`true`),
     /// else nothing (`false`, the root closes the screen).
-    pub(crate) fn to_folder_step(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn advance_to_folder_step(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.first_run || self.step == ConnectStep::Folder {
             return false;
         }
@@ -1059,7 +1059,7 @@ impl Harness {
     pub(crate) fn finish_connect(&mut self, cx: &mut Context<Self>) {
         complete_onboarding();
         self.close_muse_sheet_entry(cx);
-        let folder_step = self.connect_screen.update(cx, |screen, cx| screen.to_folder_step(cx));
+        let folder_step = self.connect_screen.update(cx, |screen, cx| screen.advance_to_folder_step(cx));
         if !folder_step {
             self.connect_screen.update(cx, |screen, cx| screen.dismiss(cx));
         }
