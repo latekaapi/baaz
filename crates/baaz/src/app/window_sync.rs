@@ -264,6 +264,13 @@ impl Harness {
             // regained focus (a switch made in System Settings shows without
             // a restart).
             self.browser.update(cx, |browser, cx| browser.refresh_default_browser_cache(cx));
+            // The keymap file (docs/82 8.8): an edit made outside Baaz —
+            // Settings › Shortcuts' "Open keymap" — installs on the way
+            // back, and the Shortcuts rows show it. One stat per regain.
+            if crate::keymap::changed_since_install() {
+                crate::app::bind_keys(cx);
+                self.settings_page.update(cx, |page, cx| page.keymap_reloaded(cx));
+            }
         } else {
             // A release outside the window never reaches the overlay: a drag
             // still armed as the window goes inactive is over.

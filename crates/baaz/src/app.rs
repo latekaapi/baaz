@@ -371,12 +371,14 @@ const MAX_TITLE_READS: usize = 12;
 /// person's `keymap.json` second, so a binding written in the file wins by
 /// gpui's existing depth-then-order rule.
 ///
-/// The load is one best-effort file read, done once here at startup before
-/// any window opens: the event loop is not yet dispatching input or painting
-/// frames, so the blocking read cannot stall the UI. A refused user entry is
+/// The load is one best-effort file read: at startup before any window
+/// opens, after a Settings › Shortcuts edit, and when the window regains
+/// focus with the file changed since this last ran (a hand edit through
+/// "Open keymap", docs/82 8.8) — one small file, read once per change. A refused user entry is
 /// never silent — every warning [`crate::keymap::load`] collects goes
 /// through `baaz_log!`, the app's diagnostics surface.
 pub fn bind_keys(cx: &mut App) {
+    crate::keymap::note_installed();
     let loaded = crate::keymap::load();
     for warning in &loaded.warnings {
         crate::baaz_log!("{warning}");

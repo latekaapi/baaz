@@ -655,6 +655,62 @@ pub fn path() -> std::path::PathBuf {
     crate::store::support_dir().join("keymap.json")
 }
 
+/// What a missing keymap file starts as when the Shortcuts page's "Open
+/// keymap" creates it (docs/82 8.8): one empty global block, valid as it
+/// stands (it loads with no warning and changes nothing), in the shape the
+/// module doc describes, so the person sees where a binding goes.
+pub(crate) const TEMPLATE: &str = "[\n  {\n    \"context\": null,\n    \"bindings\": {}\n  }\n]\n";
+
+/// The keymap file at `path`, created from [`TEMPLATE`] when it does not
+/// exist yet (never overwritten). Returns the path, ready to open.
+pub(crate) fn ensure_file_at(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    if !path.exists() {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+            Ok(mut file) => std::io::Write::write_all(&mut file, TEMPLATE.as_bytes())?,
+            // Written between the check and the open: keep theirs.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+/// What tells one version of the keymap file from another: its modified
+/// time and length, `None` while there is no file.
+pub(crate) type FileStamp = Option<(std::time::SystemTime, u64)>;
+
+/// [`FileStamp`] of the file at `path`.
+pub(crate) fn stamp_of(path: &std::path::Path) -> FileStamp {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+/// The keymap file's stamp when [`crate::app::bind_keys`] last installed
+/// it: a regained window focus compares against it
+/// ([`changed_since_install`]). `None` until the first install.
+static INSTALLED_STAMP: std::sync::Mutex<Option<FileStamp>> = std::sync::Mutex::new(None);
+
+/// Record that the file as it is now is what gets installed: called by
+/// [`crate::app::bind_keys`] right before it loads.
+pub(crate) fn note_installed() {
+    let now = stamp_of(&path());
+    *INSTALLED_STAMP.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(now);
+}
+
+/// Whether the file moved since [`note_installed`] last ran: edited by
+/// hand (the Shortcuts page's "Open keymap"), created or removed. Never
+/// in a run whose state is isolated — the user file is ignored there.
+pub(crate) fn changed_since_install() -> bool {
+    if crate::runtime::state_isolated() {
+        return false;
+    }
+    let installed = *INSTALLED_STAMP.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    installed.is_some_and(|installed| installed != stamp_of(&path()))
+}
+
 /// One `{context, bindings}` block of the user file. `bindings` maps a
 /// keystroke to an action name; `null` unbinds that keystroke in the block's
 /// context. A `null`, missing or empty `context` is the global one.
@@ -1169,6 +1225,31 @@ pub fn effective_binding(action: &str, context: Option<&str>) -> Option<Effectiv
 mod tests {
     use super::{build_bindings, KEYMAP};
     use std::collections::HashSet;
+
+    /// "Open keymap" (8.8): a missing file is created from the template,
+    /// which loads with no warning and the defaults intact; an existing
+    /// file is never overwritten; the stamp tells an edit from the file
+    /// as it was.
+    #[test]
+    fn the_keymap_template_is_created_once_and_loads_clean() {
+        use super::{ensure_file_at, load_from_path, stamp_of, TEMPLATE};
+        let dir = std::env::temp_dir().join(format!("baaz-keymap-template-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("keymap.json");
+        assert_eq!(stamp_of(&path), None, "no file, no stamp");
+        ensure_file_at(&path).expect("created");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), TEMPLATE);
+        let loaded = load_from_path(&path, false);
+        assert!(loaded.warnings.is_empty(), "the template loads clean: {:?}", loaded.warnings);
+        assert_eq!(loaded.bindings.len(), build_bindings().len(), "the template changes nothing");
+        let before = stamp_of(&path);
+        assert!(before.is_some());
+        std::fs::write(&path, "[{\"context\": null, \"bindings\": {\"cmd-shift-9\": \"NewSession\"}}]").expect("hand edit");
+        assert_ne!(stamp_of(&path), before, "an edit moves the stamp");
+        ensure_file_at(&path).expect("kept");
+        assert!(std::fs::read_to_string(&path).expect("read").contains("cmd-shift-9"), "an existing file is never overwritten");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Every action named in the table builds a binding for that same
     /// action, in table order — then the composer arrows' field-depth

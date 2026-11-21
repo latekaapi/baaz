@@ -61,8 +61,11 @@
 //!
 //! The Shortcuts section is the exception to that shape: its rows come from
 //! [`crate::keymap::effective_bindings`], cached on the page
-//! ([`SettingsPage::shortcuts`], re-read on open and after every edit), and
-//! its edits go through [`SettingsPage::handle_shortcut`].
+//! ([`SettingsPage::shortcuts`], re-read on open, after every edit, and when
+//! the window regains focus with the keymap file changed —
+//! [`SettingsPage::keymap_reloaded`]), its edits go through
+//! [`SettingsPage::handle_shortcut`], and "Open keymap"
+//! ([`SettingsPage::open_keymap`]) hands the file to the person's editor.
 
 use aui::data::{button, icon_button, section, segmented, settings_row, switch, ButtonSize, SwitchIntent, SETTINGS_ROW_PAD_Y};
 use aui::interact::{interactive, list_row, LIST_INSET, ROW_GAP};
@@ -179,7 +182,7 @@ pub(crate) fn settings_blurb(section: &str) -> &'static str {
         "browser" => "How Baaz browses: the assistant, tabs, search, downloads.",
         "providers" => "Turn providers on or off and manage their accounts.",
         "mcp" => "The MCP servers each provider's sessions can reach. Read from each provider's own files.",
-        "shortcuts" => "Click a keycap to rebind it. Changes apply live.",
+        "shortcuts" => "Click a keycap to rebind it, or edit the keymap file. Changes apply live.",
         "archived" => "Sessions you archived, grouped by project.",
         _ if is_provider_subpage(section) => "Account and sign-in for this provider.",
         _ if site_subpage_origin(section).is_some() => "What this site may do, kept from your answers. Changes apply to its next ask.",
@@ -983,6 +986,34 @@ impl SettingsPage {
     /// now — after a write, or after a hand edit while the page stood open.
     fn refresh_shortcuts(&mut self) {
         self.shortcuts = crate::keymap::effective_bindings();
+    }
+
+    /// The keymap file changed outside Baaz and the root reinstalled it
+    /// (a regained window focus, `Harness::on_window_activation`): the rows
+    /// show the file as it is now, and a recording on a row the edit moved
+    /// stops.
+    pub(crate) fn keymap_reloaded(&mut self, cx: &mut Context<Self>) {
+        self.refresh_shortcuts();
+        self.recording = None;
+        cx.notify();
+    }
+
+    /// Shortcuts › Open keymap (docs/82 8.8): the keymap file, created from
+    /// [`crate::keymap::TEMPLATE`] first when it does not exist, opened in
+    /// the editor Settings › General › "Open files in" names (macOS's
+    /// default app for `.json` when none is chosen). Edits install when the
+    /// window next regains focus ([`Self::keymap_reloaded`]). A test or a
+    /// capture (state isolated: the file is ignored there) launches
+    /// nothing.
+    pub(crate) fn open_keymap(&mut self, cx: &mut Context<Self>) {
+        if cfg!(test) || crate::runtime::captures() || crate::runtime::state_isolated() {
+            crate::baaz_log!("open keymap: refused in a test or capture");
+            return;
+        }
+        match crate::keymap::ensure_file_at(&crate::keymap::path()) {
+            Ok(path) => crate::open_in::open_path(&path, None, cx),
+            Err(error) => crate::baaz_log!("open keymap: could not create the file ({error})"),
+        }
     }
 
     /// A Shortcuts row edit, reported through the dialog's `on_shortcut`
@@ -2277,13 +2308,20 @@ impl SettingsPage {
                         .into_any_element(),
                 ),
         );
+        header_row = header_row.child(div().flex_1());
         if differs {
-            header_row = header_row.child(div().flex_1()).child(
+            header_row = header_row.child(
                 button("settings-shortcuts-restore", "Restore defaults")
                     .accessibility_label("Restore default shortcuts")
                     .on_click(move |_, window, cx| restore(&(), window, cx)),
             );
         }
+        let open_keymap = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_keymap(cx));
+        header_row = header_row.child(
+            button("settings-shortcuts-open-keymap", "Open keymap")
+                .accessibility_label("Open the keymap file in your editor")
+                .on_click(open_keymap),
+        );
         column = column.child(header_row);
         // Group live rows by relabelled category, filtered by the query.
         let mut groups: Vec<(String, Vec<AnyElement>)> = Vec::new();
