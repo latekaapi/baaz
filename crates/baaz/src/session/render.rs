@@ -4256,8 +4256,8 @@ mod tests {
         );
         let dividers = cached_handoff_dividers(vc, &view_c);
         assert_eq!(dividers.len(), 2, "one divider per hop");
-        assert!(dividers[0].contains("Muse to Claude Code"), "A→B first, got: {}", dividers[0]);
-        assert!(dividers[1].contains("Claude Code to Codex"), "B→C second, got: {}", dividers[1]);
+        assert!(dividers[0].contains("in Claude Code from Muse"), "A→B first, got: {}", dividers[0]);
+        assert!(dividers[1].contains("in Codex from Claude Code"), "B→C second, got: {}", dividers[1]);
     }
 
     /// A pack turn that ends failed reports its reason — and only its own

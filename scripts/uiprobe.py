@@ -320,6 +320,11 @@ ENTRIES = {
     # Bookmarks & History page, `browse-bookmarks-page`).
     "field-bookmarks":      {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;sidebar;tab-new:https://example.com;bookmark:https://doc.rust-lang.org/book/|The Rust Programming Language|;bookmark:https://doc.rust-lang.org/rust-by-example/|Rust by Example|Learning;history:https://doc.rust-lang.org/book/|The Rust Programming Language|1|;history:https://without.boats/blog/pin/|Pin and suffering|9|Rust needs Pin.;omnibox:rust"]},
+    # docs/82 8.9: the Field's command rows for "bookmark" — "Bookmark this
+    # page" and the one "Bookmarks" (which opens the Bookmarks & History
+    # page; "Manage bookmarks" is gone). No baseline yet.
+    "field-commands":       {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;sidebar;tab-new:https://example.com;omnibox:bookmark"]},
     # R4 Peek (⇧-click) and Split (⌥-click), board-approved gallery look.
     "browse-peek":          {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://example.com;peek:https://example.org/"]},
