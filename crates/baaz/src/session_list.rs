@@ -17,7 +17,7 @@
 //! re-renders the column with no frame-time comparison and no root notify.
 //!
 //! What the list cannot know — which session is open, which click is
-//! awaited, whose agent's terminal tasks run — arrives as [`ListFacts`] on every
+//! awaited, whose agent's terminal tasks run, who owns pages — arrives as [`ListFacts`] on every
 //! read that depends on it; the cache keys on them, as it always did.
 
 use std::cell::{Cell, RefCell};
@@ -51,6 +51,9 @@ pub(crate) struct ListFacts {
     /// Running tasks per session (docs/82 6.5): what each row's
     /// "N running" says.
     pub(crate) tasks: Vec<(String, u32)>,
+    /// Pages (tabs of its own) per session (docs/82 8.4): what each row's
+    /// "N pages" says.
+    pub(crate) pages: Vec<(String, u32)>,
 }
 
 /// What the list says changed. The sidebar pane re-renders on either; the
@@ -71,14 +74,23 @@ pub(crate) enum SessionListEvent {
 /// rows) plus the click's target (the grouping rescues it past the fold, so
 /// a click must rebuild) plus the grouping mode, the closed set and the
 /// expanded set (a toggle regroups the same rows) plus the busy-terminal
-/// counts per session (a block starting or ending restamps the hint).
-type ListKey =
-    (u64, Option<String>, Option<String>, crate::layout::GroupBy, Vec<String>, Vec<String>, Vec<(String, u32)>);
+/// counts per session (a block starting or ending restamps the hint) plus
+/// the page counts per session (a tab opened, kept or closed restamps it).
+type ListKey = (
+    u64,
+    Option<String>,
+    Option<String>,
+    crate::layout::GroupBy,
+    Vec<String>,
+    Vec<String>,
+    Vec<(String, u32)>,
+    Vec<(String, u32)>,
+);
 
 /// What the sidebar and the palette read out of the session list, held from
 /// one change to the next instead of rebuilt per caller per frame
 /// (findings `performance-5`, `support-2`, `performance-7`). Validity is
-/// seven keys, not a timestamp (see [`ListKey`]), and the grouping carries
+/// eight keys, not a timestamp (see [`ListKey`]), and the grouping carries
 /// the minute it labelled its rows against.
 #[derive(Default)]
 struct ListCache {
@@ -301,6 +313,7 @@ impl SessionList {
                 };
                 let mut row = after;
                 row.tasks_running = visible[at].tasks_running;
+                row.pages = visible[at].pages;
                 row.pull_request = visible[at].pull_request;
                 if row.updated == visible[at].updated {
                     visible[at] = row;
@@ -348,9 +361,12 @@ impl SessionList {
         // row's "N running" below. Part of the key, so a task starting or
         // ending rebuilds the rows without waiting for a list invalidation.
         let tasks = facts.tasks.clone();
+        // Who owns pages (docs/82 8.4): what stamps each row's "N pages",
+        // keyed the same way.
+        let pages = facts.pages.clone();
         let mut cache = self.cache.borrow_mut();
         if cache.key.as_ref().is_some_and(
-            |(epoch, id, awaited, cached_group, cached_closed, cached_expanded, cached_tasks)| {
+            |(epoch, id, awaited, cached_group, cached_closed, cached_expanded, cached_tasks, cached_pages)| {
                 *epoch == self.epoch
                     && *id == active
                     && *awaited == pending
@@ -358,6 +374,7 @@ impl SessionList {
                     && *cached_closed == closed
                     && *cached_expanded == expanded
                     && *cached_tasks == tasks
+                    && *cached_pages == pages
             },
         ) {
             return Rc::clone(&cache.visible);
@@ -426,6 +443,13 @@ impl SessionList {
                 }
             }
         }
+        if !pages.is_empty() {
+            for row in &mut rows {
+                if let Some((_, count)) = pages.iter().find(|(id, _)| *id == row.id) {
+                    row.pages = *count;
+                }
+            }
+        }
         // Each row's pull request (docs/82 7.3), from the book the Changes
         // pane's reads fill: the rows of that folder on that branch. A
         // book change invalidates the list ([`Self::set_pull_request`]).
@@ -434,7 +458,7 @@ impl SessionList {
                 row.pull_request = self.pull_requests.lookup(row.workspace.as_deref(), sidebar::shown_branch(row).as_deref());
             }
         }
-        cache.key = Some((self.epoch, active, pending, group_by, closed, expanded, tasks));
+        cache.key = Some((self.epoch, active, pending, group_by, closed, expanded, tasks, pages));
         cache.visible = Rc::new(rows);
         cache.grouping = None;
         Rc::clone(&cache.visible)
@@ -1072,6 +1096,7 @@ impl SessionList {
                         unread: false,
                         branch: None,
                         tasks_running: 0,
+                        pages: 0,
                         pull_request: None,
                     });
                     changed = true;

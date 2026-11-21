@@ -540,6 +540,7 @@ pub(crate) mod browser_handoff;
 mod find;
 pub(crate) mod sessions;
 mod list;
+mod mode_context;
 mod sidebar_host;
 mod peek_split;
 mod titles;
@@ -2956,6 +2957,23 @@ impl Harness {
         // D6 (docs/43 §2.2): Changes · Files · Page choose the pane's screen
         // (lit = the screen it shows); then Terminal, a hairline, the menu.
         let toggles = self.pane_toggles(cx);
+        // docs/82 8.4: the pages the open session owns, before the views —
+        // its Page, or Browse on its task folder when it owns several.
+        let pages = self.active_page_count(cx);
+        let pages_button = (pages > 0).then(|| {
+            let noun = if pages == 1 { "page" } else { "pages" };
+            let open = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
+                if let Some(id) = this.active_id(cx) {
+                    this.open_session_pages(id, window, cx);
+                }
+            });
+            aui::data::button("hd-centre-pages", format!("{pages} {noun}"))
+                .ghost()
+                .muted()
+                .xs()
+                .accessibility_label(format!("Open this session's {pages} {noun}"))
+                .on_click(open)
+        });
         // The wrapper reports the overflow button's own rect (its only
         // child), which is what the overflow menu seats at.
         let overflow_report = cx.entity().downgrade();
@@ -2963,6 +2981,7 @@ impl Harness {
             .flex_none()
             .items_center()
             .gap(px(ROW_GAP))
+            .children(pages_button)
             .child(toggles)
             .child(term_button)
             .child(div().flex_none().mx(px(scale::SP_2)).w_px().h(px(scale::ICON_DEFAULT)).bg(cx.aui().colors.line))
@@ -8359,6 +8378,7 @@ mod tests {
                 last_ask: None,
                 branch: None,
                 tasks_running: 0,
+                pages: 0,
                 pull_request: None,
                 local: false,
                 provisional: false,

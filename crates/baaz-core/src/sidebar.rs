@@ -163,6 +163,11 @@ pub struct SessionEntry {
     /// wire — and read by the app's `SessionEntry::summary` for the row's
     /// "N running".
     pub tasks_running: u32,
+    /// How many web pages (tabs of its own) this session owns (docs/82
+    /// 8.4). Stamped by the window from the browser's tab ownership on
+    /// every list build — never stored, never on the wire — and read by the
+    /// app's `SessionEntry::summary` for the row's "N pages".
+    pub pages: u32,
     /// The pull request of this row's branch (docs/82 7.3), when the
     /// Changes pane has read one for the row's folder and branch. Stamped
     /// by the window from the session list's PR book on every list build
@@ -463,6 +468,7 @@ impl SessionEntry {
             unread: meta.is_some_and(|m| m.unread),
             branch: session.branch.clone(),
             tasks_running: 0,
+            pages: 0,
             pull_request: None,
         }
     }
@@ -561,6 +567,7 @@ impl SessionEntry {
             unread: meta.is_some_and(|m| m.unread),
             branch: None,
             tasks_running: 0,
+            pages: 0,
             pull_request: None,
         })
     }
@@ -648,6 +655,7 @@ impl SessionEntry {
             unread: meta.is_some_and(|m| m.unread),
             branch: None,
             tasks_running: 0,
+            pages: 0,
             pull_request: None,
         })
     }
@@ -704,6 +712,7 @@ impl SessionEntry {
             unread: false,
             branch: None,
             tasks_running: 0,
+            pages: 0,
             pull_request: None,
         }
     }
@@ -899,6 +908,7 @@ pub fn local_started_row(
         unread: false,
         branch: None,
         tasks_running: 0,
+        pages: 0,
         pull_request: None,
     }
 }
@@ -2150,6 +2160,7 @@ pub mod tests {
             unread: false,
             branch: None,
             tasks_running: 0,
+            pages: 0,
             pull_request: None,
         }
     }

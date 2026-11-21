@@ -207,6 +207,9 @@ impl SessionRow for SessionEntry {
         // Commands the session's agent started that still run (docs/82
         // 6.5): the row's trailing slot says "N running".
         row = row.running_tasks(self.tasks_running);
+        // The pages the session owns (docs/82 8.4): "N pages" in an empty
+        // slot, and beside the `⋯` on hover.
+        row = row.pages(self.pages);
         // A provisional row carries no turn count, no running bit and no
         // status verdict — the index knows none of them — so no status is
         // set: the row says no verdict (never a false `Settled · 0
@@ -1057,6 +1060,7 @@ pub(crate) mod tests {
             unread: false,
             branch: None,
             tasks_running: 0,
+            pages: 0,
             pull_request: None,
         }
     }

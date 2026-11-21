@@ -1841,6 +1841,7 @@ mod tests {
                             unread: false,
                             branch: None,
                             tasks_running: 0,
+                            pages: 0,
                             pull_request: None,
                         });
                     });

@@ -1116,6 +1116,17 @@ ENTRIES.update({
     "right-tasks":             _populated("right-width:440;tasks-fixture;right:tasks", replay=True),
     "right-tasks-empty":       _populated("right-width:440;right:tasks", replay=True),
     "sidebar-tasks-running":   _populated("tasks-fixture:p-int-5", replay=True),
+    # docs/82 8.4, switching modes keeps your place. `sidebar-page-count`:
+    # Audit log export owns two pages and Search scopes one (fixture tabs, no
+    # page loaded) — "2 pages" in an empty slot at rest, "1 page" beside
+    # the ⋯ on the hovered row — and the open session owns two, so its
+    # header says "2 pages". `browse-footer-context`: Browse over a page,
+    # its footer saying "Needs you" with the waiting count and naming the
+    # session Sessions stood on (the replay) with its state mark. No
+    # baselines yet.
+    "sidebar-page-count":      _populated("pages-fixture;pages-fixture:p-int-2,2;pages-fixture:p-web-5,1;"
+                                          "sidebar-hover:p-web-5", replay=True),
+    "browse-footer-context":   _populated("mode:browse;tab-new:https://example.com", replay=True),
     "undo-turn-confirm":       _populated("undo-turn:last", replay=True),
     "revert-file-confirm":     _populated("right-width:440;right:changes;revert-file:crates/baaz/src/layout.rs", replay=True),
     "right-files-preview":     _populated("right-width:440;right:files;files-select:src/lib.rs",

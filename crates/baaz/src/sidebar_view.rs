@@ -1494,6 +1494,7 @@ mod tests {
                     unread: false,
                     branch: None,
                     tasks_running: 0,
+                    pages: 0,
                     pull_request: None,
                 })
             })
@@ -1640,6 +1641,7 @@ mod tests {
             unread: false,
             branch: None,
             tasks_running: 0,
+            pages: 0,
             pull_request: None,
         }
     }
@@ -2573,6 +2575,7 @@ mod tests {
                 unread: false,
                 branch: None,
                 tasks_running: 0,
+                pages: 0,
                 pull_request: None,
             }
         }
@@ -2802,6 +2805,7 @@ mod tests {
             unread: false,
             branch: None,
             tasks_running: 0,
+            pages: 0,
             pull_request: None,
         }
     }
@@ -3185,6 +3189,166 @@ mod tests {
         assert_eq!(browse.task_folders.len(), 1);
         assert_eq!(browse.task_folders[0].id.as_ref(), "sess-1");
         assert_eq!(browse.task_folders[0].tabs[0].id.as_ref(), browse_tab_key(session));
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// Five sessions, newest first by `updated` (s0 newest), s2 waiting on
+    /// an approval; Browse mode with its tabs loaded.
+    fn context_sessions(h: &mut Harness, cx: &mut gpui::App) {
+        let now = chrono::Local::now();
+        h.session_list.update(cx, |list, _| {
+            list.sessions = (0..5)
+                .map(|i| {
+                    let mut entry = list_entry(&format!("s{i}"), false);
+                    entry.updated = now - chrono::Duration::minutes(i);
+                    if i == 2 {
+                        entry.approval_command = Some("cargo test".into());
+                    }
+                    entry
+                })
+                .collect();
+            list.sessions_loaded = true;
+            list.index_loaded = true;
+        });
+        h.invalidate_list(cx);
+        h.browser.update(cx, |browser, _| browser.tabs_loaded = true);
+        h.browser.update(cx, |browser, _| browser.tabs.ensure_spaces(|_| None));
+    }
+
+    /// docs/82 8.4: Browse's footer says how many sessions wait and names
+    /// the session Sessions stood on — the newest one with nothing open,
+    /// the open one once a session is open — with its row's state.
+    #[gpui::test]
+    fn the_browse_footer_names_what_waits_and_the_session_left(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("browse-footer");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        let footer = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| baaz.update(cx, |h, cx| h.sidebar_facts(cx).browse.expect("Browse carries its model")))
+        };
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                context_sessions(h, cx);
+                crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse);
+            })
+        });
+        let browse = footer(vc);
+        assert_eq!(browse.needs_you, 1, "one session waits");
+        let last = browse.last_session.expect("a session to go back to");
+        assert_eq!(last.id.as_ref(), "s0", "nothing open: the newest session");
+        assert_eq!(last.state, aui_tokens::AgentState::Idle);
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.resume_quiet("s2".into(), window, cx)));
+        vc.update(|_, cx| baaz.update(cx, |_, cx| crate::layout::Layout::stage(cx, |layout| layout.mode = crate::layout::Mode::Browse)));
+        let last = footer(vc).last_session.expect("the open session");
+        assert_eq!(last.id.as_ref(), "s2", "the open session is the one Sessions stood on");
+        assert_eq!(last.state, aui_tokens::AgentState::Waiting, "its row's mark: needs you");
+        // Nothing waiting: no "Needs you" row.
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.session_list.update(cx, |list, _| list.sessions.iter_mut().for_each(|e| e.approval_command = None));
+                h.invalidate_list(cx);
+            })
+        });
+        assert_eq!(footer(vc).needs_you, 0);
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// docs/82 8.4: the footer's rows go back to Sessions — the last
+    /// session on that session, "Needs you" with its filter on and the
+    /// first waiting session open.
+    #[gpui::test]
+    fn the_browse_footer_rows_go_back_to_sessions(cx: &mut TestAppContext) {
+        use aui::screens::sidebar::{BrowseIntent, SidebarIntent};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("browse-footer-routes");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                context_sessions(h, cx);
+                h.set_mode(crate::layout::Mode::Browse, window, cx);
+                h.sidebar_intent(SidebarIntent::Browse(BrowseIntent::LastSession("s1".into())), window, cx);
+                assert_eq!(crate::layout::Layout::get(cx).mode, crate::layout::Mode::Sessions);
+                assert_eq!(h.active_id(cx).as_deref(), Some("s1"), "back on that session");
+                h.set_mode(crate::layout::Mode::Browse, window, cx);
+                h.sidebar_intent(SidebarIntent::Browse(BrowseIntent::NeedsYou), window, cx);
+                assert_eq!(crate::layout::Layout::get(cx).mode, crate::layout::Mode::Sessions);
+                assert!(crate::attention::Notifier::filter_on(cx), "only what waits is listed");
+                assert_eq!(h.active_id(cx).as_deref(), Some("s2"), "the first waiting session opens");
+                h.toggle_needs_you_filter(cx);
+            })
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// docs/82 8.4: a row's page count is the tabs its session owns, and
+    /// it follows ownership — a kept tab (`Tabs::move_to`) leaves the
+    /// count, a closed one too.
+    #[gpui::test]
+    fn a_rows_page_count_follows_tab_ownership(cx: &mut TestAppContext) {
+        use crate::browser::Owner;
+        use crate::sidebar::SessionRow as _;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("page-count");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        let pages = |vc: &mut gpui::VisualTestContext, id: &str| {
+            vc.update(|_, cx| {
+                baaz.update(cx, |h, cx| {
+                    let row = h.visible_sessions(cx).iter().find(|e| e.id == id).cloned().expect("the row");
+                    assert_eq!(row.summary(chrono::Local::now()).pages, row.pages, "the summary carries it");
+                    row.pages
+                })
+            })
+        };
+        let (a, b) = vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                context_sessions(h, cx);
+                let owner = Owner::Session("s1".into());
+                let a = h.browser.update(cx, |browser, _| browser.tabs.open(None, owner.clone(), "https://a.example/", None));
+                let b = h.browser.update(cx, |browser, _| browser.tabs.open(None, owner, "https://b.example/", None));
+                (a, b)
+            })
+        });
+        assert_eq!(pages(vc, "s1"), 2);
+        assert_eq!(pages(vc, "s0"), 0, "a session with no tabs owns no pages");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.browser.update(cx, |browser, _| assert!(browser.tabs.move_to(a, Owner::Person, None)))));
+        assert_eq!(pages(vc, "s1"), 1, "a kept tab is the person's");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.browser.update(cx, |browser, _| browser.tabs.close(b))));
+        assert_eq!(pages(vc, "s1"), 0, "a closed tab leaves the count");
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// docs/82 8.4: "N pages" opens them — one on the session's Page in
+    /// Sessions, several in Browse on the session's own tab.
+    #[gpui::test]
+    fn a_page_count_opens_the_page_or_browse(cx: &mut TestAppContext) {
+        use crate::browser::Owner;
+        use aui::nav::RowAction;
+        use aui::screens::sidebar::SidebarIntent;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("page-count-open");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                context_sessions(h, cx);
+                let owner = Owner::Session("s1".into());
+                let one = h.browser.update(cx, |browser, _| browser.tabs.open(None, owner.clone(), "https://a.example/", None));
+                h.sidebar_intent(SidebarIntent::RowAction("s1".into(), RowAction::Pages), window, cx);
+                assert_eq!(crate::layout::Layout::get(cx).mode, crate::layout::Mode::Sessions);
+                assert_eq!(h.active_id(cx).as_deref(), Some("s1"), "the session opens");
+                assert!(crate::layout::Layout::get(cx).right_open, "its pane opens");
+                assert_eq!(crate::layout::right_kind(crate::layout::Layout::get(cx)), crate::layout::RightKind::Browser, "on its Page");
+                assert_eq!(h.browser.read(cx).tabs.active_of(&owner, None), Some(one));
+                let two = h.browser.update(cx, |browser, _| browser.tabs.open(None, owner.clone(), "https://b.example/", None));
+                h.sidebar_intent(SidebarIntent::RowAction("s1".into(), RowAction::Pages), window, cx);
+                assert_eq!(crate::layout::Layout::get(cx).mode, crate::layout::Mode::Browse, "several open in Browse");
+                assert_eq!(h.browser.read(cx).browse_session_tab, Some(two), "on the session's active page");
+                assert!(!h.open_session_pages("s0".into(), window, cx), "no pages: nothing opens");
+            })
+        });
         b3c_teardown(&dir, guard, old);
     }
 }

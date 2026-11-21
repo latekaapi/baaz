@@ -391,6 +391,8 @@ impl Harness {
         let downloads = self.browser.read(cx).browse_downloads(cx);
         let downloads = (!downloads.is_empty())
             .then(|| downloads.iter().any(|(_, _, d)| d.state == aui_webview::DownloadStatus::Downloading));
+        // docs/82 8.4: what waits on the person and the session they left.
+        let (needs_you, last_session) = self.browse_context(cx);
         BrowseModel {
             bookmarked: self.browser.read(cx).browse_centre_shown(cx)
                 .and_then(|id| self.browser.read(cx).tabs.get(id).map(|tab| tab.url.clone()))
@@ -405,6 +407,8 @@ impl Harness {
             task_folders,
             spaces: if spaces.is_empty() { vec![BrowseSpace { id: crate::browser::tabs::PERSONAL.into(), name: "Personal".into(), own_signins: false }] } else { spaces },
             downloads,
+            needs_you,
+            last_session,
             space: current,
             // The column owns its header hover; it lays it over this.
             hovered_today_header: false,
@@ -512,6 +516,11 @@ impl Harness {
             // row click opens it) with the pane on its Tasks.
             SidebarIntent::RowAction(id, RowAction::Tasks) => {
                 self.open_session_tasks(id.to_string(), window, cx);
+            }
+            // The row's "N pages" (docs/82 8.4): its Page, or Browse on its
+            // task folder when it owns several.
+            SidebarIntent::RowAction(id, RowAction::Pages) => {
+                self.open_session_pages(id.to_string(), window, cx);
             }
             SidebarIntent::RowAction(id, action) => {
                 match action {
@@ -703,6 +712,9 @@ impl Harness {
                 }
             }
             BrowseIntent::OpenTaskChat(session) => self.browse_task_folder_action(&session, TaskFolderAction::OpenChat, window, cx),
+            // The footer's context (docs/82 8.4): back to Sessions.
+            BrowseIntent::NeedsYou => self.back_to_needs_you(window, cx),
+            BrowseIntent::LastSession(session) => self.back_to_session(session.to_string(), window, cx),
             // The column's own hover state (see `sidebar_intent`).
             BrowseIntent::HoverTodayHeader(on) => {
                 let intent = SidebarIntent::Browse(BrowseIntent::HoverTodayHeader(on));

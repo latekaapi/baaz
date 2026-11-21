@@ -29,7 +29,19 @@ impl Harness {
             active,
             pending,
             tasks: self.terminal_dock.read(cx).host().read(cx).tasks.running_counts(),
+            pages: self.session_page_counts(cx),
         }
+    }
+
+    /// How many pages (tabs of its own) each session owns, in first-seen
+    /// order (docs/82 8.4): the rows' "N pages". Nothing until the tabs
+    /// are loaded.
+    pub(crate) fn session_page_counts(&self, cx: &gpui::App) -> Vec<(String, u32)> {
+        let browser = self.browser.read(cx);
+        if !browser.tabs_loaded {
+            return Vec::new();
+        }
+        browser.tabs.session_tabs(None).into_iter().map(|(session, tabs)| (session, tabs.len() as u32)).collect()
     }
 
     /// The rows the sidebar should draw ([`SessionList::visible`]) for this

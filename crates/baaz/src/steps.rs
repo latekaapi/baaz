@@ -158,6 +158,9 @@
 //! | `run-stop` | Stop run on the open session: its process group ends; nothing running fails the step |
 //! | `run-wait-preview` (or `run-wait-preview:<s>`) | the runner waits up to that many seconds (30) while the Run's preview port has not answered, then the step checks the session's Page opened on it; gave up, run ended, moved on or no Run fails the step |
 //! | `tasks-fixture` (or `tasks-fixture:<session_id>`) | the Tasks view's capture fixture (docs/82 6.5): four tasks on that session, else the open one — running on :5173, exited 0, exited 1, stopped — with fixed durations and no process behind any; no session, or one that already has tasks, fails the step, free |
+//! | `pages-fixture` (or `pages-fixture:<session_id>[,<n>]`, `pages-fixture:,<n>`) | capture aid (docs/82 8.4): `n` pages (2 by default, 1–9) owned by that sidebar row (the open session with no id), as tabs of its own on fixed `example.com` paths, no page loaded; no such row or no session open, a bad count, or a session that already owns pages fails the step, free |
+//! | `pages-row:<session_id>` | the row's "N pages" click: one page opens the session on its Page, several open Browse on its task folder; a session that owns no pages fails the step, free |
+//! | `browse-footer:<needs-you\|last>` | the Browse footer's row click (docs/82 8.4): "Needs you" (Sessions, its filter on, the first waiting session open) or the last session (Sessions on it); outside Browse, or a row the footer does not show, fails the step, free |
 //! | `tasks-row:<session_id>` | the sidebar row's "N running" click: that session opens with the right pane on Tasks; a session with nothing running fails the step, free |
 //! | `files-reveal:<path>` | reveal the project-relative file or folder in the Files pane through the link's own path (a folder selects with every ancestor expanded and no preview, a file previews banded on the payload's `#L…`/`:line` suffix); empty or project-less fails, free |
 //! | `row-detail:<session_id>` | capture aid: pin the hover card open for one row, seated at the selected row's bounds (pair with `click:` on the same id; empty clears), free |
@@ -470,6 +473,9 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "branch", run: |this, rest, window, cx| this.step_changes_create_branch(rest, window, cx) },
     WindowVerb { verb: "tasks-fixture", run: |this, rest, _, cx| this.step_tasks_fixture(rest, cx) },
     WindowVerb { verb: "tasks-row", run: |this, rest, window, cx| this.step_tasks_row(rest, window, cx) },
+    WindowVerb { verb: "pages-fixture", run: |this, rest, _, cx| this.step_pages_fixture(rest, cx) },
+    WindowVerb { verb: "pages-row", run: |this, rest, window, cx| this.step_pages_row(rest, window, cx) },
+    WindowVerb { verb: "browse-footer", run: |this, rest, window, cx| this.step_browse_footer(rest, window, cx) },
     WindowVerb { verb: "run", run: |this, _, _, cx| this.step_run(cx) },
     WindowVerb { verb: "run-stop", run: |this, _, _, cx| this.step_run_stop(cx) },
     WindowVerb { verb: "run-wait-preview", run: |this, _, _, cx| this.step_run_wait_preview(cx) },

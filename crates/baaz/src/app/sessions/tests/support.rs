@@ -498,6 +498,7 @@ pub(super) fn chain_muse_entry(id: &str, label: &str, turns: u64) -> crate::side
         unread: false,
         branch: None,
         tasks_running: 0,
+        pages: 0,
         pull_request: None,
     }
 }
