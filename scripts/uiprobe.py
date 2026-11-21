@@ -1201,6 +1201,11 @@ ENTRIES.update({
     # turns) — its provider menu reads "Continue in…". No baselines yet.
     "sidebar-row-menu":        _populated(_PROJECTS + ";fixture-record:p-int-2;sidebar-hover:p-int-2;row-menu:p-int-2"),
     "sidebar-delete-confirm":  _populated(_PROJECTS + ";fixture-record:p-int-2;row-action:p-int-2,delete"),
+    # docs/82 8.9: the header's ⋯ is the same menu — the open session's
+    # (the replay's) row rows in the row's order, then what only the open
+    # session has (here Undo last turn: the replay's last turn is
+    # undoable). No baseline yet.
+    "session-menu-header":     _populated("overflow", replay=True),
     "composer-continue-in":    _populated("row-action:continue-in", replay=True),
     "undo-turn-confirm":       _populated("undo-turn:last", replay=True),
     "revert-file-confirm":     _populated("right-width:440;right:changes;revert-file:crates/baaz/src/layout.rs", replay=True),

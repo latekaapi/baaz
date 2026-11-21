@@ -121,7 +121,7 @@ pub enum MenuKind {
     Command,
     /// The `@` mention picker, above the composer.
     Mention,
-    /// The header's overflow menu: Rename, Fork, Archive.
+    /// The header's ⋯: the session's one menu (the row's rows) plus what only the open session has.
     Overflow,
     /// The Sessions caption's view menu: empty and archived filters.
     ViewOptions,

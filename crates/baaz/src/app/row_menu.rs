@@ -1,6 +1,7 @@
-//! A session row's one menu (docs/82 8.5): Rename, Pin, Fork, Continue in…,
-//! Move to project, Reveal folder, Archive and Delete…, on the row's `⋯` and
-//! on a right-click. The library draws the rows the host offers
+//! A session's one menu (docs/82 8.5, 8.9): Rename, Pin, Fork, Continue in…,
+//! Move to project, Reveal folder, Archive and Delete…, on the row's `⋯`, on
+//! a right-click, and on the session header's `⋯` (which adds, after these,
+//! the rows only the open session has: `dialogs::host_rows`). The library draws the rows the host offers
 //! ([`RowMenuOffers`]); this module decides which work for a session and
 //! does what each row says.
 //!
@@ -26,7 +27,7 @@ use aui::screens::sidebar::{MoveTarget, RowMenuOffers};
 /// session in front.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RowFollowUp {
-    /// The fork picker (the header menu's Fork).
+    /// The fork picker.
     Fork,
     /// The composer's provider menu, "Continue in…".
     ContinueIn,
@@ -73,7 +74,7 @@ impl Harness {
             .is_some_and(|folder| std::path::Path::new(folder).is_dir());
         let delete = list.provider_sessions.contains_key(session_id) && self.chain_members(session_id, cx).len() <= 1;
         let move_to = if archived { Vec::new() } else { move_targets(entry, &list.projects) };
-        RowMenuOffers { fork, continue_in, move_to, reveal, delete, archived }
+        RowMenuOffers { fork, continue_in, move_to, reveal, delete, archived, host_rows: Vec::new() }
     }
 
     /// The row menu's Move to project: list `session_id` under `project`

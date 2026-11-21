@@ -46,72 +46,88 @@ const RUN_LABEL: &str = "Run";
 const SHOW_RUN_LABEL: &str = "Show run";
 const STOP_RUN_LABEL: &str = "Stop run";
 
-/// Actions of the header's overflow menu, in row order.
+/// What only the open session has, after the session menu's own rows in
+/// the header's ⋯ (docs/82 8.9: the header's ⋯ IS the session's one menu),
+/// in row order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OverflowAction {
-    Rename,
-    Fork,
+enum HostRow {
     Run,
     ShowRun,
     StopRun,
     UndoLastTurn,
     MoveBack,
     OpenProject,
-    Archive,
 }
 
-/// The header overflow menu's rows and their actions: Rename, Fork, Undo
-/// last turn, Move back to project folder, Archive — Fork only where the
-/// session's provider can fork (`fork`; docs/82 5.5, rule 13: a control is
-/// shown only if it works), Undo last turn only while a finished turn can
-/// be undone (`undo_last`; docs/82 6.4), Move back only for a worktree
-/// session whose provider can resume it in the project folder
-/// (`move_back`; docs/82 6.2), and Run — or Show run and Stop run while it
-/// runs — only where the session's folder declares `run` (`run`; docs/82
-/// 7.4). "Open project in …" (`open_project`, the row's words) only while
-/// Settings › General › "Open files in" names an installed editor (docs/82
-/// 7.5).
-fn overflow_rows(fork: bool, run: Option<crate::project_run::RunOffer>, undo_last: bool, move_back: bool, open_project: Option<String>) -> (Vec<MenuRow>, Vec<OverflowAction>) {
+/// The header ⋯'s own rows after the session menu's: Run — or Show run and
+/// Stop run while it runs — only where the session's folder declares `run`
+/// (`run`; docs/82 7.4), Undo last turn only while a finished turn can be
+/// undone (`undo_last`; docs/82 6.4), Move back only for a worktree session
+/// whose provider can resume it in the project folder (`move_back`;
+/// docs/82 6.2), and "Open project in …" (`open_project`, the row's words)
+/// only while Settings › General › "Open files in" names an installed
+/// editor (docs/82 7.5). Rename, Pin, Fork, Continue in…, Move to project,
+/// Reveal folder, Archive and Delete… are the session menu's
+/// ([`Harness::row_menu_offers`]), drawn by the same builder as the row's.
+fn host_rows(run: Option<crate::project_run::RunOffer>, undo_last: bool, move_back: bool, open_project: Option<String>) -> (Vec<SharedString>, Vec<HostRow>) {
     use crate::project_run::RunOffer;
-    let mut rows = vec![MenuRow::Toggle { label: "Rename".into(), checked: false }];
-    let mut actions = vec![OverflowAction::Rename];
-    if fork {
-        rows.push(MenuRow::Toggle { label: "Fork".into(), checked: false });
-        actions.push(OverflowAction::Fork);
-    }
+    let mut rows: Vec<SharedString> = Vec::new();
+    let mut actions = Vec::new();
     match run {
         Some(RunOffer::Idle) => {
-            rows.push(MenuRow::Toggle { label: RUN_LABEL.into(), checked: false });
-            actions.push(OverflowAction::Run);
+            rows.push(RUN_LABEL.into());
+            actions.push(HostRow::Run);
         }
         Some(RunOffer::Running) => {
-            rows.push(MenuRow::Toggle { label: SHOW_RUN_LABEL.into(), checked: false });
-            actions.push(OverflowAction::ShowRun);
-            rows.push(MenuRow::Toggle { label: STOP_RUN_LABEL.into(), checked: false });
-            actions.push(OverflowAction::StopRun);
+            rows.push(SHOW_RUN_LABEL.into());
+            actions.push(HostRow::ShowRun);
+            rows.push(STOP_RUN_LABEL.into());
+            actions.push(HostRow::StopRun);
         }
         None => {}
     }
     if undo_last {
-        rows.push(MenuRow::Toggle { label: UNDO_LAST_LABEL.into(), checked: false });
-        actions.push(OverflowAction::UndoLastTurn);
+        rows.push(UNDO_LAST_LABEL.into());
+        actions.push(HostRow::UndoLastTurn);
     }
     if move_back {
-        rows.push(MenuRow::Toggle { label: MOVE_BACK_LABEL.into(), checked: false });
-        actions.push(OverflowAction::MoveBack);
+        rows.push(MOVE_BACK_LABEL.into());
+        actions.push(HostRow::MoveBack);
     }
     if let Some(label) = open_project {
-        rows.push(MenuRow::Toggle { label: label.into(), checked: false });
-        actions.push(OverflowAction::OpenProject);
+        rows.push(label.into());
+        actions.push(HostRow::OpenProject);
     }
-    rows.push(MenuRow::Toggle { label: "Archive".into(), checked: false });
-    actions.push(OverflowAction::Archive);
     (rows, actions)
 }
 
+/// The session's one menu seated under the header's ⋯: the library's
+/// [`aui::screens::sidebar::session_menu_on`], built at draw time (it keeps
+/// its submenu's hover in window state), its submenu on the left so it
+/// opens inside the window.
+/// What the session menu reports a pick through.
+type SessionMenuHandler = std::rc::Rc<dyn Fn(aui::screens::sidebar::SidebarIntent, &mut Window, &mut gpui::App)>;
 
+#[derive(IntoElement)]
+struct HeaderSessionMenu {
+    session: aui::nav::SessionSummary,
+    offers: aui::screens::sidebar::RowMenuOffers,
+    on_intent: SessionMenuHandler,
+}
 
-
+impl RenderOnce for HeaderSessionMenu {
+    fn render(self, window: &mut Window, cx: &mut gpui::App) -> impl IntoElement {
+        aui::screens::sidebar::session_menu_on(
+            "overflow",
+            &self.session,
+            &self.offers,
+            aui::overlay::SubmenuSide::Left,
+            Some(self.on_intent),
+            window,
+            cx,
+        )
+    }
+}
 
 /// The modal dialog as its own view (plan 4.6): the dialog's content, its
 /// focus, its buttons. The root opens it ([`Harness::set_dialog`]), pushes
@@ -676,80 +692,35 @@ impl Harness {
         });
     }
 
-    /// The header's overflow menu, anchored under the "…" button: Rename swaps
-    /// the title for the dense inline field, Fork opens the fork picker,
-    /// Run starts the project's declared `run` (Show run / Stop run while it
-    /// runs; [`crate::project_run`]),
-    /// Undo last turn asks before undoing the newest undoable turn, Move
-    /// back hands a worktree's changes to the project folder, and Archive
-    /// asks first through the archive dialog.
+    /// The header's ⋯: the session's one menu (docs/82 8.9) — the same
+    /// builder, offers and order as its sidebar row's ⋯ and right-click
+    /// ([`aui::screens::sidebar::session_menu_on`], [`Self::row_menu_offers`]
+    /// on the row the open session is listed under), followed by the rows
+    /// only the open session has ([`host_rows`]). The row's intents run
+    /// through [`Self::sidebar_intent`] exactly as a row's click does;
+    /// Rename opens the sidebar first, so its field is on screen.
     pub(crate) fn render_overflow_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::Overflow) {
             return None;
         }
-        let fork = self
-            .active
-            .as_ref()
-            .is_some_and(|view| view.read(cx).rt(cx).offers(provider::Capability::ForkSession));
+        let head = self.active_id(cx).map(|id| self.chain_head(&id, cx))?;
+        let entry = self.session_list.read(cx).sessions.iter().find(|entry| entry.id == head).cloned();
+        let name = self
+            .collapsed_head_label(&head, cx)
+            .or_else(|| entry.as_ref().map(|entry| entry.label.clone()))
+            .unwrap_or_else(|| crate::sidebar::UNNAMED.to_owned());
+        let mut session = aui::nav::SessionSummary::new(head.clone(), name, aui_tokens::AgentState::Idle, "");
+        session.pinned = entry.as_ref().is_some_and(|entry| entry.pinned);
         let folder = self.active.as_ref().and_then(|view| crate::open_in::project_folder(view.read(cx).rt(cx).workspace_path()));
         let open_project = folder.as_ref().and_then(|_| crate::open_in::project_label(cx));
-        let (rows, actions) = overflow_rows(fork, self.run_offer(cx), self.undo_last_offered(cx), self.move_back_offered(cx), open_project);
-        let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
-            let action = actions.get(*index).copied();
-            this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
-            match action {
-                Some(OverflowAction::Rename) => {
-                    if let Some(session_id) = this.active_id(cx) {
-                        crate::layout::Layout::stage(cx, |layout| layout.sidebar_open = true);
-                        this.start_rename(session_id, window, cx);
-                    } else {
-                        this.overlays.update(cx, |overlays, cx| {
-                            overlays.toast("Nothing to rename", "No session is open.", cx);
-                        });
-                    }
-                }
-                Some(OverflowAction::Fork) => this.open_palette(PaletteKind::Fork, cx),
-                Some(OverflowAction::Run) => {
-                    if let Err(why) = this.run_project(cx) {
-                        this.overlays.update(cx, |overlays, cx| {
-                            overlays.toast("Couldn't run", why, cx);
-                        });
-                    }
-                }
-                Some(OverflowAction::ShowRun) => this.select_right(crate::layout::RightKind::Tasks, cx),
-                Some(OverflowAction::StopRun) => {
-                    if let Err(why) = this.stop_project_run(cx) {
-                        this.overlays.update(cx, |overlays, cx| {
-                            overlays.toast("Couldn't stop it", why, cx);
-                        });
-                    }
-                }
-                Some(OverflowAction::UndoLastTurn) => {
-                    if let Err(why) = this.undo_last_turn(cx) {
-                        crate::baaz_log!("undo: last turn not asked ({why})");
-                    }
-                }
-                Some(OverflowAction::MoveBack) => {
-                    if let Err(why) = this.move_back_to_root(cx) {
-                        this.overlays.update(cx, |overlays, cx| overlays.toast("Couldn't move back", why, cx));
-                    }
-                }
-                Some(OverflowAction::OpenProject) => {
-                    if let Some(folder) = folder.as_ref() {
-                        crate::open_in::open_path(folder, None, cx);
-                    }
-                }
-                Some(OverflowAction::Archive) => {
-                    if let Some(session_id) = this.active_id(cx) {
-                        this.open_archive_dialog(session_id, cx);
-                    } else {
-                        this.overlays.update(cx, |overlays, cx| {
-                            overlays.toast("Nothing to archive", "No session is open.", cx);
-                        });
-                    }
-                }
-                None => {}
-            }
+        let (labels, actions) = host_rows(self.run_offer(cx), self.undo_last_offered(cx), self.move_back_offered(cx), open_project);
+        let mut offers = self.row_menu_offers(&head, cx);
+        offers.host_rows = labels;
+        let me = cx.entity().downgrade();
+        let on_intent: SessionMenuHandler = std::rc::Rc::new(move |intent, window, cx| {
+            let actions = actions.clone();
+            let folder = folder.clone();
+            let _ = me.update(cx, |this, cx| this.header_menu_intent(intent, &actions, folder.as_deref(), window, cx));
         });
         // Below-end of the `…` button that opened it — `anchored_menu` flips
         // above and slides inside the window on overflow. No button bounds
@@ -765,17 +736,71 @@ impl Harness {
             this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
         });
         let catcher = dismiss_layer("overflow-scrim", "Dismiss menu", move |w, cx| dismiss(&(), w, cx));
+        let menu = HeaderSessionMenu { session, offers, on_intent };
         Some(
-            div().absolute().inset_0().child(catcher).child(anchored_menu(
-                trigger,
-                MenuSide::Below,
-                MenuAlign::End,
-                view_menu("overflow", rows).at_rest().on_activate(move |i, w, cx| {
-                    activate(&i, w, cx)
-                }),
-            ))
+            div().absolute().inset_0().child(catcher).child(anchored_menu(trigger, MenuSide::Below, MenuAlign::End, menu))
             .into_any_element(),
         )
+    }
+
+    /// One pick in the header's ⋯ ([`Self::render_overflow_menu`]): the
+    /// menu closes, then a host row does its work and every other row goes
+    /// where the sidebar row's same row goes. A press on the menu's own
+    /// surface, or on Move to project (whose submenu opens on hover), keeps
+    /// it open.
+    fn header_menu_intent(
+        &mut self,
+        intent: aui::screens::sidebar::SidebarIntent,
+        actions: &[HostRow],
+        folder: Option<&std::path::Path>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use aui::nav::RowAction;
+        use aui::screens::sidebar::SidebarIntent;
+        if matches!(intent, SidebarIntent::MenuBackdrop) {
+            return;
+        }
+        self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
+        match intent {
+            SidebarIntent::DismissMenus => {}
+            SidebarIntent::RowAction(_, RowAction::Host(index)) => match actions.get(usize::from(index)).copied() {
+                Some(HostRow::Run) => {
+                    if let Err(why) = self.run_project(cx) {
+                        self.overlays.update(cx, |overlays, cx| overlays.toast("Couldn't run", why, cx));
+                    }
+                }
+                Some(HostRow::ShowRun) => self.select_right(crate::layout::RightKind::Tasks, cx),
+                Some(HostRow::StopRun) => {
+                    if let Err(why) = self.stop_project_run(cx) {
+                        self.overlays.update(cx, |overlays, cx| overlays.toast("Couldn't stop it", why, cx));
+                    }
+                }
+                Some(HostRow::UndoLastTurn) => {
+                    if let Err(why) = self.undo_last_turn(cx) {
+                        crate::baaz_log!("undo: last turn not asked ({why})");
+                    }
+                }
+                Some(HostRow::MoveBack) => {
+                    if let Err(why) = self.move_back_to_root(cx) {
+                        self.overlays.update(cx, |overlays, cx| overlays.toast("Couldn't move back", why, cx));
+                    }
+                }
+                Some(HostRow::OpenProject) => {
+                    if let Some(folder) = folder {
+                        crate::open_in::open_path(folder, None, cx);
+                    }
+                }
+                None => {}
+            },
+            intent => {
+                if matches!(intent, SidebarIntent::RowAction(_, RowAction::Rename)) {
+                    crate::layout::Layout::stage(cx, |layout| layout.sidebar_open = true);
+                }
+                self.sidebar_intent(intent, window, cx);
+            }
+        }
+        cx.notify();
     }
 
     /// The right pane's view menu (docs/83 §6), anchored under the tab
@@ -1176,50 +1201,48 @@ impl Harness {
 
 #[cfg(test)]
 mod tests {
-    use aui::nav::MenuRow;
     use crate::layout::LayoutGlobal as _;
 
-    /// The header ⋯ menu's rows: Rename, Fork, Run, Undo last turn, Move
-    /// back, Archive, one action each; Fork only where the session's
-    /// provider forks, Run, Undo last turn and Move back only where they
-    /// are offered.
+    /// The header ⋯'s own rows after the session menu's (docs/82 8.9):
+    /// only what the open session has — Run (or Show run and Stop run),
+    /// Undo last turn, Move back, Open project in … — each only where it is
+    /// offered, in that order, one action each. Rename, Fork, Archive and
+    /// the rest are the session menu's, never repeated here.
     #[test]
-    fn overflow_menu_rows_are_rename_fork_archive() {
-        let label = |row: &MenuRow| match row {
-            MenuRow::Toggle { label, checked } => (label.to_string(), *checked),
-            _ => panic!("overflow rows are toggles"),
-        };
-        let (rows, actions) = super::overflow_rows(true, None, false, false, None);
-        assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Fork", "Archive"]);
-        assert!(rows.iter().all(|r| !label(r).1), "no row is checked");
-        assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::Fork, super::OverflowAction::Archive]);
-        // A provider that cannot fork shows no Fork row (docs/82 5.5).
-        let (rows, actions) = super::overflow_rows(false, None, false, false, None);
-        assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Archive"]);
-        assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::Archive]);
-        // A worktree session whose provider resumes in a named folder gets
-        // Move back, above Archive (docs/82 6.2).
-        let (rows, actions) = super::overflow_rows(false, None, false, true, None);
-        assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Move back to project folder", "Archive"]);
-        assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::MoveBack, super::OverflowAction::Archive]);
-        // A finished turn Undo can act on adds Undo last turn (docs/82 6.4).
-        let (rows, actions) = super::overflow_rows(true, None, true, false, None);
-        assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Fork", "Undo last turn", "Archive"]);
-        assert_eq!(actions[2], super::OverflowAction::UndoLastTurn);
-        // A folder that declares `run` gets Run; while it runs, Show run and
-        // Stop run instead — never a second Run (docs/82 7.4).
+    fn the_header_menus_own_rows_follow_what_the_session_has() {
+        use super::HostRow;
         use crate::project_run::RunOffer;
-        let (rows, actions) = super::overflow_rows(false, Some(RunOffer::Idle), false, false, None);
-        assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Run", "Archive"]);
-        assert_eq!(actions[1], super::OverflowAction::Run);
-        let (rows, actions) = super::overflow_rows(false, Some(RunOffer::Running), false, false, None);
-        assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Show run", "Stop run", "Archive"]);
-        assert_eq!(&actions[1..3], [super::OverflowAction::ShowRun, super::OverflowAction::StopRun]);
-        // An editor chosen in Settings › General adds "Open project in …"
-        // above Archive (docs/82 7.5); the default app adds nothing.
-        let (rows, actions) = super::overflow_rows(false, None, false, false, Some("Open project in Zed".into()));
-        assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Open project in Zed", "Archive"]);
-        assert_eq!(actions[1], super::OverflowAction::OpenProject);
+        let labels = |rows: &[gpui::SharedString]| rows.iter().map(|r| r.to_string()).collect::<Vec<_>>();
+        let (rows, actions) = super::host_rows(None, false, false, None);
+        assert!(rows.is_empty() && actions.is_empty(), "nothing of its own: the session menu alone");
+        let (rows, actions) = super::host_rows(Some(RunOffer::Idle), true, true, Some("Open project in Zed".into()));
+        assert_eq!(labels(&rows), ["Run", "Undo last turn", "Move back to project folder", "Open project in Zed"]);
+        assert_eq!(actions, [HostRow::Run, HostRow::UndoLastTurn, HostRow::MoveBack, HostRow::OpenProject]);
+        // While it runs, Show run and Stop run instead — never a second Run
+        // (docs/82 7.4).
+        let (rows, actions) = super::host_rows(Some(RunOffer::Running), false, false, None);
+        assert_eq!(labels(&rows), ["Show run", "Stop run"]);
+        assert_eq!(actions, [HostRow::ShowRun, HostRow::StopRun]);
+        for (rows, _) in [super::host_rows(Some(RunOffer::Idle), true, true, Some("Open project in Zed".into()))] {
+            for shared in ["Rename", "Pin", "Fork", "Continue in…", "Archive", "Delete…"] {
+                assert!(!labels(&rows).iter().any(|l| l == shared), "{shared} is the session menu's, not the header's own");
+            }
+        }
+    }
+
+    /// docs/82 8.9: one session menu. The header's ⋯ draws the library's
+    /// session menu over the row's own offers — never its own copy of the
+    /// rows (the duplicated Rename / Fork / Archive building is gone).
+    #[test]
+    fn the_header_menu_is_the_rows_menu() {
+        let source = include_str!("dialogs.rs");
+        let render = &source[source.find("pub(crate) fn render_overflow_menu").expect("the header menu")..];
+        let render = &render[..render.find("fn header_menu_intent").expect("its intents")];
+        assert!(render.contains("HeaderSessionMenu {"), "the header draws its session menu");
+        let element = &source[source.find("impl RenderOnce for HeaderSessionMenu").expect("its element")..];
+        assert!(element[..400].contains("aui::screens::sidebar::session_menu_on("), "which is the row's builder");
+        assert!(render.contains("self.row_menu_offers(&head, cx)"), "over the row's own offers");
+        assert!(!render.contains("\"Rename\""), "no row of its own named Rename");
     }
 
     use crate::palette::{filter_commands, tilde_root};

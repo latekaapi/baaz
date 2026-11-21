@@ -175,7 +175,7 @@
 //! | `site-info` | open the site-information panel (the address row's shield) for the centre page; no page fails the step |
 //! | `pointer:<x>,<y>` | dispatch one mouse move to that window point: the pointer resting on a row, so a following `sidebar-scroll-sweep:` shows hover under a scroll |
 //! | `transcript-scroll-sweep:<dy,finger_ticks,tail_ticks>` | the transcript's twin of `sidebar-scroll-sweep:`, pushing the active session's own wheel accumulator |
-//! | `overflow` | open the header's overflow menu |
+//! | `overflow` | open the header's ⋯: the session's one menu plus the rows only the open session has (docs/82 8.9) |
 //! | `view-menu` | open the Sessions caption's view menu |
 //! | `account` | open the account menu |
 //! | `settings:<section>` | open the Settings page, optionally at that section (`settings` alone reopens the last-visited section, General on first open; `settings:providers/codex` opens a provider sub-page). Idempotent: open, never toggle |
@@ -215,7 +215,7 @@
 //! | `worktree:on\|off` | move the open unsent draft into a new worktree of its project, or back to the project root, through the replace a provider switch uses (docs/82 6.1); fails when it already runs there, when it is no unsent draft or still opening, and always in a capture (the person's repository is off limits) |
 //! | `worktree-default:on\|off` | the current project's worktree default for new sessions, stored with its other defaults; fails when it already says so |
 //! | `unarchive:<id>` | put an archived session back (the Archive tray action); a worktree session's worktree is restored first (docs/82 6.2). Fails when the id names no archived row |
-//! | `move-back` | "Move back to project folder" on the open session: its worktree's changes land in the project root, uncommitted, and it reopens there (docs/82 6.2). Fails where the overflow menu would not offer it |
+//! | `move-back` | "Move back to project folder" on the open session: its worktree's changes land in the project root, uncommitted, and it reopens there (docs/82 6.2). Fails where the header's ⋯ would not offer it |
 //! | `wheel:<dy>` | dispatch one synthetic wheel event at the window centre and log `baaz: wheel dy=<dy> list_px=<before>-><after>` (the palette-scroll instrument) |
 //! | `sidebar-wheel:<dy>[,n]` | dispatch n synthetic wheel events at a sidebar point and log `baaz: sbwheel dy=<dy> n=<n> sidebar_ix=<before_ix>+<before_off>-><after_ix>+<after_off> rows=<entries> pane=<pane> root=<root> centre=<centre> drains=<drains>` (the sidebar-scroll instrument: the virtual list's `ListOffset`, item index plus the pixel offset into that row, in place of the old div's pixel offset; pair with `wait:<ms>` and a trailing `sidebar-wheel:0,0` to read the burst's renders; `centre` is the cached transcript column's rebuilds) |
 //! | `centre` | log `baaz: centre hero=<hero> loading=<loading>`: hero vs loading-row paints since the last call (the open-flicker instrument) |
