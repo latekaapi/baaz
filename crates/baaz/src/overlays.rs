@@ -88,6 +88,11 @@ pub enum DialogAction {
     /// the Trash (D-8). The paths ride the dialog's `archive_target`, one
     /// per line; dismissing any other way keeps them.
     TrashTranscript,
+    /// Delete the session in `archive_target` for good (docs/82 8.5): what
+    /// Baaz kept for it goes, and its transcript is offered for the Trash
+    /// ([`Self::TrashTranscript`]). Only this button deletes; dismissing
+    /// any other way keeps everything.
+    DeleteSession,
     /// Undo a turn or revert a file (docs/82 6.4): the session and the
     /// ask's number ride `archive_target` (`<session id>\n<n>`), so only
     /// this button runs the action; dismissing any other way changes
@@ -165,6 +170,10 @@ pub struct Menu {
     /// For [`MenuKind::SessionRow`]: whose row menu it is. Meaningless for
     /// every other kind.
     pub session: Option<String>,
+    /// For [`MenuKind::SessionRow`]: where a right-click on the row landed,
+    /// in window coordinates — the menu stands there. `None`: under the
+    /// row's `⋯` (docs/82 8.5).
+    pub point: Option<gpui::Point<gpui::Pixels>>,
 }
 
 impl Menu {
@@ -183,22 +192,27 @@ impl Menu {
 
     /// A chip picker with the selection on `selected`.
     pub fn picker(kind: MenuKind, selected: usize) -> Self {
-        Self { kind, selected, filter: String::new(), at: 0, project: None, project_header: false, sub_open: false, session: None }
+        Self { kind, selected, filter: String::new(), at: 0, project: None, project_header: false, sub_open: false, session: None, point: None }
     }
 
     /// A caret popover that started at byte `at` in the draft.
     pub fn caret(kind: MenuKind, at: usize) -> Self {
-        Self { kind, selected: 0, filter: String::new(), at, project: None, project_header: false, sub_open: false, session: None }
+        Self { kind, selected: 0, filter: String::new(), at, project: None, project_header: false, sub_open: false, session: None, point: None }
     }
 
     /// A project menu for `project` (`None` is Unfiled).
     pub fn project(project: Option<String>, from_header: bool) -> Self {
-        Self { kind: MenuKind::Project, selected: 0, filter: String::new(), at: 0, project, project_header: from_header, sub_open: false, session: None }
+        Self { kind: MenuKind::Project, selected: 0, filter: String::new(), at: 0, project, project_header: from_header, sub_open: false, session: None, point: None }
     }
 
     /// A sidebar session row's `⋯` menu for `session`.
     pub fn session_row(session: String) -> Self {
         Self { session: Some(session), ..Self::picker(MenuKind::SessionRow, 0) }
+    }
+
+    /// The same row menu, opened by a right-click at `point` (docs/82 8.5).
+    pub fn session_row_at(session: String, point: gpui::Point<gpui::Pixels>) -> Self {
+        Self { point: Some(point), ..Self::session_row(session) }
     }
 }
 

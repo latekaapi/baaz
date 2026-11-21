@@ -227,6 +227,7 @@ impl Render for DialogView {
                 | DialogAction::DeleteSpace
                 | DialogAction::ClearHistory
                 | DialogAction::TrashTranscript
+                | DialogAction::DeleteSession
                 | DialogAction::UndoChanges
         );
         // A dialog whose primary already dismisses it carries no second
@@ -994,6 +995,12 @@ impl Harness {
             self.trash_transcript(target, cx);
             return;
         }
+        // Delete (docs/82 8.5): the session id rode the dialog; only this
+        // button deletes.
+        if action == DialogAction::DeleteSession {
+            self.confirm_delete_dialog(target, window, cx);
+            return;
+        }
         // Undo (docs/82 6.4): the session and the ask rode the dialog.
         if action == DialogAction::UndoChanges {
             self.confirm_undo_dialog(target, cx);
@@ -1043,6 +1050,7 @@ impl Harness {
             | DialogAction::ClearHistory
             | DialogAction::SpaceSignIns
             | DialogAction::TrashTranscript
+            | DialogAction::DeleteSession
             | DialogAction::UndoChanges
             | DialogAction::HandoffConfirm => {}
         }

@@ -855,6 +855,14 @@ impl SessionView {
         self.close_menu(cx);
     }
 
+    /// Open the provider menu (never a toggle): the row menu's Continue
+    /// in… on this session (docs/82 8.5).
+    pub(crate) fn open_provider_menu(&mut self, cx: &mut Context<Self>) {
+        if !self.overlays.read(cx).is_open(MenuKind::Provider) {
+            self.toggle_picker(MenuKind::Provider, cx);
+        }
+    }
+
     pub(super) fn close_menu(&mut self, cx: &mut Context<Self>) {
         self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
         cx.notify();
@@ -881,14 +889,12 @@ impl SessionView {
 impl SessionRuntime {
     /// The provider menu's rows for a session on `current`.
     ///
-    /// A fresh session offers the three backends as a swap. A session
-    /// with turns keeps its lane, so every other backend gets two rows:
-    /// "Hand off to X…" first (a `handoff:<wire>` id, starting the
-    /// lossy re-prompt), then "New session on X" with the reason in the
-    /// detail line. The picker's rows always act on click — the typed
-    /// reason rides as prose, the way an `Unavailable` capability
-    /// explains itself — and row ids are what [`Self::pick_provider`]
-    /// parses back; only the labels differ.
+    /// Every provider by mark and name, the current one checked (D4). A
+    /// fresh session swaps to the pick; a session with turns keeps its
+    /// lane, so the pick opens the hand-off confirm and the menu reads
+    /// "Continue in…" (docs/82 8.5). Row ids are plain wire ids, what
+    /// [`SessionView::pick_provider`] parses back (it still reads a
+    /// `handoff:<wire>` id from a scripted verb).
     pub(super) fn provider_rows(current: ProviderId, has_turns: bool) -> Vec<ProviderRow> {
         Self::provider_rows_for(current, has_turns, &ProviderId::all())
     }
@@ -943,10 +949,10 @@ impl SessionView {
             }
             Command::Compact => self.runtime.update(cx, |rt, cx| rt.compact(cx)),
             Command::Clear => cx.emit(SessionEvent::NewSession),
-            // `/handoff` opens the provider picker on the handoff rows: a
-            // session with turns offers "Hand off to X…" there. With no
-            // turns there is nothing to carry, so it says so instead of
-            // opening a menu whose handoff rows would all refuse.
+            // `/handoff` opens the provider menu, which reads "Continue
+            // in…" on a session with turns: a pick there is the hand-off.
+            // With no turns there is nothing to carry, so it says so
+            // instead of opening a menu whose picks would only swap.
             Command::Handoff => {
                 if self.runtime.read(cx).has_turns() {
                     self.toggle_picker(MenuKind::Provider, cx);

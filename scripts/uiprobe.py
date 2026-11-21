@@ -1127,6 +1127,18 @@ ENTRIES.update({
     "sidebar-page-count":      _populated("pages-fixture;pages-fixture:p-int-2,2;pages-fixture:p-web-5,1;"
                                           "sidebar-hover:p-web-5", replay=True),
     "browse-footer-context":   _populated("mode:browse;tab-new:https://example.com", replay=True),
+    # docs/82 8.5, the session row's one menu. `sidebar-row-menu`: Audit log
+    # export's menu open under its ⋯ over the populated sidebar — the row
+    # given the local record a real row of its provider carries
+    # (`fixture-record:`, in memory only), so every row it can offer shows:
+    # Rename, Pin, Fork (where its provider forks), Continue in…, Move to
+    # project ›, Reveal folder, Archive, Delete…. `sidebar-delete-confirm`:
+    # its Delete… confirm, naming what goes. `composer-continue-in`: the
+    # row menu's Continue in… on the open session (the replay, which has
+    # turns) — its provider menu reads "Continue in…". No baselines yet.
+    "sidebar-row-menu":        _populated(_PROJECTS + ";fixture-record:p-int-2;sidebar-hover:p-int-2;row-menu:p-int-2"),
+    "sidebar-delete-confirm":  _populated(_PROJECTS + ";fixture-record:p-int-2;row-action:p-int-2,delete"),
+    "composer-continue-in":    _populated("row-action:continue-in", replay=True),
     "undo-turn-confirm":       _populated("undo-turn:last", replay=True),
     "revert-file-confirm":     _populated("right-width:440;right:changes;revert-file:crates/baaz/src/layout.rs", replay=True),
     "right-files-preview":     _populated("right-width:440;right:files;files-select:src/lib.rs",

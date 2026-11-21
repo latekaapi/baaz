@@ -1168,6 +1168,10 @@ impl Harness {
         if self.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).session_id == session_id) {
             self.active = None;
         }
+        // Nor does the header or the selection keep naming it.
+        if self.open_state.pending_id.as_deref() == Some(session_id) {
+            self.open_state.pending_id = None;
+        }
         // A deleted session takes its inline open failure with it (Z4), so
         // Retry cannot resurrect what was just forgotten.
         if self

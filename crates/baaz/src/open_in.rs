@@ -71,6 +71,36 @@ thread_local! {
     pub(crate) static OPENED: std::cell::RefCell<Vec<Vec<String>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Select `folder` in Finder (a session row's Reveal folder, docs/82 8.5),
+/// off the UI thread: the existence check and `open -R` run on a thread of
+/// their own. A missing folder does nothing. Tests record the path
+/// instead of opening Finder.
+pub(crate) fn reveal_folder(folder: PathBuf) {
+    reveal(folder);
+}
+
+#[cfg(not(test))]
+fn reveal(folder: PathBuf) {
+    let _ = std::thread::Builder::new().name("baaz-reveal".into()).spawn(move || {
+        if std::fs::metadata(&folder).is_ok() {
+            if let Err(why) = crate::system_open::open_detached([std::ffi::OsStr::new("-R"), folder.as_os_str()]) {
+                crate::baaz_log!("reveal folder: could not start open ({why})");
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+fn reveal(folder: PathBuf) {
+    REVEALED.with(|revealed| revealed.borrow_mut().push(folder));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The folders [`reveal_folder`] would have shown, for tests.
+    pub(crate) static REVEALED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// The folder a session's "Open project in …" opens: its workspace path
 /// (a worktree session's own worktree). `None` for an empty path.
 pub(crate) fn project_folder(workspace: &str) -> Option<PathBuf> {

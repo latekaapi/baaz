@@ -541,6 +541,7 @@ mod find;
 pub(crate) mod sessions;
 mod list;
 mod mode_context;
+mod row_menu;
 mod sidebar_host;
 mod peek_split;
 mod titles;
@@ -2916,7 +2917,7 @@ impl Harness {
 
     /// The session header's title: the open session's chain head label, or
     /// "Skills" while the Skills page is open.
-    fn session_header_label(&self, cx: &mut Context<Self>) -> Option<String> {
+    pub(crate) fn session_header_label(&self, cx: &mut Context<Self>) -> Option<String> {
         // The click's target, from the list entry — never the view, so the
         // header answers on the click's own frame, before any page arrives.
         let target =

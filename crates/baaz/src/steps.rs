@@ -181,7 +181,9 @@
 //! | `stall:<ms>[,busy]` | block the UI thread for `ms` (at most 10 s; `,busy` spins on CPU instead of sleeping): the stall watchdog's live check — it should write a `stall:` line, a `logs/stall-*.txt` sample past 2 s and `stall ended:` to `<state dir>/logs/baaz.log`; a bad number fails the step, free |
 //! | `settings-set:<key>=<value>` | the scripted twin of the Settings → Browser rows (`search-engine=<google\|duckduckgo\|bing\|kagi>`) and of Settings → Appearance (`summary-line=<on\|off>`, `theme=<system\|light\|dark>`, `density=<comfortable\|compact>`, `text-size=<default\|large>`); unknown keys or values fail the step, free |
 //! | `sidebar-hover:<session_id>` | capture aid: stand the sidebar's pointer state on that session's row (its trailing slot shows the age and the `⋯`), as the row's own hover report would; an id with no row fails the step, free |
-//! | `row-menu:<session_id>` | open that session row's `⋯` menu (idempotent: open, never toggle); an id with no row fails the step, free |
+//! | `row-menu:<session_id>` | open that session row's menu under its `⋯` (idempotent: open, never toggle); an id with no row fails the step, free |
+//! | `row-action:[<session_id>,]<action>` | a row menu row as its click does (docs/82 8.5), on that row or the open session's: `fork` (opens the session, then its fork picker), `continue-in` (opens it, then its provider menu, "Continue in…"), `archive` (the confirm, or Unarchive on an archived row), `delete` (the confirm), `move:<project name\|unfiled>`; a row the menu does not offer fails the step, and so does `reveal` (it opens Finder: never scripted), free |
+//! | `fixture-record:<session_id>` | capture aid: the in-memory local record a real row of a provider with no list of its own carries (the sidebar fixture's rows have none), so its menu offers Delete…; nothing is written; no row, a row of the provider that lists its own sessions, or one already recorded fails the step, free |
 //! | `pin` | pin or unpin the open session |
 //! | `archive` | raise the archive confirmation |
 //! | `archive-confirm` | confirm it |
@@ -486,6 +488,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "hover", run: |this, rest, _, cx| this.step_hover(rest, cx) },
     WindowVerb { verb: "sidebar-hover", run: |this, rest, _, cx| this.step_sidebar_hover(rest, cx) },
     WindowVerb { verb: "row-menu", run: |this, rest, _, cx| this.step_row_menu(rest, cx) },
+    WindowVerb { verb: "row-action", run: |this, rest, window, cx| this.step_row_action(rest, window, cx) },
+    WindowVerb { verb: "fixture-record", run: |this, rest, _, cx| this.step_fixture_record(rest, cx) },
     WindowVerb { verb: "resize-begin", run: |this, rest, _, cx| this.step_resize_drag("begin", rest, cx) },
     WindowVerb { verb: "resize-move", run: |this, rest, _, cx| this.step_resize_drag("move", rest, cx) },
     WindowVerb { verb: "resize-end", run: |this, rest, _, cx| this.step_resize_drag("end", rest, cx) },

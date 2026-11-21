@@ -37,7 +37,7 @@ use aui::nav::{
 };
 use aui::screens::sidebar::{
     screen_item_count, sidebar_screen, Account, AccountStatus, BrowseIntent, BrowseMenu, BrowseMenuTarget, BrowseModel, Bylines,
-    EditingState, GroupKey, Mode, NavItem, SidebarIntent, SidebarModel, SortKey, ViewOptions,
+    EditingState, GroupKey, Mode, NavItem, RowMenuOffers, SidebarIntent, SidebarModel, SortKey, ViewOptions,
 };
 use aui_icons::IconName;
 use aui_tokens::AgentState;
@@ -75,8 +75,12 @@ pub(crate) struct SidebarFacts {
     pub(crate) skills_on: usize,
     /// The Sessions caption's view menu stands open.
     pub(crate) view_menu_open: bool,
-    /// The session whose `⋯` menu stands open.
+    /// The session whose row menu stands open (its `⋯`, or a right-click).
     pub(crate) row_menu: Option<String>,
+    /// What that menu offers for the session (docs/82 8.5).
+    pub(crate) row_menu_offers: RowMenuOffers,
+    /// Where a right-click opened it; `None` under the row's `⋯`.
+    pub(crate) row_menu_at: Option<gpui::Point<Pixels>>,
     /// The open Browse right-click menu: its row stays lit.
     pub(crate) browse_menu: Option<BrowseMenu>,
     /// The session row being renamed in place.
@@ -109,6 +113,8 @@ impl Default for SidebarFacts {
             skills_on: 0,
             view_menu_open: false,
             row_menu: None,
+            row_menu_offers: RowMenuOffers::default(),
+            row_menu_at: None,
             browse_menu: None,
             renaming: None,
             browse: None,
@@ -1187,6 +1193,9 @@ impl SidebarPane {
                 Some(BrowseMenuTarget::TaskFolder { session, .. }) if mode == Mode::Browse => {
                     Some(format!("folder-{session}").into())
                 }
+                // A session row's menu (its `⋯` or a right-click) keeps its
+                // row lit too, wherever the pointer went (docs/82 8.5).
+                _ if mode == Mode::Sessions && facts.row_menu.is_some() => facts.row_menu.clone().map(SharedString::from),
                 _ => self.hovered.clone().map(SharedString::from),
             },
             hovered_group: self.hovered_group.clone().map(SharedString::from),
@@ -1194,6 +1203,8 @@ impl SidebarPane {
             highlighted: None,
             editing,
             row_menu: facts.row_menu.clone().map(SharedString::from),
+            row_menu_offers: facts.row_menu_offers.clone(),
+            row_menu_at: facts.row_menu_at,
             loading: list.loading(),
             view_menu_open: facts.view_menu_open,
             view_options: ViewOptions {
@@ -3347,6 +3358,208 @@ mod tests {
                 assert_eq!(crate::layout::Layout::get(cx).mode, crate::layout::Mode::Browse, "several open in Browse");
                 assert_eq!(h.browser.read(cx).browse_session_tab, Some(two), "on the session's active page");
                 assert!(!h.open_session_pages("s0".into(), window, cx), "no pages: nothing opens");
+            })
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// Two adopted projects under the hermetic state dir, s0..s4 listed in
+    /// the first (their folder its root).
+    fn menu_projects(h: &mut Harness, dir: &std::path::Path, cx: &mut gpui::App) -> (String, String) {
+        let (a, b) = (dir.join("alpha"), dir.join("beta"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let (a_id, b_id) = h.session_list.update(cx, |list, _| (list.projects.add(&a).id.clone(), list.projects.add(&b).id.clone()));
+        let root = crate::projects::canonical_str(&a.to_string_lossy());
+        h.session_list.update(cx, |list, _| {
+            for entry in &mut list.sessions {
+                entry.workspace = Some(root.clone());
+                entry.project = Some(a_id.clone());
+            }
+        });
+        h.invalidate_list(cx);
+        (a_id, b_id)
+    }
+
+    /// docs/82 8.5: the row menu offers per capability and state — Fork only
+    /// where the provider forks and a turn exists, Continue in… only on a
+    /// started session, nothing but Unarchive / Reveal / Delete on an
+    /// archived row, Delete only where Baaz keeps the record.
+    #[gpui::test]
+    fn the_row_menu_offers_what_works_for_the_session(cx: &mut TestAppContext) {
+        use crate::providers::ProviderId;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("row-menu-offers");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                context_sessions(h, cx);
+                let (alpha, beta) = menu_projects(h, &dir, cx);
+                let offers = h.row_menu_offers("s1", cx);
+                let fork = crate::providers::offers(ProviderId::Muse, provider::Capability::ForkSession);
+                assert_eq!(offers.fork, fork, "Fork follows the provider's capability");
+                assert!(offers.reveal, "its folder exists");
+                assert!(!offers.delete, "Baaz keeps no record of a session its provider lists");
+                assert!(!offers.archived);
+                let targets: Vec<(Option<String>, bool)> =
+                    offers.move_to.iter().map(|t| (t.project.as_ref().map(|p| p.to_string()), t.current)).collect();
+                assert!(targets.contains(&(Some(alpha), true)), "its own project, checked: {targets:?}");
+                assert!(targets.contains(&(Some(beta), false)), "the other one: {targets:?}");
+                assert!(targets.iter().all(|(project, _)| project.is_some()), "no Unfiled under a project root: {targets:?}");
+                // A provider that cannot fork offers no Fork.
+                let cannot = ProviderId::all().into_iter().find(|id| !crate::providers::offers(*id, provider::Capability::ForkSession));
+                if let Some(cannot) = cannot {
+                    h.session_list.update(cx, |list, _| list.sessions.iter_mut().filter(|e| e.id == "s1").for_each(|e| e.provider = cannot));
+                    assert!(!h.row_menu_offers("s1", cx).fork, "{cannot:?} cannot fork");
+                }
+                // A draft (no turns) has nothing to fork or continue.
+                h.session_list.update(cx, |list, _| list.sessions.iter_mut().filter(|e| e.id == "s3").for_each(|e| e.turns = 0));
+                let draft = h.row_menu_offers("s3", cx);
+                assert!(!draft.fork && !draft.continue_in, "a draft offers no Fork and no Continue in…");
+                // An archived row: Unarchive, Reveal, Delete only.
+                h.session_list.update(cx, |list, _| list.sessions.iter_mut().filter(|e| e.id == "s4").for_each(|e| e.archived = true));
+                let archived = h.row_menu_offers("s4", cx);
+                assert!(archived.archived && !archived.fork && !archived.continue_in && archived.move_to.is_empty());
+                // A recorded session (a provider with no list of its own) can be deleted.
+                h.session_list.update(cx, |list, _| {
+                    crate::provider_sessions::upsert_open(&mut list.provider_sessions, &mut list.overrides, "codex", "s0", None, None, None);
+                });
+                assert!(h.row_menu_offers("s0", cx).delete);
+            })
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// docs/82 8.5: a right-click opens the same menu as the `⋯`, at the
+    /// pointer, with the same offers.
+    #[gpui::test]
+    fn a_right_click_opens_the_rows_menu_at_the_pointer(cx: &mut TestAppContext) {
+        use aui::screens::sidebar::SidebarIntent;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("row-menu-right-click");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        let at = gpui::point(px(120.0), px(340.0));
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                context_sessions(h, cx);
+                h.sidebar_intent(SidebarIntent::RowAction("s1".into(), aui::nav::RowAction::More), window, cx);
+                let dots = h.sidebar_facts(cx);
+                assert_eq!(dots.row_menu.as_deref(), Some("s1"));
+                assert_eq!(dots.row_menu_at, None, "the ⋯ seats it under itself");
+                h.sidebar_intent(SidebarIntent::RowMenuAt("s1".into(), at), window, cx);
+                let right = h.sidebar_facts(cx);
+                assert_eq!(right.row_menu.as_deref(), Some("s1"), "the same row's menu");
+                assert_eq!(right.row_menu_at, Some(at), "at the pointer");
+                assert_eq!(right.row_menu_offers, dots.row_menu_offers, "the same rows");
+                h.sidebar_intent(SidebarIntent::RowMenuAt("s2".into(), at), window, cx);
+                assert_eq!(h.open_row_menu(cx).as_deref(), Some("s2"), "another row's right-click replaces it");
+            })
+        });
+        let model = vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| h.push_sidebar_facts(cx));
+            baaz.read(cx).sidebar_pane.read(cx).model(cx)
+        });
+        assert_eq!(model.row_menu.as_deref(), Some("s2"));
+        assert_eq!(model.row_menu_at, Some(at), "the screen draws it at the pointer");
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// docs/82 8.5: Delete… asks first and says exactly what goes; its
+    /// button forgets the session; Move to project lists the row under
+    /// the project picked; Reveal folder hands the folder to the helper.
+    #[gpui::test]
+    fn delete_move_and_reveal_do_what_the_rows_say(cx: &mut TestAppContext) {
+        use aui::screens::sidebar::SidebarIntent;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("row-menu-actions");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                context_sessions(h, cx);
+                let (_, beta) = menu_projects(h, &dir, cx);
+                // Move to project: listed under beta now, its folder unchanged.
+                h.sidebar_intent(SidebarIntent::MoveToProject("s1".into(), Some(beta.clone().into())), window, cx);
+                let row = h.session_list.read(cx).sessions.iter().find(|e| e.id == "s1").cloned().unwrap();
+                assert_eq!(row.project.as_deref(), Some(beta.as_str()), "listed under the project picked");
+                assert!(row.workspace.as_deref().is_some_and(|w| w.ends_with("alpha")), "its folder stays");
+                assert!(!h.move_session_to_project("s1", None, cx), "Unfiled is not offered under a project root");
+                // Reveal folder: the helper gets the session's folder.
+                crate::open_in::REVEALED.with(|r| r.borrow_mut().clear());
+                h.sidebar_intent(SidebarIntent::RowAction("s1".into(), aui::nav::RowAction::Reveal), window, cx);
+                let revealed = crate::open_in::REVEALED.with(|r| r.borrow().clone());
+                assert_eq!(revealed.len(), 1);
+                assert!(revealed[0].ends_with("alpha"), "{revealed:?}");
+                // Delete…: the confirm first, naming what goes.
+                h.session_list.update(cx, |list, _| {
+                    crate::provider_sessions::upsert_open(&mut list.provider_sessions, &mut list.overrides, "codex", "s0", None, None, None);
+                });
+                h.sidebar_intent(SidebarIntent::RowAction("s0".into(), aui::nav::RowAction::Delete), window, cx);
+                let dialog = h.overlays.read(cx).dialog().cloned().expect("Delete asks first");
+                assert_eq!(dialog.action, crate::overlays::DialogAction::DeleteSession);
+                assert_eq!(dialog.archive_target.as_deref(), Some("s0"));
+                assert_eq!(dialog.primary, "Delete");
+                for goes in ["turns", "attachments", "pictures", "hand-off snapshot", "checkpoints", "Trash"] {
+                    assert!(dialog.detail.contains(goes), "the confirm names {goes}: {}", dialog.detail);
+                }
+                assert!(!dialog.title.contains("Codex") && !dialog.detail.contains("Codex"), "no provider name in the copy");
+                assert!(h.session_list.read(cx).sessions.iter().any(|e| e.id == "s0"), "nothing goes before the button");
+                h.confirm_delete_dialog(dialog.archive_target.clone(), window, cx);
+                assert!(!h.session_list.read(cx).sessions.iter().any(|e| e.id == "s0"), "its button deletes");
+                assert!(!h.session_list.read(cx).provider_sessions.contains_key("s0"));
+            })
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// docs/82 8.5: Fork and Continue in… from a row open that session and
+    /// then its fork picker / its provider menu (the hand-off).
+    #[gpui::test]
+    fn fork_and_continue_in_open_the_session_then_act(cx: &mut TestAppContext) {
+        use aui::screens::sidebar::SidebarIntent;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("row-menu-follow-ups");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                context_sessions(h, cx);
+                h.sidebar_intent(SidebarIntent::RowAction("s3".into(), aui::nav::RowAction::ContinueIn), window, cx);
+                assert_eq!(h.active_id(cx).as_deref(), Some("s3"), "the session opens");
+                assert!(h.overlays.read(cx).is_open(crate::overlays::MenuKind::Provider), "its provider menu opens: Continue in…");
+                h.sidebar_intent(SidebarIntent::RowAction("s1".into(), aui::nav::RowAction::Fork), window, cx);
+                assert_eq!(h.active_id(cx).as_deref(), Some("s1"));
+                assert_eq!(
+                    h.overlays.read(cx).palette().map(|p| p.kind),
+                    Some(crate::overlays::PaletteKind::Fork),
+                    "its fork picker opens"
+                );
+            })
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// The follow-up the Stage 6 gate listed: after Archive, the centre
+    /// header named the archived session — the open target outlived the
+    /// view. It names nothing (or what opened in its place) now.
+    #[gpui::test]
+    fn the_header_after_archive_names_what_is_open(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("archive-header");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                context_sessions(h, cx);
+                h.resume_quiet("s1".into(), window, cx);
+                assert_eq!(h.session_header_label(cx).as_deref(), Some("s1"));
+                h.archive_session("s1".into(), Some(window), cx);
+                let header = h.session_header_label(cx);
+                assert_ne!(header.as_deref(), Some("s1"), "the archived title leaves the header");
+                assert_eq!(header, h.active_id(cx).and_then(|id| h.collapsed_head_label(&id, cx)), "it names what is open");
+                assert_eq!(h.sidebar_facts(cx).selected, h.active_id(cx), "the selection agrees");
             })
         });
         b3c_teardown(&dir, guard, old);

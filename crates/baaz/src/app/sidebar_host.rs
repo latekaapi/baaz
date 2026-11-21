@@ -80,6 +80,8 @@ impl Harness {
             skills_on: self.skills_page.read(cx).catalog.on_count(),
             view_menu_open: self.overlays.read(cx).is_open(MenuKind::ViewOptions),
             row_menu: self.open_row_menu(cx),
+            row_menu_offers: self.open_row_menu(cx).map(|id| self.row_menu_offers(&id, cx)).unwrap_or_default(),
+            row_menu_at: self.overlays.read(cx).menu().filter(|menu| menu.kind == MenuKind::SessionRow).and_then(|menu| menu.point),
             browse_menu: self.browse_menu_now(cx),
             renaming: self.renaming(cx),
             browse,
@@ -522,10 +524,24 @@ impl Harness {
             SidebarIntent::RowAction(id, RowAction::Pages) => {
                 self.open_session_pages(id.to_string(), window, cx);
             }
+            // A right-click on a row: the same menu at the pointer (docs/82
+            // 8.5), replacing whatever menu stood open.
+            SidebarIntent::RowMenuAt(id, at) => self.open_row_menu_at(id.to_string(), Some(at), cx),
+            SidebarIntent::MoveToProject(id, project) => {
+                self.move_session_to_project(&id, project.map(|p| p.to_string()), cx);
+            }
             SidebarIntent::RowAction(id, action) => {
                 match action {
                     RowAction::Rename => self.start_rename(id.to_string(), window, cx),
                     RowAction::Pin => self.toggle_pin(id.to_string(), cx),
+                    RowAction::Fork => self.open_then(id.to_string(), super::row_menu::RowFollowUp::Fork, window, cx),
+                    RowAction::ContinueIn => {
+                        self.open_then(id.to_string(), super::row_menu::RowFollowUp::ContinueIn, window, cx)
+                    }
+                    RowAction::Reveal => {
+                        self.reveal_session_folder(&id, cx);
+                    }
+                    RowAction::Delete => self.open_delete_dialog(id.to_string(), cx),
                     // One archive affordance: a listed session asks first,
                     // an archived one goes straight back.
                     RowAction::Archive => {
@@ -606,12 +622,23 @@ impl Harness {
         self.overlays.read(cx).menu().filter(|menu| menu.kind == MenuKind::SessionRow).and_then(|menu| menu.session.clone())
     }
 
-    /// Open `session`'s row menu, replacing whatever menu was open.
+    /// Open `session`'s row menu under its `⋯`, replacing whatever menu
+    /// was open.
     pub(crate) fn open_row_menu_for(&mut self, session: String, cx: &mut Context<Self>) {
+        self.open_row_menu_at(session, None, cx);
+    }
+
+    /// Open `session`'s row menu — at `at` for a right-click, else under its
+    /// `⋯` — replacing whatever menu was open.
+    pub(crate) fn open_row_menu_at(&mut self, session: String, at: Option<gpui::Point<gpui::Pixels>>, cx: &mut Context<Self>) {
         if let Some(view) = self.active.clone() {
             view.update(cx, |view, cx| view.close_plus_menu(cx));
         }
-        self.overlays.update(cx, |overlays, cx| overlays.open(crate::overlays::Menu::session_row(session), cx));
+        let menu = match at {
+            Some(at) => crate::overlays::Menu::session_row_at(session, at),
+            None => crate::overlays::Menu::session_row(session),
+        };
+        self.overlays.update(cx, |overlays, cx| overlays.open(menu, cx));
         // Outside the draw: the column takes the open menu on this frame.
         self.push_sidebar_facts(cx);
     }

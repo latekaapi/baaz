@@ -2610,6 +2610,7 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         // v3 (canvas "Baaz v3", Composer A): one raised card with text
         // controls, on the transcript measure.
         let mut element = composer("composer", &self.composer, self.runtime.read(cx).display_provider().icon(), self.runtime.read(cx).model())
+            .continue_in(self.runtime.read(cx).has_turns())
             .docked(true)
             .raised(true)
             .mode(self.runtime.read(cx).mode_label())
@@ -2938,7 +2939,13 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                     this.pick_provider(id.as_ref(), cx);
                 });
                 // D4: the provider picker — marks and names only, 240 wide.
+                // A session that has started cannot switch in place: picking
+                // another provider continues it there (a hand-off), so the
+                // menu says "Continue in…" (docs/82 8.5); a draft's says
+                // "Provider".
+                let title = if self.runtime.read(cx).has_turns() { "Continue in…" } else { "Provider" };
                 let menu = provider_menu("provider-menu", rows, selected, true)
+                    .title(title)
                     .on_pick(move |id, window, cx| pick(id, window, cx))
                     .on_close(move |window, cx| close(&(), window, cx));
                 let menu = if crate::runtime::captures() { menu.at_rest() } else { menu };
@@ -2959,12 +2966,10 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
 }
 
 /// The provider menu's rows for a session on `current`, drawn from
-/// [`SessionRuntime::provider_rows`]: a fresh session offers the three
-/// backends as a swap; a session with turns keeps its lane, so every
-/// other backend reads as "Hand off to X…" followed by "New session on
-/// X". The picker component has no disabled state, so the typed reason
-/// rides as prose (the way an `Unavailable` capability explains itself)
-/// and every row still acts on click.
+/// [`SessionRuntime::provider_rows`]: the enabled providers, mark and name,
+/// the current one checked. A fresh session swaps to the pick; a session
+/// with turns keeps its lane, so the pick opens the hand-off confirm (the
+/// menu reads "Continue in…" there).
 fn provider_picker_rows(current: ProviderId, has_turns: bool) -> Vec<PickerRow> {
     SessionRuntime::provider_rows_for(
         current,

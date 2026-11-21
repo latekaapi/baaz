@@ -376,7 +376,9 @@ impl Harness {
             });
             return;
         }
-        let was_active = self.active.as_ref().is_some_and(|a| a.read(cx).rt(cx).session_id == session_id);
+        // The open session is archived when it is any member of the chain
+        // (the header names the head, the view may be a member).
+        let was_active = self.active_id(cx).is_some_and(|id| members.contains(&id));
         // Archived sessions are never cached: a parked view of one is
         // dropped, and reopening (after Undo) pages it afresh.
         self.registry.forget_where(|id| members.iter().any(|member| member == id));
@@ -384,6 +386,13 @@ impl Harness {
         self.set_overrides(&members, |meta| meta.archived = true, cx);
         if was_active {
             self.active = None;
+        }
+        // The header and the selection read what is open from the open
+        // target first (`open_state.pending_id`, which every landing sets):
+        // left on an archived member, the header kept its title after the
+        // view was gone.
+        if self.open_state.pending_id.as_ref().is_some_and(|id| members.contains(id)) {
+            self.open_state.pending_id = None;
         }
         self.archive_worktrees(in_worktrees, cx);
         self.push_undo(
