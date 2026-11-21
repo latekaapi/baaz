@@ -57,14 +57,14 @@ on a concept; they are listed under it.
 | # | Concept | What it is | Its one mechanism |
 |---|---|---|---|
 | 1 | Project | A folder you work in. | Add project (pick or drop a folder); its sessions group under it in the sidebar. Sessions in no project sit in the last group, Unfiled. |
-| 2 | Session | One conversation with one agent, in a project. | A sidebar row. Everything done to a session is in its one menu (the row's ⋯, a right-click, the header's ⋯): Rename, Pin, Fork, Continue in…, Move to project, Reveal folder, Archive, Delete…. What you add to it (a quote, a screenshot, a page) lands as a chip in its composer. |
+| 2 | Session | One conversation with one agent, in a project. | A sidebar row. Everything done to a session is in its one menu (the row's ⋯, a right-click, the header's ⋯): Rename, Pin, Fork, Continue in…, Move to project, Reveal folder, Archive, Delete…; the header's ⋯ then adds what only the open session has (Run, Undo last turn, Move back, Open project in …). What you add to it (a quote, a screenshot, a page) lands as a chip in its composer. |
 | 3 | Provider | The agent a session runs on: Claude Code, Codex or Muse. | The composer's provider chip; once the session has turns the same chip reads "Continue in…". Set up in Settings › Providers, listed in one order everywhere. |
 | 4 | Model | Which model the provider uses. | The composer's model chip. |
 | 5 | Effort | How hard the model thinks. | The composer's effort chip, shown only where the provider has one. |
 | 6 | Mode | How far the agent may go without asking: Ask, Auto, Full access. | The composer's mode chip; an approval card when it asks. |
 | 7 | Plan | The agent plans and waits for your go before it acts. | ⇧Tab or `/plan`; a Plan pill shows while it is on. |
 | 8 | Needs you | Sessions waiting on an answer from you. | The Needs you count (the sidebar's row, Browse's footer, the Dock badge); ⌘⇧J goes to the next one. |
-| 9 | Archive | A session set aside, still on disk. | Archive in the session's menu; Settings › Archived brings it back. |
+| 9 | Archive | A session set aside, still on disk. | Archive in the session's menu (or `/archive`, with Undo); Settings › Archived brings it back. There is no Hide. |
 | 10 | Worktree | A session working on its own branch checkout of the project. | The composer's "Own worktree" chip (a project can make it the default). |
 | 11 | Workspace pane | The session's right side, kept per session. | Its tab row: Changes, Files, Page, Terminal, Tasks; a second view can stack below. The header's buttons open the same tabs. |
 | 12 | Changes | What changed in the folder: tick, commit, branch, push. | The Changes view. Select lines → Quote. |
