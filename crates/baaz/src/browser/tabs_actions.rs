@@ -531,6 +531,11 @@ impl Harness {
         };
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         self.browser.update(cx, |browser, cx| browser.set_session_tab(Some(id), cx));
+        // Entering Browse with no tab of the person's own opens a blank one
+        // with the Field up (`ensure_browse_tab`, the ⌘T path); the page
+        // shown is the session's, so the Field goes (Gate 8: it stood over
+        // the session's page).
+        self.leave_browse_address(window, cx);
     }
 
 

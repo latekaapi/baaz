@@ -606,6 +606,9 @@ impl Harness {
         self.ensure_tab_page(&id, tab_id, window, cx);
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         self.browser.update(cx, |browser, cx| browser.set_session_tab(Some(tab_id), cx));
+        // As "Open in Browse" does: the Field the entering ensure opened
+        // goes, since the session's page is the one shown.
+        self.leave_browse_address(window, cx);
         Ok(())
     }
 

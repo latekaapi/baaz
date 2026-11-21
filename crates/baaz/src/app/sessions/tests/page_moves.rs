@@ -64,6 +64,11 @@ fn the_page_opens_in_browse_and_comes_back_without_a_reload(cx: &mut gpui::TestA
         assert_eq!(h.browser.read(cx).browse_centre_shown(cx), Some(tab), "Browse shows the session's tab");
         assert_eq!(h.browse_centre_state(cx).map(|s| s.entity_id()), Some(page), "the same page entity, full width");
         assert!(h.shown_page_offers(cx).collapse, "a session's page in Browse offers the way back");
+        // A fresh state has no tab of the person's own, so entering Browse
+        // built a blank one with the Field up; the shown page is the
+        // session's, and the Field must not stand over it (Gate 8).
+        assert!(h.browser.read(cx).browse_address.is_none(), "no Field over the session's page");
+        assert!(!h.field_overlay_wanted(cx), "and no Field float is wanted");
     });
     // Collapse: Sessions, the session, its Page on the same tab.
     assert!(vc.update(|window, cx| baaz.update(cx, |h, cx| h.collapse_to_session_page(window, cx))));
