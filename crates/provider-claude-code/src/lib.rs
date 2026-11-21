@@ -152,9 +152,17 @@ pub struct ClaudeCodeAdapter {
     /// switch (`Layout.use_own_mcp.claude_code`), set by the host before
     /// the session commands run. Off means `--strict-mcp-config` on every
     /// launch (the default); on means the flag is stripped while the
-    /// bridge config still rides when a relay is set. Applies to sessions
-    /// started after the change.
+    /// bridge config still rides when a relay is set, and the person's own
+    /// servers ride beside it ([`Self::set_owner_mcp_source`]). Applies to
+    /// sessions started after the change.
     use_own_mcp: Mutex<bool>,
+    /// The person's `~/.claude.json`, read (never written) at each launch
+    /// while [`Self::use_own_mcp`] is on: Claude Code runs under Baaz's own
+    /// `CLAUDE_CONFIG_DIR`, whose `.claude.json` is not that file, so the
+    /// servers `claude mcp add` put there reach the session only as a
+    /// second `--mcp-config` (docs/82 8.9). `None` (tests, and any adapter
+    /// the factory did not set up) reads nothing.
+    owner_mcp_source: Mutex<Option<PathBuf>>,
     /// How long Stop waits for the child to close the turn after the
     /// `interrupt` control request before ending the child instead
     /// ([`INTERRUPT_GRACE`]; tests shorten it).
@@ -341,6 +349,7 @@ impl ClaudeCodeAdapter {
             version: Mutex::new(None),
             terminal: Mutex::new(None),
             use_own_mcp: Mutex::new(false),
+            owner_mcp_source: Mutex::new(None),
             interrupt_grace: INTERRUPT_GRACE,
         }
     }
@@ -358,20 +367,71 @@ impl ClaudeCodeAdapter {
     /// Let the session inherit the owner's own MCP servers and
     /// connectors: the Settings › MCP "Use my own MCP servers"
     /// switch. When on, launches strip `--strict-mcp-config` (the bridge
-    /// config still rides when a relay is set). Off by default.
+    /// config still rides when a relay is set) and carry the person's own
+    /// servers ([`Self::set_owner_mcp_source`]). Off by default.
     pub fn set_use_own_mcp(&self, use_own: bool) {
         *self.use_own_mcp.lock().expect("use-own-mcp mutex") = use_own;
     }
 
-    /// Apply the opt-in to a built launch: strip `--strict-mcp-config`
-    /// when the switch is on, else leave the launch as built (strict on
+    /// Where the person's own servers are read from while the opt-in is
+    /// on: their `~/.claude.json` (the factory passes it; read only, never
+    /// written). `None` reads nothing.
+    pub fn set_owner_mcp_source(&self, path: Option<PathBuf>) {
+        *self.owner_mcp_source.lock().expect("owner-mcp mutex") = path;
+    }
+
+    /// Apply the opt-in to a built launch: when the switch is on, strip
+    /// `--strict-mcp-config` and add the person's own servers
+    /// ([`Self::with_own_mcp`]); else leave the launch as built (strict on
     /// every launch — see [`argv`]).
     fn apply_use_own_mcp(&self, launch: SessionLaunch) -> SessionLaunch {
         if *self.use_own_mcp.lock().expect("use-own-mcp mutex") {
-            argv::without_strict_mcp(launch)
+            self.with_own_mcp(argv::without_strict_mcp(launch))
         } else {
             launch
         }
+    }
+
+    /// Add the person's own servers to an opted-in `launch` as a second
+    /// `--mcp-config` (docs/82 8.9): user scope plus the launch folder's
+    /// local scope from their `~/.claude.json`
+    /// ([`terminal::own_mcp_servers`]), written fresh beside the bridge's
+    /// config (the relay's directory, else `mcp/` in Baaz's Claude home).
+    /// Nothing to add — no source, an unreadable file, no servers, nowhere
+    /// to write — leaves the launch as it is; a launch already carrying
+    /// the file keeps it once. Best-effort: a failed write is said on
+    /// stderr and the session still starts.
+    fn with_own_mcp(&self, mut launch: SessionLaunch) -> SessionLaunch {
+        let Some(source) = self.owner_mcp_source.lock().expect("owner-mcp mutex").clone() else {
+            return launch;
+        };
+        let dir = match self.terminal.lock().expect("terminal mutex").as_ref() {
+            Some(relay) => Some(relay.config_dir.clone()),
+            None => self.config_override.lock().expect("config mutex").as_ref().map(|home| home.join("mcp")),
+        };
+        let Some(dir) = dir else { return launch };
+        let path = terminal::own_mcp_config_path(&dir, &launch.session_id);
+        let path_text = path.to_string_lossy().into_owned();
+        if launch.argv.iter().any(|arg| *arg == path_text) {
+            return launch;
+        }
+        let Ok(text) = std::fs::read_to_string(&source) else { return launch };
+        let workspace = launch
+            .cwd
+            .clone()
+            .or_else(|| self.workspace.lock().expect("workspace mutex").as_ref().map(|path| path.to_string_lossy().into_owned()));
+        let servers = terminal::own_mcp_servers(&text, workspace.as_deref());
+        if servers.is_empty() {
+            return launch;
+        }
+        match terminal::write_own_mcp_config(&dir, &launch.session_id, &servers) {
+            Ok(path) => {
+                launch.argv.push("--mcp-config".into());
+                launch.argv.push(path.to_string_lossy().into_owned());
+            }
+            Err(error) => eprintln!("baaz: could not pass your own MCP servers to Claude Code: {error}"),
+        }
+        launch
     }
 
     /// The `--mcp-config` path for `session_id`, writing its file first —
@@ -435,11 +495,14 @@ impl ClaudeCodeAdapter {
     /// old one did. A launch that already carries `--mcp-config` (every
     /// relayed [`Self::launch_for_open`] one does) keeps its file — the
     /// file is written once per session, not once per swap — but still
-    /// gains (or, opted in, loses) `--strict-mcp-config`, so a swap never
-    /// silently widens or narrows what the session may see.
+    /// gains (or, opted in, loses) `--strict-mcp-config` and, opted in,
+    /// the person's own servers' file, so a swap never silently widens or
+    /// narrows what the session may see. The person's file is not the
+    /// bridge's: a launch carrying only it still gains the bridge.
     fn with_mcp_config(&self, mut launch: SessionLaunch) -> Result<SessionLaunch, ProviderError> {
         let use_own = *self.use_own_mcp.lock().expect("use-own-mcp mutex");
-        if !launch.argv.iter().any(|arg| arg == "--mcp-config") {
+        let has_bridge = launch.argv.windows(2).any(|pair| pair[0] == "--mcp-config" && !pair[1].ends_with("-own.json"));
+        if !has_bridge {
             if let Some(path) = self.mcp_config_for(&launch.session_id.clone())? {
                 launch.argv.push("--mcp-config".into());
                 launch.argv.push(path);
@@ -450,6 +513,9 @@ impl ClaudeCodeAdapter {
             launch = argv::without_strict_mcp(launch);
         } else if !use_own && !has_strict {
             launch.argv.push("--strict-mcp-config".into());
+        }
+        if use_own {
+            launch = self.with_own_mcp(launch);
         }
         Ok(launch)
     }
@@ -4869,6 +4935,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir.canonicalize().expect("canonical scratch dir")
+    }
+
+    /// docs/82 8.9: with "Use my own MCP servers" on, every launch — the
+    /// open, a resume, and a relaunch that resumes — carries the person's
+    /// own servers (from a fixture `~/.claude.json`, never the real one) as
+    /// a second `--mcp-config` beside the bridge's, once; off, or with no
+    /// source, nothing of theirs rides and the bridge is never lost.
+    #[test]
+    fn the_own_servers_switch_passes_the_persons_servers_on_every_launch() {
+        let root = scratch_dir("own-mcp");
+        let owner = root.join("owner-home");
+        std::fs::create_dir_all(&owner).expect("owner home");
+        std::fs::write(owner.join(".claude.json"), include_str!("../../../fixtures/claude-code/mcp-claude.json")).expect("fixture");
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.set_terminal_relay(TerminalRelay {
+            bridge: PathBuf::from("/tmp/baaz/bin/mcp-bridge"),
+            socket: PathBuf::from("/tmp/baaz/run/terminal-9.sock"),
+            config_dir: root.join("mcp"),
+        });
+        adapter.set_owner_mcp_source(Some(owner.join(".claude.json")));
+        let configs = |argv: &[String]| -> Vec<String> {
+            argv.windows(2).filter(|pair| pair[0] == "--mcp-config").map(|pair| pair[1].clone()).collect()
+        };
+        // Off: the bridge alone, strict.
+        let open = adapter.launch_for_open("req-1", Some("/work"), None).expect("open");
+        assert_eq!(configs(&open.argv).len(), 1, "off: the bridge alone: {:?}", open.argv);
+        assert!(open.argv.contains(&"--strict-mcp-config".to_owned()));
+        // On: the bridge and the person's servers, no strict.
+        adapter.set_use_own_mcp(true);
+        let open = adapter.launch_for_open("req-1", Some("/work"), None).expect("open");
+        let files = configs(&open.argv);
+        assert_eq!(files.len(), 2, "bridge plus own: {:?}", open.argv);
+        assert!(!open.argv.contains(&"--strict-mcp-config".to_owned()));
+        let own: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&files[1]).expect("own file")).expect("json");
+        let mut names: Vec<&String> = own["mcpServers"].as_object().expect("servers").keys().collect();
+        names.sort();
+        assert_eq!(names, ["filesystem", "linear", "local-only"], "user scope plus /work's local scope, never baaz");
+        // A resume carries it too.
+        let resume = adapter.launch_for_resume("req-1").expect("resume");
+        assert_eq!(configs(&resume.argv).len(), 2, "resume: {:?}", resume.argv);
+        // A relaunch built without any config gains the bridge and the
+        // person's file, once each.
+        adapter.attach_session_for_tests("req-1");
+        let bare = argv::argv_for_resume("req-1", None, None, None);
+        let (relaunch, _) = adapter.relaunch_launch(&bare).expect("built");
+        let files = configs(&relaunch.argv);
+        assert_eq!(files.len(), 2, "relaunch: bridge plus own: {:?}", relaunch.argv);
+        assert!(files.iter().any(|f| f.ends_with("req-1.json")) && files.iter().any(|f| f.ends_with("req-1-own.json")));
+        let (again, _) = adapter.relaunch_launch(&relaunch).expect("built");
+        assert_eq!(configs(&again.argv).len(), 2, "never twice: {:?}", again.argv);
+        // No source (an adapter the factory did not set up): nothing read.
+        adapter.set_owner_mcp_source(None);
+        let open = adapter.launch_for_open("req-2", Some("/work"), None).expect("open");
+        assert_eq!(configs(&open.argv).len(), 1, "no source, no file: {:?}", open.argv);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// THE 2026-10-17 EXIT. A draft launched Read-only (`--settings`

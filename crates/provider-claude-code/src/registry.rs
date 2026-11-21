@@ -82,6 +82,10 @@ impl ProviderFactory for ClaudeCodeFactory {
             });
         }
         adapter.set_use_own_mcp(spawn.inherit_owner_mcp);
+        // The person's own servers live in their `~/.claude.json`, which
+        // Baaz's Claude home does not read: read (never written) at each
+        // opted-in launch and passed beside the bridge (docs/82 8.9).
+        adapter.set_owner_mcp_source(spawn.owner_home.as_deref().map(|home| home.join(".claude.json")));
         pin_home(&adapter, &spawn.state_dir, spawn.owner_home.as_deref());
         let mut provider = Provider::new(adapter);
         provider.connect(&spawn.client)?;

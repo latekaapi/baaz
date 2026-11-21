@@ -109,3 +109,27 @@ fn codex_with_the_switch_on_builds_bridge_only() {
         "opted in means nothing silenced: {extra:?}"
     );
 }
+
+/// docs/82 8.9: the switch does what its words say on Claude Code. Baaz's
+/// own Claude home does not read the person's `~/.claude.json`, so their
+/// `claude mcp add` servers ride every opted-in launch as a second
+/// `--mcp-config` — read from a fixture home here, never the real one.
+#[test]
+fn claude_with_the_switch_on_carries_the_persons_own_servers() {
+    let dir = temp_dir("own-servers");
+    let owner = dir.join("owner");
+    std::fs::create_dir_all(&owner).expect("owner home");
+    std::fs::write(owner.join(".claude.json"), r#"{"mcpServers":{"linear":{"type":"http","url":"https://mcp.example.invalid/linear"},"baaz":{"command":"x"}}}"#)
+        .expect("fixture");
+    let adapter = provider_claude_code::ClaudeCodeAdapter::new("claude-must-never-spawn");
+    adapter.set_terminal_relay(claude_relay(&dir.join("mcp")));
+    adapter.set_owner_mcp_source(Some(owner.join(".claude.json")));
+    adapter.set_use_own_mcp(true);
+    let open = adapter.launch_for_open("req-1", None, None).expect("open");
+    let files: Vec<&String> = open.argv.windows(2).filter(|pair| pair[0] == "--mcp-config").map(|pair| &pair[1]).collect();
+    assert_eq!(files.len(), 2, "the bridge and the person's servers: {:?}", open.argv);
+    let own: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(files[1]).expect("own")).expect("json");
+    assert!(own["mcpServers"].get("linear").is_some(), "their server rides");
+    assert!(own["mcpServers"].get("baaz").is_none(), "never a second `baaz`");
+    let _ = std::fs::remove_dir_all(&dir);
+}
