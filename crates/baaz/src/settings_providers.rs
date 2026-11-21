@@ -138,8 +138,8 @@ pub(crate) fn settled_toast(status: &ProviderStatus, after_sign_out: bool) -> (S
     }
 }
 
-/// The providers a composer menu may list: the enabled ones, in
-/// switcher order. A disabled provider disappears from the composer's
+/// The providers a composer menu may list: the enabled ones, in the one
+/// provider order. A disabled provider disappears from the composer's
 /// provider menu and from the new-session provider choice.
 pub(crate) fn visible_provider_ids(statuses: &[ProviderStatus]) -> Vec<ProviderId> {
     ProviderId::all().into_iter().filter(|id| statuses.iter().any(|s| s.provider == *id && s.enabled)).collect()
@@ -152,11 +152,11 @@ pub(crate) fn live_visible_provider_ids() -> Vec<ProviderId> {
 
 /// The provider new sessions start on when the person has not picked one
 /// (or picked one that is now off or missing): the first Connected, then the
-/// first installed, then the first enabled, in switcher order. No provider
+/// first installed, then the first enabled, in the one provider order. No provider
 /// is the default for being Muse (docs/50 P1).
 pub(crate) fn default_new_provider(statuses: &[ProviderStatus]) -> Option<ProviderId> {
     use crate::provider_status::{Headline, Installed};
-    let enabled: Vec<&ProviderStatus> = crate::connect::connect_order()
+    let enabled: Vec<&ProviderStatus> = ProviderId::all()
         .into_iter()
         .filter_map(|id| statuses.iter().find(|s| s.provider == id && s.enabled))
         .collect();
@@ -175,10 +175,10 @@ pub(crate) fn usable_provider(statuses: &[ProviderStatus], id: ProviderId) -> bo
         .any(|s| s.provider == id && s.enabled && s.installed != crate::provider_status::Installed::No)
 }
 
-/// [`default_new_provider`] over the live statuses; the switcher's first
-/// provider when nothing is enabled at all.
+/// [`default_new_provider`] over the live statuses; the first provider in
+/// the one order when nothing is enabled at all.
 pub(crate) fn live_default_new_provider() -> ProviderId {
-    default_new_provider(&crate::provider_status::live_statuses()).unwrap_or_else(crate::connect::first_in_order)
+    default_new_provider(&crate::provider_status::live_statuses()).unwrap_or_else(ProviderId::first)
 }
 
 /// The quiet banner an opened session on a disabled provider shows
@@ -773,18 +773,17 @@ mod tests {
             p1_status(ProviderId::ClaudeCode, yes(), Auth::SignedOut),
         ];
         assert_eq!(default_new_provider(&statuses), Some(ProviderId::Muse));
-        // Every one connected: the first in switcher order (the connect
-        // board's: the per-lane CLIs first), never Muse for being first in
-        // the registry (Gate 4).
+        // Every one connected: the first in the one provider order (the
+        // per-lane CLIs first), never Muse (Gate 4).
         let statuses = [
             p1_status(ProviderId::Muse, yes(), signed_in()),
             p1_status(ProviderId::ClaudeCode, yes(), signed_in()),
             p1_status(ProviderId::Codex, yes(), signed_in()),
         ];
         assert_eq!(default_new_provider(&statuses), Some(ProviderId::ClaudeCode));
-        // Nothing known yet (a first launch's Checking rows): the switcher's first.
+        // Nothing known yet (a first launch's Checking rows): the first in the one order.
         let statuses: Vec<ProviderStatus> = ProviderId::all().into_iter().map(ProviderStatus::checking).collect();
-        assert_eq!(default_new_provider(&statuses), Some(crate::connect::first_in_order()));
+        assert_eq!(default_new_provider(&statuses), Some(ProviderId::first()));
         // A disabled provider is never the default.
         let mut off = p1_status(ProviderId::ClaudeCode, yes(), signed_in());
         off.enabled = false;
@@ -944,7 +943,7 @@ mod tests {
         ));
         assert_eq!(
             visible_provider_ids(&statuses),
-            vec![ProviderId::Muse, ProviderId::Codex]
+            vec![ProviderId::Codex, ProviderId::Muse]
         );
     }
 

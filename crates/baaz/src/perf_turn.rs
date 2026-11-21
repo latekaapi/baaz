@@ -97,9 +97,9 @@ pub(crate) fn sidebar_fixture() -> (Vec<SessionEntry>, HashMap<String, IndexEntr
             archived: false,
             description: String::new(),
             replayed: false,
-            // The first registered provider's rows, as the budget was
-            // measured (unmarked).
-            provider: crate::providers::ProviderId::all()[0],
+            // The first provider's rows: the flat row draws no provider
+            // mark, so which one does not move the budget.
+            provider: crate::providers::ProviderId::first(),
             named: false,
             needs_title: false,
             side_marker: false,

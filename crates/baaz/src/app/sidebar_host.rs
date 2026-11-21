@@ -247,7 +247,7 @@ impl Harness {
         // Every provider alike (owner, 2026-10-29: the footer read Muse's
         // sign-in as the app's): the account of the provider new sessions
         // start on when it is connected, else the first connected one in
-        // switcher order. Muse's plan label still comes from its tier.
+        // the one provider order. Muse's plan label still comes from its tier.
         let muse_plan = || muse_plan_label(self.tier.as_ref()).unwrap_or_default();
         let (name, email, initial, plan, status) = footer_identity(self.provider_statuses(cx), self.new_provider(cx), muse_plan);
         let usage = if menu_open { self.sidebar_usage() } else { Vec::new() };

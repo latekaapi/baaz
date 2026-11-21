@@ -970,7 +970,7 @@ fn switch_provider_replaces_the_fresh_draft_without_leaking_its_view(
     let vc = cx.add_empty_window();
     let baaz = lane_harness(vc, &state.2);
     // A fresh muse draft first: scripted chrome opens it locally. Muse is
-    // named: it is no longer the default for being first in the registry.
+    // named: it is not the default (Claude Code is first in the one order).
     vc.update(|window, cx| {
         baaz.update(cx, |harness, cx| {
             harness.provider_model.update(cx, |model, _| model.point_new_provider(ProviderId::Muse));

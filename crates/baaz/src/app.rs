@@ -832,7 +832,7 @@ impl Harness {
         // the root pushes the current project.
         // It also holds where new sessions start: `--provider`, else the
         // stored pick while it can start one, else the first that can run
-        // in switcher order — following the statuses until the person picks.
+        // in the one provider order — following the statuses until the person picks.
         let explicit = args.provider_explicit.then(|| args.provider.clone());
         let provider_model = cx.new(|_| crate::provider_model::ProviderStatusModel::new(overlays.clone(), explicit));
         let connect_screen = cx.new(|cx| crate::connect::ConnectScreen::new(provider_model.clone(), overlays.clone(), cx));
@@ -4185,7 +4185,7 @@ impl Harness {
 
     pub(crate) fn select_new_provider(&mut self, id: ProviderId, cx: &mut Context<Self>) {
         // A disabled provider is never the default for new sessions: fall
-        // back to the first enabled one (the switcher's first when none is).
+        // back to the first enabled one (the one order's first when none is).
         let id = if crate::settings_providers::live_visible_provider_ids().contains(&id) {
             id
         } else {

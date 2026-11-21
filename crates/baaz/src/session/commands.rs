@@ -2154,6 +2154,58 @@ mod tests {
         assert!(rows.iter().any(|row| row.id == "claude-code"));
     }
 
+    /// docs/82 8.7 (docs/81 F A5.3): one provider order everywhere. The
+    /// registry's order is Claude Code, Codex, Muse, and every list of
+    /// providers reads it — the first-run Connect rows and its "New
+    /// sessions start in" picker (Settings › Providers draws the same
+    /// picker), Settings › Providers' rows and cards (the live statuses),
+    /// the composer's provider menu (also "Continue in…" on a started
+    /// session, and the new-session choice), the account menu's usage bars,
+    /// and the default when nothing is picked. A surface that kept an
+    /// order of its own fails here.
+    #[test]
+    fn one_provider_order_on_every_surface() {
+        use crate::provider_status::{Advisory, Auth, Installed, ProviderStatus};
+        let one = ProviderId::all();
+        assert_eq!(&one[..3], &[ProviderId::ClaudeCode, ProviderId::Codex, ProviderId::Muse], "the one order");
+        assert_eq!(ProviderId::first(), ProviderId::ClaudeCode);
+        // Statuses handed in back to front: no surface may take their order.
+        let connected = |id: ProviderId| ProviderStatus {
+            provider: id,
+            installed: Installed::yes("1.0", "/bin/x"),
+            auth: Auth::SignedIn { email: Some("a@x.com".into()), plan: None, method: None, source: None },
+            enabled: true,
+            advisory: Advisory::None,
+            checked_at: Some(1),
+            usage: None,
+        };
+        let statuses: Vec<ProviderStatus> = one.iter().rev().copied().map(connected).collect();
+        let keys = |ids: Vec<ProviderId>| ids.into_iter().map(ProviderId::as_str).collect::<Vec<_>>();
+        let want = keys(one.clone());
+        // Connect rows and the default picker's choices.
+        let rows = crate::connect::build_rows(&statuses, &crate::connect::CodexLogin::Idle);
+        assert_eq!(rows.iter().map(|row| row.id.to_string()).collect::<Vec<_>>(), want, "connect rows");
+        assert_eq!(keys(crate::connect::connected_choices(&statuses)), want, "new sessions start in");
+        // Settings › Providers: rows and cards draw the live statuses.
+        let live: Vec<ProviderId> = crate::provider_status::live_statuses().iter().map(|s| s.provider).collect();
+        assert_eq!(keys(live), want, "settings rows and cards");
+        // The composer's provider menu / Continue in… / the new-session choice.
+        let menu_ids: Vec<ProviderId> = one.iter().rev().copied().collect();
+        for has_turns in [false, true] {
+            let menu = SessionRuntime::provider_rows_for(ProviderId::Muse, has_turns, &menu_ids);
+            assert_eq!(menu.iter().map(|row| row.id.clone()).collect::<Vec<_>>(), want, "composer menu");
+        }
+        assert_eq!(keys(crate::settings_providers::visible_provider_ids(&statuses)), want, "enabled for menus");
+        // The account menu's usage bars.
+        let bars: Vec<ProviderId> = crate::account_usage::usage_rows(&statuses, None, 0)
+            .iter()
+            .filter_map(|row| crate::providers::provider_from_icon(row.provider))
+            .collect();
+        assert_eq!(keys(bars), want, "usage bars");
+        // Nothing picked, everything connected: the first in the one order.
+        assert_eq!(crate::settings_providers::default_new_provider(&statuses), Some(ProviderId::first()));
+    }
+
     /// verb — the same `pick_provider` the click and Enter paths call.
     /// A fresh session emits the swap; a session with turns keeps its
     /// lane (the verb still routes through the menu, so a new session

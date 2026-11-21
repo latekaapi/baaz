@@ -2059,7 +2059,7 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// Providers overview: one row per provider in switcher order
+    /// Providers overview: one row per provider in the one provider order
     /// (provider mark, name, headline, Enable switch, chevron into the
     /// sub-page) plus the footer action row. The chevron is decorative —
     /// the text beside it carries the click and the label — but always
@@ -2139,8 +2139,8 @@ impl SettingsPage {
         statuses: &[crate::provider_status::ProviderStatus],
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // With no pick, the first registered stands (as at boot).
-        let current = self.facts.new_provider.unwrap_or(ProviderId::all()[0]);
+        // With no pick, the first in the one order stands (as at boot).
+        let current = self.facts.new_provider.unwrap_or_else(ProviderId::first);
         let row: AnyElement = match crate::connect::default_picker_for(statuses, current, self.default_menu_open(cx)) {
             Some(picker) => {
                 let weak = cx.entity().downgrade();

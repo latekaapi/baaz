@@ -38,13 +38,22 @@ use provider::{
     SharedChild, UnknownProvider,
 };
 
-/// Every adapter this build registers, in switcher order: the one place the
-/// app names an adapter crate's registration (docs/82 5.4, 5.7). A provider
-/// joins with one line here — nothing else in the app names it.
+/// Every adapter this build registers, in **the one provider order**: the
+/// one place the app names an adapter crate's registration (docs/82 5.4,
+/// 5.7). A provider joins with one line here — nothing else in the app
+/// names it.
+///
+/// This table's order is the order every list of providers shows —
+/// the first-run Connect rows, Settings › Providers, the "New sessions
+/// start in" menus, the composer's provider menu, the account menu's usage
+/// bars, Continue in…, the import offers (docs/82 8.7, docs/81 F A5.3):
+/// each reads [`ProviderId::all`], and none keeps an order of its own. The
+/// per-lane CLIs first (Claude Code, Codex), the shared-child provider
+/// after them, a provider the person configures last.
 static REGISTRATIONS: &[&provider::Registration] = &[
-    &provider_muse::registry::REGISTRATION,
     &provider_claude_code::registry::REGISTRATION,
     &provider_codex::registry::REGISTRATION,
+    &provider_muse::registry::REGISTRATION,
     &provider_acp::registry::REGISTRATION,
 ];
 
@@ -119,12 +128,21 @@ impl ProviderId {
         REGISTRATIONS.iter().map(|registration| ProviderId(registration.descriptor.key))
     }
 
-    /// Every provider the app offers, in switcher order: each registration
-    /// whose descriptor says it is offered — one the person configures
+    /// Every provider the app offers, in the one provider order
+    /// (`REGISTRATIONS`): each registration whose descriptor says it is
+    /// offered — one the person configures
     /// ([`provider::ProviderDescriptor::command_env`]) only once it is
-    /// configured (rule 13).
+    /// configured (rule 13). Every list of providers reads this; none sorts
+    /// it again (docs/82 8.7).
     pub fn all() -> Vec<ProviderId> {
         ProviderId::registered().filter(|id| id.descriptor().command_env.is_none() || configured_command(*id).is_some()).collect()
+    }
+
+    /// The first provider in the one order: the fallback where one is
+    /// wanted and nothing is known (never a provider for being itself —
+    /// docs/50 P1).
+    pub fn first() -> ProviderId {
+        ProviderId::all().into_iter().next().expect("a provider is always offered")
     }
 
     /// Whether this provider declares `trait_`.
@@ -1281,7 +1299,7 @@ mod tests {
     fn three_entries_in_the_registry() {
         assert_eq!(ProviderId::all().len(), 3);
         let ids: Vec<&str> = ProviderId::all().iter().map(|p| p.as_str()).collect();
-        assert_eq!(ids, vec!["muse", "claude-code", "codex"]);
+        assert_eq!(ids, vec!["claude-code", "codex", "muse"], "the one provider order (docs/82 8.7)");
     }
 
     /// The terminal relay carries the threaded socket through: whatever the
@@ -1448,7 +1466,7 @@ mod tests {
     #[test]
     fn a_configured_provider_is_registered_but_offered_only_once_configured() {
         let keys: Vec<&str> = ProviderId::registered().map(ProviderId::as_str).collect();
-        assert_eq!(keys, vec!["muse", "claude-code", "codex", "acp"], "switcher order");
+        assert_eq!(keys, vec!["claude-code", "codex", "muse", "acp"], "the one provider order");
         let acp = ProviderId::parse_known("acp").expect("registered");
         assert_eq!(acp.descriptor().command_env, Some("BAAZ_ACP_AGENT"));
         assert!(!ProviderId::all().contains(&acp), "no stand-in configured under test: not offered");

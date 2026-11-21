@@ -60,9 +60,9 @@ pub(crate) struct NewProvider {
 impl NewProvider {
     /// At boot, over the boot statuses (the cache, never a probe): the
     /// `--provider` key, else the stored pick while it can start a session,
-    /// else the first in switcher order that can run
-    /// ([`crate::settings_providers::default_new_provider`]) — never Muse
-    /// for being first in the registry (docs/50 P1).
+    /// else the first in the one provider order that can run
+    /// ([`crate::settings_providers::default_new_provider`]) — never a
+    /// provider for being itself (docs/50 P1).
     pub(crate) fn at_boot(explicit: Option<String>, statuses: &[ProviderStatus]) -> Self {
         Self::at_boot_with(explicit, crate::providers::read_last_provider(), statuses)
     }
@@ -75,7 +75,7 @@ impl NewProvider {
         let id = stored
             .filter(|id| crate::settings_providers::usable_provider(statuses, *id))
             .or_else(|| crate::settings_providers::default_new_provider(statuses))
-            .unwrap_or_else(crate::connect::first_in_order);
+            .unwrap_or_else(ProviderId::first);
         NewProvider { key: id.as_str().to_owned(), chosen: stored.is_some() }
     }
 
@@ -86,9 +86,9 @@ impl NewProvider {
 
     /// With no pick of the person's, the default follows `statuses` as they
     /// land: boot chose it over the cache, or over Checking rows on a first
-    /// launch, which say nothing yet. The first that can run in switcher
-    /// order (Gate 4: a first launch stayed on Muse, first in the registry,
-    /// with every provider connected). A pick is never re-picked.
+    /// launch, which say nothing yet. The first that can run in the one
+    /// provider order (Gate 4: a first launch stayed on Muse, then first in
+    /// the registry, with every provider connected). A pick is never re-picked.
     fn follow(&mut self, statuses: &[ProviderStatus]) {
         if self.chosen {
             return;
@@ -516,16 +516,16 @@ mod tests {
     }
 
     /// Gate 4: a first launch (no cache, nothing stored) started new
-    /// sessions on Muse, first in the registry. Boot over Checking rows
-    /// takes the switcher's first; once the statuses land, the first
-    /// connected in switcher order — not Muse with everything connected.
+    /// sessions on Muse, then first in the registry. Boot over Checking
+    /// rows takes the one order's first; once the statuses land, the first
+    /// connected in the one order — not Muse with everything connected.
     #[test]
     fn a_first_launch_follows_the_statuses_to_the_first_connected() {
         let mut new = NewProvider::at_boot_with(None, None, &checking());
-        assert_eq!(new.key, crate::connect::first_in_order().as_str());
-        assert_ne!(new.key, ProviderId::Muse.as_str(), "the registry's first is no default");
+        assert_eq!(new.key, ProviderId::first().as_str());
+        assert_ne!(new.key, ProviderId::Muse.as_str(), "Muse is no default for being Muse");
         new.follow(&all_connected());
-        assert_eq!(new.key, crate::connect::connect_order()[0].as_str(), "the first connected in switcher order");
+        assert_eq!(new.key, ProviderId::all()[0].as_str(), "the first connected in the one order");
         assert_eq!(new.key, ProviderId::ClaudeCode.as_str());
         // Only Codex connected: Codex.
         let statuses = vec![status(ProviderId::Muse, false), status(ProviderId::ClaudeCode, false), status(ProviderId::Codex, true)];

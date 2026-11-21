@@ -3972,7 +3972,7 @@ mod tests {
     fn a_session_with_turns_still_lists_providers_only() {
         let rows = provider_picker_rows(ProviderId::Muse, true);
         let ids: Vec<&str> = rows.iter().map(|row| row.id.as_ref()).collect();
-        assert_eq!(ids, vec!["muse", "claude-code", "codex"]);
+        assert_eq!(ids, vec!["claude-code", "codex", "muse"], "the one provider order");
         for (row, id) in rows.iter().zip(ProviderId::all()) {
             assert_eq!(row.label.as_ref(), id.label());
         }

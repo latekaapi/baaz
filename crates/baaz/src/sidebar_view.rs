@@ -3568,7 +3568,7 @@ mod tests {
 
 /// The footer's `(name, email, initial, plan, tile)`: the connected account
 /// of `preferred` (the new-session provider), else of the first connected
-/// enabled provider in switcher order; "Checking providers…" while nothing
+/// enabled provider in the one provider order; "Checking providers…" while nothing
 /// has been probed (the tile spins); "No provider connected" otherwise (the
 /// tile's amber dot: the provider problem, docs/83 §4). Muse is one
 /// provider among three here, never the app's account. Pure, so tests

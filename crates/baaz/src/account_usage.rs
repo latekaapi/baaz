@@ -469,13 +469,14 @@ mod tests {
         let mut signed_out = status(ProviderId::Codex);
         signed_out.auth = Auth::SignedOut;
         let rows = usage_rows(&[muse, claude, codex], None, 1700000000);
+        // In the one provider order: Claude Code, Codex, Muse.
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].provider, AuiProvider::Muse);
-        assert!(unavailable_text(&rows[0]).contains("first Muse turn"));
-        assert_eq!(rows[1].provider, AuiProvider::Claude);
-        assert!(unavailable_text(&rows[1]).contains("Claude Code turn"));
-        assert_eq!(rows[2].provider, AuiProvider::Codex);
-        match &rows[2].state {
+        assert_eq!(rows[0].provider, AuiProvider::Claude);
+        assert!(unavailable_text(&rows[0]).contains("Claude Code turn"));
+        assert_eq!(rows[2].provider, AuiProvider::Muse);
+        assert!(unavailable_text(&rows[2]).contains("first Muse turn"));
+        assert_eq!(rows[1].provider, AuiProvider::Codex);
+        match &rows[1].state {
             UsageRowState::Windows(windows, as_of) => {
                 assert_eq!(windows.len(), 1);
                 // The age only: the library renders the "as of" prefix.
@@ -561,12 +562,13 @@ mod tests {
         checking.checked_at = None;
         let mut unverified = status(ProviderId::Codex);
         unverified.auth = Auth::Unverified;
+        // Rows in the one provider order: Claude Code, Codex, Muse.
         let rows = usage_rows(&[checking, cant_run, missing.clone()], None, 1700000000);
-        assert_eq!(unavailable_text(&rows[0]), "Checking…");
+        assert_eq!(unavailable_text(&rows[2]), "Checking…");
         assert!(
-            unavailable_text(&rows[1]).contains("env: node: No such file or directory"),
+            unavailable_text(&rows[0]).contains("env: node: No such file or directory"),
             "the row keeps the probe's own words: {}",
-            unavailable_text(&rows[1])
+            unavailable_text(&rows[0])
         );
         let missing_rows = usage_rows(&[missing], None, 1700000000);
         assert_eq!(unavailable_text(&missing_rows[0]), "Not installed");

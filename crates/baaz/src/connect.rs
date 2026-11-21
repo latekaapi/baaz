@@ -81,23 +81,6 @@ pub fn complete_onboarding() {
 
 // ------------------------------------------------------------ rows
 
-/// The connect screen's row order (the D5 board): Claude Code, Codex, Muse.
-/// The footer picker lists Connected providers in this order too, and the
-/// first of them is the default when the person has not picked one.
-pub fn connect_order() -> Vec<ProviderId> {
-    // The per-lane CLIs first, in registration order; a shared child last.
-    let mut order = ProviderId::all().to_vec();
-    order.sort_by_key(|id| id.has(provider::ProviderTrait::SharedChild));
-    order
-}
-
-/// The first provider in [`connect_order`]: the switcher's first, where a
-/// fallback is wanted and nothing is known (never the registry's first for
-/// being first — docs/50 P1).
-pub fn first_in_order() -> ProviderId {
-    connect_order().into_iter().next().expect("a provider is always offered")
-}
-
 /// The connect row's headline: the status headline, except a provider that
 /// has not reported yet this launch (no probe result and no cache) always
 /// reads Checking — never Not installed while a probe is pending.
@@ -227,12 +210,12 @@ pub fn row_connected(status: &ProviderStatus) -> bool {
     headline_for(status) == AuiHeadline::Connected && too_old(status).is_none()
 }
 
-/// The three connect rows in [`connect_order`]. Codex's row follows its
+/// The connect rows, in the one provider order ([`ProviderId::all`]). Codex's row follows its
 /// sign-in while one runs (`codex`): a spinner and Cancel while waiting,
 /// the failure reason when it failed.
 pub fn build_rows(statuses: &[ProviderStatus], codex: &CodexLogin) -> Vec<ConnectRowData> {
     let by_id: HashMap<ProviderId, &ProviderStatus> = statuses.iter().map(|s| (s.provider, s)).collect();
-    connect_order()
+    ProviderId::all()
         .into_iter()
         .map(|id| {
             let status = by_id
@@ -295,7 +278,7 @@ pub fn codex_assist_runs(state: &CodexLogin) -> Vec<aui::screens::AssistRun> {
 }
 
 /// The provider new sessions start in, as the footer shows it: `current`
-/// while it is Connected, else the first Connected in [`connect_order`];
+/// while it is Connected, else the first Connected in the one provider order;
 /// `None` when nothing is Connected (the footer reads "Nothing is ready").
 pub fn connect_default(statuses: &[ProviderStatus], current: ProviderId) -> Option<ProviderId> {
     let connected: Vec<ProviderId> = connected_choices(statuses);
@@ -320,10 +303,10 @@ pub fn default_picker_for(
     })
 }
 
-/// The Connected providers, in [`connect_order`]: what the footer picker
-/// lists.
+/// The Connected providers, in the one provider order: what the footer
+/// picker lists.
 pub fn connected_choices(statuses: &[ProviderStatus]) -> Vec<ProviderId> {
-    connect_order()
+    ProviderId::all()
         .into_iter()
         .filter(|id| statuses.iter().any(|s| s.provider == *id && s.enabled && row_connected(s)))
         .collect()
@@ -858,8 +841,8 @@ impl Render for ConnectScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.model.read(cx);
         let rows = build_rows(&model.statuses, &model.codex_login);
-        // With no pick, the first registered stands (as at boot).
-        let current = self.facts.new_provider.unwrap_or(ProviderId::all()[0]);
+        // With no pick, the first in the one order stands (as at boot).
+        let current = self.facts.new_provider.unwrap_or_else(ProviderId::first);
         let picker = default_picker_for(&model.statuses, current, self.menu_open(cx));
         // Codex's sign-in owns the line while it runs; otherwise the P7
         // offer may stand there (first run only).
