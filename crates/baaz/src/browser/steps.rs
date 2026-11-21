@@ -453,17 +453,33 @@ impl Harness {
         Ok(())
     }
 
-    /// `page-actions`: open the page controls' ⋯ on the shown tab — the
-    /// real one, the library's page menu (`BrowseMenuTarget::Page`) with the
-    /// offers the page has, through the button's own path. It draws in the
-    /// overlay window over the page, which a shot of the main window does
-    /// not show. No shown page is an `Err`. Free.
-    pub(crate) fn step_page_actions(&mut self, _rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+    /// `page-actions` / `page-actions:<x>,<y>`: open the page controls' ⋯
+    /// on the shown tab — the real one, the library's page menu
+    /// (`BrowseMenuTarget::Page`) with the offers the page has, through the
+    /// button's own path. It draws in the overlay window over the page (a
+    /// capture lays that window over its shot, `shot.rs`). A click carries
+    /// the button's bounds; `<x>,<y>` names the button's centre in window
+    /// points, so the menu seats under it as a click seats it. With none,
+    /// the menu opens at the pointer, wherever it stands (a capture's two
+    /// shots then depend on the OS pointer). No shown page, or a point that
+    /// does not parse, is an `Err`. Free.
+    pub(crate) fn step_page_actions(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
+        let anchor = match rest.trim() {
+            "" => None,
+            point => {
+                let (x, y) = point
+                    .split_once(',')
+                    .and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?)))
+                    .ok_or_else(|| format!("`{point}` is not a window point x,y"))?;
+                let side = cx.aui().metrics.control;
+                Some(gpui::Bounds::centered_at(gpui::point(gpui::px(x), gpui::px(y)), gpui::size(side, side)))
+            }
+        };
         if self.browse_centre_page(window, cx).is_none() {
             return Err("no page is open in Browse".into());
         }
-        self.toggle_browse_page_menu(None, window, cx);
+        self.toggle_browse_page_menu(anchor, window, cx);
         match self.overlays.read(cx).stack.browse_menu() {
             Some(menu) if matches!(menu.target, aui::screens::sidebar::BrowseMenuTarget::Page { .. }) => Ok(()),
             _ => Err("the page menu did not open".into()),

@@ -380,7 +380,7 @@ ENTRIES = {
     # does not show: this pins that the menu opens (a failed step exits 1),
     # not its look — the gallery's `screens/sidebar-browse-page-offers` is.
     "browse-more-menu":     {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "mode:browse;tab-new:https://example.com;page-actions"]},
+                                      "--steps", "mode:browse;tab-new:https://example.com;page-actions:234,102"]},
     # docs/82 8.6, work-browser basics. A site's own Settings page (the
     # per-site sheet: kept answers as Ask / Allow / Block, the agents' rule,
     # its zoom, Forget), reached from the page menu's "Site settings…" and
@@ -399,7 +399,7 @@ ENTRIES = {
     "browse-bookmarks-page": {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://example.com;bookmark:https://doc.rust-lang.org/book/|The Rust Programming Language|;bookmark:https://news.ycombinator.com/|Hacker News|;bookmark:https://doc.rust-lang.org/rust-by-example/|Rust by Example|Learning;library:bookmarks"]},
     "browse-zoom-menu":     {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "mode:browse;tab-new:https://example.com;zoom:in;zoom:in;page-actions"]},
+                                      "--steps", "mode:browse;tab-new:https://example.com;zoom:in;zoom:in;page-actions:234,102"]},
     # docs/82 8.6: a session acting on the page Browse shows — the agent
     # cursor on the element it acted on (drawn in the main window over the
     # scripted page; over a native page its own float draws it), the
