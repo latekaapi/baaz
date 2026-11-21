@@ -1,6 +1,6 @@
 //! The right pane's Tasks screen (docs/82 6.5, docs/83 §6): what the open
-//! session's agent started through Baaz's terminal tools — command, state,
-//! port, duration — newest first, with Stop on what still runs. A row with a
+//! session's agent started through Baaz's terminal tools, and the session's
+//! Run (docs/82 7.4) — command, state, port, duration — newest first, with Stop on what still runs. A row with a
 //! tab opens the dock on it.
 //!
 //! The rows come from the terminal host's task book
@@ -18,7 +18,7 @@ use crate::right_pane::{RightPane, RightPaneEvent};
 use crate::terminal::tasks::{duration_label, TaskRow, TaskState};
 
 /// The empty screen's one line (decision 4, rule 14: no provider named).
-pub(crate) const EMPTY_LINE: &str = "Nothing running. Commands the agent starts in Baaz's terminal show here.";
+pub(crate) const EMPTY_LINE: &str = "Nothing running. Commands the agent starts in Baaz's terminal, and the project's Run, show here.";
 
 impl RightPane {
     /// Copy the open session's tasks out of the host for this frame (and

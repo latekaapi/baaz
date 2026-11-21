@@ -16,13 +16,17 @@
 //!   project root, keeping their paths ([`copy_included`]). No file, nothing
 //!   copied.
 //! * **`.baaz/project.toml`** declares `setup`, `run` and `preview_url`
-//!   ([`ProjectConfig`]). `setup` runs once per worktree, in it, through
+//!   ([`ProjectConfig`]). `run` and `preview_url` are the session's Run
+//!   (docs/82 7.4, in the app). `setup` runs once per worktree, in it, through
 //!   `sh -c`, in its own session and process group (the `posix_spawn`
 //!   helper, never `pre_exec`), with a timeout and its output in a log file
 //!   beside the worktree ([`run_setup_once`]). A failing setup keeps the
 //!   worktree.
 //! * **Env**: [`Worktree::env`] — `BAAZ_WORKTREE_PATH`, `BAAZ_PROJECT_ROOT`,
-//!   `BAAZ_PORT` (the first of the block) and `BAAZ_PORT_COUNT`.
+//!   `BAAZ_PORT` (the first of the block) and `BAAZ_PORT_COUNT`. A session
+//!   that runs in no worktree gets a block for the life of its Run's
+//!   terminal tab instead ([`run_port_block`], [`plain_env`]), taken from
+//!   the top of the range down, so it never meets a worktree's row.
 //! * **An unused worktree goes** ([`discard_unused`]): `git worktree remove`
 //!   without `--force`, so a worktree with changes in it stays.
 //! * **Archive and unarchive** (docs/82 6.2, docs/26b §2.8): [`archive`]
@@ -417,14 +421,16 @@ pub fn copy_included(root: &Path, dest: &Path) -> Result<usize, String> {
 // ----------------------------------------------------------- project.toml
 
 /// What a project declares in `.baaz/project.toml`. Stage 6 runs `setup`;
-/// `run` and `preview_url` are read for stage 7.
+/// the session's Run starts `run` and opens `preview_url` (docs/82 7.4).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProjectConfig {
     /// Runs once in each new worktree.
     pub setup: Option<String>,
-    /// Starts the project (stage 7).
+    /// Starts the project: the session's Run types it into a terminal tab
+    /// of the session's own, with the session's port block in its env.
     pub run: Option<String>,
-    /// Where the running project answers (stage 7).
+    /// Where the running project answers: `${BAAZ_PORT}` or `$BAAZ_PORT`
+    /// in it is the session's first port.
     pub preview_url: Option<String>,
 }
 
@@ -638,6 +644,40 @@ fn run_script(script: &str, worktree: &Worktree, base_env: &[(OsString, OsString
     }
 }
 
+// ------------------------------------------------------- plain-session ports
+
+/// The block a Run of a session in no worktree gets (docs/82 7.4): the
+/// highest block whose first port is not in `taken` (blocks this run's
+/// other Run tabs hold) and that `free` says nothing listens on. From the
+/// top down, where [`create`]'s rows fill from the bottom up, so the two
+/// meet only when two thousand blocks are in use. Held for the life of the
+/// Run's terminal tab, never written to the database. `None` when no block
+/// is free.
+pub fn run_port_block(taken: &[u16], free: impl Fn(u16) -> bool) -> Option<u16> {
+    (0..PORT_BLOCKS)
+        .rev()
+        .map(|block| PORT_BASE + block * PORT_BLOCK)
+        .find(|port| !taken.contains(port) && free(*port))
+}
+
+/// Whether nothing on this Mac listens on `port` at 127.0.0.1: a bind
+/// that succeeds (and is let go at once). What [`run_port_block`] asks of
+/// a block's first port.
+pub fn port_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// What a Run of a session in no worktree is started with: the project
+/// folder as `BAAZ_PROJECT_ROOT` and its block (`BAAZ_PORT`,
+/// `BAAZ_PORT_COUNT`). No `BAAZ_WORKTREE_PATH`: there is none.
+pub fn plain_env(folder: &Path, port: u16) -> Vec<(String, String)> {
+    vec![
+        ("BAAZ_PROJECT_ROOT".to_owned(), folder.to_string_lossy().into_owned()),
+        ("BAAZ_PORT".to_owned(), port.to_string()),
+        ("BAAZ_PORT_COUNT".to_owned(), PORT_BLOCK.to_string()),
+    ]
+}
+
 // ------------------------------------------------------------- lookups
 
 /// The worktree whose folder is `folder`, from `state_dir`'s database.
@@ -712,6 +752,12 @@ fn forget(folder: &Path) {
 /// database: empty for a folder no lookup or create has named yet.
 pub fn cached_env_for_folder(folder: &Path) -> Vec<(String, String)> {
     cached(|map| map.get(folder).map(Worktree::env)).unwrap_or_default()
+}
+
+/// The live worktree in `folder`, from what this run already knows (no
+/// database): `None` for any other folder.
+pub fn cached_worktree_for_folder(folder: &Path) -> Option<Worktree> {
+    cached(|map| map.get(folder).cloned())
 }
 
 /// The branch of the live worktree in `folder`, from what this run

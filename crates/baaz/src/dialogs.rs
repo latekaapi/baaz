@@ -41,12 +41,19 @@ use crate::layout::LayoutGlobal as _;
 const MOVE_BACK_LABEL: &str = "Move back to project folder";
 /// The overflow row that undoes the newest undoable turn (docs/82 6.4).
 const UNDO_LAST_LABEL: &str = "Undo last turn";
+/// The header menu's Run rows (docs/82 7.4).
+const RUN_LABEL: &str = "Run";
+const SHOW_RUN_LABEL: &str = "Show run";
+const STOP_RUN_LABEL: &str = "Stop run";
 
 /// Actions of the header's overflow menu, in row order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OverflowAction {
     Rename,
     Fork,
+    Run,
+    ShowRun,
+    StopRun,
     UndoLastTurn,
     MoveBack,
     Archive,
@@ -58,13 +65,29 @@ enum OverflowAction {
 /// shown only if it works), Undo last turn only while a finished turn can
 /// be undone (`undo_last`; docs/82 6.4), Move back only for a worktree
 /// session whose provider can resume it in the project folder
-/// (`move_back`; docs/82 6.2).
-fn overflow_rows(fork: bool, undo_last: bool, move_back: bool) -> (Vec<MenuRow>, Vec<OverflowAction>) {
+/// (`move_back`; docs/82 6.2), and Run — or Show run and Stop run while it
+/// runs — only where the session's folder declares `run` (`run`; docs/82
+/// 7.4).
+fn overflow_rows(fork: bool, run: Option<crate::project_run::RunOffer>, undo_last: bool, move_back: bool) -> (Vec<MenuRow>, Vec<OverflowAction>) {
+    use crate::project_run::RunOffer;
     let mut rows = vec![MenuRow::Toggle { label: "Rename".into(), checked: false }];
     let mut actions = vec![OverflowAction::Rename];
     if fork {
         rows.push(MenuRow::Toggle { label: "Fork".into(), checked: false });
         actions.push(OverflowAction::Fork);
+    }
+    match run {
+        Some(RunOffer::Idle) => {
+            rows.push(MenuRow::Toggle { label: RUN_LABEL.into(), checked: false });
+            actions.push(OverflowAction::Run);
+        }
+        Some(RunOffer::Running) => {
+            rows.push(MenuRow::Toggle { label: SHOW_RUN_LABEL.into(), checked: false });
+            actions.push(OverflowAction::ShowRun);
+            rows.push(MenuRow::Toggle { label: STOP_RUN_LABEL.into(), checked: false });
+            actions.push(OverflowAction::StopRun);
+        }
+        None => {}
     }
     if undo_last {
         rows.push(MenuRow::Toggle { label: UNDO_LAST_LABEL.into(), checked: false });
@@ -639,6 +662,8 @@ impl Harness {
 
     /// The header's overflow menu, anchored under the "…" button: Rename swaps
     /// the title for the dense inline field, Fork opens the fork picker,
+    /// Run starts the project's declared `run` (Show run / Stop run while it
+    /// runs; [`crate::project_run`]),
     /// Undo last turn asks before undoing the newest undoable turn, Move
     /// back hands a worktree's changes to the project folder, and Archive
     /// asks first through the archive dialog.
@@ -650,7 +675,7 @@ impl Harness {
             .active
             .as_ref()
             .is_some_and(|view| view.read(cx).rt(cx).offers(provider::Capability::ForkSession));
-        let (rows, actions) = overflow_rows(fork, self.undo_last_offered(cx), self.move_back_offered(cx));
+        let (rows, actions) = overflow_rows(fork, self.run_offer(cx), self.undo_last_offered(cx), self.move_back_offered(cx));
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
             let action = actions.get(*index).copied();
             this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
@@ -666,6 +691,21 @@ impl Harness {
                     }
                 }
                 Some(OverflowAction::Fork) => this.open_palette(PaletteKind::Fork, cx),
+                Some(OverflowAction::Run) => {
+                    if let Err(why) = this.run_project(cx) {
+                        this.overlays.update(cx, |overlays, cx| {
+                            overlays.toast("Couldn't run", why, cx);
+                        });
+                    }
+                }
+                Some(OverflowAction::ShowRun) => this.select_right(crate::layout::RightKind::Tasks, cx),
+                Some(OverflowAction::StopRun) => {
+                    if let Err(why) = this.stop_project_run(cx) {
+                        this.overlays.update(cx, |overlays, cx| {
+                            overlays.toast("Couldn't stop it", why, cx);
+                        });
+                    }
+                }
                 Some(OverflowAction::UndoLastTurn) => {
                     if let Err(why) = this.undo_last_turn(cx) {
                         crate::baaz_log!("undo: last turn not asked ({why})");
@@ -1138,32 +1178,42 @@ mod tests {
     use aui::nav::MenuRow;
     use crate::layout::LayoutGlobal as _;
 
-    /// The header ⋯ menu's rows: Rename, Fork, Undo last turn, Move back,
-    /// Archive, one action each; Fork only where the session's provider
-    /// forks, Undo last turn and Move back only where they are offered.
+    /// The header ⋯ menu's rows: Rename, Fork, Run, Undo last turn, Move
+    /// back, Archive, one action each; Fork only where the session's
+    /// provider forks, Run, Undo last turn and Move back only where they
+    /// are offered.
     #[test]
     fn overflow_menu_rows_are_rename_fork_archive() {
         let label = |row: &MenuRow| match row {
             MenuRow::Toggle { label, checked } => (label.to_string(), *checked),
             _ => panic!("overflow rows are toggles"),
         };
-        let (rows, actions) = super::overflow_rows(true, false, false);
+        let (rows, actions) = super::overflow_rows(true, None, false, false);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Fork", "Archive"]);
         assert!(rows.iter().all(|r| !label(r).1), "no row is checked");
         assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::Fork, super::OverflowAction::Archive]);
         // A provider that cannot fork shows no Fork row (docs/82 5.5).
-        let (rows, actions) = super::overflow_rows(false, false, false);
+        let (rows, actions) = super::overflow_rows(false, None, false, false);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Archive"]);
         assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::Archive]);
         // A worktree session whose provider resumes in a named folder gets
         // Move back, above Archive (docs/82 6.2).
-        let (rows, actions) = super::overflow_rows(false, false, true);
+        let (rows, actions) = super::overflow_rows(false, None, false, true);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Move back to project folder", "Archive"]);
         assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::MoveBack, super::OverflowAction::Archive]);
         // A finished turn Undo can act on adds Undo last turn (docs/82 6.4).
-        let (rows, actions) = super::overflow_rows(true, true, false);
+        let (rows, actions) = super::overflow_rows(true, None, true, false);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Fork", "Undo last turn", "Archive"]);
         assert_eq!(actions[2], super::OverflowAction::UndoLastTurn);
+        // A folder that declares `run` gets Run; while it runs, Show run and
+        // Stop run instead — never a second Run (docs/82 7.4).
+        use crate::project_run::RunOffer;
+        let (rows, actions) = super::overflow_rows(false, Some(RunOffer::Idle), false, false);
+        assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Run", "Archive"]);
+        assert_eq!(actions[1], super::OverflowAction::Run);
+        let (rows, actions) = super::overflow_rows(false, Some(RunOffer::Running), false, false);
+        assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Show run", "Stop run", "Archive"]);
+        assert_eq!(&actions[1..3], [super::OverflowAction::ShowRun, super::OverflowAction::StopRun]);
     }
 
     use crate::palette::{filter_commands, tilde_root};

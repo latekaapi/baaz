@@ -99,6 +99,7 @@ mod resize;
 mod right;
 mod right_changes;
 mod right_files;
+mod project_run;
 mod right_page;
 mod right_pr;
 mod right_pane;

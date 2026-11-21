@@ -54,6 +54,9 @@ pub struct TerminalTab {
     /// The tab's shell, when it is a real pty: the session leader whose
     /// foreground group a task's Stop ends (docs/82 6.5).
     pub shell_pid: Option<u32>,
+    /// The port block a plain session's Run holds while this tab lives
+    /// (docs/82 7.4): its first port, in the shell's `BAAZ_PORT`.
+    pub port_block: Option<u16>,
 }
 
 /// The pure facts [`pick_tab`] decides on: one row per tab the host holds.
@@ -328,10 +331,53 @@ impl TerminalHost {
         // wants it off can unset it in their rc, which runs after this.
         // The scrub rides along ([`pty_extra_env`]): the inherited
         // desktop-agent vars blank, the owner's homes untouched.
+        self.open_pty(project_root, cwd, title, owner, origin_session, Vec::new(), cx)
+    }
+
+    /// Open the tab a session's Run starts in (docs/82 7.4): a person's
+    /// tab of `project_root`, its shell in `cwd`, started with `env` on top
+    /// of what every tab gets — a plain session's port block
+    /// (`port_block`, held while the tab lives), or nothing extra for a
+    /// worktree session, whose tab gets the worktree's variables anyway.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_run_tab(
+        &mut self,
+        project_root: &Path,
+        cwd: &Path,
+        title: String,
+        origin_session: Option<SessionId>,
+        env: Vec<(String, String)>,
+        port_block: Option<u16>,
+        cx: &mut Context<Self>,
+    ) -> String {
+        let id = self.open_pty(project_root, cwd, title, TabOwner::User, origin_session, env, cx);
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+            tab.port_block = port_block;
+        }
+        id
+    }
+
+    /// The port blocks plain sessions' Run tabs hold now: what the next
+    /// plain Run's block must not be ([`baaz_core::worktrees::run_port_block`]).
+    pub fn run_port_blocks(&self) -> Vec<u16> {
+        self.tabs.iter().filter_map(|tab| tab.port_block).collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_pty(
+        &mut self,
+        project_root: &Path,
+        cwd: &Path,
+        title: String,
+        owner: TabOwner,
+        origin_session: Option<SessionId>,
+        extra: Vec<(String, String)>,
+        cx: &mut Context<Self>,
+    ) -> String {
         let mut config = aui_terminal::PtyConfig::login(cwd);
         // A session in one of Baaz's worktrees (its root is the worktree):
         // the shell gets the worktree's variables too (docs/82 6.1).
-        for (key, value) in pty_extra_env().into_iter().chain(baaz_core::worktrees::cached_env_for_folder(project_root)) {
+        for (key, value) in pty_extra_env().into_iter().chain(baaz_core::worktrees::cached_env_for_folder(project_root)).chain(extra) {
             config = config.with_env(key, value);
         }
         let nonce = config.nonce().to_owned();
@@ -475,6 +521,7 @@ impl TerminalHost {
             origin_session,
             session: entity,
             shell_pid,
+            port_block: None,
         });
         self.active.insert(project_root.to_owned(), id.clone());
         id
@@ -489,6 +536,14 @@ impl TerminalHost {
     pub fn record_task(&mut self, session: &str, command: &str, tab: &str, block: usize, cx: &mut Context<Self>) {
         self.tasks.record(session, command, tab, block);
         self.ensure_task_poll(cx);
+    }
+
+    /// Record the session's Run (docs/82 7.4) started in `tab` (its block
+    /// will be `block`) and make sure the poll follows it. Returns its id.
+    pub fn record_run(&mut self, session: &str, command: &str, tab: &str, block: usize, preview: bool, cx: &mut Context<Self>) -> u64 {
+        let id = self.tasks.record_run(session, command, tab, block, preview);
+        self.ensure_task_poll(cx);
+        id
     }
 
     /// The foreground process group of `tab`'s shell — the command running

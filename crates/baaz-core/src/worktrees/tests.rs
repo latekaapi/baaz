@@ -598,3 +598,35 @@ fn in_git_repository_sees_repos_subfolders_and_worktrees() {
     assert!(worktree.path.join(".git").is_file());
     assert!(in_git_repository(&worktree.path), "a worktree");
 }
+
+/// docs/82 7.4: a plain session's Run block comes from the top of the
+/// range down, past blocks other Runs hold and blocks something listens
+/// on, and its env carries the port.
+#[test]
+fn a_plain_run_takes_the_highest_free_block_and_its_env_names_it() {
+    let top = PORT_BASE + (PORT_BLOCKS - 1) * PORT_BLOCK;
+    assert_eq!(run_port_block(&[], |_| true), Some(top));
+    assert_eq!(run_port_block(&[top], |_| true), Some(top - PORT_BLOCK), "a block another Run holds is skipped");
+    assert_eq!(run_port_block(&[], |port| port != top), Some(top - PORT_BLOCK), "a listening block is skipped");
+    assert_eq!(run_port_block(&[], |_| false), None);
+    let env = plain_env(Path::new("/acme"), 60990);
+    assert!(env.contains(&("BAAZ_PORT".to_owned(), "60990".to_owned())), "{env:?}");
+    assert!(env.contains(&("BAAZ_PORT_COUNT".to_owned(), PORT_BLOCK.to_string())), "{env:?}");
+    assert!(env.contains(&("BAAZ_PROJECT_ROOT".to_owned(), "/acme".to_owned())), "{env:?}");
+    assert!(!env.iter().any(|(key, _)| key == "BAAZ_WORKTREE_PATH"), "no worktree: {env:?}");
+}
+
+/// `port_free` is a bind: a port a listener holds is not free.
+#[test]
+fn a_held_port_is_not_free() {
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("skipped: this sandbox forbids listening ({error})");
+            return;
+        }
+    };
+    let port = listener.local_addr().expect("bound").port();
+    assert!(!port_free(port));
+    drop(listener);
+}

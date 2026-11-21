@@ -139,6 +139,9 @@
 //! | `new-branch` | open New branch…'s name field on the Changes foot (docs/82 7.2; idempotent); not on the default branch, or a foot without the branch line, fails the step, free |
 //! | `amend:<on\|off>` | set "Amend last commit" in the commit box (docs/82 7.2; a setter); no changes, or Amend not offered (HEAD on a remote), fails the step, free |
 //! | `changes-scope:<all\|session\|last>` | the Changes pane on that scope (docs/82 6.3): a capture loads the fixture checkpoint index (two finished turns over the fixture tree) — no refs are read or written; no open session or an unknown word fails the step, free |
+//! | `run` | press Run on the open session (docs/82 7.4): the folder's `.baaz/project.toml` `run` starts in a terminal tab of the session's own, listed in Tasks; a Run that still runs is shown, not started again; no session or no `run` declared fails the step — **starts a real process** (captures: a static server in a fixture folder only) |
+//! | `run-stop` | Stop run on the open session: its process group ends; nothing running fails the step |
+//! | `run-wait-preview` (or `run-wait-preview:<s>`) | the runner waits up to that many seconds (30) while the Run's preview port has not answered, then the step checks the session's Page opened on it; gave up, run ended, moved on or no Run fails the step |
 //! | `tasks-fixture` (or `tasks-fixture:<session_id>`) | the Tasks view's capture fixture (docs/82 6.5): four tasks on that session, else the open one — running on :5173, exited 0, exited 1, stopped — with fixed durations and no process behind any; no session, or one that already has tasks, fails the step, free |
 //! | `tasks-row:<session_id>` | the sidebar row's "N running" click: that session opens with the right pane on Tasks; a session with nothing running fails the step, free |
 //! | `files-reveal:<path>` | reveal the project-relative file or folder in the Files pane through the link's own path (a folder selects with every ancestor expanded and no preview, a file previews banded on the payload's `#L…`/`:line` suffix); empty or project-less fails, free |
@@ -441,6 +444,9 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "amend", run: |this, rest, _, cx| this.step_changes_amend(rest, cx) },
     WindowVerb { verb: "tasks-fixture", run: |this, rest, _, cx| this.step_tasks_fixture(rest, cx) },
     WindowVerb { verb: "tasks-row", run: |this, rest, window, cx| this.step_tasks_row(rest, window, cx) },
+    WindowVerb { verb: "run", run: |this, _, _, cx| this.step_run(cx) },
+    WindowVerb { verb: "run-stop", run: |this, _, _, cx| this.step_run_stop(cx) },
+    WindowVerb { verb: "run-wait-preview", run: |this, _, _, cx| this.step_run_wait_preview(cx) },
     WindowVerb { verb: "undo-turn", run: |this, rest, _, cx| this.step_undo_turn(rest, cx) },
     WindowVerb { verb: "revert-file", run: |this, rest, _, cx| this.step_revert_file(rest, cx) },
     WindowVerb { verb: "files-reveal", run: |this, rest, _, cx| this.step_files_reveal(rest, cx) },
@@ -1304,6 +1310,16 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
                     crate::baaz_log!(
                         "session switch never arrived; `{step}` runs against {active:?}"
                     );
+                }
+            }
+            // `run-wait-preview[:<s>]` (docs/82 7.4): the step checks the
+            // Page opened; the wait for the port to answer is the runner's,
+            // like `wait:`, bounded (30 s unless named).
+            if split(&step).0 == "run-wait-preview" {
+                let secs: u64 = split(&step).1.trim().parse().unwrap_or(30);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+                while std::time::Instant::now() < deadline && this.read_with(cx, |this, cx| this.preview_waiting(cx)).unwrap_or(false) {
+                    cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
                 }
             }
             STEPS_RAN.fetch_add(1, Ordering::Relaxed);

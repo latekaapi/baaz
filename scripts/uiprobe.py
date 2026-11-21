@@ -1123,6 +1123,38 @@ ENTRIES.update({
                                           "tab-new:https://doc.rust-lang.org/book/"),
 })
 
+# Task 7.4 · Run and preview. A folder at one fixed path (its name shows in
+# the header crumb and the hero) declaring a Run that serves the folder
+# with Python's static server on the session's port, and its preview.
+# `run-offered`: the header ⋯ menu offers Run on a session in it (no
+# process). `run-preview`: Run pressed, the preview's port answers, the
+# session's Page opens on it (a capture's Page is the scripted page, so the
+# address row is what shows the URL). The session is in no worktree, so its
+# block is the top one, 60990, while nothing else holds it; quit ends the
+# server's group (6.5), so the next attempt finds the port free again.
+def _run_fixture():
+    root = os.path.join(REAL_TMP, "baaz-uiprobe-run", "static-site")
+    try:
+        os.makedirs(os.path.join(root, ".baaz"), exist_ok=True)
+        with open(os.path.join(root, ".baaz", "project.toml"), "w") as f:
+            f.write('run = "python3 -m http.server $BAAZ_PORT --bind 127.0.0.1"\n'
+                    'preview_url = "http://127.0.0.1:${BAAZ_PORT}/"\n')
+        with open(os.path.join(root, "index.html"), "w") as f:
+            f.write("<!doctype html><title>Static site</title><h1>Static site</h1>\n")
+    except OSError as error:
+        print(f"uiprobe: the run fixture was not built ({error})", file=sys.stderr)
+    return root
+
+
+_RUN_SITE = _run_fixture()
+
+ENTRIES.update({
+    "run-offered":  {"shot": ["--no-connect", "--login", "signed-in",
+                              "--steps", f"project:{_RUN_SITE};new;wait:300;overflow"]},
+    "run-preview":  {"shot": ["--no-connect", "--login", "signed-in",
+                              "--steps", f"project:{_RUN_SITE};new;wait:300;run;run-wait-preview:30"]},
+})
+
 # Task 2.11 · light theme pass: the light twin of the screens a person
 # sees filled, plus one of each floating kind (menu, palette, dialog, sheet)
 # and the pages, so "renders light everywhere" is looked at rather than

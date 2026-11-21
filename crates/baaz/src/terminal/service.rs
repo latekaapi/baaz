@@ -546,9 +546,8 @@ impl TerminalService {
         self.shared.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id.to_owned(), project_root);
     }
 
-    /// The root `id` is trusted for (tests read where a session's
-    /// commands would run).
-    #[cfg(test)]
+    /// The root `id` is trusted for: where its agent's tabs open, and its
+    /// Run's (docs/82 7.4). Tests read it too.
     pub fn session_root(&self, id: &str) -> Option<PathBuf> {
         self.shared.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(id).cloned()
     }

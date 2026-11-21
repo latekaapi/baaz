@@ -6,7 +6,10 @@
 //! command line it typed with `terminal_send` into an idle tab it opened
 //! (`terminal_open` then `send "npm run dev" + enter`). An idle shell the
 //! agent opened is not a task until something runs in it; the person's own
-//! commands, in their tabs or in the agent's, are never recorded.
+//! commands, in their tabs or in the agent's, are never recorded — except
+//! the session's Run (docs/82 7.4, [`crate::project_run`]): the project's
+//! declared `run`, started from the header menu, is a task too
+//! ([`TaskBook::record_run`]), carrying its preview's progress.
 //!
 //! The book lives on [`TerminalHost`](super::TerminalHost), which owns the
 //! tabs the tasks run in: the host reads each running task's block on a
@@ -88,6 +91,23 @@ enum Span {
     Fixed(Duration),
 }
 
+/// Where a Run's preview stands (docs/82 7.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preview {
+    /// The project declares no `preview_url`.
+    None,
+    /// Waiting for its port to answer.
+    Waiting,
+    /// It answered and the Page opened on it.
+    Opened,
+    /// It answered, but the person had moved on: a toast said so instead.
+    Ready,
+    /// Nothing answered in time.
+    GaveUp,
+    /// The run ended before its port answered.
+    RunEnded,
+}
+
 /// One recorded task.
 #[derive(Clone, Debug)]
 pub struct Task {
@@ -109,6 +129,9 @@ pub struct Task {
     pub group: Option<i32>,
     /// The person pressed Stop.
     pub stop_asked: bool,
+    /// The session's Run (docs/82 7.4), with its preview's progress; `None`
+    /// for what the agent started.
+    pub run: Option<Preview>,
 }
 
 impl Task {
@@ -177,9 +200,52 @@ impl TaskBook {
             port: None,
             group: None,
             stop_asked: false,
+            run: None,
         });
         self.trim(session);
         id
+    }
+
+    /// Record the session's Run (docs/82 7.4): the project's `run` started
+    /// in `tab`, whose block will be `block`; `preview` says whether a
+    /// preview waits on it. Returns the task's id.
+    pub fn record_run(&mut self, session: &str, command: &str, tab: &str, block: usize, preview: bool) -> u64 {
+        let id = self.record(session, command, tab, block);
+        if let Some(task) = self.tasks.iter_mut().find(|task| task.id == id) {
+            task.run = Some(if preview { Preview::Waiting } else { Preview::None });
+        }
+        id
+    }
+
+    /// `session`'s Run that still runs, if any: what keeps a second Run
+    /// from starting a second copy.
+    pub fn running_run(&self, session: &str) -> Option<u64> {
+        self.tasks.iter().rev().find(|task| task.session == session && task.run.is_some() && task.state.running()).map(|task| task.id)
+    }
+
+    /// The tab `session`'s newest Run ran in, while it has one: the tab a
+    /// next Run reuses when it is idle.
+    pub fn last_run_tab(&self, session: &str) -> Option<String> {
+        self.tasks.iter().rev().find(|task| task.session == session && task.run.is_some()).and_then(|task| task.tab.clone())
+    }
+
+    /// `session`'s newest Run: `(id, state, preview)` — what the probe's
+    /// `run-wait-preview` reads.
+    #[cfg(any(test, feature = "probe"))]
+    pub fn latest_run(&self, session: &str) -> Option<(u64, TaskState, Preview)> {
+        self.tasks.iter().rev().find(|task| task.session == session && task.run.is_some()).map(|task| (task.id, task.state, task.run.unwrap_or(Preview::None)))
+    }
+
+    /// Task `id`'s state and, for a Run, its preview's progress.
+    pub fn run_state(&self, id: u64) -> Option<(TaskState, Preview)> {
+        self.tasks.iter().find(|task| task.id == id).and_then(|task| Some((task.state, task.run?)))
+    }
+
+    /// Note where Run `id`'s preview stands.
+    pub fn set_preview(&mut self, id: u64, preview: Preview) {
+        if let Some(task) = self.tasks.iter_mut().find(|task| task.id == id && task.run.is_some()) {
+            task.run = Some(preview);
+        }
     }
 
     fn push(&mut self, mut task: Task) -> u64 {
@@ -392,6 +458,7 @@ impl TaskBook {
                 port,
                 group: None,
                 stop_asked: state == TaskState::Stopped,
+                run: None,
             });
         }
     }
@@ -579,6 +646,27 @@ mod tests {
         let got = found.get(&group).copied();
         assert!(got.is_some_and(|lowest| lowest <= port), "group {group} listens on {port}: {found:?}");
         drop(listener);
+    }
+
+    /// docs/82 7.4: a session has one Run at a time — the running one is
+    /// found, not doubled — and the next Run reuses the last one's tab.
+    #[test]
+    fn a_run_is_found_while_it_runs_and_its_tab_is_remembered() {
+        let mut book = TaskBook::default();
+        assert_eq!(book.running_run("s1"), None);
+        book.record("s1", "pnpm test", "t1", 0);
+        assert_eq!(book.running_run("s1"), None, "the agent's task is no Run");
+        let run = book.record_run("s1", "python3 -m http.server $BAAZ_PORT", "t2", 0, true);
+        assert_eq!(book.running_run("s1"), Some(run));
+        assert_eq!(book.running_run("s2"), None, "per session");
+        assert_eq!(book.latest_run("s1"), Some((run, TaskState::Running, Preview::Waiting)));
+        book.set_preview(run, Preview::Opened);
+        assert_eq!(book.run_state(run), Some((TaskState::Running, Preview::Opened)));
+        book.settle(|tab, _| if tab == "t2" { Seen::Finished { exit: Some(0), ended: None } } else { Seen::Running });
+        assert_eq!(book.running_run("s1"), None, "it ended");
+        assert_eq!(book.last_run_tab("s1"), Some("t2".to_owned()), "the next Run reuses its tab");
+        book.rekey("s1", "thread-1");
+        assert_eq!(book.last_run_tab("thread-1"), Some("t2".to_owned()), "a Run follows its session's new id");
     }
 
     #[test]
