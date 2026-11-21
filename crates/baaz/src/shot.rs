@@ -99,6 +99,16 @@ fn write_capture(
     Ok((target_w, target_h))
 }
 
+/// Open, move or close the floats for what the main window shows now,
+/// without waiting for a frame that a covered window never draws.
+fn sync_floats_now(main: WindowHandle<Root>, cx: &mut App) {
+    let _ = main.update(cx, |root, window, cx| {
+        if let Ok(harness) = root.view().clone().downcast::<crate::app::Harness>() {
+            harness.update(cx, |harness, cx| harness.sync_floats(window, cx));
+        }
+    });
+}
+
 type Rgba = image::ImageBuffer<image::Rgba<u8>, Vec<u8>>;
 
 /// Every other window of this app, drawn now and rendered, with its
@@ -304,6 +314,13 @@ pub fn capture_and_quit(
                 window.refresh();
             });
         });
+        // The floats (Browse's menus, the Field, the Ask line, toasts) open
+        // from `queue_floats`, an `on_next_frame` callback — and gpui stops a
+        // window's frames while it is covered or off screen, so a capture
+        // whose window sat under another app's never opened them (Gate 8's
+        // baseline run: browse-more-menu, -omnibox, -ask-line came out bare).
+        // Sync them here, then give their open tasks the wait below.
+        cx.update(|cx| sync_floats_now(handle, cx));
         cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
         // gpui-pre 0.3.12 stops a window's frame source while it is not
         // visibly on screen (covered, on another Space, display asleep), so
@@ -318,6 +335,10 @@ pub fn capture_and_quit(
             });
             cx.background_executor().timer(std::time::Duration::from_millis(60)).await;
         }
+        // Once more after those frames: a float placed from a laid-out rect
+        // (the Page float with the Ask line reads the page's rect) has one now.
+        cx.update(|cx| sync_floats_now(handle, cx));
+        cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
         let rendered = cx.update(|cx| {
             handle.update(cx, |_root, window, _cx| {
                 let scale = window.scale_factor();
