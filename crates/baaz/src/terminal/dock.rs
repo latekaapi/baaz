@@ -1,6 +1,13 @@
 //! The terminal dock as its own entity (task 4.4): a
 //! [`Region`](crate::region::Region) that hangs under the composer in the
-//! centre column (D42).
+//! centre column (D42), or sits in the right pane as its Terminal view
+//! (docs/82 8.1, [`TerminalPlace`]).
+//!
+//! One terminal, two places: [`TerminalDock::body`] is the one builder of
+//! the tab strip and the grid. The bottom place wraps it in the library's
+//! dock frame on its spring ([`Render`]); the pane's Terminal view wraps it
+//! in a sub-header and fills its screen ([`TerminalDock::pane_screen`]).
+//! Either way the same tabs, ptys, focus, intents and ⌃C.
 //!
 //! [`TerminalDock`] owns everything only the dock reads: the tab host it
 //! draws ([`TerminalHost`], shared as an entity with the session views that
@@ -9,8 +16,10 @@
 //! terminal bridge session answers for (the tabs' agent marks). It renders
 //! itself; `Harness::render` seats its view under the centre's body.
 //!
-//! Its open state and height persist in [`Layout`][crate::layout::Layout];
-//! the height is clamped to `[120px, 70% of the centre column]`.
+//! Its place, open state and height persist in
+//! [`Layout`][crate::layout::Layout]; the dock's height is clamped to
+//! `[120px, 70% of the centre column]`. In the pane the screen's own size
+//! is the terminal's: no spring, no height, no maximise.
 //!
 //! What only the root knows reaches the dock as [`DockFacts`] (the current
 //! project, the active session, the root's provider records for the tabs'
@@ -18,7 +27,8 @@
 //! every root call into it (`Harness::with_terminal_dock`). What the dock
 //! cannot do itself goes out as a [`TerminalDockEvent`]: a link for the
 //! Browser pane, a busy tab's close confirmation (the window's dialog), a
-//! block for the composer's draft.
+//! block for the composer's draft, a move to the other place (the pane's
+//! state is the root's to persist per session).
 //!
 //! The root keeps the gestures that must work while the dock does not hold
 //! the keyboard — ⌃` and the palette's "New terminal" — and the B11b rule
@@ -28,17 +38,19 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use aui::workbench::{terminal_dock, terminal_tabs, TermTab, TerminalDockAction, TerminalTabsAction};
-use aui_icons::Provider;
+use aui::workbench::{pane_action, pane_subheader, state_block, terminal_dock, terminal_tabs, TermTab, TerminalDockAction, TerminalTabsAction};
+use aui_icons::{IconName, Provider};
 use aui_motion::{spring_px, SpringKind};
 use aui_terminal::{terminal_grid, TerminalGridIntent};
-use aui_tokens::scale;
+use aui_tokens::{scale, ActiveAui as _, AuiStyled as _, TextRole};
 use gpui::{
     div, prelude::*, px, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
     SharedString, Window,
 };
+use gpui_kit::base::{h_flex, v_flex};
 
 use super::{Pick, TabOwner, TerminalHost};
+use crate::layout::TerminalPlace;
 use crate::overlays::Overlays;
 use crate::region::Region;
 use crate::layout::LayoutGlobal as _;
@@ -81,6 +93,18 @@ pub(crate) enum TerminalDockEvent {
     /// A block's Ask: its command and output go into the active session's
     /// composer draft, unsent.
     Ask { command: String, output: String },
+    /// The header's place control: move the terminal to the other place
+    /// (docs/82 8.1), keeping its tabs and ptys.
+    Move(TerminalPlace),
+}
+
+/// The terminal as both places draw it (docs/82 8.1), from
+/// [`TerminalDock::body`]: the header row's content — the tab strip, the
+/// agent hint and the place control — and the active tab's grid, `None`
+/// while the project has no tab.
+struct TerminalBody {
+    header: AnyElement,
+    grid: Option<AnyElement>,
 }
 
 /// The terminal dock: per-project tabs over the library's pty backend.
@@ -183,13 +207,14 @@ impl TerminalDock {
         window.focus(&self.focus, cx);
     }
 
-    /// A new terminal tab on the current project, opening the dock for it.
+    /// A new terminal tab on the current project. The root shows the
+    /// terminal in its place first (`Harness::show_terminal`); the dock's
+    /// own ＋ and "New terminal" draw where it already shows.
     ///
     /// Goes through D43's [`pick`](TerminalHost::pick) with a `"new"`
     /// route, so the rule the unit tests pin is the rule this runs. The
     /// root's B11b guard runs before this.
     pub(crate) fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        crate::layout::Layout::stage(cx, |layout| layout.terminal_open = true);
         if let Some(root) = self.facts.project.clone() {
             let decision = self.host.read(cx).pick(cx, &root, false);
             match decision {
@@ -206,30 +231,26 @@ impl TerminalDock {
             }
         }
         window.focus(&self.focus, cx);
-        crate::layout::Layout::save(cx);
     }
 
-    /// Open the dock and focus `tab`: a Tasks row's click (docs/82 6.5),
-    /// and D51's "Open terminal" on a tool card. A tab the host no longer
-    /// holds (or none named) opens the dock on its active tab instead of
-    /// failing.
+    /// Focus `tab`: a Tasks row's click (docs/82 6.5), and D51's "Open
+    /// terminal" on a tool card, once the root has shown the terminal in its
+    /// place. A tab the host no longer holds (or none named) leaves the
+    /// active tab instead of failing.
     pub(crate) fn open_tab(&mut self, tab: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        crate::layout::Layout::stage(cx, |layout| layout.terminal_open = true);
         if let Some(tab) = tab {
             if self.host.read(cx).get(&tab).is_some() {
                 self.host.update(cx, |host, cx| host.activate(&tab, cx));
             }
         }
         window.focus(&self.focus, cx);
-        crate::layout::Layout::save(cx);
     }
 
     #[cfg(feature = "probe")]
-    /// The `--steps` verb's dock: open it over a FakePty-backed tab named
-    /// `title` on `root` and drain its script at once, so the capture
-    /// replays the same bytes on every run.
+    /// The `--steps` verb's terminal: a FakePty-backed tab named `title` on
+    /// `root`, its script drained at once, so the capture replays the same
+    /// bytes on every run. The root shows the terminal in its place.
     pub(crate) fn open_scripted(&mut self, root: &std::path::Path, title: String, window: &mut Window, cx: &mut Context<Self>) {
-        crate::layout::Layout::stage(cx, |layout| layout.terminal_open = true);
         let origin = self.facts.origin.clone();
         let nonce = aui_terminal::generate_nonce();
         let script = super::deterministic_script(&nonce);
@@ -237,7 +258,6 @@ impl TerminalDock {
             let id = host.open_fake(root, title, TabOwner::User, origin, script, &nonce, cx);
             host.drain(&id, cx);
         });
-        crate::layout::Layout::save(cx);
         window.focus(&self.focus, cx);
     }
 
@@ -400,7 +420,7 @@ impl Region for TerminalDock {
 
     /// The dock's tab strip (`terminal_tabs`): one tab per terminal on the
     /// project with its agent mark and busy dot, ✕ to close, ＋ for a new
-    /// one. The dock seats it in its own frame's header.
+    /// one. [`TerminalDock::body`] seats it in either place's header.
     fn actions(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let root = self.facts.project.clone()?;
         let host = self.host.read(cx);
@@ -437,10 +457,115 @@ impl Region for TerminalDock {
     }
 }
 
+impl TerminalDock {
+    /// The terminal itself, for either place (docs/82 8.1): the one builder
+    /// of the tab strip ([`Region::actions`]), the agent hint, the control
+    /// that moves the terminal to the other place, and the active tab's
+    /// `terminal_grid`. `None` with no project.
+    fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<TerminalBody> {
+        let root = self.facts.project.clone()?;
+        let (active_tab, hint_provider) = {
+            let host = self.host.read(cx);
+            match host.active_for(&root) {
+                Some(tab) => (Some((tab.id.clone(), tab.session.clone())), self.mark_for(tab.origin_session.as_deref())),
+                None => (None, None),
+            }
+        };
+        let tabs = self.actions(window, cx).unwrap_or_else(|| div().into_any_element());
+        let place = crate::layout::Layout::get(cx).terminal_place;
+        let to = match place {
+            TerminalPlace::Bottom => TerminalPlace::Pane,
+            TerminalPlace::Pane => TerminalPlace::Bottom,
+        };
+        let click = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(TerminalDockEvent::Move(to)));
+        // The dock's header holds the frame's small buttons (maximise and
+        // close, 20 px); the pane's sub-header its 28 px row actions.
+        let mover = match place {
+            TerminalPlace::Bottom => aui::data::icon_button("terminal-to-pane", IconName::PanelRight)
+                .ghost()
+                .muted()
+                .size(aui::data::ButtonSize::Xs)
+                .icon_size(px(scale::SP_4))
+                .accessibility_label("Move terminal to the right pane")
+                .on_click(click),
+            TerminalPlace::Pane => pane_action("terminal-to-bottom", IconName::ArrowDown, "Dock terminal at the bottom").on_click(click),
+        };
+        let p = cx.aui().colors;
+        let header = h_flex()
+            .size_full()
+            .min_w(px(0.0))
+            .items_center()
+            .gap(px(scale::SP_3))
+            .child(div().flex_1().min_w(px(0.0)).h_full().flex().items_center().child(tabs))
+            .child(div().flex_none().role_in(TextRole::Caption, cx).text_color(p.fg_muted).whitespace_nowrap().child(Self::hint_name(hint_provider)))
+            .child(mover)
+            .into_any_element();
+        let grid = active_tab.map(|(tab_id, session)| {
+            let intent = cx.processor(move |this: &mut Self, intent: TerminalGridIntent, window, cx| {
+                this.handle_intent(&tab_id, intent, window, cx);
+            });
+            // The grid draws its cursor focused — and blinks it — only while
+            // the handle it was GIVEN is focused. Hand it the dock's own
+            // handle, the one `keyed` tracks and ⌃` focuses, or the grid
+            // falls back to a handle nothing in this app ever focuses and
+            // the cursor stays hollow and still forever.
+            terminal_grid(&session).focus_handle(self.focus.clone()).on_intent(intent).into_any_element()
+        });
+        Some(TerminalBody { header, grid })
+    }
+
+    /// Either place's frame under the terminal's keyboard: its key context,
+    /// ⌃C as SIGINT to the active tab, and the dock's focus handle.
+    fn keyed(&self, frame: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        frame
+            .key_context(gpui::KeyContext::parse(crate::app::TERMINAL_CONTEXT).unwrap_or_default())
+            // ⌃C under the dock's context: SIGINT to the active tab. An
+            // action, not a key handler, so the grid's own key routing is
+            // untouched.
+            .on_action(cx.listener(|this, _: &crate::app::TerminalSigint, _, cx| this.sigint(cx)))
+            // No key handler here: the grid below is given this very
+            // handle, so it IS the focus node and routes keys itself.
+            // A handler here would see every keystroke a second time
+            // as it bubbles, and the pty would receive `aa` for `a`.
+            .track_focus(&self.focus)
+    }
+
+    /// The right pane's Terminal view (docs/82 8.1, docs/83 §6): the
+    /// terminal's header as the screen's 36 px sub-header over the grid,
+    /// filling the screen — the screen's size is the terminal's, so no
+    /// spring, height or maximise. With no tab the pane's empty state
+    /// offers a new one. The pane's screen wrapper names the landmark
+    /// ("Right pane: Terminal"), as it does every screen's.
+    pub(crate) fn pane_screen(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(TerminalBody { header, grid }) = self.body(window, cx) else {
+            return state_block("right-terminal-noproject", IconName::Terminal, "No project")
+                .line("Open or add a project to use its terminal.")
+                .into_any_element();
+        };
+        let p = cx.aui().colors;
+        let body = match grid {
+            Some(grid) => grid,
+            None => {
+                let new = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| this.new_terminal(window, cx));
+                state_block("right-terminal-empty", IconName::Terminal, "No terminal yet")
+                    .line("A terminal opens in the project's folder.")
+                    .action(aui::data::button("right-terminal-new", "New terminal").on_click(new))
+                    .into_any_element()
+            }
+        };
+        let frame = v_flex()
+            .size_full()
+            .child(pane_subheader(cx).pr(px(scale::SP_2)).child(header))
+            .child(div().flex_1().min_h(px(0.0)).w_full().relative().overflow_hidden().bg(p.term_bg).child(body));
+        self.keyed(frame, cx).id(id).into_any_element()
+    }
+}
+
 impl Render for TerminalDock {
     /// The dock under the composer (D42): the library's `terminal_dock`
-    /// frame over the tab strip ([`Region::actions`]) and the active tab's
-    /// `terminal_grid`, or the empty state when the project has no tab.
+    /// frame over [`TerminalDock::body`], or the frame's empty state when
+    /// the project has no tab. Nothing while the terminal sits in the
+    /// right pane, which draws the same body itself.
     ///
     /// Opens and closes on the layout spring like the right pane: the outer
     /// height springs between the resting height and zero while the body
@@ -449,6 +574,9 @@ impl Render for TerminalDock {
     /// stays mounted while it collapses and draws nothing once the spring
     /// has settled shut (nothing at all with no project).
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if crate::layout::Layout::get(cx).terminal_place == TerminalPlace::Pane {
+            return div().into_any_element();
+        }
         let open = crate::layout::Layout::get(cx).terminal_open;
         let resting = Self::resting_height(window, cx);
         let target = if open { px(resting) } else { Pixels::ZERO };
@@ -465,27 +593,8 @@ impl Render for TerminalDock {
         if !open && shown < px(scale::SP_1 / 2.0) {
             return div().into_any_element();
         }
-        let Some(root) = self.facts.project.clone() else { return div().into_any_element() };
+        let Some(TerminalBody { header, grid }) = self.body(window, cx) else { return div().into_any_element() };
         let height = resting;
-        let (active_tab, hint_provider) = {
-            let host = self.host.read(cx);
-            match host.active_for(&root) {
-                Some(tab) => (Some((tab.id.clone(), tab.session.clone())), self.mark_for(tab.origin_session.as_deref())),
-                None => (None, None),
-            }
-        };
-        let header = self.actions(window, cx).unwrap_or_else(|| div().into_any_element());
-        let body = active_tab.map(|(tab_id, session)| {
-            let intent = cx.processor(move |this: &mut Self, intent: TerminalGridIntent, window, cx| {
-                this.handle_intent(&tab_id, intent, window, cx);
-            });
-            // The grid draws its cursor focused — and blinks it — only while
-            // the handle it was GIVEN is focused. Hand it the dock's own
-            // handle, the one `track_focus` binds below and ⌃` focuses, or
-            // the grid falls back to a handle nothing in this app ever
-            // focuses and the cursor stays hollow and still forever.
-            terminal_grid(&session).focus_handle(self.focus.clone()).on_intent(intent).into_any_element()
-        });
         let maximised = height >= clamp_dock_height(f32::MAX, Self::centre_height(window)) - 0.5;
         let dock_action = cx.processor(move |this: &mut Self, action: TerminalDockAction, window, cx| match action {
             TerminalDockAction::Maximize => {
@@ -498,8 +607,8 @@ impl Render for TerminalDock {
             }
             TerminalDockAction::NewTerminal => this.new_terminal(window, cx),
         });
-        let dock = terminal_dock("terminal-dock", header, body)
-            .hint(Self::hint_name(hint_provider))
+        // The hint rides the header row (`body`), before the place control.
+        let dock = terminal_dock("terminal-dock", header, grid)
             .maximized(maximised)
             .on_action(dock_action);
         let resize_start = cx.processor(|this: &mut Self, grab: f32, _, cx| {
@@ -523,21 +632,8 @@ impl Render for TerminalDock {
                 .ok();
         };
         let dock = dock.on_resize_start(resize_start).on_resize(resize_move).on_resize_end(resize_end);
-        div()
-            .h(shown)
-            .w_full()
-            .flex_none()
-            .overflow_hidden()
-            .key_context(gpui::KeyContext::parse(crate::app::TERMINAL_CONTEXT).unwrap_or_default())
-            // ⌃C under the dock's context: SIGINT to the active tab. An
-            // action, not a key handler, so the grid's own key routing is
-            // untouched.
-            .on_action(cx.listener(|this, _: &crate::app::TerminalSigint, _, cx| this.sigint(cx)))
-            // No key handler here: the grid below is given this very
-            // handle, so it IS the focus node and routes keys itself.
-            // A handler here would see every keystroke a second time
-            // as it bubbles, and the pty would receive `aa` for `a`.
-            .track_focus(&self.focus)
+        let frame = div().h(shown).w_full().flex_none().overflow_hidden();
+        self.keyed(frame, cx)
             // The body keeps its resting height while the outer springs,
             // the right pane's `right_inner`: the grid measures this box,
             // so its bounds — and the pty size it reports — never move

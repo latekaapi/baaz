@@ -102,7 +102,10 @@
 //! | `sidebar` | collapse or expand the sidebar |
 //! | `sidebar-peek` | hold the sidebar peek open (or release it) while the sidebar is closed — a capture aid, no hover |
 //! | `sidebar-width:<px>` | settle the sidebar divider at a width |
-//! | `right:<browser\|changes\|files\|off>` | open the right pane on that kind, idempotently (`off` closes it, empty toggles); unknown fails the step, free |
+//! | `right:<browser\|changes\|files\|terminal\|tasks\|off>` | open the right pane on that kind, idempotently (`off` closes it, empty toggles; `terminal` moves the terminal into the pane); unknown fails the step, free |
+//! | `right-lower:<changes\|files\|terminal\|tasks\|off>` | stack that view below the pane's top one (docs/82 8.1), opening the pane, idempotently (`off` closes the lower pane); the Page, the kind on top, Browse, the Settings page or an unknown kind fails the step, free |
+//! | `right-split:<share>` | settle the lower pane's divider at that share of the pane's height (0.25–0.75, held), as a released drag does; no lower pane showing or a bad number fails the step, free |
+//! | `terminal-place:<bottom\|pane>` | move the terminal there, as its header's place control does (docs/82 8.1), idempotently: the dock opens, or the pane shows it (below an open Page, else on top); the same tabs and ptys either way. Unknown, or the Settings page open, fails the step, free |
 //! | `browse:<url>` | navigate the active session's browser (the home one with no session open), idempotently; empty fails the step, free |
 //! | `tab-new:<url>` | open a tab on `url` (a person tab in Browse mode, otherwise for the shown owner: a session tab in the active session, a person tab with no session open) and select it; empty fails the step, free |
 //! | `open-url:<url>` | the scripted form of a real open-URL event: the same classify/queue/open path `App::on_open_urls` drains into (a person tab in the current project, Browse mode, window to the front; queued before sign-in); empty fails the step, free |
@@ -229,7 +232,7 @@
 //! | `details:<provider>` | open that provider's Details on its Settings card (`claude-code`, `codex`, `muse`), free |
 //! | `diagnostics:<provider>` | print what "Copy diagnostics" would copy to stderr instead of the clipboard (it runs the CLI's `--version` and auth status), free |
 //! | `skills:<fixture>` (`page`, `empty`, `add-menu`, `import-preview`, `new`) | open the Skills page on a fixture catalog — no CLI, deterministic, offline; the K3 fixtures layer the Add menu, the import preview and the New dialog over the page fixture, free |
-//! | `terminal-dock:<title>` | capture aid: open the dock over a FakePty-backed tab titled `<title>` (empty is "terminal") and drain its script at once, so two runs render the same bytes, free |
+//! | `terminal-dock:<title>` | capture aid: show the terminal where it sits (the dock, or the pane per `terminal-place:`) over a FakePty-backed tab titled `<title>` (empty is "terminal") and drain its script at once, so two runs render the same bytes, free |
 //! | `folder-new:<name>` | a new folder named `<name>` in the current browser space, holding the active person tab (the new-folder flow, committed), free |
 //! | `space-new:<name>` | add a browser space named `<name>` and make it current, free |
 //! | `wait:<ms>` | let the wire catch up before the next step |
@@ -388,6 +391,9 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "sidebar-width", run: |this, rest, _, cx| this.step_sidebar_width(rest, cx) },
     WindowVerb { verb: "right", run: |this, rest, _, cx| this.step_right(rest, cx) },
     WindowVerb { verb: "right-width", run: |this, rest, _, cx| this.step_right_width(rest, cx) },
+    WindowVerb { verb: "right-lower", run: |this, rest, window, cx| this.step_right_lower(rest, window, cx) },
+    WindowVerb { verb: "right-split", run: |this, rest, _, cx| this.step_right_split(rest, cx) },
+    WindowVerb { verb: "terminal-place", run: |this, rest, window, cx| this.step_terminal_place(rest, window, cx) },
     WindowVerb {
         verb: "page-menu",
         run: |this, rest, _, cx| match rest.trim() {
@@ -690,7 +696,7 @@ impl Harness {
         Ok(())
     }
 
-    /// `right:<browser|changes|files|off>`: open the right pane on that kind
+    /// `right:<browser|changes|files|terminal|tasks|off>`: open the right pane on that kind
     /// idempotently (a kind OPENS it, never toggles), so the capture shows
     /// the production pane. The pre-merge `diff`/`git` slugs still parse —
     /// onto Changes — so older scripts keep working.
@@ -735,10 +741,9 @@ impl Harness {
         }
         match crate::layout::RightKind::parse(slug) {
             Some(kind) => {
-                crate::layout::Layout::stage(cx, |layout| {
-                    layout.right_kind = Some(kind);
-                    layout.right_open = true;
-                });
+                // The model's own open: a lower pane on that kind closes,
+                // and `terminal` takes the terminal into the pane.
+                crate::layout::Layout::stage(cx, |layout| layout.open_top(kind));
                 self.save_right_for_active(cx);
                 // Outside a capture the pane reads its data in the background
                 // when it paints; a run on a locked screen never paints, so
@@ -796,10 +801,7 @@ impl Harness {
             return Err("no path".into());
         }
         let (root, _) = self.right_project(cx).ok_or("no current project")?;
-        crate::layout::Layout::stage(cx, |layout| {
-            layout.right_kind = Some(crate::layout::RightKind::Files);
-            layout.right_open = true;
-        });
+        crate::layout::Layout::stage(cx, |layout| layout.open_top(crate::layout::RightKind::Files));
         self.refresh_right_now(cx);
         self.with_right_pane(cx, |pane, cx| pane.begin_file_preview_for(&root, id, cx));
         Ok(())
@@ -822,6 +824,51 @@ impl Harness {
             // the baselines were pinned to user state without anyone noticing.
             crate::layout::Layout::stage(cx, |layout| layout.right_width = Some(width));
             self.right_pane.update(cx, |pane, _| pane.resize.width = width);
+        }
+        Ok(())
+    }
+
+    /// `right-lower:<kind|off>`: stack `kind` below the pane's top view, or
+    /// close the lower pane, through the views menu's own path
+    /// ([`Harness::set_right_lower`]) — a setter, so a second run lands where
+    /// the first did. A kind the lower pane cannot show (the Page, the one
+    /// on top, anything in Browse) fails the step instead of capturing a
+    /// pane that did not change. Free.
+    pub(crate) fn step_right_lower(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> StepResult {
+        let slug = rest.trim();
+        let kind = match slug {
+            "off" => None,
+            _ => Some(crate::layout::RightKind::parse(slug).ok_or_else(|| format!("unknown right pane kind `{slug}`"))?),
+        };
+        self.set_right_lower(kind, window, cx)
+    }
+
+    /// `right-split:<share>`: settle the lower pane's divider at `share` of
+    /// the pane's height, held to 0.25–0.75 like a drag. With no lower pane
+    /// showing there is no divider to settle, and the step fails. Free.
+    pub(crate) fn step_right_split(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
+        let share = rest.trim().parse::<f32>().ok().filter(|share| share.is_finite()).ok_or_else(|| format!("`{rest}` is not a share"))?;
+        let live = crate::layout::Layout::get(cx);
+        if !live.right_open || live.shown_lower().is_none() {
+            return Err("no lower pane is open".into());
+        }
+        self.set_right_split(share, cx);
+        Ok(())
+    }
+
+    /// `terminal-place:<bottom|pane>`: move the terminal there through its
+    /// header control's path ([`Harness::move_terminal`]). Idempotent: the
+    /// place is set, and a terminal already showing there stays. Fails on
+    /// an unknown place, and while the Settings page stands open (B11b),
+    /// where the move would change hidden state. Free.
+    pub(crate) fn step_terminal_place(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> StepResult {
+        let place = crate::layout::TerminalPlace::parse(rest.trim()).ok_or_else(|| format!("`{rest}` is not bottom or pane"))?;
+        if self.settings_open(cx) {
+            return Err("the Settings page is open".into());
+        }
+        self.move_terminal(place, window, cx);
+        if crate::layout::Layout::get(cx).terminal_place != place || !crate::layout::Layout::get(cx).terminal_shown() {
+            return Err(format!("the terminal did not move to {}", rest.trim()));
         }
         Ok(())
     }
@@ -1732,6 +1779,54 @@ mod tests {
             refused.is_err_and(|reason| reason.contains("not-a-kind")),
             "unknown slug fails the step"
         );
+        restore_state(state);
+    }
+
+    /// docs/82 8.1: `right-lower:` and `terminal-place:` are setters (a
+    /// second run lands where the first did), `right-split:` needs a lower
+    /// pane, and every refusal changes nothing.
+    #[gpui::test]
+    fn the_lower_pane_and_place_verbs_are_idempotent_and_fail_loudly(cx: &mut gpui::TestAppContext) {
+        use crate::layout::{RightKind, TerminalPlace};
+        let state = hermetic_state("lower-verbs");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(step_test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
+        });
+        let layout = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| crate::layout::Layout::get(cx).clone());
+        let split = vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_split("0.4", cx)));
+        assert!(split.is_err(), "no lower pane, no divider: {split:?}");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right("changes", cx))).expect("Changes on top");
+        for _ in 0..2 {
+            vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_right_lower("files", window, cx))).expect("Files below");
+            assert_eq!(layout(vc).shown_lower(), Some(RightKind::Files));
+        }
+        for refused in ["browser", "changes", "nope"] {
+            let result = vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_right_lower(refused, window, cx)));
+            assert!(result.is_err(), "`{refused}` below must fail");
+            assert_eq!(layout(vc).shown_lower(), Some(RightKind::Files), "and change nothing");
+        }
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_split("0.3", cx))).expect("a lower pane: the divider settles");
+        assert_eq!(layout(vc).split(), 0.3);
+        assert!(vc.update(|_, cx| baaz.update(cx, |h, cx| h.step_right_split("wide", cx))).is_err());
+        for _ in 0..2 {
+            vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_right_lower("off", window, cx))).expect("off closes");
+            assert_eq!(layout(vc).right_lower, None);
+        }
+        // The place, over a scripted tab so nothing spawns a shell.
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_terminal_dock("zsh", window, cx))).expect("scripted tab");
+        for _ in 0..2 {
+            vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_terminal_place("pane", window, cx))).expect("into the pane");
+            let now = layout(vc);
+            assert_eq!(now.terminal_place, TerminalPlace::Pane);
+            assert!(now.terminal_in_pane() && crate::layout::right_kind(&now) == RightKind::Terminal);
+        }
+        for _ in 0..2 {
+            vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_terminal_place("bottom", window, cx))).expect("to the dock");
+            assert!(layout(vc).dock_open() && !layout(vc).terminal_in_pane());
+        }
+        assert!(vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_terminal_place("ceiling", window, cx))).is_err());
         restore_state(state);
     }
 

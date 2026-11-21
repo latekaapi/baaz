@@ -42,7 +42,9 @@ impl Harness {
     /// dock bounds and the mouse-down hand-back — computed once here,
     /// reused everywhere, so the three can never disagree.
     pub(super) fn open_dock_height_px(&self, window: &Window, cx: &gpui::App) -> Pixels {
-        if !crate::layout::Layout::get(cx).terminal_open {
+        // The dock under the composer only: a terminal in the right pane
+        // takes none of the centre's height (docs/82 8.1).
+        if !crate::layout::Layout::get(cx).dock_open() {
             return gpui::px(0.0);
         }
         // The centre column runs the window's height (the flat shell has

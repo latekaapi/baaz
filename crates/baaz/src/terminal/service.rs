@@ -307,8 +307,8 @@ struct Shared {
     session_aliases: Mutex<HashMap<String, String>>,
 }
 
-/// What the harness does when the agent runs something: open the dock (not
-/// focused) so the person can watch. Runs on the UI thread, inside `drain` —
+/// What the harness does when the agent runs something: show the terminal
+/// where it sits (not focused) so the person can watch. Runs on the UI thread, inside `drain` —
 /// which the harness calls from inside its own update — so the hook must
 /// never synchronously update the entity that is draining: defer that work
 /// with `cx.defer`, which runs at the end of the effect cycle with the
@@ -553,7 +553,7 @@ impl TerminalService {
     }
 
     /// What the harness runs on the UI thread when the agent starts
-    /// something (open the dock, unfocused). Test hooks observe it instead.
+    /// something (show the terminal, unfocused). Test hooks observe it instead.
     ///
     /// The hook fires inside [`drain`][TerminalService::drain], inside the
     /// draining entity's update: it must defer entity work with `cx.defer`

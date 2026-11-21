@@ -25,7 +25,7 @@ use crate::layout::RightKind;
 /// The right pane as one session left it: whether it stood open, on which
 /// kind, and the Files sub-state (open preview, selection, expansion) for
 /// that session. A session with no stored state shows the pane closed.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RightState {
     /// Whether the pane stood open. Closed by default: the pane is asked
@@ -51,7 +51,22 @@ pub struct RightState {
     /// is "never navigated": a fresh webview opens on `about:blank`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_url: Option<String>,
+    /// The kind stacked below the top one (docs/82 8.1), if a lower pane
+    /// stood open. Absent from every record written before it, and from
+    /// any with no lower pane; a kind this build does not know reads as
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::store::lenient")]
+    pub lower: Option<RightKind>,
+    /// The top pane's share of the pane's height, if the divider was ever
+    /// dragged (`crate::layout::clamp_split` holds it on read).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<f32>,
 }
+
+/// The share is clamped into a finite range wherever it is set, so the
+/// record's equality is an equivalence ([`SessionMeta`] is compared whole
+/// to tell which rows changed).
+impl Eq for RightState {}
 
 /// Baaz's own facts about one session.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -571,6 +586,8 @@ mod tests {
                 files_selected: Some("Cargo.toml".into()),
                 files_expanded: vec!["src".into()],
                 browser_url: Some("https://example.com".into()),
+                lower: None,
+                split: None,
             }),
             ..SessionMeta::default()
         };
@@ -587,6 +604,33 @@ mod tests {
         // Old files without the pane still read, showing the pane closed.
         let old: SessionMeta = serde_json::from_str("{\"hidden\":true}").unwrap();
         assert!(old.right.is_none());
+    }
+
+    /// docs/82 8.1: the lower pane and its divider ride the session's
+    /// record when set, are absent when not, and a record written before
+    /// them (or with a kind this build does not know) still reads.
+    #[test]
+    fn the_lower_pane_round_trips_and_old_records_read() {
+        let with = RightState {
+            open: true,
+            kind: crate::layout::RightKind::Browser,
+            lower: Some(crate::layout::RightKind::Terminal),
+            split: Some(0.4),
+            ..RightState::default()
+        };
+        let text = serde_json::to_string(&with).unwrap();
+        assert!(text.contains("\"lower\":\"terminal\"") && text.contains("\"split\":0.4"), "{text}");
+        assert_eq!(serde_json::from_str::<RightState>(&text).unwrap(), with);
+        let without = RightState { open: true, kind: crate::layout::RightKind::Terminal, ..RightState::default() };
+        let text = serde_json::to_string(&without).unwrap();
+        assert!(!text.contains("lower") && !text.contains("split"), "no lower pane writes none: {text}");
+        assert_eq!(serde_json::from_str::<RightState>(&text).unwrap(), without);
+        // An old record: no lower pane.
+        let old: RightState = serde_json::from_str("{\"open\":true,\"kind\":\"files\",\"filesExpanded\":[\"src\"]}").unwrap();
+        assert_eq!((old.lower, old.split, old.kind), (None, None, crate::layout::RightKind::Files));
+        // A newer build's kind below reads as none; the rest stands.
+        let newer: RightState = serde_json::from_str("{\"open\":true,\"kind\":\"changes\",\"lower\":\"hologram\"}").unwrap();
+        assert_eq!((newer.open, newer.kind, newer.lower), (true, crate::layout::RightKind::Changes, None));
     }
 
     #[test]

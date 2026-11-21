@@ -1,7 +1,7 @@
 //! The right pane's Tasks screen (docs/82 6.5, docs/83 §6): what the open
 //! session's agent started through Baaz's terminal tools, and the session's
 //! Run (docs/82 7.4) — command, state, port, duration — newest first, with Stop on what still runs. A row with a
-//! tab opens the dock on it.
+//! tab shows the terminal on it, where the terminal sits (docs/82 8.1).
 //!
 //! The rows come from the terminal host's task book
 //! ([`crate::terminal::tasks`]); the pane copies them into its cache on each

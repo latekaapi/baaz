@@ -158,6 +158,9 @@ pub enum RightKind {
     Changes,
     /// The workspace file tree.
     Files,
+    /// The project's terminal tabs, when the terminal sits in the pane
+    /// ([`TerminalPlace::Pane`], docs/82 8.1).
+    Terminal,
     /// What the session's agent started in Baaz's terminal (docs/82 6.5).
     Tasks,
 }
@@ -176,7 +179,7 @@ impl<'de> Deserialize<'de> for RightKind {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
         RightKind::parse(&text).ok_or_else(|| {
-            de::Error::unknown_variant(text.as_str(), &["browser", "changes", "files", "tasks", "diff", "git"])
+            de::Error::unknown_variant(text.as_str(), &["browser", "changes", "files", "terminal", "tasks", "diff", "git"])
         })
     }
 }
@@ -190,10 +193,21 @@ impl Default for RightKind {
 
 impl RightKind {
     /// Every kind the pane offers, in strip order: Changes · Files · Page ·
-    /// Tasks. The tab row always carries the first three; Tasks rides it
-    /// while it shows or while the session has a task (the app decides).
-    pub const ALL: [RightKind; 4] =
-        [RightKind::Changes, RightKind::Files, RightKind::Browser, RightKind::Tasks];
+    /// Terminal · Tasks. The tab row always carries the first four; Tasks
+    /// rides it while it shows or while the session has a task (the app
+    /// decides).
+    pub const ALL: [RightKind; 5] =
+        [RightKind::Changes, RightKind::Files, RightKind::Browser, RightKind::Terminal, RightKind::Tasks];
+
+    /// The kinds a second pane may show below the first (docs/82 8.1), in
+    /// the views menu's order. The Page is top-only: its native view is
+    /// placed where the strip puts it, and only the strip slides.
+    pub const BELOW: [RightKind; 4] = [RightKind::Changes, RightKind::Files, RightKind::Terminal, RightKind::Tasks];
+
+    /// Whether this kind may sit in the lower pane ([`Self::BELOW`]).
+    pub fn sits_below(self) -> bool {
+        Self::BELOW.contains(&self)
+    }
 
     /// The user-visible name: the tab row's labels, and T3's ⌘K labels.
     /// The legacy aliases label as the view they load into.
@@ -203,6 +217,7 @@ impl RightKind {
             RightKind::Browser => "Page",
             RightKind::Changes => "Changes",
             RightKind::Files => "Files",
+            RightKind::Terminal => "Terminal",
             RightKind::Tasks => "Tasks",
         }
     }
@@ -215,6 +230,7 @@ impl RightKind {
             RightKind::Browser => "browser",
             RightKind::Changes => "changes",
             RightKind::Files => "files",
+            RightKind::Terminal => "terminal",
             RightKind::Tasks => "tasks",
         }
     }
@@ -230,10 +246,53 @@ impl RightKind {
             "browser" | "page" => Some(RightKind::Browser),
             "changes" | "diff" | "git" => Some(RightKind::Changes),
             "files" => Some(RightKind::Files),
+            "terminal" => Some(RightKind::Terminal),
             "tasks" => Some(RightKind::Tasks),
             _ => None,
         }
     }
+}
+
+/// Where the terminal sits (docs/82 8.1): docked under the composer in the
+/// centre column, or in the right pane as its Terminal view. One terminal
+/// either way — the same tabs and the same ptys; only the place it draws
+/// changes. Bottom when nothing is stored, so every `layout.json` written
+/// before 8.1 reads as the dock it always was.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalPlace {
+    /// The dock under the composer (D42).
+    #[default]
+    Bottom,
+    /// The right pane's Terminal view, on top or in the lower pane.
+    Pane,
+}
+
+impl TerminalPlace {
+    #[cfg(feature = "probe")]
+    /// `bottom` / `pane`, as the store and the `terminal-place:` step spell
+    /// them.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "bottom" => Some(TerminalPlace::Bottom),
+            "pane" => Some(TerminalPlace::Pane),
+            _ => None,
+        }
+    }
+}
+
+/// The lower pane's divider (docs/82 8.1): the top pane's share of the
+/// pane's height, held to [`SPLIT_MIN`]..=[`SPLIT_MAX`].
+pub const SPLIT_DEFAULT: f32 = 0.5;
+/// The smallest share the top pane keeps.
+pub const SPLIT_MIN: f32 = 0.25;
+/// The largest share the top pane takes.
+pub const SPLIT_MAX: f32 = 0.75;
+
+/// A divider share held into [`SPLIT_MIN`]..=[`SPLIT_MAX`]; anything that is
+/// not a number reads as the default.
+pub fn clamp_split(share: f32) -> f32 {
+    if share.is_finite() { share.clamp(SPLIT_MIN, SPLIT_MAX) } else { SPLIT_DEFAULT }
 }
 
 /// Which half of the window the person is in (B2a-H2): today's sessions
@@ -295,7 +354,7 @@ impl<'de> Deserialize<'de> for Mode {
 
 /// The Sessions right pane, set aside while Browse has the window: Browse
 /// stands with its own pane closed, and this is what Sessions gets back.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionsPane {
     /// Whether the pane stood open.
     #[serde(default)]
@@ -303,6 +362,12 @@ pub struct SessionsPane {
     /// Which kind it showed, if it was ever opened.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::store::lenient")]
     pub kind: Option<RightKind>,
+    /// The lower pane's kind, if one stood open (docs/82 8.1).
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::store::lenient")]
+    pub lower: Option<RightKind>,
+    /// The divider's share, if it was ever dragged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<f32>,
 }
 
 /// Whether provider sessions may inherit the owner's own MCP servers
@@ -497,6 +562,11 @@ pub struct Layout {
     /// one. `None` is "never resized": the default height.
     #[serde(rename = "terminalHeight", default, skip_serializing_if = "Option::is_none")]
     pub terminal_height: Option<f32>,
+    /// Where the terminal sits (docs/82 8.1): see [`TerminalPlace`]. While
+    /// it is [`TerminalPlace::Pane`], [`Self::terminal_open`] means nothing
+    /// and the pane's own state says whether the terminal shows.
+    #[serde(rename = "terminalPlace", default, deserialize_with = "crate::store::lenient")]
+    pub terminal_place: TerminalPlace,
     /// Whether the right pane stands open in the window's right column.
     /// Closed by default: the pane is asked for, never assumed, exactly
     /// as the dock is.
@@ -511,6 +581,20 @@ pub struct Layout {
     /// pre-merge `diff`/`git` reads back as [`RightKind::Changes`].
     #[serde(rename = "rightKind", default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::store::lenient")]
     pub right_kind: Option<RightKind>,
+    /// The kind the lower pane shows, stacked under the first (docs/82
+    /// 8.1); `None` is no lower pane. The open session's value, mirrored
+    /// here like [`Self::right_kind`] and restored per session.
+    #[serde(rename = "rightLower", default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::store::lenient")]
+    pub right_lower: Option<RightKind>,
+    /// The top pane's share of the pane's height while a lower pane shows;
+    /// `None` is [`SPLIT_DEFAULT`]. Read it through [`Layout::split`].
+    #[serde(rename = "rightSplit", default, skip_serializing_if = "Option::is_none")]
+    pub right_split: Option<f32>,
+    /// The top kind shown before the current one, while this window runs:
+    /// where the pane goes back to when the terminal leaves it. Never
+    /// stored.
+    #[serde(skip)]
+    pub right_previous: Option<RightKind>,
     /// The two inherit-owner-servers opt-ins, owned by the Settings →
     /// Providers page (see [`UseOwnMcp`]).
     #[serde(rename = "useOwnMcp", default)]
@@ -668,24 +752,189 @@ impl Layout {
     }
 
     /// Set the Sessions right pane aside for Browse, whose own pane stands
-    /// closed on the default kind. A pane already aside (a relaunch into
-    /// Browse) stays what Sessions gets back.
+    /// closed on the default kind with no lower pane. A pane already aside
+    /// (a relaunch into Browse) stays what Sessions gets back.
     pub fn enter_browse(&mut self) {
-        let pane = SessionsPane { open: self.right_open, kind: self.right_kind };
+        let pane = SessionsPane { open: self.right_open, kind: self.right_kind, lower: self.right_lower, split: self.right_split };
         self.sessions_pane.get_or_insert(pane);
         self.right_open = false;
         self.right_kind = None;
+        self.right_lower = None;
     }
 
     /// Hand Sessions its right pane back. Whatever Browse's pane did goes.
+    /// A pane that comes back showing the terminal takes it (see
+    /// [`Self::claim_terminal`]).
     pub fn leave_browse(&mut self) {
         if let Some(pane) = self.sessions_pane.take() {
             self.right_open = pane.open;
             self.right_kind = pane.kind;
+            self.right_lower = pane.lower;
+            self.right_split = pane.split;
+            self.claim_terminal();
         } else {
             self.right_open = false;
             self.right_kind = None;
+            self.right_lower = None;
         }
+    }
+
+    // ── the right pane's workspace (docs/82 8.1) ───────────────────────
+
+    /// The top pane's share of the pane's height: the stored one, held to
+    /// its range, or [`SPLIT_DEFAULT`].
+    pub fn split(&self) -> f32 {
+        self.right_split.map_or(SPLIT_DEFAULT, clamp_split)
+    }
+
+    /// The lower pane as drawn: in Sessions only (Browse keeps one body),
+    /// a kind that may sit below and is not the one on top. Whether the
+    /// pane itself stands open is the caller's to ask.
+    pub fn shown_lower(&self) -> Option<RightKind> {
+        if self.mode == Mode::Browse {
+            return None;
+        }
+        self.right_lower.filter(|kind| kind.sits_below() && *kind != right_kind(self))
+    }
+
+    /// Whether the open pane shows the terminal, on top or below.
+    pub fn terminal_in_pane(&self) -> bool {
+        self.right_open && (right_kind(self) == RightKind::Terminal || self.shown_lower() == Some(RightKind::Terminal))
+    }
+
+    /// Whether the terminal shows anywhere: the open dock, or the pane's
+    /// Terminal view.
+    pub fn terminal_shown(&self) -> bool {
+        match self.terminal_place {
+            TerminalPlace::Bottom => self.terminal_open,
+            TerminalPlace::Pane => self.terminal_in_pane(),
+        }
+    }
+
+    /// Whether the dock under the composer stands open: the terminal sits
+    /// at the bottom and is open there.
+    pub fn dock_open(&self) -> bool {
+        self.terminal_place == TerminalPlace::Bottom && self.terminal_open
+    }
+
+    /// One terminal, one place: a pane that shows the terminal takes it
+    /// from the dock. Called after every change that can open the pane on
+    /// it (a pick, a restore, Browse handing the pane back).
+    pub fn claim_terminal(&mut self) {
+        if self.terminal_in_pane() {
+            self.terminal_place = TerminalPlace::Pane;
+            self.terminal_open = false;
+        }
+    }
+
+    /// Open the pane on `kind` (the top pane), remembering what showed
+    /// before. A lower pane on the same kind closes (one kind shows once);
+    /// the terminal moves into the pane when that is what it now shows.
+    pub fn open_top(&mut self, kind: RightKind) {
+        let was = right_kind(self);
+        if was != kind {
+            self.right_previous = Some(was);
+        }
+        self.right_kind = Some(kind);
+        self.right_open = true;
+        if self.right_lower == Some(kind) {
+            self.right_lower = None;
+        }
+        self.claim_terminal();
+    }
+
+    /// Stack `kind` under the top pane, or close the lower pane (`None`).
+    /// Refused — nothing changes — in Browse, for the Page, and for the
+    /// kind already on top. The terminal moves into the pane when it is
+    /// the lower kind and the pane stands open.
+    pub fn set_lower(&mut self, kind: Option<RightKind>) -> Result<(), &'static str> {
+        if let Some(kind) = kind {
+            if self.mode == Mode::Browse {
+                return Err("Browse keeps one body");
+            }
+            if !kind.sits_below() {
+                return Err("the Page is top-only");
+            }
+            if kind == right_kind(self) {
+                return Err("that kind is on top");
+            }
+        }
+        self.right_lower = kind;
+        self.claim_terminal();
+        Ok(())
+    }
+
+    /// Put the terminal in the pane (the dock header's "Move terminal to
+    /// the right pane", ⌃` there, the `terminal-place:pane` step): below an
+    /// open Page — the reference's browser over terminal — and otherwise
+    /// as the top view, opening the pane. The dock closes. Already in the
+    /// pane and showing, nothing moves.
+    pub fn seat_terminal_in_pane(&mut self) {
+        self.terminal_place = TerminalPlace::Pane;
+        self.terminal_open = false;
+        if self.terminal_in_pane() {
+            return;
+        }
+        if self.right_open && self.mode != Mode::Browse && right_kind(self) == RightKind::Browser {
+            self.right_lower = Some(RightKind::Terminal);
+        } else {
+            self.open_top(RightKind::Terminal);
+        }
+    }
+
+    /// The agent ran something in the terminal while it sits in the pane
+    /// and does not show: open the pane on it when closed, else stack it
+    /// below whatever the person is looking at (the top view stays). In
+    /// Browse, where nothing stacks, it takes the top.
+    pub fn reveal_terminal_in_pane(&mut self) {
+        if self.terminal_in_pane() {
+            return;
+        }
+        if self.right_open && self.mode != Mode::Browse {
+            self.right_lower = Some(RightKind::Terminal);
+            self.claim_terminal();
+        } else {
+            self.open_top(RightKind::Terminal);
+        }
+    }
+
+    /// Dock the terminal at the bottom (the pane's "Dock terminal at the
+    /// bottom", ⌃` with the terminal there, `terminal-place:bottom`): the
+    /// dock opens, and the pane gives the terminal up — a top Terminal
+    /// goes back to the view shown before it (Files when there was none),
+    /// a lower one closes.
+    pub fn dock_terminal_bottom(&mut self) {
+        self.terminal_place = TerminalPlace::Bottom;
+        self.terminal_open = true;
+        if self.right_lower == Some(RightKind::Terminal) {
+            self.right_lower = None;
+        }
+        if self.right_kind == Some(RightKind::Terminal) {
+            let back = self.right_previous.filter(|kind| *kind != RightKind::Terminal).unwrap_or(RightKind::Files);
+            self.right_kind = Some(back);
+            if self.right_lower == Some(back) {
+                self.right_lower = None;
+            }
+        }
+    }
+
+    /// ⌃`, wherever the terminal sits: the dock flips open or shut; in the
+    /// pane a showing terminal goes (the pane closes when it is the top
+    /// view, the lower pane when it is below) and a hidden one is seated
+    /// ([`Self::seat_terminal_in_pane`]). Returns whether it now shows.
+    pub fn toggle_terminal(&mut self) -> bool {
+        match self.terminal_place {
+            TerminalPlace::Bottom => self.terminal_open = !self.terminal_open,
+            TerminalPlace::Pane if self.terminal_in_pane() => {
+                if right_kind(self) == RightKind::Terminal {
+                    self.right_open = false;
+                } else {
+                    self.right_lower = None;
+                }
+            }
+            TerminalPlace::Pane => self.seat_terminal_in_pane(),
+        }
+        self.terminal_shown()
     }
 }
 
@@ -711,9 +960,13 @@ impl Default for Layout {
             fold_finished_turns: true,
             terminal_open: false,
             terminal_height: None,
+            terminal_place: TerminalPlace::Bottom,
             right_open: false,
             right_width: None,
             right_kind: None,
+            right_lower: None,
+            right_split: None,
+            right_previous: None,
             use_own_mcp: UseOwnMcp::default(),
             mode: Mode::Sessions,
             sidebar_open: true,
@@ -869,8 +1122,139 @@ mod tests {
         assert_eq!(serde_json::to_string(&RightKind::Tasks).unwrap(), "\"tasks\"");
         assert_eq!(RightKind::parse("tasks"), Some(RightKind::Tasks));
         assert_eq!(RightKind::Tasks.label(), "Tasks");
-        // And the four screens are exactly Changes · Files · Browser · Tasks.
-        assert_eq!(RightKind::ALL, [RightKind::Changes, RightKind::Files, RightKind::Browser, RightKind::Tasks]);
+        // And the five screens are exactly Changes · Files · Page · Terminal · Tasks.
+        assert_eq!(
+            RightKind::ALL,
+            [RightKind::Changes, RightKind::Files, RightKind::Browser, RightKind::Terminal, RightKind::Tasks]
+        );
+    }
+
+    /// docs/82 8.1: the terminal's place reads Bottom from every file
+    /// written before it, an unknown value reads Bottom without failing the
+    /// file, and Pane round-trips.
+    #[test]
+    fn the_terminal_place_is_bottom_by_default_and_round_trips() {
+        assert_eq!(Layout::default().terminal_place, TerminalPlace::Bottom);
+        let old: Layout = serde_json::from_str("{\"terminalOpen\":true}").unwrap();
+        assert_eq!(old.terminal_place, TerminalPlace::Bottom);
+        assert!(old.dock_open() && old.terminal_shown());
+        let odd: Layout = serde_json::from_str("{\"terminalPlace\":\"ceiling\",\"summaryLine\":true}").unwrap();
+        assert_eq!(odd.terminal_place, TerminalPlace::Bottom, "an unknown place reads as the dock");
+        assert!(odd.summary_line, "and fails nothing else");
+        let pane = Layout { terminal_place: TerminalPlace::Pane, right_lower: Some(RightKind::Terminal), right_split: Some(0.3), ..Layout::default() };
+        let text = serde_json::to_string(&pane).unwrap();
+        assert!(text.contains("\"terminalPlace\":\"pane\"") && text.contains("\"rightLower\":\"terminal\"") && text.contains("\"rightSplit\":0.3"), "{text}");
+        assert!(!text.contains("rightPrevious") && !text.contains("right_previous"), "the previous view is never stored: {text}");
+        let back: Layout = serde_json::from_str(&text).unwrap();
+        assert_eq!((back.terminal_place, back.right_lower, back.right_split), (TerminalPlace::Pane, Some(RightKind::Terminal), Some(0.3)));
+        // A file with no lower pane writes none.
+        assert!(!serde_json::to_string(&Layout::default()).unwrap().contains("rightLower"));
+    }
+
+    /// The lower pane: one kind other than the top's, never the Page, never
+    /// in Browse; the top taking the lower's kind closes it.
+    #[test]
+    fn the_lower_pane_keeps_to_its_rules() {
+        let mut layout = Layout::default();
+        layout.open_top(RightKind::Changes);
+        assert_eq!(layout.set_lower(Some(RightKind::Browser)), Err("the Page is top-only"));
+        assert_eq!(layout.set_lower(Some(RightKind::Changes)), Err("that kind is on top"));
+        assert_eq!(layout.right_lower, None, "a refusal changes nothing");
+        layout.set_lower(Some(RightKind::Files)).unwrap();
+        assert_eq!(layout.shown_lower(), Some(RightKind::Files));
+        // Another top keeps it; the top on the lower's kind closes it.
+        layout.open_top(RightKind::Tasks);
+        assert_eq!(layout.shown_lower(), Some(RightKind::Files));
+        layout.open_top(RightKind::Files);
+        assert_eq!(layout.right_lower, None, "the top took the lower's kind: the lower pane closed");
+        // Browse draws one body and stacks nothing.
+        layout.set_lower(Some(RightKind::Changes)).unwrap();
+        layout.mode = Mode::Browse;
+        assert_eq!(layout.shown_lower(), None);
+        assert_eq!(layout.set_lower(Some(RightKind::Tasks)), Err("Browse keeps one body"));
+        layout.mode = Mode::Sessions;
+        // Browse sets the lower pane aside with the rest and hands it back.
+        layout.right_split = Some(0.6);
+        layout.enter_browse();
+        assert_eq!(layout.right_lower, None);
+        layout.leave_browse();
+        assert_eq!((layout.right_lower, layout.right_split), (Some(RightKind::Changes), Some(0.6)));
+        // Closing it.
+        layout.set_lower(None).unwrap();
+        assert_eq!(layout.shown_lower(), None);
+    }
+
+    /// The divider's share holds to 0.25..=0.75, a stored value included.
+    #[test]
+    fn the_divider_clamps() {
+        assert_eq!(clamp_split(0.1), SPLIT_MIN);
+        assert_eq!(clamp_split(0.9), SPLIT_MAX);
+        assert_eq!(clamp_split(0.4), 0.4);
+        assert_eq!(clamp_split(f32::NAN), SPLIT_DEFAULT);
+        assert_eq!(Layout::default().split(), SPLIT_DEFAULT);
+        let stored: Layout = serde_json::from_str("{\"rightSplit\":0.02}").unwrap();
+        assert_eq!(stored.split(), SPLIT_MIN, "a hand-edited share is held too");
+    }
+
+    /// ⌃` follows the place: the dock flips at the bottom; in the pane a
+    /// hidden terminal is seated and a showing one goes.
+    #[test]
+    fn toggling_the_terminal_follows_its_place() {
+        let mut layout = Layout::default();
+        assert!(layout.toggle_terminal(), "the dock opens");
+        assert!(layout.dock_open());
+        assert!(!layout.toggle_terminal(), "and shuts");
+        // In the pane: closed pane → opens on Terminal.
+        layout.terminal_place = TerminalPlace::Pane;
+        assert!(layout.toggle_terminal());
+        assert!(layout.right_open && right_kind(&layout) == RightKind::Terminal && !layout.dock_open());
+        assert!(!layout.toggle_terminal(), "on top: the pane closes");
+        assert!(!layout.right_open);
+        // Over an open Page it goes below, and ⌃` closes only the lower pane.
+        layout.open_top(RightKind::Browser);
+        assert!(layout.toggle_terminal());
+        assert_eq!((right_kind(&layout), layout.shown_lower()), (RightKind::Browser, Some(RightKind::Terminal)));
+        assert!(!layout.toggle_terminal());
+        assert!(layout.right_open && layout.right_lower.is_none(), "the Page stays");
+    }
+
+    /// Moving the terminal: into the pane closes the dock; back to the
+    /// bottom opens it and gives the pane its previous view (Files with
+    /// none), or closes the lower pane.
+    #[test]
+    fn moving_the_terminal_keeps_one_place() {
+        let mut layout = Layout { terminal_open: true, ..Layout::default() };
+        layout.open_top(RightKind::Changes);
+        layout.seat_terminal_in_pane();
+        assert_eq!(layout.terminal_place, TerminalPlace::Pane);
+        assert!(!layout.terminal_open && layout.terminal_shown());
+        assert_eq!(right_kind(&layout), RightKind::Terminal, "not over a Page: the top view");
+        layout.dock_terminal_bottom();
+        assert!(layout.dock_open());
+        assert_eq!(right_kind(&layout), RightKind::Changes, "the view shown before the terminal");
+        assert!(layout.right_open, "the pane stays open");
+        // Below a Page, and back.
+        layout.open_top(RightKind::Browser);
+        layout.seat_terminal_in_pane();
+        assert_eq!((right_kind(&layout), layout.shown_lower()), (RightKind::Browser, Some(RightKind::Terminal)));
+        layout.seat_terminal_in_pane();
+        assert_eq!(layout.shown_lower(), Some(RightKind::Terminal), "seating twice moves nothing");
+        layout.dock_terminal_bottom();
+        assert_eq!((right_kind(&layout), layout.right_lower), (RightKind::Browser, None));
+        // A pane opened on the terminal (a restore, a pick) takes it.
+        let mut layout = Layout { terminal_open: true, ..Layout::default() };
+        layout.open_top(RightKind::Terminal);
+        assert_eq!(layout.terminal_place, TerminalPlace::Pane);
+        assert!(!layout.terminal_open, "the dock gave it up");
+        // No previous view: Files.
+        let mut layout = Layout { terminal_place: TerminalPlace::Pane, right_open: true, right_kind: Some(RightKind::Terminal), ..Layout::default() };
+        layout.dock_terminal_bottom();
+        assert_eq!(right_kind(&layout), RightKind::Files);
+        // The agent's run reveals it below what the person looks at.
+        let mut layout = Layout { terminal_place: TerminalPlace::Pane, ..Layout::default() };
+        layout.open_top(RightKind::Changes);
+        layout.reveal_terminal_in_pane();
+        assert_eq!((right_kind(&layout), layout.shown_lower()), (RightKind::Changes, Some(RightKind::Terminal)));
     }
 
     /// The sidebar's one open state: open by default, and a closed one

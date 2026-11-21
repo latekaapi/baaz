@@ -131,8 +131,8 @@ pub enum MenuKind {
     /// and drives it.
     SessionRow,
     /// The right pane's view menu, under the tab row's `＋` (docs/83 §6):
-    /// Changes, Files, Page, Tasks and (in Sessions) Terminal, the ones showing
-    /// checked.
+    /// Changes, Files, Page, Terminal, Tasks, and (in Sessions) the views that
+    /// can stack below (docs/82 8.1), the ones showing checked.
     RightViews,
     /// The composer's `+` menu: attach, mention, slash commands. A menu like
     /// the chip pickers, so one menu stands at a time with no extra rule.

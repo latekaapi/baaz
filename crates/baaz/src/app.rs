@@ -823,7 +823,11 @@ impl Harness {
         // agent's tools over them, and the pane's Tasks screen lists what the
         // agent started there (docs/82 6.5).
         let terminal_host = cx.new(|_| TerminalHost::new());
-        let right_pane = cx.new(|cx| crate::right_pane::RightPane::new(right_restored, overlays.clone(), terminal_host.clone(), cx));
+        // The dock draws the same tabs the service serves, and shares the
+        // window's floating layer for its toasts. The pane is given it too:
+        // its Terminal view is the dock's own body (docs/82 8.1).
+        let terminal_dock = cx.new(|cx| terminal::TerminalDock::new(terminal_host.clone(), overlays.clone(), cx));
+        let right_pane = cx.new(|cx| crate::right_pane::RightPane::new(right_restored, overlays.clone(), terminal_host.clone(), terminal_dock.clone(), cx));
         // The Skills page, closed: it lists for the launch workspace until
         // the root pushes the current project.
         // It also holds where new sessions start: `--provider`, else the
@@ -862,9 +866,6 @@ impl Harness {
         // pointed at exactly this path, so a second window keeping another
         // window's name shows up here rather than as a silent misroute.
         crate::baaz_log!("terminal service socket: {}", terminal_service.socket_path().display());
-        // The dock draws the same tabs the service serves, and shares the
-        // window's floating layer for its toasts.
-        let terminal_dock = cx.new(|cx| terminal::TerminalDock::new(terminal_host, overlays.clone(), cx));
         // Z7a, read once at boot: captures (`--screenshot`) and tests run the
         // scripted browser page — a native view never appears in a gpui
         // screenshot, and captures must be deterministic — while the app runs
@@ -967,14 +968,18 @@ impl Harness {
                 harness.update(cx, |harness, cx| harness.agent_tabs_call(call, cx));
             });
         });
-        // When the agent runs something the dock opens — never focused, so
-        // the person's keyboard stays where it was while they watch.
+        // When the agent runs something the terminal shows where it sits —
+        // never focused, so the person's keyboard stays where it was while
+        // they watch (`reveal_terminal_for_agent`).
+        let activity_harness = cx.entity().downgrade();
         this.terminal_service.set_activity_hook(move |cx: &mut App| {
-            // The open is a layout write, which needs no Harness: the window
-            // observes the layout global and redraws. Still deferred to the
-            // end of the effect cycle, so it lands after the `drain` (run
-            // inside a Harness update) that reported the activity.
-            cx.defer(|cx| crate::layout::Layout::update(cx, |layout| layout.terminal_open = true));
+            // Deferred to the end of the effect cycle, so it lands after the
+            // `drain` (run inside a Harness update) that reported the
+            // activity.
+            let harness = activity_harness.clone();
+            cx.defer(move |cx| {
+                let _ = harness.update(cx, |harness, cx| harness.reveal_terminal_for_agent(cx));
+            });
         });
         // The service's requests queue on socket threads; this pump runs
         // them on the UI thread until the window is gone. A pass is one
@@ -1688,22 +1693,6 @@ impl Harness {
         self.close_browse_menu(cx);
     }
 
-    /// The dock toggle (⌃`): flips the open state, persists it, and focuses
-    /// the dock on open so keys reach the pty. While the Settings page
-    /// stands open this is ignored with no state change (B11b): the page
-    /// hides the dock without writing its state, and a toggle would
-    /// otherwise flip it invisibly.
-    pub(crate) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_open(cx) {
-            return;
-        }
-        crate::layout::Layout::stage(cx, |layout| layout.terminal_open = !layout.terminal_open);
-        if crate::layout::Layout::get(cx).terminal_open {
-            self.with_terminal_dock(cx, |dock, cx| dock.opened(window, cx));
-        }
-        crate::layout::Layout::save(cx);
-    }
-
     /// Trust `session_id` for the terminal service (D53): the app opened
     /// this session, so its agent routes may drive the project's tabs.
     /// Called wherever a session becomes current; the provider lanes join
@@ -1746,7 +1735,11 @@ impl Harness {
         // snap and no frame has consumed it yet.
         self.right_pane.update(cx, |pane, _| pane.snap = false);
         self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::PageMenu, cx); });
-        crate::layout::Layout::stage(cx, |layout| layout.right_open = !layout.right_open);
+        crate::layout::Layout::stage(cx, |layout| {
+            layout.right_open = !layout.right_open;
+            // A pane that opens on the terminal takes it from the dock.
+            layout.claim_terminal();
+        });
         crate::baaz_log!("toggle right pane: open={}", crate::layout::Layout::get(cx).right_open);
         self.arm_browser_url_focus(cx);
         crate::layout::Layout::save(cx);
@@ -1844,10 +1837,7 @@ impl Harness {
         if crate::layout::Layout::get(cx).right_open && crate::layout::Layout::get(cx).right_kind == Some(kind) {
             crate::layout::Layout::stage(cx, |layout| layout.right_open = false);
         } else {
-            crate::layout::Layout::stage(cx, |layout| {
-                layout.right_kind = Some(kind);
-                layout.right_open = true;
-            });
+            crate::layout::Layout::stage(cx, |layout| layout.open_top(kind));
         }
         crate::baaz_log!("show right pane: {kind:?} open={}", crate::layout::Layout::get(cx).right_open);
         self.arm_browser_url_focus(cx);
@@ -1876,16 +1866,15 @@ impl Harness {
         self.arm_browser_url_focus(cx);
     }
 
-    /// The non-toggling open behind [`Self::select_right`], [`Self::show_right`]
-    /// and the agent's `browser_navigate`: set the kind, force the pane open,
+    /// The non-toggling open behind [`Self::select_right`] and the agent's
+    /// `browser_navigate`: set the kind, force the pane open,
     /// persist, prewarm, save, refresh, notify. Never arms URL focus — the
     /// callers that owe it (a person's own open) arm it themselves, so an
     /// agent navigation never steals the keyboard.
     pub(crate) fn open_right_on(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
-        crate::layout::Layout::stage(cx, |layout| {
-            layout.right_kind = Some(kind);
-            layout.right_open = true;
-        });
+        // The lower pane closes when the top takes its kind; the terminal
+        // moves into the pane when that is what it shows (docs/82 8.1).
+        crate::layout::Layout::stage(cx, |layout| layout.open_top(kind));
         crate::baaz_log!("open right pane: {kind:?} open={}", crate::layout::Layout::get(cx).right_open);
         crate::layout::Layout::save(cx);
         // B7: prepare the webview on the pick, before the pane animates.
@@ -2063,13 +2052,16 @@ impl Harness {
             .get(&session_id)
             .and_then(|meta| meta.right.clone())
             .and_then(|right| right.browser_url);
+        let live = crate::layout::Layout::get(cx);
         let state = crate::sessions::RightState {
-            open: crate::layout::Layout::get(cx).right_open,
-            kind: crate::layout::Layout::get(cx).right_kind.unwrap_or(layout::RightKind::Files),
+            open: live.right_open,
+            kind: live.right_kind.unwrap_or(layout::RightKind::Files),
             files_preview,
             files_selected,
             files_expanded,
             browser_url,
+            lower: live.right_lower,
+            split: live.right_split,
         };
         self.store_right_state_cheap(&session_id, state, cx);
     }
@@ -2095,9 +2087,21 @@ impl Harness {
             crate::layout::Layout::stage(cx, |layout| layout.right_open = open);
             self.right_pane.update(cx, |pane, _| pane.snap = true);
         }
-        if let Some(state) = &stored {
-            crate::layout::Layout::stage(cx, |layout| layout.right_kind = Some(state.kind));
-        }
+        // The lower pane and its divider are the session's too (docs/82
+        // 8.1): a session that stored none shows none. A pane that comes
+        // back showing the terminal takes it from the dock.
+        let (kind, lower, split) = match &stored {
+            Some(state) => (Some(state.kind), state.lower, state.split),
+            None => (None, None, None),
+        };
+        crate::layout::Layout::stage(cx, |layout| {
+            if kind.is_some() {
+                layout.right_kind = kind;
+            }
+            layout.right_lower = lower;
+            layout.right_split = split.map(crate::layout::clamp_split);
+            layout.claim_terminal();
+        });
         if let Some((root, _)) = self.right_project(cx) {
             self.with_right_pane(cx, |pane, cx| pane.restore_files(&root, stored.as_ref(), cx));
         }
@@ -2122,15 +2126,17 @@ impl Harness {
         })
     }
 
-    /// A new terminal tab on the current project, opening the dock for it
-    /// ([`terminal::TerminalDock::new_terminal`]): the palette's "New
+    /// A new terminal tab on the current project, showing the terminal
+    /// where it sits for it ([`Self::show_terminal`],
+    /// [`terminal::TerminalDock::new_terminal`]): the palette's "New
     /// terminal" and the composer's `/new-terminal`. Ignored while the
     /// Settings page stands open (B11b), like the dock toggle: opening the
-    /// dock would flip hidden state invisibly.
+    /// terminal would flip hidden state invisibly.
     pub(crate) fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_open(cx) {
             return;
         }
+        self.show_terminal(cx);
         self.with_terminal_dock(cx, |dock, cx| dock.new_terminal(window, cx));
     }
 
@@ -2147,14 +2153,16 @@ impl Harness {
         if self.settings_open(cx) {
             return;
         }
+        self.show_terminal(cx);
         self.with_terminal_dock(cx, |dock, cx| dock.open_tab(tab, window, cx));
     }
 
     #[cfg(feature = "probe")]
-    /// The `--steps` verb's route: open the dock over a FakePty-backed tab
-    /// and drain its script at once, so the capture replays the same bytes
-    /// on every run. The payload names the tab; empty is "terminal". Fails
-    /// the step while the Settings page stands open.
+    /// The `--steps` verb's route: show the terminal where it sits over a
+    /// FakePty-backed tab and drain its script at once, so the capture
+    /// replays the same bytes on every run. The payload names the tab;
+    /// empty is "terminal". Fails the step while the Settings page stands
+    /// open.
     pub(crate) fn step_terminal_dock(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let title = rest.trim();
         let title = if title.is_empty() { "terminal".to_owned() } else { title.to_owned() };
@@ -2167,6 +2175,7 @@ impl Harness {
         if self.settings_open(cx) {
             return Err("the Settings page is open".into());
         }
+        self.show_terminal(cx);
         self.with_terminal_dock(cx, |dock, cx| dock.open_scripted(&root, title, window, cx));
         Ok(())
     }
@@ -2245,6 +2254,7 @@ impl Harness {
             }
             // `set_draft` only: the draft is never sent from here. An
             // occupied composer is appended to, never clobbered.
+            terminal::TerminalDockEvent::Move(place) => self.move_terminal(*place, window, cx),
             terminal::TerminalDockEvent::Ask { command, output } => {
                 if let Some(view) = self.active.clone() {
                     view.update(cx, |view, cx| {
@@ -3101,14 +3111,15 @@ impl Harness {
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
         let overflow_open = self.overlays.read(cx).is_open(MenuKind::Overflow);
-        // The terminal toggle: ⌃`'s button, lit while the dock stands open.
+        // The terminal toggle: ⌃`'s button, lit while the terminal shows,
+        // at the bottom or in the pane.
         let term_toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
             this.toggle_terminal(window, cx);
         });
         let mut term_button = icon_button("hd-centre-terminal", IconName::Terminal)
             .ghost()
             .accessibility_label("Toggle terminal");
-        if crate::layout::Layout::get(cx).terminal_open {
+        if crate::layout::Layout::get(cx).terminal_shown() {
             term_button = term_button.on_click(term_toggle);
         } else {
             term_button = term_button.muted().on_click(term_toggle);
@@ -5852,6 +5863,149 @@ mod tests {
         restore_state(state);
     }
 
+    /// docs/82 8.1: a window over the hermetic workspace with one scripted
+    /// terminal tab (FakePty: no shell runs, so nothing below spawns one).
+    type TestState = (std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>, PathBuf);
+
+    fn terminal_window<'a>(cx: &'a mut gpui::TestAppContext, name: &str) -> (TestState, &'a mut gpui::VisualTestContext, gpui::Entity<Harness>, PathBuf) {
+        let state = hermetic_state(name);
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
+        });
+        let opened = vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_terminal_dock("zsh", window, cx)));
+        assert!(opened.is_ok(), "the scripted tab opens: {opened:?}");
+        let root = vc.update(|_, cx| baaz.read(cx).current_project(cx).map(|project| project.root.clone())).expect("the hermetic workspace is the project");
+        (state, vc, baaz, root)
+    }
+
+    fn tab_ids(vc: &mut gpui::VisualTestContext, baaz: &gpui::Entity<Harness>, root: &std::path::Path) -> Vec<String> {
+        vc.update(|_, cx| baaz.read(cx).terminal_host(cx).read(cx).tabs_for(root).iter().map(|tab| tab.id.clone()).collect())
+    }
+
+    /// docs/82 8.1: ⌃` follows the terminal's place — the dock flips at the
+    /// bottom; in the pane the pane opens on the terminal, and closes when
+    /// the terminal is its top view.
+    #[gpui::test]
+    fn the_terminal_toggle_follows_its_place(cx: &mut gpui::TestAppContext) {
+        let (state, vc, baaz, root) = terminal_window(cx, "terminal-toggle-place");
+        let layout = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| crate::layout::Layout::get(cx).clone());
+        assert!(layout(vc).dock_open(), "the scripted tab shows in the dock");
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_terminal(window, cx)));
+        assert!(!layout(vc).terminal_shown(), "⌃` shuts the dock");
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_terminal(window, cx)));
+        assert!(layout(vc).dock_open(), "and opens it");
+        // In the pane.
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.move_terminal(crate::layout::TerminalPlace::Pane, window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_terminal(window, cx)));
+        let now = layout(vc);
+        assert!(!now.right_open && !now.terminal_shown() && !now.dock_open(), "⌃` closes the pane the terminal tops");
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_terminal(window, cx)));
+        let now = layout(vc);
+        assert!(now.right_open && crate::layout::right_kind(&now) == crate::layout::RightKind::Terminal, "and opens it on the terminal");
+        assert!(!now.dock_open(), "never in two places");
+        assert_eq!(tab_ids(vc, &baaz, &root).len(), 1, "no toggle opened another tab");
+        restore_state(state);
+    }
+
+    /// docs/82 8.1: moving the terminal — through the header control's own
+    /// event — keeps the same tab and pty, and one place at a time.
+    #[gpui::test]
+    fn moving_the_terminal_keeps_its_tab(cx: &mut gpui::TestAppContext) {
+        let (state, vc, baaz, root) = terminal_window(cx, "terminal-move");
+        let before = tab_ids(vc, &baaz, &root);
+        assert_eq!(before.len(), 1);
+        let session = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| baaz.read(cx).terminal_host(cx).read(cx).tabs_for(&root).first().map(|tab| tab.session.entity_id()))
+        };
+        let pty = session(vc);
+        let dock = vc.update(|_, cx| baaz.read(cx).terminal_dock.clone());
+        // The dock header's "Move terminal to the right pane".
+        vc.update(|_, cx| dock.update(cx, |_, cx| cx.emit(crate::terminal::TerminalDockEvent::Move(crate::layout::TerminalPlace::Pane))));
+        vc.run_until_parked();
+        let now = vc.update(|_, cx| crate::layout::Layout::get(cx).clone());
+        assert_eq!(now.terminal_place, crate::layout::TerminalPlace::Pane);
+        assert!(now.terminal_in_pane() && !now.dock_open(), "the pane shows it and the dock closed");
+        assert_eq!(tab_ids(vc, &baaz, &root), before, "the same tab, no new one");
+        assert_eq!(session(vc), pty, "the same pty, not restarted");
+        // The pane's "Dock terminal at the bottom".
+        vc.update(|_, cx| dock.update(cx, |_, cx| cx.emit(crate::terminal::TerminalDockEvent::Move(crate::layout::TerminalPlace::Bottom))));
+        vc.run_until_parked();
+        let now = vc.update(|_, cx| crate::layout::Layout::get(cx).clone());
+        assert!(now.dock_open() && !now.terminal_in_pane(), "back in the dock, gone from the pane");
+        assert_ne!(crate::layout::right_kind(&now), crate::layout::RightKind::Terminal, "the pane's terminal view went back");
+        assert_eq!(tab_ids(vc, &baaz, &root), before);
+        assert_eq!(session(vc), pty);
+        // (No frame is drawn: the grid's first layout resizes its pty, which
+        // trips gpui's stale-arena panic in a test draw — see the tab-pick
+        // test above. The captures draw both places.)
+        restore_state(state);
+    }
+
+    /// docs/82 8.1: the top view taking the lower pane's kind closes the
+    /// lower pane, on the session's record too; the Page never sits below.
+    #[gpui::test]
+    fn the_top_taking_the_lower_kind_closes_it(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("right-lower-close");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        use crate::layout::RightKind;
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(RightKind::Changes, cx)));
+        let set = vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_right_lower(Some(RightKind::Files), window, cx)));
+        assert_eq!(set, Ok(()));
+        let refused = vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_right_lower(Some(RightKind::Browser), window, cx)));
+        assert!(refused.is_err(), "the Page is top-only");
+        let stored = |vc: &mut gpui::VisualTestContext| {
+            vc.update(|_, cx| baaz.read(cx).session_list.read(cx).overrides.get("s-1").and_then(|meta| meta.right.clone()).map(|right| right.lower))
+        };
+        assert_eq!(stored(vc), Some(Some(RightKind::Files)), "the session's record holds the lower pane");
+        assert_eq!(vc.update(|_, cx| crate::layout::Layout::get(cx).shown_lower()), Some(RightKind::Files));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(RightKind::Files, cx)));
+        assert_eq!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_lower), None, "the top took Files: the lower pane closed");
+        assert_eq!(stored(vc), Some(None), "and the record says so");
+        restore_state(state);
+    }
+
+    /// docs/82 8.1: the lower pane and its divider are per session — a
+    /// switch restores each session's own, and a session that stored none
+    /// shows none.
+    #[gpui::test]
+    fn the_lower_pane_restores_per_session(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("right-lower-restore");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
+        });
+        open_test_session(&mut *vc, &baaz, &state.2);
+        use crate::layout::RightKind;
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.select_right(RightKind::Changes, cx);
+                h.set_right_lower(Some(RightKind::Tasks), window, cx).expect("Tasks sits below");
+                h.set_right_split(0.9, cx);
+                h.set_override(
+                    "s-2",
+                    |meta| meta.right = Some(crate::sessions::RightState { open: true, kind: RightKind::Files, ..Default::default() }),
+                    cx,
+                );
+            })
+        });
+        assert_eq!(vc.update(|_, cx| crate::layout::Layout::get(cx).split()), crate::layout::SPLIT_MAX, "the divider is held to its range");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.restore_right_for_session("s-2", cx)));
+        let other = vc.update(|_, cx| crate::layout::Layout::get(cx).clone());
+        assert_eq!((crate::layout::right_kind(&other), other.right_lower, other.right_split), (RightKind::Files, None, None), "s-2 stored no lower pane");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.restore_right_for_session("s-1", cx)));
+        let back = vc.update(|_, cx| crate::layout::Layout::get(cx).clone());
+        assert_eq!((crate::layout::right_kind(&back), back.shown_lower(), back.split()), (RightKind::Changes, Some(RightKind::Tasks), crate::layout::SPLIT_MAX));
+        restore_state(state);
+    }
+
     /// Task 4.4: the Skills page is its own region entity. Its own keys —
     /// Esc peeling the Add menu, Enter moving into the detail — land on the
     /// page and notify the page alone; the root is never notified, and the
@@ -6244,6 +6398,8 @@ mod tests {
                 files_selected: None,
                 files_expanded: Vec::new(),
                 browser_url: None,
+                lower: None,
+                split: None,
             }),
             "the debounced write persists what the toggle stored in memory"
         );
@@ -7342,6 +7498,8 @@ mod tests {
                 files_selected: None,
                 files_expanded: Vec::new(),
                 browser_url: None,
+                lower: None,
+                split: None,
             }),
             "quitting lands the pending pane state on disk"
         );
@@ -7538,7 +7696,8 @@ mod tests {
         restore_state(state);
     }
 
-    /// docs/83 §6: the tab row carries Changes · Files · Page, each id
+    /// docs/83 §6: the tab row carries Changes · Files · Page · Terminal
+    /// (docs/82 8.1), each id
     /// parsing back to its kind and sitting at its strip index, the active
     /// one lit; Tasks joins them while it shows or the session has tasks
     /// (docs/82 6.5); a previewed file adds one closable tab that is lit in
@@ -7547,7 +7706,7 @@ mod tests {
     fn the_tab_row_maps_to_the_kinds_and_the_open_file() {
         use crate::layout::RightKind;
         let tabs = crate::right::pane_tab_list(RightKind::Files, None, false);
-        assert_eq!(tabs.len(), 3, "Changes, Files, Page — no more without an open file or tasks");
+        assert_eq!(tabs.len(), 4, "Changes, Files, Page, Terminal — no more without an open file or tasks");
         let with_tasks = crate::right::pane_tab_list(RightKind::Tasks, None, true);
         for (index, tab) in with_tasks.iter().enumerate() {
             let kind = RightKind::parse(&tab.id).unwrap_or_else(|| panic!("tab {:?} parses back to no kind", tab.id));
@@ -7555,16 +7714,16 @@ mod tests {
             assert_eq!(kind.label(), tab.label.as_ref(), "tab {:?} is labelled as its kind", tab.id);
             assert_eq!(tab.active, kind == RightKind::Tasks);
         }
-        assert_eq!(with_tasks.iter().map(|t| t.label.as_ref()).collect::<Vec<_>>(), ["Changes", "Files", "Page", "Tasks"]);
-        assert_eq!(tabs.iter().map(|t| t.label.as_ref()).collect::<Vec<_>>(), ["Changes", "Files", "Page"]);
+        assert_eq!(with_tasks.iter().map(|t| t.label.as_ref()).collect::<Vec<_>>(), ["Changes", "Files", "Page", "Terminal", "Tasks"]);
+        assert_eq!(tabs.iter().map(|t| t.label.as_ref()).collect::<Vec<_>>(), ["Changes", "Files", "Page", "Terminal"]);
         assert!(!with_tasks.iter().any(|tab| tab.closable), "the views' tabs are fixed");
 
         let tabs = crate::right::pane_tab_list(RightKind::Files, Some("right.rs".into()), false);
-        assert_eq!(tabs.len(), 4);
-        assert_eq!((tabs[3].id.as_ref(), tabs[3].label.as_ref(), tabs[3].active, tabs[3].closable), (crate::right::FILE_TAB, "right.rs", true, true));
+        assert_eq!(tabs.len(), 5);
+        assert_eq!((tabs[4].id.as_ref(), tabs[4].label.as_ref(), tabs[4].active, tabs[4].closable), (crate::right::FILE_TAB, "right.rs", true, true));
         assert!(!tabs[1].active, "Files is not lit while its file shows");
         let tabs = crate::right::pane_tab_list(RightKind::Changes, Some("right.rs".into()), false);
-        assert!(tabs[0].active && !tabs[3].active, "on Changes the file's tab waits unlit");
+        assert!(tabs[0].active && !tabs[4].active, "on Changes the file's tab waits unlit");
     }
 
     /// Maximise flips between the widest pane and the default width.
@@ -7682,6 +7841,8 @@ mod tests {
                 files_selected: None,
                 files_expanded: Vec::new(),
                 browser_url: None,
+                lower: None,
+                split: None,
             })
         );
         let baaz2 = vc.update(|window, cx| {
@@ -7741,6 +7902,7 @@ mod tests {
             for _ in 0..2 {
                 vc.update(|window, cx| {
                     let pane = baaz.read(cx).right_pane.clone();
+                    let terminal = baaz.read(cx).terminal_dock.clone();
                     pane.update(cx, |pane, cx| {
                         let _ = crate::right::render(
                             kind,
@@ -7748,6 +7910,7 @@ mod tests {
                             project.clone(),
                             &[],
                             crate::right::BrowserPane { state: None, window: &mut *window },
+                            &terminal,
                             true,
                             400.0,
                             "Muse",

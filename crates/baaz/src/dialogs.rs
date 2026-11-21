@@ -770,27 +770,44 @@ impl Harness {
     }
 
     /// The right pane's view menu (docs/83 §6), anchored under the tab
-    /// row's `＋`: Changes, Files, Page, Tasks — the shown one checked — open the
-    /// pane on that view, as their tabs and the centre header's toggles do;
-    /// in Sessions a last row, Terminal, toggles the dock exactly as ⌃`
-    /// does (checked while it stands open). Browse has no dock, so no row.
+    /// row's `＋`: Changes, Files, Page, Terminal, Tasks — the shown one
+    /// checked — open the pane on that view, as their tabs and the centre
+    /// header's toggles do (Terminal moves the terminal into the pane). In
+    /// Sessions a second block stacks a view below the top one (docs/82
+    /// 8.1): "Changes below", "Files below", "Terminal below", "Tasks
+    /// below" — not the Page, which is top-only, and not the view on top —
+    /// checked while it shows, and picking the checked one closes the
+    /// lower pane. Browse keeps one body, so no second block.
     pub(crate) fn render_right_views_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.overlays.read(cx).is_open(MenuKind::RightViews) {
             return None;
         }
-        let shown = layout::right_kind(crate::layout::Layout::get(cx));
+        let live = crate::layout::Layout::get(cx);
+        let shown = layout::right_kind(live);
+        let lower = live.shown_lower();
         let mut rows: Vec<MenuRow> =
             RightKind::ALL.into_iter().map(|kind| MenuRow::Toggle { label: kind.label().into(), checked: kind == shown }).collect();
-        let terminal = crate::layout::Layout::get(cx).mode != layout::Mode::Browse;
-        if terminal {
-            rows.push(MenuRow::Toggle { label: "Terminal".into(), checked: crate::layout::Layout::get(cx).terminal_open });
+        let below: Vec<RightKind> = if live.mode == layout::Mode::Browse {
+            Vec::new()
+        } else {
+            RightKind::BELOW.into_iter().filter(|kind| *kind != shown).collect()
+        };
+        if !below.is_empty() {
+            rows.push(MenuRow::Separator);
+            rows.extend(below.iter().map(|kind| MenuRow::Toggle { label: format!("{} below", kind.label()).into(), checked: lower == Some(*kind) }));
         }
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
             this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
-            match RightKind::ALL.get(*index) {
-                Some(kind) => this.select_right(*kind, cx),
-                None if terminal => this.toggle_terminal(window, cx),
-                None => {}
+            if let Some(kind) = RightKind::ALL.get(*index) {
+                this.select_right(*kind, cx);
+                return;
+            }
+            // The separator is index `ALL.len()`; the rows below follow it.
+            if let Some(kind) = index.checked_sub(RightKind::ALL.len() + 1).and_then(|at| below.get(at)).copied() {
+                let pick = (lower != Some(kind)).then_some(kind);
+                if let Err(why) = this.set_right_lower(pick, window, cx) {
+                    crate::baaz_log!("views menu: lower pane not set ({why})");
+                }
             }
         });
         // No `＋` bounds yet: no menu this frame (the button is drawn

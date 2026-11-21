@@ -1,8 +1,9 @@
 //! The dock's entry point for running a command (D49): the block rerun calls
 //! it. (D4 removed the transcript's play buttons; D5 moved the connect flow's
-//! typed commands into the setup sheet's own terminal.) Open the
-//! dock, pick the tab by D43's rule, bracketed-paste the command, send Enter
-//! unless asked not to, and focus the grid. Entirely local: no turn, no
+//! typed commands into the setup sheet's own terminal.) Pick the tab
+//! by D43's rule, bracketed-paste the command, send Enter unless asked not
+//! to, and focus the grid — the rerun comes from a grid that already shows,
+//! in whichever place the terminal sits (docs/82 8.1). Entirely local: no turn, no
 //! wire, so it works under `--replay` too.
 
 use std::path::Path;
@@ -11,12 +12,11 @@ use gpui::{Context, Window};
 
 use super::dock::TerminalDock;
 use super::{Pick, TabOwner};
-use crate::layout::LayoutGlobal as _;
 
 impl TerminalDock {
     /// The shared tail of every dock run: the block rerun for its
-    /// originating tab. `pick` is the caller's D43 choice; the dock open,
-    /// paste, Enter and focus below are one path.
+    /// originating tab. `pick` is the caller's D43 choice; the paste, Enter
+    /// and focus below are one path.
     pub(crate) fn run_in_picked(
         &mut self,
         project: &Path,
@@ -29,7 +29,6 @@ impl TerminalDock {
         if command.trim().is_empty() {
             return;
         }
-        crate::layout::Layout::stage(cx, |layout| layout.terminal_open = true);
         let origin = self.facts.origin.clone();
         let session = self.host().update(cx, |host, cx| {
             let id = match pick {
@@ -51,7 +50,6 @@ impl TerminalDock {
         }
         let focus = gpui::Focusable::focus_handle(self, cx);
         window.focus(&focus, cx);
-        crate::layout::Layout::save(cx);
         cx.notify();
     }
 }

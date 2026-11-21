@@ -251,13 +251,17 @@ mod tests {
             fold_finished_turns: false,
             terminal_open: true,
             terminal_height: Some(300.0),
+            terminal_place: TerminalPlace::Pane,
             right_open: true,
             right_width: Some(420.0),
             right_kind: Some(RightKind::Changes),
+            right_lower: Some(RightKind::Terminal),
+            right_split: Some(0.4),
+            right_previous: Some(RightKind::Files),
             use_own_mcp: UseOwnMcp { codex: true, claude_code: false },
             mode: Mode::Browse,
             sidebar_open: false,
-            sessions_pane: Some(SessionsPane { open: true, kind: Some(RightKind::Files) }),
+            sessions_pane: Some(SessionsPane { open: true, kind: Some(RightKind::Files), lower: None, split: None }),
             search_engine: crate::browser::toolbar::SearchEngine::Kagi,
             download_dir: Some(PathBuf::from("/tmp/baaz-downloads")),
             code_wrap: false,
@@ -284,6 +288,9 @@ mod tests {
         assert!(text.contains("\"rightOpen\":true"));
         assert!(text.contains("\"rightWidth\":420.0"));
         assert!(text.contains("\"rightKind\":\"changes\""));
+        assert!(text.contains("\"terminalPlace\":\"pane\""));
+        assert!(text.contains("\"rightLower\":\"terminal\""));
+        assert!(text.contains("\"rightSplit\":0.4"));
         assert!(text.contains("\"useOwnMcp\":{\"codex\":true,\"claudeCode\":false}"));
         assert!(text.contains("\"mode\":\"browse\""));
         assert!(text.contains("\"sidebarOpen\":false"));
@@ -309,11 +316,14 @@ mod tests {
         assert!(back.right_open);
         assert_eq!(back.right_width, Some(420.0));
         assert_eq!(back.right_kind, Some(RightKind::Changes));
+        assert_eq!(back.terminal_place, TerminalPlace::Pane);
+        assert_eq!((back.right_lower, back.right_split), (Some(RightKind::Terminal), Some(0.4)));
+        assert_eq!(back.right_previous, None, "the previous view is this window's, never stored");
         assert!(back.use_own_mcp.codex);
         assert!(!back.use_own_mcp.claude_code);
         assert_eq!(back.mode, Mode::Browse);
         assert!(!back.sidebar_open);
-        assert_eq!(back.sessions_pane, Some(SessionsPane { open: true, kind: Some(RightKind::Files) }));
+        assert_eq!(back.sessions_pane, Some(SessionsPane { open: true, kind: Some(RightKind::Files), lower: None, split: None }));
         assert_eq!(back.search_engine, crate::browser::toolbar::SearchEngine::Kagi);
         assert_eq!(back.download_dir, Some(PathBuf::from("/tmp/baaz-downloads")));
         // An old file with only a width still reads, taking the new defaults.

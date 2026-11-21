@@ -25,6 +25,13 @@
 //! session's provider, the PR in Browse, the views menu, a page intent. The
 //! root subscribes once in `Harness::new` and maps each to its own method.
 //!
+//! The pane is the session's workspace (docs/82 8.1): Changes · Files · Page
+//! · Terminal · Tasks on the strip, and a second pane may stack below the
+//! strip on its own kind ([`crate::layout::Layout::shown_lower`]) under a
+//! divider the pane drags itself ([`LowerDivider`]). The Terminal view is
+//! the terminal dock's own body ([`crate::terminal::TerminalDock::pane_screen`]):
+//! the pane is given the dock at construction, as it is given the host.
+//!
 //! The per-frame reconcile that used to run in the root's per-frame hook
 //! (`sync_right_cache`) runs in the pane's own render, and a layout observer
 //! drops the watch when the pane closes (a closed pane is not mounted, so it
@@ -47,6 +54,7 @@ use crate::resize::RightResizeDrag;
 use crate::right::{self, RightCache};
 use crate::session::SessionView;
 use crate::layout::LayoutGlobal as _;
+use aui_tokens::ActiveAui as _;
 
 #[cfg(test)]
 thread_local! {
@@ -141,8 +149,10 @@ pub(crate) enum RightPaneEvent {
     ArchiveSession,
     /// The tab row's ＋: the views menu.
     OpenViewsMenu,
-    /// A Tasks row: open the dock on the tab its command runs in.
+    /// A Tasks row: show the terminal on the tab its command runs in.
     OpenTerminalTab(String),
+    /// The lower pane's ✕ (docs/82 8.1).
+    CloseLower,
     /// What the Page's own controls ask (screenshot, annotate, console…).
     BrowserIntent(aui_webview::WebviewIntent),
 }
@@ -159,8 +169,28 @@ struct Refresh {
     watch: Option<(crate::right_watch::RightWatch, Task<()>)>,
 }
 
-/// The right pane: Changes · Files · Page · Tasks on one strip under its
-/// tab row.
+/// The lower pane's divider (docs/82 8.1): the drag in flight, and the
+/// bounds of the pane's body the top pane's share is measured against.
+#[derive(Default)]
+pub(crate) struct LowerDivider {
+    /// The grab y in window pixels and the share when the drag began.
+    drag: Option<(f32, f32)>,
+    /// The body's bounds, from its last prepaint.
+    bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+}
+
+/// The top pane's share after the pointer moved from `grab` to `at` over a
+/// body `height` tall, starting from `start`: the divider follows the
+/// pointer, held to its range ([`crate::layout::clamp_split`]).
+pub(crate) fn lower_drag_share(start: f32, grab: f32, at: f32, height: f32) -> f32 {
+    if height <= 0.0 {
+        return crate::layout::clamp_split(start);
+    }
+    crate::layout::clamp_split(start + (at - grab) / height)
+}
+
+/// The right pane: Changes · Files · Page · Terminal · Tasks on one strip
+/// under its tab row, and the lower pane under it when one stands open.
 pub(crate) struct RightPane {
     /// The last git/diff/filesystem reads, with the roots and instants they
     /// were read for. [`right::render`] draws from this and never touches a
@@ -192,6 +222,11 @@ pub(crate) struct RightPane {
     /// The terminal's tabs and their task book (docs/82 6.5): the Tasks
     /// screen draws the open session's tasks and stops them through it.
     pub(crate) host: Entity<crate::terminal::TerminalHost>,
+    /// The terminal (docs/82 8.1): the Terminal view draws the dock's own
+    /// body, so the pane and the dock are one terminal.
+    pub(crate) terminal: Entity<crate::terminal::TerminalDock>,
+    /// The lower pane's divider and its drag.
+    pub(crate) lower: LowerDivider,
     /// What the root told the pane (see [`RightFacts`]).
     pub(crate) facts: RightFacts,
     /// The layout observer: drops the watch when the pane closes.
@@ -211,7 +246,13 @@ impl RightPane {
 
     /// The pane at boot: the divider at `width` (what `layout.json`
     /// restored), nothing read yet.
-    pub(crate) fn new(width: f32, overlays: Entity<Overlays>, host: Entity<crate::terminal::TerminalHost>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        width: f32,
+        overlays: Entity<Overlays>,
+        host: Entity<crate::terminal::TerminalHost>,
+        terminal: Entity<crate::terminal::TerminalDock>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let layout = cx.observe_global::<layout::LayoutStore>(|this: &mut Self, cx| {
             this.drop_watch_if_idle(cx);
             cx.notify();
@@ -228,6 +269,8 @@ impl RightPane {
             pending_pr_body: None,
             overlays,
             host,
+            terminal,
+            lower: LowerDivider::default(),
             facts: RightFacts::default(),
             _layout: layout,
         }
@@ -315,9 +358,26 @@ impl RightPane {
     // ── refresh ─────────────────────────────────────────────────────────
 
     /// Whether `kind` shows data read from git or the filesystem: Changes
-    /// and Files (the Page draws a webview, Tasks the terminal's book).
+    /// and Files (the Page draws a webview, Terminal the ptys, Tasks the
+    /// terminal's book).
     fn needs_data(kind: RightKind) -> bool {
         matches!(kind, RightKind::Changes | RightKind::Files)
+    }
+
+    /// The kind whose data the open pane reads: the top one when it reads
+    /// any, else the lower pane's (docs/82 8.1). `None` while the pane is
+    /// closed or shows nothing read from git or the filesystem. One read
+    /// lands both slots, so one kind paces it.
+    fn reading_kind(cx: &App) -> Option<RightKind> {
+        let layout = layout::Layout::get(cx);
+        if !layout.right_open {
+            return None;
+        }
+        let top = layout::right_kind(layout);
+        if Self::needs_data(top) {
+            return Some(top);
+        }
+        layout.shown_lower().filter(|kind| Self::needs_data(*kind))
     }
 
     /// Keep a file watch on `root` while the pane shows it: a change on disk
@@ -363,10 +423,7 @@ impl RightPane {
     /// the background executor and lands with an update + notify of the pane
     /// alone. Nothing here blocks the UI thread.
     pub(crate) fn refresh_now(&mut self, cx: &mut Context<Self>) {
-        let kind = layout::right_kind(layout::Layout::get(cx));
-        if !layout::Layout::get(cx).right_open || !Self::needs_data(kind) {
-            return;
-        }
+        let Some(kind) = Self::reading_kind(cx) else { return };
         let Some((root, _)) = self.facts.project.clone() else { return };
         // The walk draws around this: a re-read never collapses a toggled
         // directory or drops the preview's tree.
@@ -453,7 +510,7 @@ impl RightPane {
         if self.drop_watch_if_idle(cx) {
             return;
         }
-        let kind = layout::right_kind(layout::Layout::get(cx));
+        let Some(kind) = Self::reading_kind(cx) else { return };
         let root = self.facts.project.as_ref().map(|(root, _)| root.clone());
         self.ensure_watch(root.as_deref(), cx);
         if self.refresh.last_key != Some((true, kind, root.clone())) {
@@ -478,11 +535,11 @@ impl RightPane {
     /// the layout observer runs this instead of the render. Returns whether
     /// the pane is idle.
     fn drop_watch_if_idle(&mut self, cx: &mut Context<Self>) -> bool {
-        let kind = layout::right_kind(layout::Layout::get(cx));
-        let open = layout::Layout::get(cx).right_open;
-        if open && Self::needs_data(kind) {
+        if Self::reading_kind(cx).is_some() {
             return false;
         }
+        let kind = layout::right_kind(layout::Layout::get(cx));
+        let open = layout::Layout::get(cx).right_open;
         let root = self.facts.project.as_ref().map(|(root, _)| root.clone());
         self.refresh.last_key = Some((open, kind, root));
         self.refresh.watch = None;
@@ -490,7 +547,7 @@ impl RightPane {
     }
 
     /// A two-finger sideways swipe in the pane: one screen along the strip
-    /// (Changes · Files · Page · Tasks), stopping at either end.
+    /// (Changes · Files · Page · Terminal · Tasks), stopping at either end.
     fn swipe_screen(&mut self, dir: i32, cx: &mut Context<Self>) {
         let at = right::screen_index(layout::right_kind(layout::Layout::get(cx))) as i32 + dir;
         if let Some(kind) = usize::try_from(at).ok().and_then(|i| RightKind::ALL.get(i).copied()) {
@@ -537,7 +594,8 @@ impl Focusable for RightPane {
 }
 
 impl Region for RightPane {
-    /// The shown screen's name ("Changes", "Files", "Page", "Tasks"). In Browse the
+    /// The shown screen's name ("Changes", "Files", "Page", "Terminal",
+    /// "Tasks"). In Browse the
     /// Page kind shows Changes (B2a-H2b), and the title says so.
     fn title(&self, cx: &App) -> SharedString {
         let kind = layout::right_kind(layout::Layout::get(cx));
@@ -546,8 +604,8 @@ impl Region for RightPane {
     }
 
     /// The pane's tab row (docs/83 §6), for the shell to seat in the right
-    /// column's 44 px header in both modes: Changes · Files · Page, Tasks
-    /// while it shows or the session has tasks, the open file's tab while
+    /// column's 44 px header in both modes: Changes · Files · Page ·
+    /// Terminal, Tasks while it shows or the session has tasks, the open file's tab while
     /// Files previews one (strip mode only), `＋`, maximise and ✕.
     fn actions(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let kind = layout::right_kind(layout::Layout::get(cx));
@@ -617,7 +675,8 @@ impl Render for RightPane {
             drawn.set(rows);
         });
         // D6 (docs/43 §2.3): in Sessions the pane is a window onto one of
-        // four screens on a strip — Changes · Files · Page · Tasks — under the
+        // five screens on a strip — Changes · Files · Page · Terminal · Tasks
+        // (docs/82 8.1) — under the
         // pane's tab row (docs/83 §6), each with its own sub-header if any;
         // a tab or toggle slides the strip (240 ms ease-out), a two-finger
         // sideways swipe moves one screen. Browse keeps its pane's body as it
@@ -639,6 +698,7 @@ impl Render for RightPane {
                 project,
                 &session_edits,
                 right::BrowserPane { state: None, window: &mut *window },
+                &self.terminal,
                 right_open,
                 width,
                 self.facts.agent(),
@@ -659,45 +719,172 @@ impl Render for RightPane {
         let pos = aui::workbench::strip_position("right-strip", index, window, cx);
         self.strip_moving = aui::workbench::strip_moving(pos, index);
         let visible = aui::workbench::strip_visible(pos, RightKind::ALL.len());
-        if visible(right::screen_index(RightKind::Tasks)) {
+        // docs/82 8.1: the lower pane's kind, drawn under the strip and
+        // never on it — a slide passing its slot shows the ground there, so
+        // no screen is built twice in one frame.
+        let lower = layout::Layout::get(cx).shown_lower();
+        if visible(right::screen_index(RightKind::Tasks)) || lower == Some(RightKind::Tasks) {
             self.sync_tasks(cx);
         }
-        if visible(2) && self.cache.page_address.is_none() {
+        if visible(right::screen_index(RightKind::Browser)) && self.cache.page_address.is_none() {
             self.ensure_page_address(window, cx);
         }
-        let agent = self.facts.agent();
         let page = self.facts.page.clone();
         let page_menu = self.page_menu_open(cx);
         let base_menu = self.base_menu_open(cx);
         let mut screens: Vec<Option<AnyElement>> = Vec::with_capacity(RightKind::ALL.len());
         for (i, screen_kind) in RightKind::ALL.into_iter().enumerate() {
-            if !visible(i) {
+            if !visible(i) || lower == Some(screen_kind) {
                 screens.push(None);
                 continue;
             }
             let page = if screen_kind == RightKind::Browser { page.clone() } else { None };
-            let edits = if screen_kind == RightKind::Changes { self.session_edits(cx) } else { Vec::new() };
-            screens.push(Some(right::render_screen(
-                screen_kind,
-                &self.cache,
-                project.clone(),
-                &edits,
-                right::BrowserPane { state: page.as_ref(), window: &mut *window },
-                right_open,
-                width,
-                agent,
-                &self.focus,
-                page_menu,
-                base_menu,
-                cx,
-            )));
+            screens.push(Some(self.screen(screen_kind, page.as_ref(), right_open, page_menu, base_menu, window, cx)));
         }
         let swipe = cx.weak_entity();
-        aui::workbench::pane_strip("right-strip", pos, px(width), screens)
+        let strip = aui::workbench::pane_strip("right-strip", pos, px(width), screens)
             .on_swipe(move |dir, _, cx| {
                 let _ = swipe.update(cx, |this, cx| this.swipe_screen(dir, cx));
             })
+            .into_any_element();
+        match lower {
+            Some(lower) => {
+                let below = self.screen(lower, None, right_open, page_menu, base_menu, window, cx);
+                self.stacked(strip, lower, below, cx)
+            }
+            None => strip,
+        }
+    }
+}
+
+impl RightPane {
+    /// One screen of the pane, on the strip or in the lower pane: the
+    /// shared builder ([`right::render_screen`]) with this frame's facts.
+    #[allow(clippy::too_many_arguments)]
+    fn screen(
+        &mut self,
+        kind: RightKind,
+        page: Option<&Entity<aui_webview::WebviewState>>,
+        right_open: bool,
+        page_menu: bool,
+        base_menu: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let edits = if kind == RightKind::Changes { self.session_edits(cx) } else { Vec::new() };
+        right::render_screen(
+            kind,
+            &self.cache,
+            self.facts.project.clone(),
+            &edits,
+            right::BrowserPane { state: page, window },
+            &self.terminal,
+            right_open,
+            self.resize.width,
+            self.facts.agent(),
+            &self.focus,
+            page_menu,
+            base_menu,
+            cx,
+        )
+    }
+
+    /// The strip over the lower pane (docs/82 8.1, docs/83 §6): the top
+    /// pane takes its share of the height ([`layout::Layout::split`]), a 1
+    /// px `line-region` divides them with a grab strip over it, and the
+    /// lower pane carries a 36 px sub-header naming its view with a ✕.
+    fn stacked(&mut self, strip: AnyElement, kind: RightKind, below: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let share = layout::Layout::get(cx).split();
+        let close = cx.listener(|_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(RightPaneEvent::CloseLower));
+        let head = aui::workbench::pushed_row("right-lower-head", kind.label())
+            .action(aui::workbench::pane_action("right-lower-close", aui_icons::IconName::X, "Close lower pane").on_click(close));
+        let grab = cx.listener(|this: &mut Self, event: &gpui::MouseDownEvent, _, cx| {
+            let share = layout::Layout::get(cx).split();
+            this.lower.drag = Some((f32::from(event.position.y), share));
+            // The share is pinned where it stands as the drag arms: a layout
+            // change, so the pane's layout observer redraws it with the
+            // drag's listeners in place.
+            layout::Layout::stage(cx, |layout| layout.right_split = Some(share));
+            cx.stop_propagation();
+        });
+        let handle = gpui::div()
+            .id("right-lower-resize")
+            .role(gpui::Role::Splitter)
+            .aria_label("Resize lower pane")
+            .absolute()
+            .left(px(0.0))
+            .right(px(0.0))
+            .top(px(-aui::shell::RESIZE_HANDLE_W / 2.0))
+            .h(px(aui::shell::RESIZE_HANDLE_W))
+            .cursor(gpui::CursorStyle::ResizeUpDown)
+            .on_mouse_down(gpui::MouseButton::Left, grab);
+        let lower = gpui_kit::base::v_flex()
+            .id("right-lower")
+            .relative()
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
+            .border_t_1()
+            .border_color(p.line_region)
+            .child(head)
+            .child(gpui::div().flex_1().min_h(px(0.0)).child(below))
+            .child(handle);
+        let bounds = self.lower.bounds.clone();
+        let measure = gpui::canvas(move |at, _, _| bounds.set(Some(at)), |_, _, _, _| {}).absolute().size_full();
+        // Mid-drag the window's own move and release listeners carry it, so
+        // the pointer may leave the 6 px strip (or the pane) and the
+        // divider keeps following; the release settles it.
+        let follow = self.lower.drag.is_some().then(|| {
+            let (moves, ends) = (cx.weak_entity(), cx.weak_entity());
+            gpui::canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let moves = moves.clone();
+                    window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                        if phase == gpui::DispatchPhase::Bubble {
+                            let _ = moves.update(cx, |this, cx| this.drag_lower_to(f32::from(event.position.y), cx));
+                        }
+                    });
+                    let ends = ends.clone();
+                    window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
+                        if phase == gpui::DispatchPhase::Bubble {
+                            let _ = ends.update(cx, |this, cx| this.end_lower_drag(cx));
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .size_full()
+        });
+        gpui_kit::base::v_flex()
+            .relative()
+            .size_full()
+            .child(measure)
+            .child(gpui::div().w_full().h(gpui::relative(share)).flex_none().overflow_hidden().child(strip))
+            .child(lower)
+            .children(follow)
             .into_any_element()
+    }
+
+    /// One move of the divider drag to window y `at`: the share follows,
+    /// live (staged, not written).
+    fn drag_lower_to(&mut self, at: f32, cx: &mut Context<Self>) {
+        let Some((grab, start)) = self.lower.drag else { return };
+        let height = self.lower.bounds.get().map_or(0.0, |bounds| f32::from(bounds.size.height));
+        let share = lower_drag_share(start, grab, at, height);
+        layout::Layout::stage(cx, |layout| layout.right_split = Some(share));
+    }
+
+    /// The release: the share is written, and the session's record takes it.
+    fn end_lower_drag(&mut self, cx: &mut Context<Self>) {
+        if self.lower.drag.take().is_none() {
+            return;
+        }
+        // Written: the layout observer redraws the pane without the drag.
+        let share = layout::Layout::get(cx).split();
+        layout::Layout::update(cx, |layout| layout.right_split = Some(share));
+        cx.emit(RightPaneEvent::Persist);
     }
 }
 
@@ -759,6 +946,10 @@ impl Harness {
             facts.page = Some(self.ensure_browser_person(window, cx));
         }
         self.right_pane.update(cx, |pane, _| pane.facts = facts);
+        // The Terminal view draws the dock's body: its facts go in too
+        // (the centre composes the dock as well, but not in every mode).
+        let dock = self.dock_facts(cx);
+        self.terminal_dock.update(cx, |terminal, _| terminal.facts = dock);
         self.right_pane.clone().into_any_element()
     }
 
@@ -811,10 +1002,28 @@ impl Harness {
             RightPaneEvent::OpenTerminalTab(tab) => {
                 if !self.settings_open(cx) {
                     let tab = tab.clone();
+                    self.show_terminal(cx);
                     self.with_terminal_dock(cx, |dock, cx| dock.open_tab(Some(tab), window, cx));
                 }
             }
+            RightPaneEvent::CloseLower => {
+                let _ = self.set_right_lower(None, window, cx);
+            }
             RightPaneEvent::BrowserIntent(intent) => self.handle_browser_intent(intent.clone(), window, cx),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lower_drag_share;
+
+    /// docs/82 8.1: the divider follows the pointer and holds to 0.25–0.75.
+    #[test]
+    fn the_lower_divider_follows_and_clamps() {
+        assert_eq!(lower_drag_share(0.5, 400.0, 480.0, 800.0), 0.6);
+        assert_eq!(lower_drag_share(0.5, 400.0, 0.0, 800.0), crate::layout::SPLIT_MIN);
+        assert_eq!(lower_drag_share(0.5, 400.0, 2000.0, 800.0), crate::layout::SPLIT_MAX);
+        assert_eq!(lower_drag_share(0.9, 0.0, 0.0, 0.0), crate::layout::SPLIT_MAX, "no measured height: the start, held");
     }
 }

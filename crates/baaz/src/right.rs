@@ -367,7 +367,7 @@ impl RightCache {
     /// The refresh path paces the steady-state interval off this.
     pub(crate) fn fetched_at(&self, kind: RightKind, root: &Path) -> Option<Instant> {
         match kind {
-            RightKind::Browser | RightKind::Tasks => None,
+            RightKind::Browser | RightKind::Terminal | RightKind::Tasks => None,
             RightKind::Changes => self
                 .git
                 .as_ref()
@@ -556,6 +556,7 @@ pub(crate) fn render(
     project: Option<(PathBuf, String)>,
     session_edits: &[String],
     browser: BrowserPane<'_>,
+    terminal: &Entity<crate::terminal::TerminalDock>,
     pane_open: bool,
     width: f32,
     agent: &str,
@@ -604,26 +605,28 @@ pub(crate) fn render(
                 ),
             }
         }
+        RightKind::Terminal => terminal.update(cx, |dock, cx| dock.pane_screen("right-terminal", browser.window, cx)),
         RightKind::Tasks => crate::right_tasks::tasks_body(&cache.tasks, cx),
     }
 }
 
 /// The screen's place on the strip (D6): Changes 0, Files 1, Page 2,
-/// Tasks 3.
+/// Terminal 3, Tasks 4.
 pub(crate) fn screen_index(kind: RightKind) -> usize {
     match kind {
         RightKind::Changes => 0,
         RightKind::Files => 1,
         RightKind::Browser => 2,
-        RightKind::Tasks => 3,
+        RightKind::Terminal => 3,
+        RightKind::Tasks => 4,
     }
 }
 
 /// The tab id of an open file's tab in the pane's tab row.
 pub(crate) const FILE_TAB: &str = "file";
 
-/// The pane's tabs (docs/83 §6): Changes · Files · Page, then Tasks when
-/// `tasks` (it shows, or the session has tasks), each keyed by its kind's
+/// The pane's tabs (docs/83 §6): Changes · Files · Page · Terminal, then
+/// Tasks when `tasks` (it shows, or the session has tasks), each keyed by its kind's
 /// slug, then — while Files previews one — the open file's tab,
 /// keyed [`FILE_TAB`] and closable. The file's tab is the lit one while it
 /// shows; Files is lit only over the tree. Baaz keeps one preview per
@@ -652,6 +655,7 @@ pub(crate) fn screen_glyph(kind: RightKind) -> IconName {
         RightKind::Changes => IconName::Git,
         RightKind::Files => IconName::Folder,
         RightKind::Browser => IconName::Globe,
+        RightKind::Terminal => IconName::Terminal,
         RightKind::Tasks => IconName::Terminal,
     }
 }
@@ -668,6 +672,7 @@ pub(crate) fn render_screen(
     project: Option<(PathBuf, String)>,
     session_edits: &[String],
     browser: BrowserPane<'_>,
+    terminal: &Entity<crate::terminal::TerminalDock>,
     pane_open: bool,
     width: f32,
     agent: &str,
@@ -737,6 +742,9 @@ pub(crate) fn render_screen(
                 let pushed = project.as_ref().is_some_and(|(root, _)| cache.preview_for(root).is_some());
                 (row, body, pushed)
             }
+            // docs/82 8.1: the terminal's own header is the screen's
+            // sub-header, inside the dock's body.
+            (RightKind::Terminal, _) => (None, terminal.update(cx, |dock, cx| dock.pane_screen("right-terminal", browser.window, cx)), false),
             (RightKind::Tasks, _) => (None, crate::right_tasks::tasks_body(&cache.tasks, cx), false),
             (RightKind::Changes, None) => (
                 None,

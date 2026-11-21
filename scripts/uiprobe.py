@@ -1114,6 +1114,15 @@ ENTRIES.update({
     "sidebar-pr":              _with_sidebar(_populated("settings-set:summary-line=on;pr-fixture:failing;row-detail:p-int-2", replay=True), "pr.json"),
     "right-page":              _populated("right-width:440;right:browser;browse:https://example.com", replay=True),
     "terminal-dock":           _populated("terminal-dock:zsh", replay=True),
+    # docs/82 8.1, the pane as the session's workspace. The same FakePty
+    # tab as `terminal-dock`, moved into the pane through the header
+    # control's path (`terminal-place:pane`): as the top view with the pane
+    # closed; below the Page when the Page is on top (browser over
+    # terminal); and Changes over Files with the default divider.
+    "right-terminal":            _populated("right-width:440;terminal-dock:zsh;terminal-place:pane", replay=True),
+    "right-page-terminal":       _populated("right-width:440;right:browser;browse:https://example.com;"
+                                            "terminal-dock:zsh;terminal-place:pane", replay=True),
+    "right-changes-lower-files": _populated("right-width:440;right:changes;right-lower:files", replay=True),
     "settings-sidebar":        _populated("settings:sidebar"),
     "palette-populated":       _populated("palette"),
     # Task 2.4's peek, held open with the sidebar closed: `sidebar` closes
@@ -1208,6 +1217,7 @@ POPULATED_ENTRIES = [
     "transcript-full", "transcript-full-light", "transcript-full-top", "transcript-full-mid",
     "composer-menu-model", "composer-menu-effort", "composer-menu-provider", "composer-menu-mode",
     "right-changes-full", "right-files-preview", "right-page", "terminal-dock", "settings-sidebar",
+    "right-terminal", "right-page-terminal", "right-changes-lower-files",
     "palette-populated", "dialog", "menu", "browse-spaces", "sidebar-projects-collapsed",
     "sidebar-needs-you",
 ]

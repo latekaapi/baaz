@@ -1,5 +1,6 @@
-//! The terminal dock: per-project tabs over the library's pty backend, drawn
-//! by the dock's own region entity ([`dock::TerminalDock`], task 4.4).
+//! The terminal: per-project tabs over the library's pty backend, drawn by
+//! the dock's own region entity ([`dock::TerminalDock`], task 4.4) under the
+//! composer or in the right pane (`place`, docs/82 8.1).
 //!
 //! Tabs belong to a project ([`Project::root`][crate::projects::Project]),
 //! not to a session, so they outlive session switches (D43). Nothing here
@@ -9,6 +10,7 @@
 pub mod dock;
 pub mod host;
 pub mod intents;
+mod place;
 pub mod run;
 pub mod service;
 pub mod tasks;
