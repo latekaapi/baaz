@@ -214,7 +214,8 @@ impl LibraryPage {
             let open = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, window, cx| this.pick(Shelf::Bookmarks, Some(id), window, cx));
             list = list.child(
                 list_row(SharedString::from(format!("library-folder-{id}")), folder.name.clone())
-                    .depth(depth.min(3))
+                    // Folders nest under Bookmarks, as Providers' pages do.
+                    .depth(depth.saturating_add(1).min(3))
                     .selected(self.shelf == Shelf::Bookmarks && self.folder == id)
                     .on_click(open),
             );
@@ -258,7 +259,9 @@ impl LibraryPage {
             None => {
                 let url = mark.url.clone();
                 let open = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(LibraryEvent::Open(url.clone())));
-                aui::interact::interactive(
+                // The row's own box takes the room, so its actions sit at
+                // the right edge.
+                div().flex_1().min_w(px(0.0)).child(aui::interact::interactive(
                     SharedString::from(format!("library-bookmark-{id}")),
                     v_flex()
                         .flex_1()
@@ -270,7 +273,7 @@ impl LibraryPage {
                 )
                 .role("link")
                 .label(format!("Open {title}"))
-                .on_click(open)
+                .on_click(open))
                 .into_any_element()
             }
         };
@@ -379,7 +382,7 @@ impl LibraryPage {
                         .border_b_1()
                         .border_color(p.line)
                         .child(div().flex_none().w(px(scale::SP_7 * 1.5)).ui(TextRole::Caption).text_color(p.fg_muted).child(local_time(visit.last_ms, "%H:%M")))
-                        .child(
+                        .child(div().flex_1().min_w(px(0.0)).child(
                             aui::interact::interactive(
                                 SharedString::from(format!("library-visit-{key}")),
                                 v_flex()
@@ -393,7 +396,7 @@ impl LibraryPage {
                             .role("link")
                             .label(format!("Open {title}"))
                             .on_click(open),
-                        )
+                        ))
                         .child(
                             button(SharedString::from(format!("library-visit-delete-{key}")), "Delete")
                                 .ghost()

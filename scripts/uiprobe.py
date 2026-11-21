@@ -401,7 +401,7 @@ ENTRIES = {
     # scripted page; over a native page its own float draws it), the
     # driving bar naming the session in the page float (not in a shot).
     "browse-agent-cursor":  {"shot": ["--no-connect", "--login", "signed-in",
-                                      "--steps", "fixture-session:Fix ledger chart;agent-drive:180,140|clicking “More information”;wait:400"]},
+                                      "--steps", "fixture-session:Fix ledger chart;agent-drive:248,226|clicking “Choose”;wait:400"]},
     # docs/82 8.3: a session's task-folder tab right-clicked in Browse (Keep
     # this tab, Send page to session…). The menu draws in the overlay
     # window, so the shot shows the session's tab shown and its row lit,
