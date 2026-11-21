@@ -427,7 +427,8 @@ pub(crate) fn parse_enabled_row(id: &str) -> Option<ProviderId> {
 }
 
 /// The providers whose sessions Baaz scopes down to its own tools — the
-/// only cards that gain a "Use my own MCP servers" switch (Z5): each one
+/// only ones whose Settings › MCP section carries a "Use my own MCP
+/// servers" switch (Z5): each one
 /// whose adapter declares the switch's line. A provider whose sessions
 /// ride a shared child never spawns through a scoped argv and declares
 /// none.
@@ -453,9 +454,94 @@ pub(crate) fn use_own_mcp_state(layout: &crate::layout::Layout, id: ProviderId) 
     layout.use_own_mcp.inherits(id)
 }
 
+/// Settings › MCP (docs/82 8.8): for each provider, what its own config
+/// files name ([`provider::ProviderDescriptor::mcp_listing`], read from
+/// files, never by running its CLI), or `None` for a provider with no such
+/// file. A capture and a test read the adapters' recorded fixtures, never
+/// the person's files. Read when the page opens, never per frame.
+pub(crate) fn read_mcp_listings() -> Vec<(ProviderId, Option<provider::McpListing>)> {
+    let scripted = cfg!(test) || crate::runtime::state_isolated();
+    ProviderId::all().into_iter().map(|id| (id, id.descriptor().mcp_listing.map(|read| read(scripted)))).collect()
+}
+
+/// The name every adapter registers Baaz's own bridge under (each
+/// adapter's `terminal::SERVER_NAME`).
+const BAAZ_MCP_SERVER: &str = "baaz";
+
+/// The words a listed server's state wears: what a new session does with
+/// it, given the provider's switch. `None` for a provider with no switch.
+pub(crate) fn mcp_entry_state(id: ProviderId, layout: &crate::layout::Layout) -> Option<&'static str> {
+    own_mcp_providers().contains(&id).then(|| if use_own_mcp_state(layout, id) { "Loads" } else { "Off" })
+}
+
 /// The Settings provider pages' own rows: the MCP switch and the move
 /// row read only the layout and the facts the root pushes.
 impl SettingsPage {
+    /// Settings › MCP: one section per provider in the one provider order,
+    /// titled by its own name — its "Use my own MCP servers" switch (when
+    /// it has one), Baaz's `baaz` server (every session carries it), then
+    /// each server and plugin its config files name, read-only, with
+    /// whether a new session loads it. The note says which files were read
+    /// and what loads that no file names. Nothing here adds, edits or
+    /// removes a server.
+    pub(crate) fn settings_mcp_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = cx.aui().colors;
+        let state_word = |key: String, word: &'static str, label: String| {
+            gpui::div()
+                .id(SharedString::from(format!("settings-mcp-state-{key}")))
+                .flex_none()
+                .ui(TextRole::Caption)
+                .text_color(p.fg_muted)
+                .role(gpui::Role::Label)
+                .aria_label(label)
+                .child(word)
+        };
+        let mut page = v_flex().w_full().gap(px(crate::settings::SETTINGS_SECTION_GAP));
+        for (id, listing) in self.mcp.clone() {
+            let mut rows = Vec::new();
+            if own_mcp_providers().contains(&id) {
+                rows.push(self.use_own_mcp_row(id, cx));
+            }
+            rows.push(
+                settings_row(BAAZ_MCP_SERVER)
+                    .description("Baaz's terminal and browser tools. Every session has them.")
+                    .control(state_word(format!("{}-baaz", id.as_str()), "Always on", format!("baaz server, {}: always on", id.label())))
+                    .into_any_element(),
+            );
+            let entry_state = mcp_entry_state(id, crate::layout::Layout::get(cx));
+            let mut note = None;
+            if let Some(listing) = listing {
+                if listing.entries.is_empty() {
+                    rows.push(
+                        settings_row("None of your own")
+                            .description("The files below name no servers or plugins.")
+                            .into_any_element(),
+                    );
+                }
+                for entry in &listing.entries {
+                    let kind = if entry.plugin { "Plugin" } else { "Server" };
+                    let mut row = settings_row(entry.name.clone()).description(kind);
+                    if let Some(word) = entry_state {
+                        row = row.control(state_word(
+                            format!("{}-{}", id.as_str(), entry.name),
+                            word,
+                            format!("{kind} {}, {}: {}", entry.name, id.label(), word.to_lowercase()),
+                        ));
+                    }
+                    rows.push(row.into_any_element());
+                }
+                let files: Vec<String> = listing.sources.iter().map(|path| crate::layout::tilde_path(path)).collect();
+                note = Some(format!("Read from {}. {}", files.join(" and "), listing.unlisted));
+            }
+            let mut group = aui::data::section(id.label().to_string()).rows(rows);
+            if let Some(note) = note {
+                group = group.note(note);
+            }
+            page = page.child(gpui::div().debug_selector(move || format!("settings-mcp-{}", id.as_str())).child(group));
+        }
+        page.into_any_element()
+    }
+
     /// Flip a "Use my own MCP servers" switch and persist it. Sessions
     /// started after the flip build their argv with (on) or without (off)
     /// Baaz's scoping; live sessions keep the argv they spawned with.
@@ -463,10 +549,10 @@ impl SettingsPage {
         crate::layout::Layout::update(cx, |layout| layout.use_own_mcp.set(id, on));
     }
 
-    /// The "Use my own MCP servers" row under the Claude Code / Codex
-    /// card: the library's settings row, its switch flipping through
-    /// [`Self::flip_use_own_mcp`]. Shared with the Settings provider
-    /// sub-pages (B11).
+    /// The "Use my own MCP servers" row heading a provider's section on
+    /// Settings › MCP (moved there from the provider sub-page in 8.8): the
+    /// library's settings row, its switch flipping through
+    /// [`Self::flip_use_own_mcp`].
     pub(crate) fn use_own_mcp_row(&self, id: ProviderId, cx: &mut Context<Self>) -> AnyElement {
         let on = use_own_mcp_state(crate::layout::Layout::get(cx), id);
         let flip = cx.listener(move |this: &mut Self, _: &SwitchIntent, _, cx| {
@@ -790,6 +876,36 @@ mod tests {
         assert_eq!(default_new_provider(&[off]), None);
     }
     use super::*;
+
+    /// Settings › MCP (8.8): a test reads the adapters' fixtures, never the
+    /// person's files; the providers with a config file list what it names
+    /// (never `baaz`), the others list nothing of their own; a listed
+    /// server reads "Off" until its provider's switch is on.
+    #[test]
+    fn the_mcp_page_lists_each_providers_own_files_and_follows_the_switch() {
+        let listings = read_mcp_listings();
+        assert_eq!(listings.iter().map(|(id, _)| *id).collect::<Vec<_>>(), ProviderId::all(), "every provider, in the one order");
+        for (id, listing) in &listings {
+            match listing {
+                Some(listing) => {
+                    assert!(own_mcp_providers().contains(id), "{id:?} lists servers it has a switch for");
+                    assert!(!listing.entries.is_empty(), "{id:?}: the fixture names servers");
+                    assert!(listing.entries.iter().all(|e| e.name != BAAZ_MCP_SERVER), "Baaz's own server is its own row");
+                    assert!(!listing.unlisted.is_empty(), "{id:?} says what it cannot list");
+                }
+                None => assert!(!own_mcp_providers().contains(id), "{id:?} has a switch but no listing"),
+            }
+        }
+        let mut layout = crate::layout::Layout::default();
+        for id in own_mcp_providers() {
+            assert_eq!(mcp_entry_state(id, &layout), Some("Off"));
+            layout.use_own_mcp.set(id, true);
+            assert_eq!(mcp_entry_state(id, &layout), Some("Loads"));
+        }
+        for id in ProviderId::all().into_iter().filter(|id| !own_mcp_providers().contains(id)) {
+            assert_eq!(mcp_entry_state(id, &layout), None, "no switch, no state word");
+        }
+    }
     use crate::provider_status::{Advisory, Auth, Installed, ProviderStatus};
 
     fn status(

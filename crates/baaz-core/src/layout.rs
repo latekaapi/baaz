@@ -595,8 +595,8 @@ pub struct Layout {
     /// stored.
     #[serde(skip)]
     pub right_previous: Option<RightKind>,
-    /// The two inherit-owner-servers opt-ins, owned by the Settings →
-    /// Providers page (see [`UseOwnMcp`]).
+    /// The two inherit-owner-servers opt-ins, owned by the Settings ›
+    /// MCP page (see [`UseOwnMcp`]).
     #[serde(rename = "useOwnMcp", default)]
     pub use_own_mcp: UseOwnMcp,
     /// Which half of the window the person is in (B2a-H2): sessions or

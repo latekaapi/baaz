@@ -209,6 +209,63 @@ pub fn codex_config_path() -> Option<std::path::PathBuf> {
     Some(home.join("config.toml"))
 }
 
+/// What `~/.codex/config.toml` connects besides Baaz's own server, for
+/// Settings › MCP (docs/82 8.8): its `[mcp_servers.<name>]` tables and its
+/// plugins that are not `enabled = false`, read from the file — never from
+/// `codex` itself. `scripted` reads the recorded
+/// `fixtures/codex/mcp-config.toml` instead (a capture never reads the
+/// person's files). An unreadable file lists nothing.
+pub fn mcp_listing(scripted: bool) -> provider::McpListing {
+    const FIXTURE: &str = include_str!("../../../fixtures/codex/mcp-config.toml");
+    let path = codex_config_path().unwrap_or_else(|| std::path::PathBuf::from("~/.codex/config.toml"));
+    let text = if scripted {
+        FIXTURE.to_owned()
+    } else {
+        std::fs::read_to_string(&path).unwrap_or_default()
+    };
+    provider::McpListing {
+        sources: vec![if scripted { std::path::PathBuf::from("~/.codex/config.toml") } else { path }],
+        entries: listed_mcp(&text),
+        unlisted: "Codex's built-in servers load too and are not listed.",
+    }
+}
+
+/// [`mcp_listing`]'s entries from `config.toml` text: the file's servers
+/// ([`file_server_names`], so never `baaz`), then its plugins left on.
+pub fn listed_mcp(config_toml: &str) -> Vec<provider::ConfiguredMcp> {
+    let off = disabled_plugins(config_toml);
+    let servers = file_server_names(config_toml).into_iter().map(|name| provider::ConfiguredMcp { name, plugin: false });
+    let plugins = plugin_names(config_toml)
+        .into_iter()
+        .filter(|name| !off.contains(name))
+        .map(|name| provider::ConfiguredMcp { name, plugin: true });
+    servers.chain(plugins).collect()
+}
+
+/// The plugins whose table says `enabled = false`: a line scan of each
+/// `[plugins."<name>"]` table's own keys, up to the next header.
+fn disabled_plugins(config_toml: &str) -> Vec<String> {
+    let mut off = Vec::new();
+    let mut current: Option<String> = None;
+    for line in config_toml.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            current = line
+                .strip_prefix("[plugins.")
+                .and_then(|body| body.strip_suffix(']'))
+                .map(|name| name.trim().trim_matches('"').trim_matches('\'').to_owned())
+                .filter(|name| !name.contains('"'));
+            continue;
+        }
+        let Some(name) = current.as_ref() else { continue };
+        let Some((key, value)) = line.split_once('=') else { continue };
+        if key.trim() == "enabled" && value.split('#').next().map(str::trim) == Some("false") {
+            off.push(name.clone());
+        }
+    }
+    off
+}
+
 /// Every inherited server to silence for one child: the bundled set plus
 /// whatever `[mcp_servers]` tables the owner's config file names today.
 /// Best-effort throughout — an unreadable file silences only the bundled
@@ -233,6 +290,19 @@ pub fn inherited_servers() -> Vec<String> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// Settings › MCP's Codex list: the recorded config's two servers (the
+    /// sub-table and Baaz's own table left out), then its one plugin still
+    /// on; the scripted read never touches the person's file.
+    #[test]
+    fn the_mcp_listing_reads_servers_and_plugins_left_on() {
+        let listing = mcp_listing(true);
+        let names: Vec<(&str, bool)> = listing.entries.iter().map(|e| (e.name.as_str(), e.plugin)).collect();
+        assert_eq!(names, [("github", false), ("postgres", false), ("pdf@openai-primary-runtime", true)]);
+        assert_eq!(listing.sources, [PathBuf::from("~/.codex/config.toml")]);
+        assert!(listed_mcp("").is_empty(), "an empty or unreadable file lists nothing");
+        assert!(listed_mcp("[plugins.\"x@y\"]\nenabled = false # off\n").is_empty(), "a trailing comment still reads off");
+    }
 
     fn bridge() -> PathBuf {
         PathBuf::from("/Applications/Baaz.app/Contents/MacOS/mcp-bridge")

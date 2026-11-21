@@ -1,0 +1,11 @@
+{
+  "numStartups": 3,
+  "mcpServers": {
+    "linear": {"type": "http", "url": "https://mcp.example.invalid/linear"},
+    "filesystem": {"type": "stdio", "command": "mcp-filesystem", "args": ["/tmp"]},
+    "baaz": {"type": "stdio", "command": "/Applications/Baaz.app/Contents/MacOS/mcp-bridge"}
+  },
+  "projects": {
+    "/work": {"mcpServers": {"local-only": {"type": "stdio", "command": "x"}}}
+  }
+}

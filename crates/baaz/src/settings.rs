@@ -163,6 +163,7 @@ pub(crate) const SETTINGS_SECTIONS: &[(&str, &str)] = &[
     ("git", "Git & worktrees"),
     ("browser", "Browser"),
     ("providers", "Providers"),
+    ("mcp", "MCP"),
     ("shortcuts", "Shortcuts"),
     ("archived", "Archived"),
 ];
@@ -177,9 +178,10 @@ pub(crate) fn settings_blurb(section: &str) -> &'static str {
         "git" => "Worktrees and pull requests. Changes apply live.",
         "browser" => "How Baaz browses: the assistant, tabs, search, downloads.",
         "providers" => "Turn providers on or off and manage their accounts.",
+        "mcp" => "The MCP servers each provider's sessions can reach. Read from each provider's own files.",
         "shortcuts" => "Click a keycap to rebind it. Changes apply live.",
         "archived" => "Sessions you archived, grouped by project.",
-        _ if is_provider_subpage(section) => "Account, tools and defaults for this provider.",
+        _ if is_provider_subpage(section) => "Account and sign-in for this provider.",
         _ if site_subpage_origin(section).is_some() => "What this site may do, kept from your answers. Changes apply to its next ask.",
         _ => "Settings.",
     }
@@ -284,6 +286,7 @@ pub(crate) fn settings_breadcrumb(section: &str) -> Vec<String> {
         "git" => crumbs.push("Git & worktrees".to_owned()),
         "browser" => crumbs.push("Browser".to_owned()),
         "providers" => crumbs.push("Providers".to_owned()),
+        "mcp" => crumbs.push("MCP".to_owned()),
         "shortcuts" => crumbs.push("Shortcuts".to_owned()),
         "archived" => crumbs.push("Archived".to_owned()),
         _ => crumbs.push("General".to_owned()),
@@ -320,7 +323,8 @@ pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
         "notify_needs_you" | "notify_done" | "notify_failed" | "notify_sound" | "notify_badge" => Some("notifications"),
         "search-engine" | "download-dir" => Some("browser"),
         _ if crate::settings_providers::parse_enabled_row(id).is_some() => Some("providers"),
-        _ if id.starts_with("use-own-mcp:") || id.starts_with("provider-card:") => Some("providers/*"),
+        _ if id.starts_with("use-own-mcp:") => Some("mcp"),
+        _ if id.starts_with("provider-card:") => Some("providers/*"),
         _ if id.starts_with("shortcut:") || parse_shortcut_row_id(id).is_some() => Some("shortcuts"),
         _ if id.starts_with("archived:") => Some("archived"),
         _ => None,
@@ -679,6 +683,10 @@ pub(crate) struct SettingsPage {
     /// The last refused write per Shortcuts row, by row id: shown as the
     /// row's detail until the next edit on that row.
     pub(crate) shortcut_errors: HashMap<String, String>,
+    /// Settings › MCP: each provider's configured servers, read from its
+    /// files when the page opens ([`crate::settings_providers::read_mcp_listings`]),
+    /// never per frame.
+    pub(crate) mcp: Vec<(ProviderId, Option<provider::McpListing>)>,
     /// The provider cards whose Details are open (closed by default).
     pub(crate) details_open: HashSet<ProviderId>,
     /// The window's overlay stack: the page's two menus (Browser ›
@@ -737,6 +745,7 @@ impl SettingsPage {
             recording: None,
             shortcut_errors: HashMap::new(),
             details_open: HashSet::new(),
+            mcp: Vec::new(),
             overlays,
             migration_paths_expanded: false,
             facts: SettingsFacts::default(),
@@ -760,6 +769,9 @@ impl SettingsPage {
         self.refresh_shortcuts();
         self.recording = None;
         self.state.open(target, active);
+        if self.state.section == "mcp" {
+            self.mcp = crate::settings_providers::read_mcp_listings();
+        }
         self.focus_armed = true;
         self.set_default_menu(false, cx);
         cx.notify();
@@ -1218,6 +1230,7 @@ impl SettingsPage {
             "git" => self.settings_git_page(window, cx),
             "browser" => self.settings_browser_page(cx),
             "providers" => self.settings_providers_overview(window, cx),
+            "mcp" => self.settings_mcp_page(cx),
             "shortcuts" => self.settings_shortcuts_page(window, cx),
             "archived" => self.settings_archived_page(cx),
             _ if is_provider_subpage(&section) => self.settings_provider_subpage(window, cx),
@@ -2189,8 +2202,9 @@ impl SettingsPage {
         self.settings_group("New sessions", vec![row], cx)
     }
 
-    /// One provider sub-page: the Account group (today's card) plus the
-    /// Tools group ("Use my own MCP servers", Claude Code and Codex only).
+    /// One provider sub-page: the provider's card (and the import offer
+    /// under it). Its "Use my own MCP servers" switch lives on Settings ›
+    /// MCP (8.8).
     fn settings_provider_subpage(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(id) = provider_subpage_id(&self.state.section) else {
             return self.settings_providers_overview(window, cx);
@@ -2212,7 +2226,7 @@ impl SettingsPage {
             this.model.update(cx, |model, cx| model.codex_assist_link(key, cx));
         });
         // The card sits on the page itself (the D5 board), not inside a
-        // settings group; the MCP switch keeps its own Tools group under it.
+        // settings group.
         let card = aui::screens::provider_card(format!("settings-card-{}", id.as_str()), &data)
             .on_intent(move |event, window, cx| intent(&event, window, cx))
             .on_assist(move |key, window, cx| assist(&key, window, cx))
@@ -2228,11 +2242,7 @@ impl SettingsPage {
             }
             None => card,
         };
-        let mut page = settings_sections_stack().child(card);
-        if crate::settings_providers::own_mcp_providers().contains(&id) {
-            page = page.child(self.settings_group("Tools", vec![self.use_own_mcp_row(id, cx)], cx));
-        }
-        page.into_any_element()
+        settings_sections_stack().child(card).into_any_element()
     }
 
     /// Shortcuts: a search field pinned at the top (⌘F focuses it),
@@ -3259,7 +3269,7 @@ mod tests {
     #[test]
     fn browser_section_is_registered() {
         let ids: Vec<&str> = SETTINGS_SECTIONS.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, ["general", "appearance", "sidebar", "notifications", "git", "browser", "providers", "shortcuts", "archived"]);
+        assert_eq!(ids, ["general", "appearance", "sidebar", "notifications", "git", "browser", "providers", "mcp", "shortcuts", "archived"]);
         assert_eq!(normalize_settings_target("browser", ""), "browser");
         assert_eq!(normalize_settings_target("BROWSER", ""), "browser");
         assert_eq!(normalize_settings_target("search-engine", ""), "browser");
@@ -3582,7 +3592,7 @@ mod tests {
         assert_eq!(normalize_settings_target("summary_line", ""), "appearance");
         assert_eq!(normalize_settings_target("fold_finished_turns", ""), "general");
         assert_eq!(normalize_settings_target("provider-enabled:codex", ""), "providers");
-        assert_eq!(normalize_settings_target("use-own-mcp:codex", ""), "providers");
+        assert_eq!(normalize_settings_target("use-own-mcp:codex", ""), "mcp");
         assert_eq!(normalize_settings_target("shortcut:NewSession", ""), "shortcuts");
         assert_eq!(normalize_settings_target("archived:s-1", ""), "archived");
         // Idempotent: normalizing the normalized target is a fixed point.
@@ -3623,8 +3633,8 @@ mod tests {
     /// Every setting id the pages render lives on exactly one page: the
     /// row models themselves are enumerated — General and Sidebar from
     /// the switch builders the sections render, Providers from the
-    /// section's own rows, each provider sub-page from its card plus its
-    /// opt-in switch, Shortcuts from the live keymap rows, Archived from
+    /// section's own rows, each provider sub-page from its card, MCP from
+    /// each opt-in switch, Shortcuts from the live keymap rows, Archived from
     /// its link spelling — and each id must both sit on exactly one page
     /// and agree with [`setting_home`]. Unknown ids name no page.
     #[test]
@@ -3647,15 +3657,15 @@ mod tests {
             ("sidebar".to_owned(), switch_ids(&sidebar_settings_rows(&layout))),
             ("git".to_owned(), switch_ids(&git_settings_rows(&layout))),
             ("providers".to_owned(), switch_ids(&crate::settings_providers::providers_section().rows)),
+            (
+                "mcp".to_owned(),
+                crate::settings_providers::own_mcp_providers().iter().map(|id| format!("use-own-mcp:{}", id.as_str())).collect(),
+            ),
             ("archived".to_owned(), vec!["archived:s-1".to_owned()]),
         ];
         for provider in ProviderId::all() {
             let wire = provider.as_str();
-            let mut rows = vec![format!("provider-card:{wire}")];
-            if crate::settings_providers::own_mcp_providers().contains(&provider) {
-                rows.push(format!("use-own-mcp:{wire}"));
-            }
-            pages.push((format!("providers/{wire}"), rows));
+            pages.push((format!("providers/{wire}"), vec![format!("provider-card:{wire}")]));
         }
         let bindings = crate::keymap::effective_bindings();
         assert!(!bindings.is_empty(), "the defaults list something");
@@ -3676,7 +3686,7 @@ mod tests {
         let links = [
             ("shortcut:NewSession", "shortcuts"),
             ("provider-enabled:codex", "providers"),
-            ("use-own-mcp:codex", "providers/*"),
+            ("use-own-mcp:codex", "mcp"),
             ("auto_title", "general"),
             ("theme", "appearance"),
         ];

@@ -101,7 +101,7 @@ pub struct CodexAdapter {
     /// still with the inherit-nothing disables below).
     terminal: Mutex<Option<TerminalRelay>>,
     /// Whether the session may inherit the owner's own MCP servers and
-    /// plugins: the Settings → Providers "Use my own MCP servers" switch
+    /// plugins: the Settings › MCP "Use my own MCP servers" switch
     /// (`Layout.use_own_mcp.codex`), set by the host before the session
     /// commands run. Off means inherit-nothing (the default); on means
     /// the disables are skipped while the bridge still rides when a relay
@@ -190,7 +190,7 @@ impl CodexAdapter {
     }
 
     /// Let the session inherit the owner's own MCP servers and plugins:
-    /// the Settings → Providers "Use my own MCP servers" switch. When on,
+    /// the Settings › MCP "Use my own MCP servers" switch. When on,
     /// [`Self::spawn_args_for`] skips every disable (server and plugin)
     /// while the bridge still rides when a relay is set. Off by default.
     pub fn set_use_own_mcp(&self, use_own: bool) {

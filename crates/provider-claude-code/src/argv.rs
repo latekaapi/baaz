@@ -398,8 +398,8 @@ fn with_mcp(mut argv: Vec<String>, mcp_config: Option<&str>) -> Vec<String> {
     argv
 }
 
-/// Drop every `--strict-mcp-config` from a built launch: the Settings →
-/// Providers "Use my own MCP servers" opt-in, applied by the adapter when
+/// Drop every `--strict-mcp-config` from a built launch: the Settings ›
+/// MCP "Use my own MCP servers" opt-in, applied by the adapter when
 /// `use_own_mcp` is set. The `--mcp-config` bridge file (when one rode
 /// the launch) stays — the session gains the owner's servers beside
 /// Baaz's, exactly as it would without Baaz's scoping.

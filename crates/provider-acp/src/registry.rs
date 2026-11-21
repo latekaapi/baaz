@@ -38,6 +38,9 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     sign_out_note: "The agent signs in and out on its own; Baaz cannot sign it out.",
     sign_out_args: None,
     own_mcp_note: None,
+    // No config file of its own names MCP servers: Settings › MCP lists
+    // only Baaz's `baaz` server for it.
+    mcp_listing: None,
     utility_models: &[],
     modes: &MODES,
     plan: provider::PlanMode::None,

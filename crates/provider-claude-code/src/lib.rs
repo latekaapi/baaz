@@ -148,7 +148,7 @@ pub struct ClaudeCodeAdapter {
     /// file (but still with `--strict-mcp-config` below).
     terminal: Mutex<Option<TerminalRelay>>,
     /// Whether the session may inherit the owner's own MCP servers and
-    /// connectors: the Settings → Providers "Use my own MCP servers"
+    /// connectors: the Settings › MCP "Use my own MCP servers"
     /// switch (`Layout.use_own_mcp.claude_code`), set by the host before
     /// the session commands run. Off means `--strict-mcp-config` on every
     /// launch (the default); on means the flag is stripped while the
@@ -356,7 +356,7 @@ impl ClaudeCodeAdapter {
     }
 
     /// Let the session inherit the owner's own MCP servers and
-    /// connectors: the Settings → Providers "Use my own MCP servers"
+    /// connectors: the Settings › MCP "Use my own MCP servers"
     /// switch. When on, launches strip `--strict-mcp-config` (the bridge
     /// config still rides when a relay is set). Off by default.
     pub fn set_use_own_mcp(&self, use_own: bool) {

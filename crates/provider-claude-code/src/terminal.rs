@@ -46,6 +46,65 @@ pub fn mcp_config_value(bridge: &Path, socket: &Path, session_id: &str) -> serde
     })
 }
 
+/// What the Claude home Baaz's sessions run under connects besides Baaz's
+/// own server, for Settings › MCP (docs/82 8.8), read from its files —
+/// never from `claude` itself: the user-scope `mcpServers` of
+/// `<home>/.claude.json` (the file `CLAUDE_CONFIG_DIR` points the CLI at,
+/// [`crate::home`]) and the plugins `settings.json` turns on (linked from
+/// the person's `~/.claude`). `scripted` reads the recorded
+/// `fixtures/claude-code/mcp-*.json` instead (a capture never reads the
+/// person's files). An unreadable file lists nothing.
+pub fn mcp_listing(scripted: bool) -> provider::McpListing {
+    const CONFIG: &str = include_str!("../../../fixtures/claude-code/mcp-claude.json");
+    const SETTINGS: &str = include_str!("../../../fixtures/claude-code/mcp-settings.json");
+    let home = crate::home::default_home();
+    let (config_path, settings_path) = (home.join(".claude.json"), home.join("settings.json"));
+    let (config, settings) = if scripted {
+        (CONFIG.to_owned(), SETTINGS.to_owned())
+    } else {
+        (
+            std::fs::read_to_string(&config_path).unwrap_or_default(),
+            std::fs::read_to_string(&settings_path).unwrap_or_default(),
+        )
+    };
+    let sources = if scripted {
+        vec![PathBuf::from("~/Library/Application Support/baaz/claude-home/.claude.json"), PathBuf::from("~/.claude/settings.json")]
+    } else {
+        vec![config_path, settings_path]
+    };
+    provider::McpListing {
+        sources,
+        entries: listed_mcp(&config, &settings),
+        unlisted: "Connectors on your claude.ai account and a project's .mcp.json load too and are not listed.",
+    }
+}
+
+/// [`mcp_listing`]'s entries from the two files' text: the user-scope
+/// servers (never `baaz`, never a project's own), then the plugins
+/// `enabledPlugins` sets true, each by name (a JSON object has no order to
+/// keep). Text that does not parse lists nothing.
+pub fn listed_mcp(claude_json: &str, settings_json: &str) -> Vec<provider::ConfiguredMcp> {
+    let keys = |text: &str, field: &str, keep: &dyn Fn(&serde_json::Value) -> bool| -> Vec<String> {
+        serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|value| value.get(field).and_then(|v| v.as_object()).cloned())
+            .map(|map| {
+                let mut names: Vec<String> = map.into_iter().filter(|(_, v)| keep(v)).map(|(k, _)| k).collect();
+                names.sort();
+                names
+            })
+            .unwrap_or_default()
+    };
+    let servers = keys(claude_json, "mcpServers", &|_| true)
+        .into_iter()
+        .filter(|name| name != SERVER_NAME)
+        .map(|name| provider::ConfiguredMcp { name, plugin: false });
+    let plugins = keys(settings_json, "enabledPlugins", &|v| v.as_bool() == Some(true))
+        .into_iter()
+        .map(|name| provider::ConfiguredMcp { name, plugin: true });
+    servers.chain(plugins).collect()
+}
+
 /// Write the config file for `session_id` into `dir` (`<support_dir>/mcp`)
 /// and return its path, for `--mcp-config`. Atomic: written beside itself
 /// and renamed, so a crash leaves the previous config.
@@ -80,6 +139,19 @@ pub fn write_mcp_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Settings › MCP's Claude Code list: the recorded home's two
+    /// user-scope servers (Baaz's own and a project's left out), then the
+    /// one plugin turned on; the scripted read never touches the person's
+    /// files.
+    #[test]
+    fn the_mcp_listing_reads_user_servers_and_plugins_turned_on() {
+        let listing = mcp_listing(true);
+        let names: Vec<(&str, bool)> = listing.entries.iter().map(|e| (e.name.as_str(), e.plugin)).collect();
+        assert_eq!(names, [("filesystem", false), ("linear", false), ("figma@claude-plugins", true)]);
+        assert_eq!(listing.sources.len(), 2);
+        assert!(listed_mcp("", "not json").is_empty(), "unreadable files list nothing");
+    }
 
     fn bridge() -> PathBuf {
         PathBuf::from("/Applications/Baaz.app/Contents/MacOS/mcp-bridge")

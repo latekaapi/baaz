@@ -123,7 +123,7 @@ fn providers_page_has_close_and_setup_row() {
     pin(&connect, "screen.show()", "connect screen opens");
 }
 
-/// Every Settings page has a probe entry: General, Git & worktrees,
+/// Every Settings page has a probe entry: General, Git & worktrees, MCP,
 /// Providers, one provider sub-page (Codex), Shortcuts and Archived.
 #[test]
 fn probe_entries_cover_every_settings_page() {
@@ -131,12 +131,14 @@ fn probe_entries_cover_every_settings_page() {
     for needle in [
         "\"settings-general\"",
         "\"settings-git\"",
+        "\"settings-mcp\"",
         "\"settings-providers\"",
         "\"settings-provider-codex\"",
         "\"settings-shortcuts\"",
         "\"settings-archived\"",
         "settings:general",
         "settings:git",
+        "settings:mcp",
         "settings:providers/codex",
         "settings:shortcuts",
         "settings:archived",
@@ -145,10 +147,12 @@ fn probe_entries_cover_every_settings_page() {
     }
 }
 
-/// Z5: each Claude Code / Codex card carries a "Use my own MCP
-/// servers" switch row (Role=Switch + label) that persists through the
-/// layout and reaches the session argv; the row says it applies to
-/// sessions started after the change.
+/// Z5: each Claude Code / Codex section of Settings › MCP (8.8; it sat
+/// under the provider card before) carries a "Use my own MCP servers"
+/// switch row (Role=Switch + label) that persists through the layout and
+/// reaches the session argv; the row says it applies to sessions started
+/// after the change. Beside it, the listing is read from files by each
+/// adapter, never by running its CLI.
 #[test]
 fn own_mcp_switch_rides_under_both_cards_and_reaches_argv() {
     let module = read_repo("crates/baaz/src/settings_providers.rs");
@@ -158,6 +162,9 @@ fn own_mcp_switch_rides_under_both_cards_and_reaches_argv() {
     pin(&module, "Applies to sessions started after this change", "row says when it applies");
     // The switch's line is each adapter's own declaration (docs/82 5.4).
     pin(&module, "own_mcp_note", "detail read from the descriptor");
+    pin(&module, "fn settings_mcp_page", "the MCP page lists beside the switch");
+    pin(&module, "mcp_listing.map(|read| read(scripted))", "listing read through each adapter's declaration");
+    pin(&module, "cfg!(test) || crate::runtime::state_isolated()", "tests and captures read fixtures, never the person's files");
     let codex_registry = read_repo("crates/provider-codex/src/registry.rs");
     pin(&codex_registry, "servers and plugins load too", "codex detail");
     let claude_registry = read_repo("crates/provider-claude-code/src/registry.rs");

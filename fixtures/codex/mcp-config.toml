@@ -1,0 +1,23 @@
+# A recorded ~/.codex/config.toml for Settings › MCP captures and tests
+# (docs/82 8.8): two servers, a sub-table, Baaz's own table, one plugin on
+# and one off. Never a real file's contents.
+model = "gpt-5"
+
+[mcp_servers.github]
+command = "github-mcp-server"
+args = ["stdio"]
+
+[mcp_servers.github.env]
+GITHUB_HOST = "github.com"
+
+[mcp_servers.postgres]
+command = "postgres-mcp"
+
+[mcp_servers.baaz]
+command = "/Applications/Baaz.app/Contents/MacOS/mcp-bridge"
+
+[plugins."pdf@openai-primary-runtime"]
+enabled = true
+
+[plugins."slides@openai-primary-runtime"]
+enabled = false

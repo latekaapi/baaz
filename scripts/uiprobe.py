@@ -510,6 +510,13 @@ ENTRIES = {
     # baseline yet — generate on main after merge.
     "settings-git":         {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "settings:git"]},
+    # Task 8.8: Settings › MCP — per provider, the "Use my own MCP servers"
+    # switch, Baaz's own `baaz` server and what the provider's config files
+    # name, read-only. A capture reads the adapters' recorded fixtures
+    # (`fixtures/codex/mcp-config.toml`, `fixtures/claude-code/mcp-*.json`),
+    # never the person's files and never a CLI. Offline, idempotent.
+    "settings-mcp":         {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "settings:mcp"]},
     # Settings › Appearance (task 2.9): the theme choice and the summary
     # line. `-light` switches the theme by the page's own setter
     # (`settings-set:theme=light`), not by `--theme`, so it proves the live

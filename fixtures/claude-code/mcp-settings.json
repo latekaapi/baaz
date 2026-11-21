@@ -1,0 +1,7 @@
+{
+  "permissions": {"allow": []},
+  "enabledPlugins": {
+    "figma@claude-plugins": true,
+    "retired@claude-plugins": false
+  }
+}

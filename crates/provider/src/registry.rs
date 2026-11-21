@@ -69,6 +69,13 @@ pub struct ProviderDescriptor {
     /// sessions Baaz scopes down to its own tools; `None` when it has no
     /// such switch.
     pub own_mcp_note: Option<&'static str>,
+    /// The MCP servers and plugins the person configured for this
+    /// provider, read from its own config files — never by running its CLI
+    /// — for Settings › MCP (docs/82 8.8), read-only. `scripted` reads the
+    /// adapter's recorded fixture instead of the person's files (a capture,
+    /// whose state is isolated). `None` when the provider keeps no such
+    /// file Baaz can read.
+    pub mcp_listing: Option<fn(scripted: bool) -> McpListing>,
     /// The models a one-off assistant chat can start on, `(id, label)`,
     /// cheapest first; an empty id is the CLI's own default.
     pub utility_models: &'static [(&'static str, &'static str)],
@@ -159,6 +166,33 @@ pub struct Replay {
     pub sent: Vec<(String, String)>,
     /// The folded events, in order.
     pub events: Vec<ProviderEvent>,
+}
+
+/// What a provider's own config files say it connects besides Baaz's
+/// `baaz` server ([`ProviderDescriptor::mcp_listing`]): read-only facts for
+/// Settings › MCP, never a list Baaz edits.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct McpListing {
+    /// The files read, as paths (the app shortens the home to `~`).
+    pub sources: Vec<PathBuf>,
+    /// What the files name, servers first, then plugins; never Baaz's own
+    /// server.
+    pub entries: Vec<ConfiguredMcp>,
+    /// What also loads with the person's servers that no file here names
+    /// (account connectors, a CLI's built-in servers), in the provider's
+    /// own words: the list is honest about what it cannot see.
+    pub unlisted: &'static str,
+}
+
+/// One server or plugin a provider's config file names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfiguredMcp {
+    /// Its name as the file spells it (a server's table or key, a plugin's
+    /// `name@marketplace`).
+    pub name: String,
+    /// A plugin bundles tools (and possibly servers) of its own; a server
+    /// is one MCP server.
+    pub plugin: bool,
 }
 
 /// One approval mode as the adapter runs it: the neutral mode it maps to,
@@ -539,6 +573,7 @@ mod tests {
         sign_out_note: "",
         sign_out_args: None,
         own_mcp_note: None,
+        mcp_listing: None,
         utility_models: &[],
         modes: &protocol_modes("Anything without a matching rule is refused.", None),
         plan: crate::PlanMode::None,

@@ -38,6 +38,7 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         "Off: sessions see only Baaz's tools. On: your ~/.codex/config.toml \
             servers and plugins load too. Applies to sessions started after this change.",
     ),
+    mcp_listing: Some(crate::terminal::mcp_listing),
     utility_models: &[("", "Codex default")],
     modes: &MODES,
     // The app-server schema defines a `plan` collaboration mode, but no

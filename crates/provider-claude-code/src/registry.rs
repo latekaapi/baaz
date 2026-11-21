@@ -35,6 +35,7 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         "Off: sessions see only Baaz's tools. On: your Claude Code MCP \
             servers and connectors load too. Applies to sessions started after this change.",
     ),
+    mcp_listing: Some(crate::terminal::mcp_listing),
     // Read-only denies every tool not annotated `readOnlyHint` on the deny
     // layer, which beats any allow rule: the protocol's sentence holds.
     // Haiku is the utility model the app's one-shot completions run on.

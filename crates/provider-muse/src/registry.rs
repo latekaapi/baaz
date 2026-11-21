@@ -40,6 +40,9 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     sign_out_args: None,
     // Its sessions ride the shared child, which has no scoped argv.
     own_mcp_note: None,
+    // No config file of its own names MCP servers: Settings › MCP lists
+    // only Baaz's `baaz` server for it.
+    mcp_listing: None,
     utility_models: &[(crate::oneshot::UTILITY_MODEL_ID, "Muse Spark 1.3"), ("", "Muse default")],
     modes: &MODES,
     // Its bundled `plan` skill, reached by a `/plan ` prefix
