@@ -640,7 +640,7 @@ impl RightPane {
     }
 
     /// New branch…: the name field opens, prefilled with the branch prefix
-    /// (Settings › Worktrees), focused; ⏎ creates, Esc cancels.
+    /// (Settings › Git & worktrees), focused; ⏎ creates, Esc cancels.
     pub(crate) fn open_new_branch(&mut self, root: &Path, prefix: String, window: &mut Window, cx: &mut Context<Self>) {
         let field = cx.new(|cx| {
             let mut s = InputState::new(window, cx).placeholder("Branch name");

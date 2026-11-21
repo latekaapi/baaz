@@ -20,7 +20,7 @@
 //!   — no row reads `gh` for itself — so a row learns its PR the first
 //!   time Changes shows its folder, and keeps it for the run.
 //! - **Settling**: a merged read offers Archive this session; with
-//!   Settings › General's "Archive a session when its pull request
+//!   Settings › Git & worktrees' "Archive a session when its pull request
 //!   merges" on, the read archives it itself, once per PR, never under a
 //!   running turn (it waits for the next read).
 
@@ -394,7 +394,7 @@ fn comment_block(i: usize, comment: &PrComment, can_act: bool, cx: &mut Context<
 impl Harness {
     /// A PR read landed for `root` on `branch` (not the default branch):
     /// the session list's book takes it for the rows and, when it merged
-    /// and Settings › General says so, the session settles.
+    /// and Settings › Git & worktrees says so, the session settles.
     pub(crate) fn pull_request_read(&mut self, root: &Path, branch: &str, pr: Option<PullRequest>, window: &mut Window, cx: &mut Context<Self>) {
         let folder = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()).to_string_lossy().into_owned();
         let row = pr.as_ref().map(PullRequest::row);

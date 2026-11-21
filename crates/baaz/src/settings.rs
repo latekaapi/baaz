@@ -120,7 +120,7 @@ pub(crate) fn apply_setting(layout: &mut Layout, id: &str, on: bool) -> bool {
 pub(crate) const CHROMIUM_SETTINGS_URL: &str = "chrome://settings";
 
 /// Store the branch prefix as typed (normalised; blank or unusable is the
-/// default, stored as nothing). Used by the General page's field.
+/// default, stored as nothing). Used by the Git & worktrees page's field.
 pub(crate) fn set_worktree_branch_prefix(typed: &str, cx: &mut App) {
     let prefix = crate::layout::normalize_branch_prefix(typed)
         .filter(|prefix| prefix != baaz_core::worktrees::DEFAULT_BRANCH_PREFIX);
@@ -154,12 +154,13 @@ pub(crate) const SETTINGS_COLUMN_TOP: f32 = scale::SP_6;
 /// that run on from the heading.
 pub(crate) const SETTINGS_SECTION_GAP: f32 = scale::SP_7;
 
-/// The page's sections, in list order (a muted divider before Archived).
+/// The page's sections, in list order (a rule before Archived).
 pub(crate) const SETTINGS_SECTIONS: &[(&str, &str)] = &[
     ("general", "General"),
     ("appearance", "Appearance"),
     ("sidebar", "Sidebar"),
     ("notifications", "Notifications"),
+    ("git", "Git & worktrees"),
     ("browser", "Browser"),
     ("providers", "Providers"),
     ("shortcuts", "Shortcuts"),
@@ -169,10 +170,11 @@ pub(crate) const SETTINGS_SECTIONS: &[(&str, &str)] = &[
 /// One-line descriptions per page: the H1's muted line.
 pub(crate) fn settings_blurb(section: &str) -> &'static str {
     match section {
-        "general" => "Model housekeeping and app defaults. Changes apply live.",
+        "general" => "Model housekeeping, the transcript and files. Changes apply live.",
         "appearance" => "How Baaz looks. Changes apply live.",
         "sidebar" => "What the session list shows. Changes apply live.",
         "notifications" => "When Baaz tells you a session needs you. Changes apply live.",
+        "git" => "Worktrees and pull requests. Changes apply live.",
         "browser" => "How Baaz browses: the assistant, tabs, search, downloads.",
         "providers" => "Turn providers on or off and manage their accounts.",
         "shortcuts" => "Click a keycap to rebind it. Changes apply live.",
@@ -279,6 +281,7 @@ pub(crate) fn settings_breadcrumb(section: &str) -> Vec<String> {
         "appearance" => crumbs.push("Appearance".to_owned()),
         "sidebar" => crumbs.push("Sidebar".to_owned()),
         "notifications" => crumbs.push("Notifications".to_owned()),
+        "git" => crumbs.push("Git & worktrees".to_owned()),
         "browser" => crumbs.push("Browser".to_owned()),
         "providers" => crumbs.push("Providers".to_owned()),
         "shortcuts" => crumbs.push("Shortcuts".to_owned()),
@@ -310,7 +313,8 @@ pub(crate) fn settings_crumb_target(section: &str, index: usize) -> Option<&'sta
 /// actually carries ([`shortcut_row_id`]); both live on Shortcuts.
 pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
     match id {
-        "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns" | "archive_on_merge" | "open_in" => Some("general"),
+        "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns" | "open_in" => Some("general"),
+        "archive_on_merge" | "branch_prefix" => Some("git"),
         "theme" | "summary_line" => Some("appearance"),
         "group_branch" => Some("sidebar"),
         "notify_needs_you" | "notify_done" | "notify_failed" | "notify_sound" | "notify_badge" => Some("notifications"),
@@ -361,17 +365,25 @@ pub(crate) fn general_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
             )),
             on: layout.fold_finished_turns,
         },
-        SettingsRow::Switch {
-            id: SharedString::from("archive_on_merge"),
-            label: SharedString::from(ARCHIVE_ON_MERGE_LABEL),
-            detail: Some(SharedString::from(ARCHIVE_ON_MERGE_DETAIL)),
-            on: layout.archive_on_merge,
-        },
     ]
 }
 
-/// Settings › General's pull-request switch (docs/82 7.3), shared by the
-/// row model and the page.
+/// The Git & worktrees page's switch rows, from the layout they read: the
+/// row model the coverage test enumerates (test-only, like the General
+/// table). The branch prefix is a field, not a switch; its id
+/// (`branch_prefix`) homes through [`setting_home`].
+#[cfg(test)]
+pub(crate) fn git_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
+    vec![SettingsRow::Switch {
+        id: SharedString::from("archive_on_merge"),
+        label: SharedString::from(ARCHIVE_ON_MERGE_LABEL),
+        detail: Some(SharedString::from(ARCHIVE_ON_MERGE_DETAIL)),
+        on: layout.archive_on_merge,
+    }]
+}
+
+/// Settings › Git & worktrees' pull-request switch (docs/82 7.3; moved
+/// from General in 8.8), shared by the row model and the page.
 const ARCHIVE_ON_MERGE_LABEL: &str = "Archive a session when its pull request merges";
 const ARCHIVE_ON_MERGE_DETAIL: &str = "Once the pull request of a session's branch reads merged, the session is archived; a session in its own worktree keeps its work. Never while a turn runs.";
 
@@ -647,7 +659,7 @@ pub(crate) struct SettingsPage {
     pub(crate) state: SettingsPageState,
     /// The Shortcuts search field (⌘F on the page).
     pub(crate) search: Entity<TextareaState>,
-    /// General › Worktrees: the branch prefix field. Each edit is stored
+    /// Git & worktrees › Worktrees: the branch prefix field. Each edit is stored
     /// (normalised) in the layout as it is typed.
     pub(crate) branch_prefix: Entity<TextareaState>,
     /// The prefix field's edits, stored as they land.
@@ -1111,6 +1123,10 @@ impl SettingsPage {
             .role(gpui::Role::TabList)
             .aria_label("Settings sections");
         for (id, label) in SETTINGS_SECTIONS {
+            // A rule before Archived.
+            if *id == "archived" {
+                section_list = section_list.child(rule().my(px(scale::SP_2)));
+            }
             let target = id.to_string();
             let open = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| {
                 cx.emit(SettingsEvent::Navigate(target.clone()));
@@ -1133,10 +1149,6 @@ impl SettingsPage {
                             .on_click(open_sub),
                     );
                 }
-            }
-            // A rule before Archived.
-            if *id == "shortcuts" {
-                section_list = section_list.child(rule().my(px(scale::SP_2)));
             }
         }
         list.child(section_list).into_any_element()
@@ -1199,17 +1211,18 @@ impl SettingsPage {
         };
         let blurb = settings_blurb(&section);
         let body: AnyElement = match section.as_str() {
-            "general" => self.settings_general_page(window, cx),
+            "general" => self.settings_general_page(cx),
             "appearance" => self.settings_appearance_page(cx),
             "sidebar" => self.settings_sidebar_page(cx),
             "notifications" => self.settings_notifications_page(cx),
+            "git" => self.settings_git_page(window, cx),
             "browser" => self.settings_browser_page(cx),
             "providers" => self.settings_providers_overview(window, cx),
             "shortcuts" => self.settings_shortcuts_page(window, cx),
             "archived" => self.settings_archived_page(cx),
             _ if is_provider_subpage(&section) => self.settings_provider_subpage(window, cx),
             _ if site_subpage_origin(&section).is_some() => self.settings_site_page(cx),
-            _ => self.settings_general_page(window, cx),
+            _ => self.settings_general_page(cx),
         };
         // While a shortcut records, the next keystroke binds it (the old
         // dialog's capture, moved onto the page): a bare modifier stays
@@ -1311,9 +1324,11 @@ impl SettingsPage {
         section(label.to_string()).rows(rows).into_any_element()
     }
 
-    /// General › Worktrees: the branch prefix a session's worktree branch
-    /// starts with (docs/82 6.1), as a one-line field.
-    fn settings_worktrees_group(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// Git & worktrees (docs/82 8.8): the branch prefix a session's
+    /// worktree branch starts with (docs/82 6.1) as a one-line field, where
+    /// the per-project worktree default lives, and archiving a session when
+    /// its pull request merges (docs/82 7.3). Moved here from General.
+    fn settings_git_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let field = aui::data::field_frame("settings-branch-prefix", &self.branch_prefix, window, cx)
             .flex_none()
             .w(px(SHORTCUT_SEARCH_W))
@@ -1328,18 +1343,33 @@ impl SettingsPage {
                     .whitespace_nowrap()
                     .into_any_element(),
             );
-        let row = div().debug_selector(|| "settings-branch-prefix-row".into()).child(
+        let prefix = div().debug_selector(|| "settings-branch-prefix-row".into()).child(
             settings_row("Branch prefix")
                 .description("A session in its own worktree works on a new branch named with this prefix.")
                 .control(field),
         );
-        self.settings_group("Worktrees", vec![row.into_any_element()], cx)
+        let pull_requests = vec![self.settings_switch_row(
+            "archive_on_merge",
+            ARCHIVE_ON_MERGE_LABEL,
+            ARCHIVE_ON_MERGE_DETAIL,
+            crate::layout::Layout::get(cx).archive_on_merge,
+            cx,
+        )];
+        settings_sections_stack()
+            .child(
+                section("Worktrees")
+                    .rows(vec![prefix.into_any_element()])
+                    .note("Whether a project's new sessions start in their own worktree is set per project, from its ⋯ menu in the sidebar."),
+            )
+            .child(self.settings_group("Pull requests", pull_requests, cx))
+            .into_any_element()
     }
 
     /// General: the three model-spending switches under "Model
-    /// housekeeping", the transcript's fold, the worktree branch prefix,
-    /// and archiving a session when its pull request merges.
-    fn settings_general_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// housekeeping", the transcript's fold and where files open. The
+    /// worktree and pull-request rows live on Git & worktrees (8.8), so the
+    /// page fits the window without scrolling.
+    fn settings_general_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let rows = vec![
             self.settings_switch_row(
                 "auto_title",
@@ -1370,19 +1400,10 @@ impl SettingsPage {
             crate::layout::Layout::get(cx).fold_finished_turns,
             cx,
         )];
-        let pull_requests = vec![self.settings_switch_row(
-            "archive_on_merge",
-            ARCHIVE_ON_MERGE_LABEL,
-            ARCHIVE_ON_MERGE_DETAIL,
-            crate::layout::Layout::get(cx).archive_on_merge,
-            cx,
-        )];
         settings_sections_stack()
             .child(self.settings_group("Model housekeeping", rows, cx))
             .child(self.settings_group("Transcript", transcript, cx))
             .child(self.settings_editor_group(cx))
-            .child(self.settings_worktrees_group(window, cx))
-            .child(self.settings_group("Pull requests", pull_requests, cx))
             .into_any_element()
     }
 
@@ -2398,10 +2419,9 @@ impl Harness {
     }
 
     /// Open the Settings page on legacy dialog index `section` (menu rows,
-    /// ⌘,): an index into [`SETTINGS_SECTIONS`] (0 General, 1 Appearance,
-    /// 2 Sidebar, 3 Notifications, 4 Browser, 5 Providers, 6 Shortcuts,
-    /// 7 Archived). Idempotent (open, never toggle). Menus, palette and
-    /// modal go first.
+    /// ⌘,): an index into [`SETTINGS_SECTIONS`] (0 is General, the only
+    /// index a caller names). Idempotent (open, never toggle). Menus,
+    /// palette and modal go first.
     pub(crate) fn open_settings(&mut self, section: usize, cx: &mut Context<Self>) {
         let target = SETTINGS_SECTIONS.get(section).map(|(id, _)| *id).unwrap_or("general");
         self.open_settings_page(target, cx);
@@ -3239,7 +3259,7 @@ mod tests {
     #[test]
     fn browser_section_is_registered() {
         let ids: Vec<&str> = SETTINGS_SECTIONS.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, ["general", "appearance", "sidebar", "notifications", "browser", "providers", "shortcuts", "archived"]);
+        assert_eq!(ids, ["general", "appearance", "sidebar", "notifications", "git", "browser", "providers", "shortcuts", "archived"]);
         assert_eq!(normalize_settings_target("browser", ""), "browser");
         assert_eq!(normalize_settings_target("BROWSER", ""), "browser");
         assert_eq!(normalize_settings_target("search-engine", ""), "browser");
@@ -3250,6 +3270,28 @@ mod tests {
         assert_eq!(settings_blurb("browser"), "How Baaz browses: the assistant, tabs, search, downloads.");
         assert_eq!(setting_home("search-engine"), Some("browser"));
         assert_eq!(setting_home("download-dir"), Some("browser"));
+    }
+
+    /// Task 8.8: Git & worktrees is a section holding the branch prefix and
+    /// the pull-request switch; General keeps neither (it fits the window
+    /// unscrolled).
+    #[test]
+    fn git_section_holds_worktrees_and_pull_requests() {
+        assert_eq!(normalize_settings_target("git", ""), "git");
+        assert_eq!(normalize_settings_target("archive_on_merge", ""), "git");
+        assert_eq!(normalize_settings_target("branch_prefix", ""), "git");
+        assert!(settings_target_known("git"));
+        assert_eq!(settings_breadcrumb("git"), vec!["Settings".to_owned(), "Git & worktrees".to_owned()]);
+        assert_eq!(page_title("git"), "Git & worktrees");
+        let layout = Layout::default();
+        let general: Vec<String> = general_settings_rows(&layout)
+            .iter()
+            .filter_map(|row| match row {
+                SettingsRow::Switch { id, .. } => Some(id.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(!general.contains(&"archive_on_merge".to_owned()), "the pull-request switch lives on Git & worktrees only");
     }
 
     /// Task 3.5: Notifications is a section (after Sidebar), its switches
@@ -3603,6 +3645,7 @@ mod tests {
             ("general".to_owned(), switch_ids(&general_settings_rows(&layout))),
             ("appearance".to_owned(), switch_ids(&appearance_settings_rows(&layout))),
             ("sidebar".to_owned(), switch_ids(&sidebar_settings_rows(&layout))),
+            ("git".to_owned(), switch_ids(&git_settings_rows(&layout))),
             ("providers".to_owned(), switch_ids(&crate::settings_providers::providers_section().rows)),
             ("archived".to_owned(), vec!["archived:s-1".to_owned()]),
         ];

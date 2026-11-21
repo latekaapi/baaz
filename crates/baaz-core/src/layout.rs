@@ -640,13 +640,13 @@ pub struct Layout {
     /// Settings › Browser › Ad blocking (R4): on/off and the allowed sites.
     #[serde(rename = "adblock", default, skip_serializing_if = "crate::layout::is_default_adblock")]
     pub adblock: crate::browser_prefs::AdblockPrefs,
-    /// Settings › General › Worktrees (docs/82 6.1): what a session's
+    /// Settings › Git & worktrees › Worktrees (docs/82 6.1): what a session's
     /// worktree branch starts with. `None` is
     /// [`crate::worktrees::DEFAULT_BRANCH_PREFIX`]; read it through
     /// [`Layout::worktree_branch_prefix`].
     #[serde(rename = "worktreeBranchPrefix", default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch_prefix: Option<String>,
-    /// Settings › General: archive a session when the pull request of its
+    /// Settings › Git & worktrees: archive a session when the pull request of its
     /// branch reads merged (docs/82 7.3). Off by default.
     #[serde(rename = "archiveOnMerge", default)]
     pub archive_on_merge: bool,

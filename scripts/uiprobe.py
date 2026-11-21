@@ -505,6 +505,11 @@ ENTRIES = {
     # generate on main after merge, never to silence a finding.
     "settings-general":     {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "settings:general"]},
+    # Task 8.8: Settings › Git & worktrees (the branch prefix and the
+    # pull-request switch, moved off General). Offline, idempotent. No
+    # baseline yet — generate on main after merge.
+    "settings-git":         {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "settings:git"]},
     # Settings › Appearance (task 2.9): the theme choice and the summary
     # line. `-light` switches the theme by the page's own setter
     # (`settings-set:theme=light`), not by `--theme`, so it proves the live

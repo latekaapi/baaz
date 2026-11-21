@@ -150,7 +150,7 @@ fn a_session_with_the_worktree_default_on_runs_and_writes_only_in_its_worktree(c
     let (baaz, vc, project) = window(cx, &state.2, &root, factory);
     vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.set_worktree_default(&project, true, cx)))
         .expect("the default turns on");
-    // Settings › General › Worktrees: what the prefix field stores.
+    // Settings › Git & worktrees › Worktrees: what the prefix field stores.
     vc.update(|_, cx| crate::settings::set_worktree_branch_prefix(" team x/ ", cx));
     vc.update(|_, cx| assert_eq!(crate::layout::Layout::get(cx).worktree_branch_prefix(), "team-x/"));
     vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));

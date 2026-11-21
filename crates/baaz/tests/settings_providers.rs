@@ -123,18 +123,20 @@ fn providers_page_has_close_and_setup_row() {
     pin(&connect, "screen.show()", "connect screen opens");
 }
 
-/// Every Settings page has a probe entry: General, Providers, one provider
-/// sub-page (Codex), Shortcuts and Archived.
+/// Every Settings page has a probe entry: General, Git & worktrees,
+/// Providers, one provider sub-page (Codex), Shortcuts and Archived.
 #[test]
 fn probe_entries_cover_every_settings_page() {
     let probe = read_repo("scripts/uiprobe.py");
     for needle in [
         "\"settings-general\"",
+        "\"settings-git\"",
         "\"settings-providers\"",
         "\"settings-provider-codex\"",
         "\"settings-shortcuts\"",
         "\"settings-archived\"",
         "settings:general",
+        "settings:git",
         "settings:providers/codex",
         "settings:shortcuts",
         "settings:archived",
