@@ -412,7 +412,7 @@ impl ClaudeCodeAdapter {
         let Some(dir) = dir else { return launch };
         let path = terminal::own_mcp_config_path(&dir, &launch.session_id);
         let path_text = path.to_string_lossy().into_owned();
-        if launch.argv.iter().any(|arg| *arg == path_text) {
+        if launch.argv.contains(&path_text) {
             return launch;
         }
         let Ok(text) = std::fs::read_to_string(&source) else { return launch };
