@@ -4761,7 +4761,6 @@ impl Render for Harness {
             });
         let overflow = self.render_overflow_menu(cx);
         let right_views = self.render_right_views_menu(cx);
-        let back_history = self.render_back_history_menu(cx);
         let row_detail = self.render_row_detail(cx);
         let project_menu = self.render_project_menu(cx);
         let files_menu = self.right_pane.update(cx, |pane, cx| pane.render_files_menu(cx));
@@ -4790,7 +4789,7 @@ impl Render for Harness {
             })
         };
         let (palette, dialog, muse_sheet) = (held(palette), held(dialog), held(muse_sheet));
-        let (overflow, back_history, project_menu, right_views) = (held(overflow), held(back_history), held(project_menu), held(right_views));
+        let (overflow, project_menu, right_views) = (held(overflow), held(project_menu), held(right_views));
         // The keyboard moves off the frame (task 4.9): the palette takes it
         // as it opens and a closed overlay gives it back from the settle
         // (`Harness::settle`), or at the end of the frame that unmounted the
@@ -5007,7 +5006,6 @@ impl Render for Harness {
                 .children(row_detail)
                 .children(overflow)
                 .children(right_views)
-                .children(back_history)
                 .children(project_menu)
                 .children(files_menu)
                 // Painted last: the whole-frame instrument's end. Zero-size,
@@ -5961,12 +5959,109 @@ mod tests {
         }
     }
 
+    /// A scripted page the test keeps a handle on: every call reaches the
+    /// shared fake, so the test can move it (a `pushState`) and read what
+    /// Baaz asked of it (zoom, permission answers).
+    pub(crate) struct SharedPage(pub(crate) std::rc::Rc<std::cell::RefCell<aui_webview::FakeWebBackend>>);
+
+    impl aui_webview::WebBackend for SharedPage {
+        fn navigate(&mut self, url: &str) {
+            self.0.borrow_mut().navigate(url);
+        }
+        fn back(&mut self) {
+            self.0.borrow_mut().back();
+        }
+        fn forward(&mut self) {
+            self.0.borrow_mut().forward();
+        }
+        fn reload(&mut self) {
+            self.0.borrow_mut().reload();
+        }
+        fn eval(&mut self, js: &str) {
+            self.0.borrow_mut().eval(js);
+        }
+        fn set_annotate(&mut self, on: bool) {
+            self.0.borrow_mut().set_annotate(on);
+        }
+        fn poll_events(&mut self) -> Vec<aui_webview::WebEvent> {
+            self.0.borrow_mut().poll_events()
+        }
+        fn can_go_back(&self) -> bool {
+            self.0.borrow().can_go_back()
+        }
+        fn can_go_forward(&self) -> bool {
+            self.0.borrow().can_go_forward()
+        }
+        fn set_zoom(&mut self, percent: u16) {
+            self.0.borrow_mut().set_zoom(percent);
+        }
+        fn supports(&self, feature: aui_webview::BackendFeature) -> bool {
+            self.0.borrow().supports(feature)
+        }
+        fn answer_permission(&mut self, id: u64, decision: aui_webview::PermissionDecision) {
+            self.0.borrow_mut().answer_permission(id, decision);
+        }
+    }
+
+    /// A Browse tab on a [`SharedPage`] at `url`: the harness, the test
+    /// window, the tab and the fake behind its page.
+    pub(crate) fn browse_tab_on_shared_page(
+        vc: &mut gpui::VisualTestContext,
+        state_dir: &std::path::Path,
+        url: &str,
+    ) -> (gpui::Entity<Harness>, crate::browser::TabId, std::rc::Rc<std::cell::RefCell<aui_webview::FakeWebBackend>>) {
+        let baaz = vc.update(|window, cx| cx.new(|cx| Harness::new(test_args(state_dir), crate::runtime::CaptureToken::default(), window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_tab_new(url, window, cx))).expect("the tab opens");
+        vc.run_until_parked();
+        let browser = vc.update(|_, cx| baaz.read(cx).browser.clone());
+        let id = vc.update(|_, cx| browser.read(cx).browse_centre_shown(cx).expect("the new tab is the centre's"));
+        let fake = std::rc::Rc::new(std::cell::RefCell::new(aui_webview::FakeWebBackend::new()));
+        aui_webview::WebBackend::navigate(&mut *fake.borrow_mut(), url);
+        vc.update(|_, cx| {
+            let page = cx.new(|cx| aui_webview::WebviewState::new(Box::new(SharedPage(fake.clone())), cx));
+            browser.update(cx, |browser, cx| browser.adopt_page(id, page, cx));
+        });
+        vc.run_until_parked();
+        (baaz, id, fake)
+    }
+
+    /// docs/82 8.6: Back and Forward are the engine's. A page that moved
+    /// itself (`pushState`: Baaz never navigated there) is one step back,
+    /// and Forward is offered because the engine says so — the URL replay
+    /// this replaced navigated afresh and lost the forward entry.
+    #[gpui::test]
+    fn back_and_forward_step_the_engines_own_history(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browse-engine-history");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (baaz, id, fake) = browse_tab_on_shared_page(vc, &state.2, "https://a.example/");
+        fake.borrow_mut().script_push_state("https://a.example/#step-2");
+        vc.executor().advance_clock(std::time::Duration::from_millis(200));
+        vc.run_until_parked();
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.browse_go_back(cx)));
+        vc.executor().advance_clock(std::time::Duration::from_millis(200));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            let page = h.browse_centre_state(cx).expect("the tab's page");
+            assert_eq!(page.read(cx).url().as_ref(), "https://a.example/", "back is the page's own entry");
+            assert!(page.read(cx).can_go_forward(), "forward comes from the engine");
+            assert_eq!(h.browser.read(cx).tabs.get(id).map(|t| t.url.clone()).as_deref(), Some("https://a.example/"), "the tab follows its page");
+        });
+        assert_eq!(fake.borrow().url().as_ref(), "https://a.example/");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.browse_go_forward(cx)));
+        vc.executor().advance_clock(std::time::Duration::from_millis(200));
+        vc.run_until_parked();
+        assert_eq!(fake.borrow().url().as_ref(), "https://a.example/#step-2", "forward walked the engine's entry");
+        restore_state(state);
+    }
+
     /// Task 4.5b: the Browse view follows its pages itself. A person tab's
     /// page moves on its own (a link: nothing in Baaz asks), and with no
     /// window frame drawn — the root never renders in this window, and the
     /// frame's occlusion never ran — the tab takes the page's URL and
-    /// title, the back/forward stack follows, and the visit reaches
-    /// history. The view is notified (it redraws); the root is not.
+    /// title, and the visit reaches history. The view is notified (it redraws); the root is not.
     #[gpui::test]
     fn a_page_change_reaches_the_tabs_and_history_with_no_frame(cx: &mut gpui::TestAppContext) {
         use aui_webview::WebEvent;
@@ -6011,7 +6106,6 @@ mod tests {
             let view = browser.read(cx);
             let tab = view.tabs.get(id).expect("the tab stays");
             assert_eq!((tab.url.as_str(), tab.title.as_str()), ("https://b.example/next", "Next"), "the tab follows its page");
-            assert!(view.histories.get(&id).is_some_and(|stack| stack.can_back()), "back/forward followed the navigation");
             assert_eq!(view.data.read(cx).history_len(), 2, "the visit reached history");
             assert!(view.centre_page_rect.is_none(), "no frame drew: the occlusion never ran");
             assert_eq!(view.occlusion.shown(), crate::browser::PageShow::default(), "nor decided anything");
@@ -6305,53 +6399,6 @@ mod tests {
         restore_state(state);
     }
 
-
-    /// B2a-H4d(4): the back-history render is pure. With the menu open but
-    /// nothing to show it draws nothing and leaves the menu state alone —
-    /// "nothing to show" is the opener's decision, never a render-time
-    /// mutation. With history behind it, it draws the menu.
-    #[gpui::test]
-    fn back_history_render_is_pure(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let state = hermetic_state("back-history-pure");
-        let vc = cx.add_empty_window();
-        let baaz = vc.update(|window, cx| {
-            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
-        });
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
-        vc.update(|window, cx| baaz.update(cx, |h, cx| h.ensure_browse_tab(window, cx)));
-        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_menu(crate::overlays::MenuKind::BackHistory, cx)));
-        // Nothing to show: no menu drawn, menu state untouched.
-        vc.update(|_, cx| {
-            baaz.update(cx, |h, cx| {
-                assert!(h.render_back_history_menu(cx).is_none(), "an empty stack draws nothing");
-                assert!(
-                    h.overlays.read(cx).is_open(crate::overlays::MenuKind::BackHistory),
-                    "the empty render mutates nothing, not even the menu"
-                );
-            })
-        });
-        // History behind it: the menu draws.
-        vc.update(|window, cx| {
-            baaz.update(cx, |h, cx| {
-                let id = h.browser.read(cx).browse_centre_shown(cx).expect("a tab shows");
-                h.browser.update(cx, |browser, _| browser.histories.entry(id).or_default().note_navigated("https://a.example/"));
-                h.browser.update(cx, |browser, _| browser.histories.entry(id).or_default().note_navigated("https://b.example/"));
-                h.browser.update(cx, |browser, _| {
-                    browser.back_bounds = Some(gpui::Bounds::new(
-                        gpui::point(gpui::px(0.0), gpui::px(0.0)),
-                        gpui::size(gpui::px(10.0), gpui::px(10.0)),
-                    ))
-                });
-                let _ = window;
-                assert!(
-                    h.render_back_history_menu(cx).is_some(),
-                    "a stack with past draws the menu"
-                );
-            })
-        });
-        restore_state(state);
-    }
 
     /// ⌘L from a page that holds the keyboard: the page lets go, so typing
     /// reaches the Field (owner 2026-11-06: it landed nowhere).

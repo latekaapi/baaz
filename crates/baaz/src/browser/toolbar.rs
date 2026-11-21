@@ -1,6 +1,7 @@
 //! The Browse toolbar's pure model (B2a-H4): the address states, the
-//! Enter-to-URL-or-search decision, the omnibox ranking, the new-tab
-//! pick-up rows, and the per-tab back/forward stacks. No gpui types here,
+//! Enter-to-URL-or-search decision, the omnibox ranking and the new-tab
+//! pick-up rows (back and forward are the engine's own history, docs/82
+//! 8.6, read off the page). No gpui types here,
 //! so the gate's unit tests pin every decision without a window.
 //!
 //! The address badge reads the library's [`PageSecurity`](aui_webview::PageSecurity)
@@ -570,121 +571,6 @@ pub(crate) fn relative_ago(ms: u64) -> String {
     }
 }
 
-/// One tab's Baaz-tracked back/forward stacks (B2a-H4): the library owns the
-/// real history and exposes no back/forward/​reload calls (its engine
-/// stepping is private to the pane), so the header toolbar tracks the URLs
-/// the page reconcile reports and navigates within them. An outside navigation (a
-/// link, the pane's own controls before Browse hid them) lands through
-/// [`Self::note_navigated`], which clears the forward stack exactly like a
-/// fresh navigation does.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct BackForward {
-    past: Vec<String>,
-    future: Vec<String>,
-    current: Option<String>,
-    /// The URL the page still shows after [`Self::go_back`] stepped the
-    /// stacks ahead of it: the page reconcile reports the old URL until
-    /// the navigation lands, and that stale echo must not undo the step.
-    /// Consumed once — a genuine later navigation to the same URL heals
-    /// on the next reconcile, since it re-reports it.
-    stale: Option<String>,
-}
-
-const HISTORY_CAP: usize = 50;
-
-impl BackForward {
-    /// Record the tab showing `url`: a new URL pushes the old current back
-    /// and clears the forward stack; the same URL (or an empty one) is a
-    /// no-op, so a reconcile per page change never grows the stacks. The one stale
-    /// echo after a [`Self::go_back`]/[`Self::go_forward`] step is ignored,
-    /// so the step is never undone by the page reporting late.
-    pub(crate) fn note_navigated(&mut self, url: &str) {
-        if url.is_empty() {
-            return;
-        }
-        if self.current.as_deref() == Some(url) {
-            // The stacks already read this URL: settled, so any armed
-            // stale echo is over.
-            self.stale = None;
-            return;
-        }
-        if self.stale.as_deref() == Some(url) {
-            // The pre-navigation echo of a step: swallow once.
-            self.stale = None;
-            return;
-        }
-        if let Some(current) = self.current.take() {
-            if current != url {
-                self.past.push(current);
-                if self.past.len() > HISTORY_CAP {
-                    self.past.remove(0);
-                }
-            }
-        }
-        self.future.clear();
-        self.stale = None;
-        self.current = Some(url.to_owned());
-    }
-
-    /// Whether back would go anywhere.
-    pub(crate) fn can_back(&self) -> bool {
-        !self.past.is_empty()
-    }
-
-    /// The back stack, oldest first: the back-history menu reverses it.
-    pub(crate) fn past_urls(&self) -> Vec<String> {
-        self.past.clone()
-    }
-
-    /// Whether forward would go anywhere.
-    pub(crate) fn can_forward(&self) -> bool {
-        !self.future.is_empty()
-    }
-
-    /// Step back: the URL to navigate to, or `None` at the start. Arms
-    /// the stale echo (the URL the page still shows) so the per-frame
-    /// [`Self::note_navigated`] cannot undo the step.
-    pub(crate) fn go_back(&mut self) -> Option<String> {
-        let prev = self.past.pop()?;
-        if let Some(current) = self.current.take() {
-            if self.stale.is_none() {
-                self.stale = Some(current.clone());
-            }
-            self.future.push(current);
-        }
-        self.current = Some(prev.clone());
-        Some(prev)
-    }
-
-    /// Step forward: the URL to navigate to, or `None` at the end. Arms
-    /// the stale echo like [`Self::go_back`] does.
-    pub(crate) fn go_forward(&mut self) -> Option<String> {
-        let next = self.future.pop()?;
-        if let Some(current) = self.current.take() {
-            if self.stale.is_none() {
-                self.stale = Some(current.clone());
-            }
-            self.past.push(current);
-        }
-        self.current = Some(next.clone());
-        Some(next)
-    }
-
-    /// Step back `steps` entries at once: what picking a back-history menu
-    /// row does, so the stacks stay right (the entries above the target
-    /// move forward, the target becomes current). `0` steps back once.
-    pub(crate) fn go_back_steps(&mut self, steps: usize) -> Option<String> {
-        let mut target = None;
-        for _ in 0..steps.max(1) {
-            target = self.go_back();
-            if target.is_none() {
-                break;
-            }
-        }
-        target
-    }
-}
-
 /// The draft text for `text` arriving over `existing` (a hand-off's draft,
 /// docs/82 8.2): an empty composer takes it as is, otherwise it appends on
 /// a new line — never replacing, never sent.
@@ -829,26 +715,6 @@ mod tests {
         assert_eq!(relative_ago(90_000_000), "1 d ago");
     }
 
-    #[test]
-    fn back_forward_tracks_navigations() {
-        let mut history = BackForward::default();
-        assert!(!history.can_back() && !history.can_forward());
-        history.note_navigated("https://a.example/");
-        history.note_navigated("https://a.example/");
-        assert!(!history.can_back(), "re-reporting the URL grows nothing");
-        history.note_navigated("https://b.example/");
-        assert!(history.can_back() && !history.can_forward());
-        assert_eq!(history.go_back().as_deref(), Some("https://a.example/"));
-        assert!(history.can_forward());
-        assert_eq!(history.go_forward().as_deref(), Some("https://b.example/"));
-        // An outside navigation clears the forward stack.
-        assert_eq!(history.go_back().as_deref(), Some("https://a.example/"));
-        history.note_navigated("https://c.example/");
-        assert!(!history.can_forward(), "a fresh navigation clears forward");
-        assert_eq!(history.go_back().as_deref(), Some("https://a.example/"));
-        assert_eq!(history.go_back(), None, "the start goes nowhere");
-    }
-
 
     #[test]
     fn classify_table_allowlists_schemes_and_loopbacks() {
@@ -939,23 +805,6 @@ mod tests {
             let row = rows.iter().find(|row| row.suggestion.kind == kind).expect("the row");
             assert_eq!(row.suggestion.complete, None, "{kind:?} rows are not completable");
         }
-    }
-
-    #[test]
-    fn back_step_survives_the_stale_echo() {
-        let mut history = BackForward::default();
-        history.note_navigated("https://a.example/");
-        history.note_navigated("https://b.example/");
-        history.note_navigated("https://c.example/");
-        assert_eq!(history.go_back_steps(2).as_deref(), Some("https://a.example/"));
-        assert!(history.can_forward());
-        // The page still shows the old URL until the navigation lands.
-        history.note_navigated("https://c.example/");
-        assert!(!history.can_back(), "the stale echo steps nothing");
-        assert!(history.can_forward(), "the forward stack survives the echo");
-        assert_eq!(history.go_forward().as_deref(), Some("https://b.example/"));
-        history.note_navigated("https://b.example/");
-        assert!(history.can_back() && history.can_forward());
     }
 
     #[test]

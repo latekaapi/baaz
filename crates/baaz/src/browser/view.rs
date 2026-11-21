@@ -25,7 +25,7 @@ use aui_webview::WebviewState;
 use aui_tokens::{scale, ActiveAui};
 use gpui::{div, prelude::*, px, AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Render, SharedString, Subscription, Window};
 
-use super::{chrome, history, peek_split, BackForward, TabId, Tabs};
+use super::{chrome, history, peek_split, TabId, Tabs};
 use super::favicons;
 use super::occlusion::NativeOcclusion;
 
@@ -91,10 +91,6 @@ pub(crate) struct BrowserView {
     /// The pane's shown page's rect as the last occlusion pass saw it: the
     /// Page float anchors to it (a change is [`BrowserEvent::PageRectMoved`]).
     pub pane_page_rect: Option<Bounds<Pixels>>,
-    /// One back/forward stack per tab (B2a-H4): the header toolbar tracks
-    /// the URLs the page reconcile reports, since the library exposes no back,
-    /// forward or reload calls to drive.
-    pub histories: HashMap<TabId, BackForward>,
     /// Every tab's find strip (B2a-H5): per tab, so switching hides the
     /// strip and returning restores the query.
     pub find_strips: chrome::FindStrips,
@@ -226,10 +222,6 @@ pub(crate) struct BrowserView {
     /// `move_omnibox`, cleared by typing and whenever editing ends. Never
     /// persists.
     pub(crate) browse_omnibox_moved: bool,
-    /// The header back button's rect (B2a-H4): what the back-history menu
-    /// seats at, reported the way the header `…` anchor is
-    /// (`Overlays::note_anchor`). Never persists.
-    pub(crate) back_bounds: Option<Bounds<Pixels>>,
     /// Whether the Browse centre's page held the keyboard on the last
     /// frame's occlusion ([`Self::occlude`], B2a-H4 7b): the rising edge ends address editing,
     /// since a click into a Chromium page moves no gpui focus and the input
@@ -358,7 +350,6 @@ impl BrowserView {
             agent_tabs: HashMap::new(),
             centre_page_rect: None,
             pane_page_rect: None,
-            histories: HashMap::new(),
             find_strips: chrome::FindStrips::default(),
             visit_allows: chrome::VisitAllows::default(),
             permission_origins: HashMap::new(),
@@ -399,7 +390,6 @@ impl BrowserView {
             newtab_ground: None,
             newtab_ground_asked: false,
             browse_omnibox_moved: false,
-            back_bounds: None,
             browse_last_holds: false,
             browse_address_page_focus: false,
             browse_find: None,

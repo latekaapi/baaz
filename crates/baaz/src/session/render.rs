@@ -2413,7 +2413,6 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             | MenuKind::ViewOptions
             | MenuKind::Account
             | MenuKind::Project
-            | MenuKind::BackHistory
                 | MenuKind::SessionRow
                 | MenuKind::RightViews
                 | MenuKind::Plus => return None,
@@ -2957,7 +2956,6 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
             | MenuKind::ViewOptions
             | MenuKind::Account
             | MenuKind::Project
-            | MenuKind::BackHistory
                 | MenuKind::SessionRow
                 | MenuKind::RightViews
                 | MenuKind::Plus => Vec::new(),

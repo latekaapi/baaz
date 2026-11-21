@@ -92,7 +92,7 @@ pub(crate) use occlusion::PageShow;
 #[cfg(test)]
 use occlusion::{browser_visible, centre_visibility, BrowserVisibility};
 pub(crate) use tabs::{Owner, TabId, Tabs};
-pub(crate) use toolbar::{BackForward, OmniRow, OmniTarget, SuggestKind};
+pub(crate) use toolbar::{OmniRow, OmniTarget, SuggestKind};
 
 /// The fake backend's URL key for the no-session/home webview.
 pub(crate) const HOME_KEY: &str = "home";

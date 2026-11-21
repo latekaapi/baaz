@@ -193,7 +193,6 @@ impl SessionView {
                 | MenuKind::ViewOptions
                 | MenuKind::Account
                 | MenuKind::Project
-                | MenuKind::BackHistory
                 | MenuKind::SessionRow
                 | MenuKind::RightViews
                 | MenuKind::Plus,
@@ -281,7 +280,6 @@ impl SessionView {
             | MenuKind::ViewOptions
             | MenuKind::Account
             | MenuKind::Project
-            | MenuKind::BackHistory
                 | MenuKind::SessionRow
                 | MenuKind::RightViews
                 | MenuKind::Plus => {}

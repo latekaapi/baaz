@@ -128,9 +128,6 @@ pub enum MenuKind {
     /// The target project id lives on [`Menu::project`] (`None` is "Other
     /// workspaces"), because the kind itself stays `Copy`.
     Project,
-    /// The Browse header back button's history (B2a-H4): this tab's back
-    /// stack, newest first, anchored under the back button.
-    BackHistory,
     /// A sidebar session row's `⋯` menu (docs/83 §4): Pin, Rename,
     /// Archive. The session id lives on [`Menu::session`]; the screen draws
     /// and drives it.

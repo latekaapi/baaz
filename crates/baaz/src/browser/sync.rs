@@ -342,15 +342,6 @@ impl BrowserView {
             })
             .collect();
         self.record_history(&live, cx);
-        // The header toolbar's back/forward stacks follow every live page:
-        // whatever the page reports becomes the stack's current URL, so an
-        // outside navigation (a link) lands here and clears the forward
-        // stack exactly like a fresh one. Whether a load runs is the
-        // engine's own `WebviewState::loading`, read where the stop/reload
-        // control needs it — never tracked here.
-        for (id, url, _, _) in &live {
-            self.histories.entry(*id).or_default().note_navigated(url);
-        }
         // B2a-H5: popups become tabs (foreground ones select, so the centre
         // follows), downloads stamp their start for the popover's
         // estimates, and closed tabs drop their find strips.

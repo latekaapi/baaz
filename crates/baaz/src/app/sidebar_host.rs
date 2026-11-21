@@ -377,7 +377,11 @@ impl Harness {
             live_url
         };
         let address = split_address(&url);
-        let history = shown.and_then(|id| self.browser.read(cx).histories.get(&id));
+        // The engine's own history says whether back and forward go anywhere.
+        let (can_go_back, can_go_forward) = self
+            .browse_centre_state(cx)
+            .map(|state| (state.read(cx).can_go_back(), state.read(cx).can_go_forward()))
+            .unwrap_or_default();
         let spaces: Vec<BrowseSpace> = self
             .browser
             .read(cx)
@@ -401,8 +405,8 @@ impl Harness {
                 .is_some_and(|url| self.browser.read(cx).data.read(cx).is_bookmarked(&url)),
             host: address.host,
             path: address.path,
-            can_go_back: history.is_some_and(|h| h.can_back()),
-            can_go_forward: history.is_some_and(|h| h.can_forward()),
+            can_go_back,
+            can_go_forward,
             pins,
             tabs: today,
             folders,
@@ -711,8 +715,8 @@ impl Harness {
                 self.overlays.update(cx, |o, cx| o.set(crate::overlay_stack::Layer::SiteInfo, open, cx));
             }
             BrowseIntent::Bookmark => self.edit_shown_bookmark(window, cx),
-            BrowseIntent::Back => self.browse_go_back(window, cx),
-            BrowseIntent::Forward => self.browse_go_forward(window, cx),
+            BrowseIntent::Back => self.browse_go_back(cx),
+            BrowseIntent::Forward => self.browse_go_forward(cx),
             BrowseIntent::Reload => {
                 if let Some(id) = self.browser.read(cx).browse_centre_shown(cx) {
                     self.reload_browse_tab(id, window, cx);

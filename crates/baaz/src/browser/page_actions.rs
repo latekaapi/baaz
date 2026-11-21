@@ -154,27 +154,26 @@ impl Harness {
         cx.notify();
     }
 
-    /// Step the shown tab back within its Baaz-tracked history.
-    pub(crate) fn browse_go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded(cx);
-        let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else {
-            return;
-        };
-        let url = self.browser.update(cx, |browser, _| browser.histories.entry(id).or_default().go_back());
-        if let Some(url) = url {
-            self.navigate_browse_tab(id, &url, window, cx);
+    /// Step the shown tab back in its engine's own history: links, form
+    /// posts, `pushState` and fragments are entries there, so a page that
+    /// moved itself steps back the way a browser does. The tab's URL follows
+    /// what the page reports, like any navigation.
+    pub(crate) fn browse_go_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.browse_centre_state(cx) {
+            state.update(cx, |state, cx| {
+                state.go_back();
+                cx.notify();
+            });
         }
     }
 
-    /// Step the shown tab forward within its Baaz-tracked history.
-    pub(crate) fn browse_go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_tabs_loaded(cx);
-        let Some(id) = self.browser.read(cx).browse_centre_shown(cx) else {
-            return;
-        };
-        let url = self.browser.update(cx, |browser, _| browser.histories.entry(id).or_default().go_forward());
-        if let Some(url) = url {
-            self.navigate_browse_tab(id, &url, window, cx);
+    /// Step the shown tab forward in its engine's own history.
+    pub(crate) fn browse_go_forward(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.browse_centre_state(cx) {
+            state.update(cx, |state, cx| {
+                state.go_forward();
+                cx.notify();
+            });
         }
     }
 
