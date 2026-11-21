@@ -948,6 +948,63 @@ impl RightPane {
     }
 
     #[cfg(feature = "probe")]
+    /// `commit:<message>`'s pane half: the ticked files committed through
+    /// [`Self::commit_changes`], the button's own path (the gate's scripted
+    /// live run, docs/82 Gate 7). A capture, no message, no ticked file or a
+    /// git operation already running is an `Err`; the commit itself lands
+    /// off the UI thread, so the script checks git afterwards.
+    pub(crate) fn step_commit(&mut self, root: &Path, message: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if crate::runtime::captures() {
+            return Err("a capture commits nothing".into());
+        }
+        if message.is_empty() {
+            return Err("no commit message".into());
+        }
+        let tree = self.cache.git_for(root).flatten().ok_or("no git tree read for the Changes pane")?;
+        let session_edits = self.session_edits(cx);
+        let ui = self.changes_ui(root);
+        if ui.busy.is_some() {
+            return Err("a git operation is already running".into());
+        }
+        if ticked_paths(&tree.files, &session_edits, root, &ui.ticks).is_empty() && !(ui.amend && ui.amendable) {
+            return Err("no ticked file to commit".into());
+        }
+        ui.editor = None;
+        ui.message = message.to_owned();
+        ui.message_edited = true;
+        self.commit_changes(root, cx);
+        match self.changes_ui(root).busy {
+            Some(_) => Ok(()),
+            None => Err("the commit did not start".into()),
+        }
+    }
+
+    #[cfg(feature = "probe")]
+    /// `branch:<name>`'s pane half: New branch… with `name` typed and ⏎,
+    /// through [`Self::create_new_branch`]. A capture, a name that is empty,
+    /// a branch that is not offered or a git operation already running is an
+    /// `Err`; git's own refusal is the toast, so the script checks git after.
+    pub(crate) fn step_branch(&mut self, root: &Path, name: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if crate::runtime::captures() {
+            return Err("a capture creates no branch".into());
+        }
+        if name.is_empty() {
+            return Err("no branch name".into());
+        }
+        if self.changes_ui(root).busy.is_some() {
+            return Err("a git operation is already running".into());
+        }
+        self.step_new_branch(root, String::new(), window, cx)?;
+        let field = self.changes_ui(root).branch_field.clone().ok_or("New branch… did not open")?;
+        field.update(cx, |s, cx| s.set_value(name, window, cx));
+        self.create_new_branch(root, cx);
+        match self.changes_ui(root).busy {
+            Some(_) => Ok(()),
+            None => Err("the branch was not started".into()),
+        }
+    }
+
+    #[cfg(feature = "probe")]
     /// `changes-open`'s pane half: open the changed row `path` (idempotent).
     /// Not a changed row is an `Err`; a row already open succeeds.
     pub(crate) fn open_change_row(&mut self, root: &Path, path: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
@@ -1077,6 +1134,24 @@ impl Harness {
     }
 
     #[cfg(feature = "probe")]
+    /// `commit:<message>`: the ticked files committed for real (never in a
+    /// capture).
+    pub(crate) fn step_changes_commit(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let (root, _) = self.right_project(cx).ok_or("no project for the right pane")?;
+        self.select_right(crate::layout::RightKind::Changes, cx);
+        self.with_right_pane(cx, |pane, cx| pane.step_commit(&root, rest.trim(), cx))
+    }
+
+    #[cfg(feature = "probe")]
+    /// `branch:<name>`: a new branch from the default one, for real (never
+    /// in a capture).
+    pub(crate) fn step_changes_create_branch(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let (root, _) = self.right_project(cx).ok_or("no project for the right pane")?;
+        self.select_right(crate::layout::RightKind::Changes, cx);
+        self.with_right_pane(cx, |pane, cx| pane.step_branch(&root, rest.trim(), window, cx))
+    }
+
+    #[cfg(feature = "probe")]
     /// `amend:<on|off>`: "Amend last commit" set.
     pub(crate) fn step_changes_amend(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let on = match rest.trim() {
@@ -1090,9 +1165,10 @@ impl Harness {
     }
 
     #[cfg(feature = "probe")]
-    /// `changes-open:<path>`: open that row's diff (idempotent), refreshing
-    /// first so the tree is there. No project for the pane, or a path that
-    /// is not a changed row, is an `Err`; a row already open succeeds.
+    /// `changes-open:<path>`: open that row's diff (idempotent). The tree
+    /// must already be read (`right:changes` starts the read; a live run
+    /// waits for it). No project for the pane, or a path that is not a
+    /// changed row, is an `Err`; a row already open succeeds.
     pub(crate) fn step_changes_open(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let path = rest.trim();
         let (root, _) = self.right_project(cx).ok_or("no project for the right pane")?;

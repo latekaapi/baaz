@@ -145,6 +145,11 @@ impl Runtime {
         runtime
     }
 
+    /// [`lanes_scripted`] for this runtime.
+    fn lanes_scripted(&self) -> bool {
+        self.provider_factory.lanes == Lanes::Scripted || self.provider_factory.scripted
+    }
+
     /// The runtime of a run whose capture flag is `capture`, lanes spawned.
     fn from_env(capture: bool) -> Self {
         Self {
@@ -273,6 +278,13 @@ pub fn providers_scripted() -> bool {
     INSTALLED.get().map_or_else(env_captures, |runtime| runtime.provider_factory.scripted)
 }
 
+/// This run's lanes are scripted (`--no-connect`, `--replay`, or a
+/// capture): no session reaches a provider, so neither may anything else —
+/// a one-shot completion (titles, bylines, drafts) included.
+pub fn lanes_scripted() -> bool {
+    INSTALLED.get().map_or_else(env_captures, Runtime::lanes_scripted)
+}
+
 /// How a window opens its session lanes: the installed runtime's choice,
 /// else `from_args`, what the window's own command line says.
 pub fn lanes_for(from_args: Lanes) -> Lanes {
@@ -399,6 +411,16 @@ impl CaptureToken {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--no-connect` reaches no model: scripted lanes refuse one-shot
+    /// completions too (a commit draft once ran the real `claude` on an
+    /// offline run, Gate 7). A wall-clock run with spawned lanes may.
+    #[test]
+    fn offline_and_capture_runs_refuse_completions() {
+        assert!(Runtime::new(Lanes::Scripted).lanes_scripted());
+        assert!(Runtime::from_env(true).lanes_scripted());
+        assert!(!Runtime::from_env(false).lanes_scripted());
+    }
 
     /// The scheduling loops in `shot` all start from this: a step list that
     /// has not been armed yet reads exactly like one that already finished,

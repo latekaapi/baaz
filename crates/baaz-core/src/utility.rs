@@ -85,8 +85,8 @@ pub fn complete(
         });
     }
     #[allow(unreachable_code)]
-    if crate::runtime::providers_scripted() {
-        return Err("no completions in a deterministic capture".into());
+    if crate::runtime::lanes_scripted() {
+        return Err("no completions in an offline, replayed or captured run".into());
     }
     if provider.has(provider::ProviderTrait::SideSessionCompletions) {
         let side = muse.ok_or_else(|| format!("{} is not running", provider.label()))?;

@@ -533,9 +533,12 @@ impl RightPane {
     }
 
     /// The row the shown list has at `path`: the working tree's in All
-    /// changes, the scope's list otherwise.
+    /// changes — or with no scope row, which the list then is whatever the
+    /// scope says (a session with no checkpoints yet) — the scope's list
+    /// otherwise. Reads the list the way the render does.
     pub(crate) fn shown_change(&mut self, root: &Path, path: &str) -> Option<FileChange> {
-        if self.changes_ui(root).scopes.scope == ChangesScope::All {
+        let scopes = &self.changes_ui(root).scopes;
+        if scopes.scope == ChangesScope::All || scopes.row(scopes.shown_session.as_deref()).is_none() {
             return self.cache.git_for(root).flatten().and_then(|tree| tree.change(path).cloned());
         }
         self.changes_ui(root).scopes.scoped.as_ref().and_then(|list| list.files.iter().find(|f| f.path == path).cloned())

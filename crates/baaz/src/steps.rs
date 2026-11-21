@@ -142,6 +142,8 @@
 //! | `pr-details:<name>` | capture aid: `pr-fixture:<name>` with Details open over Changes (the checks and review comments), free |
 //! | `new-branch` | open New branch…'s name field on the Changes foot (docs/82 7.2; idempotent); not on the default branch, or a foot without the branch line, fails the step, free |
 //! | `amend:<on\|off>` | set "Amend last commit" in the commit box (docs/82 7.2; a setter); no changes, or Amend not offered (HEAD on a remote), fails the step, free |
+//! | `commit:<message>` | commit the ticked files with `<message>` through the Commit button's own path — for real, so **never in a capture** (fails the step); no message, no ticked file or a git operation already running fails the step; the commit lands off the UI thread, so a script `wait:`s and checks git (Gate 7's scripted live run) |
+//! | `branch:<name>` | New branch… with `<name>` typed and ⏎ (`git switch -c`, the working tree carried) — for real, **never in a capture** (fails the step); off the default branch, an empty name or a git operation already running fails the step; git's refusal is the toast, so a script checks git after |
 //! | `changes-scope:<all\|session\|last>` | the Changes pane on that scope (docs/82 6.3): a capture loads the fixture checkpoint index (two finished turns over the fixture tree) — no refs are read or written; no open session or an unknown word fails the step, free |
 //! | `run` | press Run on the open session (docs/82 7.4): the folder's `.baaz/project.toml` `run` starts in a terminal tab of the session's own, listed in Tasks; a Run that still runs is shown, not started again; no session or no `run` declared fails the step — **starts a real process** (captures: a static server in a fixture folder only) |
 //! | `run-stop` | Stop run on the open session: its process group ends; nothing running fails the step |
@@ -446,6 +448,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "pr-details", run: |this, rest, _, cx| this.step_pr_fixture(rest, true, cx) },
     WindowVerb { verb: "new-branch", run: |this, _, window, cx| this.step_new_branch(window, cx) },
     WindowVerb { verb: "amend", run: |this, rest, _, cx| this.step_changes_amend(rest, cx) },
+    WindowVerb { verb: "commit", run: |this, rest, _, cx| this.step_changes_commit(rest, cx) },
+    WindowVerb { verb: "branch", run: |this, rest, window, cx| this.step_changes_create_branch(rest, window, cx) },
     WindowVerb { verb: "tasks-fixture", run: |this, rest, _, cx| this.step_tasks_fixture(rest, cx) },
     WindowVerb { verb: "tasks-row", run: |this, rest, window, cx| this.step_tasks_row(rest, window, cx) },
     WindowVerb { verb: "run", run: |this, _, _, cx| this.step_run(cx) },
@@ -736,6 +740,12 @@ impl Harness {
                     layout.right_open = true;
                 });
                 self.save_right_for_active(cx);
+                // Outside a capture the pane reads its data in the background
+                // when it paints; a run on a locked screen never paints, so
+                // the read starts here (a later `wait:` lets it land).
+                if !crate::runtime::captures() {
+                    self.with_right_pane(cx, |pane, cx| pane.refresh_now(cx));
+                }
                 Ok(())
             }
             None => {
