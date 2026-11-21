@@ -120,10 +120,10 @@
 //! | `split-ratio:<0..1>` | set the Split's left share, as dragging its divider does (held to 0.2–0.8); free |
 //! | `chrome-import` | open the Import from Chrome sheet (captures read only `BAAZ_CHROME_ROOT`, never the person's Chrome); free |
 //! | `omnibox:<text>` | focus the Browse address field and type `text` (the dropdown stays open on the typed text; entering Browse with its tab when needed), free |
-//! | `find:<query>` | open the Browse find strip on the shown tab with `query` typed (a scripted "3 of 12" result lands through the poll path); empty fails the step, free |
-//! | `permission:<kinds>` | script a permission ask (`camera,microphone`) on the shown tab, so the strip shows; unknown kinds fail the step, free |
-//! | `download:<name>` | script an active download (`done:<name>` lands it) on the shown tab and open the popover; empty fails the step, free |
-//! | `crashed:<reason>` | script a renderer crash on the shown tab, so the Baaz error page shows (empty is "the page crashed (-1)"), free |
+//! | `find:<query>` | open the Browse find strip on the shown tab with `query` typed (a scripted "3 of 12" result lands through the poll path); empty fails the step, free; a real engine (a live run) fails the step, since only a capture's scripted page plays it |
+//! | `permission:<kinds>` | script a permission ask (`camera,microphone`) on the shown tab, so the strip shows; unknown kinds fail the step, free; a real engine (a live run) fails the step, since only a capture's scripted page plays it |
+//! | `download:<name>` | script an active download (`done:<name>` lands it) on the shown tab and open the popover; empty fails the step, free; a real engine (a live run) fails the step, since only a capture's scripted page plays it |
+//! | `crashed:<reason>` | script a renderer crash on the shown tab, so the Baaz error page shows (empty is "the page crashed (-1)"), free; a real engine (a live run) fails the step, since only a capture's scripted page plays it |
 //! | `page-actions` | open the page controls' ⋯ on the shown tab (the library's page menu with its offers); it draws in the overlay window, which a main-window shot does not show; no page fails the step, free |
 //! | `site-set:<origin>\|<key>=<value>,…` | keep site settings for `origin` (capture-only store): `camera=allow`, `microphone=block`, `zoom=125`… (docs/82 8.6); a bad origin, key or value fails the step, free |
 //! | `zoom:<in\|out\|reset>` | step the shown Browse page's zoom, kept for its site, as ⌘= ⌘- ⌘0 do; no page, an engine that cannot zoom, or a level that did not move fails the step, free |

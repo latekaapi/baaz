@@ -349,6 +349,18 @@ impl Harness {
         Ok(())
     }
 
+    /// The four verbs below queue a script that only the in-memory page
+    /// plays (`browser/pages.rs` hands the queue to `FakeWebBackend` and
+    /// drops it for a real engine). On a real engine — a live `--steps`
+    /// run — the verb would do nothing and report success, so it fails.
+    fn scripted_page_only(&self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if self.browser.read(cx).fake || cfg!(test) {
+            Ok(())
+        } else {
+            Err("only a capture's scripted page plays this; a real engine is showing".into())
+        }
+    }
+
     /// `find:<query>`: open the find strip on the shown tab with `query`
     /// typed (a scripted "3 of 12" result lands through the poll path, so
     /// the `browse-find` capture shows the count). An empty query, no
@@ -360,6 +372,7 @@ impl Harness {
         if query.is_empty() {
             return Err("no query given".into());
         }
+        self.scripted_page_only(cx)?;
         self.browser.update(cx, |browser, _| browser.fake_scripts.push(chrome::FakePageScript::Find { query: query.to_owned(), active: 3, total: 12 }));
         if !self.rebuild_shown_browse_page(window, cx) {
             return Err("no tab is shown in Browse".into());
@@ -378,6 +391,7 @@ impl Harness {
     pub(crate) fn step_permission(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         let kinds = chrome::parse_permission_kinds(rest).ok_or_else(|| format!("`{rest}` names an unknown permission"))?;
+        self.scripted_page_only(cx)?;
         self.browser.update(cx, |browser, _| {
             browser.fake_scripts.push(chrome::FakePageScript::Permission {
                 id: 7,
@@ -404,6 +418,7 @@ impl Harness {
         if name.is_empty() {
             return Err("no file name given".into());
         }
+        self.scripted_page_only(cx)?;
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
         let script = chrome::FakePageScript::Download(aui_webview::DownloadState {
             id: 3,
@@ -430,6 +445,7 @@ impl Harness {
         self.set_mode(crate::layout::Mode::Browse, window, cx);
         let reason = rest.trim();
         let reason = if reason.is_empty() { "the page crashed (-1)" } else { reason };
+        self.scripted_page_only(cx)?;
         self.browser.update(cx, |browser, _| browser.fake_scripts.push(chrome::FakePageScript::Crashed(reason.to_owned())));
         if !self.rebuild_shown_browse_page(window, cx) {
             return Err("no tab is shown in Browse".into());
