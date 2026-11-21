@@ -1211,6 +1211,11 @@ ENTRIES.update({
     # session has (here Undo last turn: the replay's last turn is
     # undoable). No baseline yet.
     "session-menu-header":     _populated("overflow", replay=True),
+    # docs/82 8.9, one word each: the ⌘K rows for "continue" (/continue,
+    # "Continue in another provider…") and "page" (/page, "Show the Page in
+    # the right pane"; Skills' row too, set up here). No baselines yet.
+    "palette-continue":        _populated("palette:continue"),
+    "palette-page":            _populated("palette:page"),
     "composer-continue-in":    _populated("row-action:continue-in", replay=True),
     "undo-turn-confirm":       _populated("undo-turn:last", replay=True),
     "revert-file-confirm":     _populated("right-width:440;right:changes;revert-file:crates/baaz/src/layout.rs", replay=True),

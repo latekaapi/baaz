@@ -175,7 +175,7 @@
 //! | `site-info` | open the site-information panel (the address row's shield) for the centre page; no page fails the step |
 //! | `pointer:<x>,<y>` | dispatch one mouse move to that window point: the pointer resting on a row, so a following `sidebar-scroll-sweep:` shows hover under a scroll |
 //! | `transcript-scroll-sweep:<dy,finger_ticks,tail_ticks>` | the transcript's twin of `sidebar-scroll-sweep:`, pushing the active session's own wheel accumulator |
-//! | `overflow` | open the header's ⋯: the session's one menu plus the rows only the open session has (docs/82 8.9) |
+//! | `overflow` | open the header's ⋯: the session's one menu plus the rows only the open session has (docs/82 8.9); fails with no session open (the header then shows no ⋯) |
 //! | `view-menu` | open the Sessions caption's view menu |
 //! | `account` | open the account menu |
 //! | `settings:<section>` | open the Settings page, optionally at that section (`settings` alone reopens the last-visited section, General on first open; `settings:providers/codex` opens a provider sub-page). Idempotent: open, never toggle |
@@ -508,7 +508,13 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "sidebar", run: |this, _, _, cx| { this.toggle_sidebar(cx); Ok(()) } },
     // Was `peek`, which the Browse link verb above shadowed, so it never ran.
     WindowVerb { verb: "sidebar-peek", run: |this, _, _, cx| { this.capture.toggle_peek_pinned(); cx.notify(); Ok(()) } },
-    WindowVerb { verb: "overflow", run: |this, _, _, cx| { this.open_menu(MenuKind::Overflow, cx); Ok(()) } },
+    WindowVerb { verb: "overflow", run: |this, _, _, cx| {
+        if this.active_id(cx).is_none() {
+            return Err("no session is open: the header shows no session menu".into());
+        }
+        this.open_menu(MenuKind::Overflow, cx);
+        Ok(())
+    } },
     WindowVerb { verb: "view-menu", run: |this, _, _, cx| { this.open_menu(MenuKind::ViewOptions, cx); Ok(()) } },
     WindowVerb { verb: "account", run: |this, _, _, cx| { this.open_menu(MenuKind::Account, cx); Ok(()) } },
     WindowVerb { verb: "settings", run: |this, rest, _, cx| this.step_settings(rest, cx) },

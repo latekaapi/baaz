@@ -2929,6 +2929,7 @@ impl Harness {
         let overflow =
             cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.open_menu(MenuKind::Overflow, cx));
         let overflow_open = self.overlays.read(cx).is_open(MenuKind::Overflow);
+        let has_session = self.active_id(cx).is_some();
         // The terminal toggle: ⌃`'s button, lit while the terminal shows,
         // at the bottom or in the pane.
         let term_toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
@@ -2969,8 +2970,10 @@ impl Harness {
             .children(pages_button)
             .child(toggles)
             .child(term_button)
-            .child(div().flex_none().mx(px(scale::SP_2)).w_px().h(px(scale::ICON_DEFAULT)).bg(cx.aui().colors.line))
-            .child(
+            // The session menu only while a session is open (rule 13): with
+            // none, it had nothing to act on.
+            .when(has_session, |row| row.child(div().flex_none().mx(px(scale::SP_2)).w_px().h(px(scale::ICON_DEFAULT)).bg(cx.aui().colors.line)))
+            .when(has_session, |row| row.child(
                 div()
                     .flex_none()
                     .on_children_prepainted(move |bounds, _, cx| {
@@ -2989,7 +2992,7 @@ impl Harness {
                             .menu_open(overflow_open)
                             .on_click(overflow),
                     ),
-            )
+            ))
             .into_any_element()
     }
 
