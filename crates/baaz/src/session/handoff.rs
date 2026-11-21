@@ -58,11 +58,11 @@ impl SessionRuntime {
     }
 
     /// The composer's read-only notice once this session retired into a
-    /// handoff's destination: "Handed off to <Provider> — open the new
+    /// handoff's destination: "Continued in <Provider> — open the new
     /// session". `None` while the session takes sends.
     pub(crate) fn handoff_readonly_notice(&self) -> Option<String> {
         let (to, _) = self.handed_off_to.as_ref()?;
-        Some(format!("Handed off to {} — open the new session", to.label()))
+        Some(format!("Continued in {} — open the new session", to.label()))
     }
 
     /// Append the run's card to the transcript, in a turn of its own — the

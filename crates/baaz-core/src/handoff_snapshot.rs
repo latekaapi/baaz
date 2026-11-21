@@ -143,9 +143,9 @@ pub fn read_snapshot(destination: &str) -> Option<HandoffSnapshot> {
     })
 }
 
-/// The divider's text: "Handed off from \<From> to \<To>", plus the
+/// The divider's text: "Continued in \<To> from \<From>", plus the
 /// destination model and the pack's verbatim turn count when they are known:
-/// "Handed off from Claude Code to Codex · gpt-5 · 4 turns carried". A part
+/// "Continued in Codex from Claude Code · gpt-5 · 4 turns carried". A part
 /// this build does not have is omitted, never guessed. Semicolon-free by
 /// construction: a `;` inside a `send:` step would split the `--steps` list.
 pub fn divider_text(
@@ -154,7 +154,7 @@ pub fn divider_text(
     model: Option<&str>,
     turns_carried: Option<usize>,
 ) -> String {
-    let mut text = format!("Handed off from {} to {}", from.label(), to.label());
+    let mut text = format!("Continued in {} from {}", to.label(), from.label());
     // A model named like its provider ("muse" on Muse) says nothing twice.
     if let Some(model) = model
         .map(str::trim)
@@ -173,7 +173,7 @@ pub fn divider_text(
 /// link of its own — the marker's existing back-link (wired from the origin
 /// the caller also sets) is what opens the previous session.
 pub fn fallback_text(from: ProviderId) -> String {
-    format!("Handed off from {} — earlier turns are in the previous session", from.label())
+    format!("Continued from {} — earlier turns are in the previous session", from.label())
 }
 
 /// The divider as a turn: one assistant turn holding the single marker, so
@@ -595,20 +595,20 @@ mod tests {
     fn the_divider_names_both_providers_the_model_and_the_carried_turns() {
         assert_eq!(
             divider_text(ProviderId::ClaudeCode, ProviderId::Codex, Some("gpt-5"), Some(4)),
-            "Handed off from Claude Code to Codex · gpt-5 · 4 turns carried"
+            "Continued in Codex from Claude Code · gpt-5 · 4 turns carried"
         );
         assert_eq!(
             divider_text(ProviderId::Muse, ProviderId::ClaudeCode, None, Some(1)),
-            "Handed off from Muse to Claude Code · 1 turn carried"
+            "Continued in Claude Code from Muse · 1 turn carried"
         );
         assert_eq!(
             divider_text(ProviderId::Muse, ProviderId::Codex, Some("  "), None),
-            "Handed off from Muse to Codex",
+            "Continued in Codex from Muse",
             "a blank model and an unknown count are both omitted"
         );
         assert_eq!(
             divider_text(ProviderId::Muse, ProviderId::Codex, None, None),
-            "Handed off from Muse to Codex"
+            "Continued in Codex from Muse"
         );
         for text in [
             divider_text(ProviderId::Muse, ProviderId::Codex, Some("m"), Some(2)),
@@ -623,7 +623,7 @@ mod tests {
     fn the_fallback_divider_names_the_source_and_the_previous_session() {
         assert_eq!(
             fallback_text(ProviderId::ClaudeCode),
-            "Handed off from Claude Code — earlier turns are in the previous session"
+            "Continued from Claude Code — earlier turns are in the previous session"
         );
     }
 
@@ -771,7 +771,7 @@ mod tests {
             "handoff-divider-d",
             ProviderId::ClaudeCode,
             ProviderId::Codex,
-            "Handed off from Claude Code to Codex".to_owned(),
+            "Continued in Codex from Claude Code".to_owned(),
         );
         let turns = vec![user("u1", "Plan Greyport"), card, divider.clone(), reply("a1", "On it.")];
         let kept = without_handoff_cards(turns);

@@ -233,12 +233,12 @@ mod tests {
     fn steps_fail_at_start_names_the_pack_step() {
         let mut run = run();
         run.note_quiescing();
-        run.fail("nothing to hand off — the session has no turns".to_owned());
+        run.fail("nothing to carry — the session has no turns".to_owned());
         let steps = run_steps(&run);
         assert!(matches!(steps[0].state, HandoffStepState::Failed));
         assert_eq!(
             steps[0].detail.as_deref(),
-            Some("nothing to hand off — the session has no turns"),
+            Some("nothing to carry — the session has no turns"),
             "the failed step carries the reason"
         );
         assert!(

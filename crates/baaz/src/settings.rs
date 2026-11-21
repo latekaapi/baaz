@@ -362,7 +362,7 @@ pub(crate) fn general_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
         },
         SettingsRow::Switch {
             id: SharedString::from("handoff_model_summary"),
-            label: SharedString::from("Summarise handoffs with a model"),
+            label: SharedString::from("Summarise when a session continues in another provider"),
             detail: Some(SharedString::from(
                 "A cheap model writes the summary the next provider reads (one short turn). Off: the first lines of the earliest replies.",
             )),
@@ -1491,7 +1491,7 @@ impl SettingsPage {
             ),
             self.settings_switch_row(
                 "handoff_model_summary",
-                "Summarise handoffs with a model",
+                "Summarise when a session continues in another provider",
                 "A cheap model writes the summary the next provider reads (one short turn).",
                 crate::layout::Layout::get(cx).handoff_model_summary,
                 cx,

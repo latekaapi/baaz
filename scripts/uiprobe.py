@@ -583,7 +583,7 @@ ENTRIES = {
     "composer-provider":    {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "new;provider"]},
     # The provider menu on a session WITH turns: each other backend reads
-    # "Hand off to X…" first, then "New session on X". The send goes to
+    # under its "Continue in…" header. The send goes to
     # the scripted lane (offline, free); the wait lets its deltas land so
     # `has_turns` is true before the menu opens. No baseline yet —
     # generate on main after merge, never to silence a finding.

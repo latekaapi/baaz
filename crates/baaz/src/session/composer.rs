@@ -947,7 +947,7 @@ impl SessionView {
             }
             Command::Compact => self.runtime.update(cx, |rt, cx| rt.compact(cx)),
             Command::Clear => cx.emit(SessionEvent::NewSession),
-            // `/handoff` opens the provider menu, which reads "Continue
+            // `/continue` (or `/handoff`) opens the provider menu, which reads "Continue
             // in…" on a session with turns: a pick there is the hand-off.
             // With no turns there is nothing to carry, so it says so
             // instead of opening a menu whose picks would only swap.
@@ -955,7 +955,7 @@ impl SessionView {
                 if self.runtime.read(cx).has_turns() {
                     self.toggle_picker(MenuKind::Provider, cx);
                 } else {
-                    self.runtime.update(cx, |rt, cx| rt.set_banner("Nothing to hand off yet — send a turn first.", None, cx));
+                    self.runtime.update(cx, |rt, cx| rt.set_banner("Nothing to continue yet — send a turn first.", None, cx));
                 }
             }
             Command::Logout => cx.emit(SessionEvent::Logout),
@@ -1004,7 +1004,6 @@ impl SessionView {
             // would be worse than no row. `/skills` typed as a whole draft
             // arrives here too: the page opens, and no turn is ever sent.
             Command::RightBrowser
-            | Command::RightDiff
             | Command::RightGit
             | Command::RightFiles
             | Command::Terminal

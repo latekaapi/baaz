@@ -49,7 +49,7 @@
 //! | `name:<name>` | `/name`, the session rename command |
 //! | `hide` | `/hide` the open session |
 //! | `setmodel:<id>` | `session/setModel`, without waiting for the catalog |
-//! | `handoff:<provider>` | "Hand off to X" as a verb (`muse`, `claude-code`, `codex`), headless: no confirm dialog — the command line already asked. Needs turns, refuses on a pending question or approval, and never fires for the session's own provider; an unknown id fails, free |
+//! | `handoff:<provider>` | "Continue in X" as a verb (`muse`, `claude-code`, `codex`), headless: no confirm dialog — the command line already asked. Needs turns, refuses on a pending question or approval, and never fires for the session's own provider; an unknown id fails, free |
 //! | `setprovider:<id>` | the provider menu's row as a verb (`muse`, `claude-code`, `codex`): a fresh session swaps lanes, a session with turns starts a new session on the pick instead and the step fails saying so; an unknown id fails, free |
 //! | `fixture-models` | fill the model menu with a fixed three-row Muse-shaped catalog whose rows open effort submenus (no catalog request), free |
 //! | `submenu` | open the open model menu's highlighted row's submenu (as →); fails when the model menu is closed, free |

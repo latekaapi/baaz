@@ -11,7 +11,7 @@ use super::*;
 /// (keyed by source session), the confirm dialog is shown, destinations
 /// are opened, and acks advance the run to activation.
 impl Harness {
-    /// "Hand off to X…" with a confirm first: freeze the pack preview and
+    /// "Continue in X…" with a confirm first: freeze the pack preview and
     /// show [`handoff_confirm`](aui::transcript::handoff_confirm). A
     /// session with no turns, or a pending question / approval / an
     /// uninterruptible turn, never reaches the dialog — the refusal lands
@@ -64,17 +64,17 @@ impl Harness {
         self.set_dialog(
             cx,
             Dialog {
-                title: format!("Hand off to {}?", to.label()),
+                title: format!("Continue in {}?", to.label()),
                 detail: String::new(),
                 kind: DialogKind::Warning,
-                primary: "Hand off",
+                primary: "Continue",
                 action: DialogAction::HandoffConfirm,
                 archive_target: None,
             },
         );
     }
 
-    /// The confirm dialog's "Hand off": close it and start the run. The
+    /// The confirm dialog's "Continue": close it and start the run. The
     /// frozen facts are taken, so dismissing any other way confirms
     /// nothing afterwards.
     pub(crate) fn confirm_handoff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -180,7 +180,7 @@ impl Harness {
             }
         };
         let Some(pack) = facts.pack.filter(|_| facts.has_turns) else {
-            run.fail("nothing to hand off — the session has no turns".to_owned());
+            run.fail("nothing to carry — the session has no turns".to_owned());
             let card = run.card();
             let card_id = run.card_id.clone();
             self.handoff_state.runs.insert(source, run);
@@ -502,7 +502,7 @@ impl Harness {
     /// The pack never landed — or its pack turn terminally failed while
     /// still Prepared: the run fails with the reason, the source stays
     /// usable (a Failed card sends again), the chain links roll back,
-    /// and the destination row reads "Hand-off failed: <reason>". Past
+    /// and the destination row reads "Couldn't continue: <reason>". Past
     /// Prepared the move owns its state and this is a no-op (see
     /// [`crate::handoff::HandoffRun::fail_pack_turn`]). An event for an
     /// unknown destination is ignored — it belongs to no run.
@@ -522,7 +522,7 @@ impl Harness {
             view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.replace_handoff_card(&card_id, card, cx)));
         }
         self.clear_handoff_links(&source, &dest, cx);
-        let row_reason = format!("Hand-off failed: {reason}");
+        let row_reason = format!("Couldn't continue: {reason}");
         self.session_list.update(cx, |list, _| {
             if let Some(entry) = list.sessions.iter_mut().find(|entry| entry.id == dest) {
                 entry.last_error = Some(row_reason.clone());

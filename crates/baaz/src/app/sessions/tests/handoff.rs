@@ -402,7 +402,7 @@ fn a_pack_turn_that_fails_fails_the_handoff(cx: &mut gpui::TestAppContext) {
             assert_eq!(run.reason.as_deref(), Some(reason));
             let entry =
                 harness.session_list.read(cx).sessions.iter().find(|entry| entry.id == "dest-m").expect("the row");
-            let expected_row = format!("Hand-off failed: {reason}");
+            let expected_row = format!("Couldn't continue: {reason}");
             assert_eq!(
                 entry.last_error.as_deref(),
                 Some(expected_row.as_str()),

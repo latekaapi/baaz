@@ -152,7 +152,7 @@ fn a_snapshot_round_trips_prefix_divider_and_own_turns() {
     let turns = vec![
         user("u1", "Name three ferry routes"),
         reply("a1", "Cormorant, Heron, Gull"),
-        divider("div-1", "Handed off from Claude Code to Codex · gpt-5 · 2 turns carried"),
+        divider("div-1", "Continued in Codex from Claude Code · gpt-5 · 2 turns carried"),
         reply("a2", "Got it — ready to continue…"),
     ];
     // Keys mirror the real file schema (`HandoffSnapshot` serializes
@@ -245,12 +245,12 @@ fn sidebar_half_wiring_one_row_per_chain() {
 #[test]
 fn divider_texts_name_both_providers_and_stay_step_safe() {
     for text in [
-        "Handed off from Claude Code to Codex · gpt-5 · 2 turns carried",
-        "Handed off from Muse to Claude Code · 1 turn carried",
-        "Handed off from Muse to Codex",
-        "Handed off from Claude Code — earlier turns are in the previous session",
+        "Continued in Codex from Claude Code · gpt-5 · 2 turns carried",
+        "Continued in Claude Code from Muse · 1 turn carried",
+        "Continued in Codex from Muse",
+        "Continued from Claude Code — earlier turns are in the previous session",
     ] {
         assert!(!text.contains(';'), "a `;` would split the `--steps` list: {text}");
-        assert!(text.starts_with("Handed off from "), "the divider reads as a handoff: {text}");
+        assert!(text.starts_with("Continued "), "the divider says the session continued: {text}");
     }
 }

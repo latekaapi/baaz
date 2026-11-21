@@ -652,8 +652,8 @@ pub enum SessionEvent {
         /// The picked backend.
         provider: ProviderId,
     },
-    /// The person picked "Hand off to X…" (composer provider menu, or ⌘K
-    /// `/handoff`): the session's turns move to a fresh session on the
+    /// The person picked "Continue in X…" (composer provider menu, or ⌘K
+    /// `/continue`): the session's turns move to a fresh session on the
     /// pick as a lossy re-prompt (see [`crate::handoff`]). A same-provider
     /// pick never emits this — [`SessionView::pick_provider`] keeps it a
     /// menu close, and the run itself refuses it as a model change.

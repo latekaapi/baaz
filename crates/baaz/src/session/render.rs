@@ -4102,7 +4102,7 @@ mod tests {
         );
         assert_eq!(
             cached_handoff_dividers(vc, &view),
-            vec!["Handed off from Claude Code to Codex · gpt-5 · 2 turns carried".to_owned()],
+            vec!["Continued in Codex from Claude Code · gpt-5 · 2 turns carried".to_owned()],
             "the divider says what crossed over"
         );
         // The pack stays in the provider history: the fold still holds it,
@@ -4152,7 +4152,7 @@ mod tests {
         assert_eq!(cached_ids(vc, &view), vec!["handoff-divider-dest-r"]);
         assert_eq!(
             cached_handoff_dividers(vc, &view),
-            vec!["Handed off from Muse — earlier turns are in the previous session".to_owned()]
+            vec!["Continued from Muse — earlier turns are in the previous session".to_owned()]
         );
     }
 

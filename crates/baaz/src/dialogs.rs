@@ -185,8 +185,8 @@ impl DialogView {
     /// The handoff confirm: the library's own dialog — the destination row,
     /// the Carried / Not carried lists the card draws, the pack size and the
     /// honest fresh-start note — over the same modal layer every other
-    /// dialog uses. Cancel closes it (the frozen facts leave with it); Hand
-    /// off starts the run.
+    /// dialog uses. Cancel closes it (the frozen facts leave with it);
+    /// Continue starts the run.
     fn render_handoff(&self, state: crate::handoff::HandoffConfirmState, cx: &mut Context<Self>) -> AnyElement {
         let action = self.dialog.action;
         let target = self.dialog.archive_target.clone();
@@ -607,8 +607,8 @@ impl Harness {
                 self.select_right(RightKind::Browser, cx);
                 true
             }
-            Command::RightDiff | Command::RightGit => {
-                // B8: both spellings open the merged Changes view, without
+            Command::RightGit => {
+                // B8: `/changes` (and `/diff`) open the merged Changes view, without
                 // ever toggling it shut when it already shows.
                 self.select_right(RightKind::Changes, cx);
                 true
@@ -1299,7 +1299,6 @@ mod tests {
         let vc = cx.add_empty_window();
         for (command, kind) in [
             (Command::RightBrowser, RightKind::Browser),
-            (Command::RightDiff, RightKind::Changes),
             (Command::RightGit, RightKind::Changes),
             (Command::RightFiles, RightKind::Files),
         ] {
@@ -1339,9 +1338,7 @@ mod tests {
     /// [`Command::ALL`] is either a window command (`run_window_command`
     /// returns `true`) or a session command (`false`), the six window ones
     /// are in the window set, and the other eighteen are not. A 25th variant
-    /// that lands in neither path fails here. (`RightDiff` is a legacy
-    /// alias with no palette row: still window-handled when invoked, but
-    /// not in `ALL`, so not counted here.)
+    /// that lands in neither path fails here.
     #[gpui::test]
     fn every_command_is_on_exactly_one_dispatch_side(cx: &mut gpui::TestAppContext) {
         let state = hermetic_state("sides");
@@ -1358,7 +1355,6 @@ mod tests {
             let is_window = matches!(
                 command,
                 Command::RightBrowser
-                    | Command::RightDiff
                     | Command::RightGit
                     | Command::RightFiles
                     | Command::Terminal

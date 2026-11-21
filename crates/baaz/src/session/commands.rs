@@ -145,7 +145,7 @@ impl SessionRuntime {
         // transcript the pack already captured. It resumes if the move
         // fails; the draft is kept either way.
         if self.handoff_quiescing() {
-            self.banner = Some("Handoff in progress — sends resume if it fails.".to_owned());
+            self.banner = Some("Continuing in another provider — sends resume if it fails.".to_owned());
             self.banner_action = None;
             self.restore_prompt(text, cx);
             return;
