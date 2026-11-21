@@ -636,6 +636,7 @@ impl SessionView {
                 (offered, tap)
             }),
             undone: self.rt(cx).undone_notes(),
+            find_marks: self.find_marks_for_frame(cx),
         }
     }
 

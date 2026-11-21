@@ -256,6 +256,10 @@ pub struct Overlays {
     /// wrappers on their triggers — what `aui::overlay::anchored_menu`
     /// seats them at (menus anchor to their triggers, never constants).
     anchors: [Option<gpui::Bounds<gpui::Pixels>>; 2],
+    /// The transcript's find bar (⌘F, docs/82 7.5): one per window, naming
+    /// the session it searches ([`crate::session::find`]). `None` while
+    /// closed — the transcript's frame then reads no marks at all.
+    pub(crate) transcript_find: Option<gpui::Entity<crate::session::find::TranscriptFind>>,
 }
 
 /// A shell menu's anchor ([`Overlays::note_anchor`]).

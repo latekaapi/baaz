@@ -1056,6 +1056,11 @@ ENTRIES.update({
     "transcript-full-compact": _populated("settings-set:density=compact", replay=True, sidebar=False),
     "sidebar-projects-compact": _populated(_PROJECTS + ";settings-set:density=compact"),
     "transcript-full-large":   _populated("settings-set:text-size=large", replay=True, sidebar=False),
+    # docs/82 7.5: ⌘F's bar over the populated transcript, every match of
+    # "validation" tinted and the current one stronger, the count reading
+    # "N of M"; then one ⌘G on, the next match current and scrolled to.
+    "transcript-find":         _populated("transcript-find:validation", replay=True, sidebar=False),
+    "transcript-find-next":    _populated("transcript-find:validation;transcript-find-next", replay=True, sidebar=False),
     "composer-menu-model":     _populated("fixture-models;model", replay=True),
     "composer-menu-effort":    _populated("effort", replay=True),
     "composer-menu-provider":  _populated("provider", replay=True),

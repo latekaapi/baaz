@@ -300,7 +300,7 @@ pub(crate) fn settings_crumb_target(section: &str, index: usize) -> Option<&'sta
 /// actually carries ([`shortcut_row_id`]); both live on Shortcuts.
 pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
     match id {
-        "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns" | "archive_on_merge" => Some("general"),
+        "auto_title" | "auto_summary" | "handoff_model_summary" | "fold_finished_turns" | "archive_on_merge" | "open_in" => Some("general"),
         "theme" | "summary_line" => Some("appearance"),
         "group_branch" => Some("sidebar"),
         "notify_needs_you" | "notify_done" | "notify_failed" | "notify_sound" | "notify_badge" => Some("notifications"),
@@ -1352,6 +1352,7 @@ impl SettingsPage {
         settings_sections_stack()
             .child(self.settings_group("Model housekeeping", rows, cx))
             .child(self.settings_group("Transcript", transcript, cx))
+            .child(self.settings_editor_group(cx))
             .child(self.settings_worktrees_group(window, cx))
             .child(self.settings_group("Pull requests", pull_requests, cx))
             .into_any_element()
@@ -1425,6 +1426,61 @@ impl SettingsPage {
     }
 
 
+
+    /// General › Files (docs/82 7.5): "Open files in" — Default app plus
+    /// each editor found in `/Applications` and `~/Applications`, as a chip
+    /// whose menu lists them. The file preview's open button, a Changes
+    /// row's and the session ⋯ menu's "Open project in …" all follow it.
+    fn settings_editor_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        use aui::composer::{model_menu, PickerRow};
+        let p = cx.aui().colors;
+        let open = self.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::EditorMenu);
+        let label = crate::open_in::choice_label(cx);
+        let chip = button("settings-open-in", label.clone())
+            .trailing(aui_icons::icon(IconName::ChevronDown).size(px(scale::ICON_SM)).color(p.fg_muted))
+            .menu_open(open)
+            .accessibility_label(format!("Open files in, {label}. Change"))
+            .on_click(cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                let open = !this.overlays.read(cx).stack.is_open(crate::overlay_stack::LayerKind::EditorMenu);
+                this.set_menu(crate::overlay_stack::Layer::EditorMenu, open, cx);
+            }));
+        let mut anchor = div().relative().flex_none().child(div().debug_selector(|| "settings-open-in".into()).child(chip));
+        if open {
+            let found = crate::open_in::detected();
+            let mut rows = vec![PickerRow::new(baaz_core::editors::DEFAULT_APP, "Default app", "macOS picks by file type")];
+            rows.extend(found.iter().map(|f| PickerRow::new(f.editor.id, f.editor.name, f.app.to_string_lossy().into_owned())));
+            let selected = crate::open_in::chosen(cx)
+                .and_then(|c| found.iter().position(|f| f.editor.id == c.editor.id))
+                .map_or(0, |i| i + 1);
+            let pick = cx.entity().downgrade();
+            let close = pick.clone();
+            anchor = anchor.child(
+                model_menu("settings-open-in-menu", rows, selected, true)
+                    .align_end(true)
+                    .drop_down(true)
+                    .title("Open files in")
+                    .on_pick(move |row, _, cx| {
+                        let id = row.to_string();
+                        let _ = pick.update(cx, |this, cx| {
+                            crate::layout::Layout::stage(cx, |layout| {
+                                layout.open_in = (id != baaz_core::editors::DEFAULT_APP).then_some(id);
+                            });
+                            this.set_menu(crate::overlay_stack::Layer::EditorMenu, false, cx);
+                            crate::layout::Layout::save(cx);
+                        });
+                    })
+                    .on_close(move |_, cx| {
+                        let _ = close.update(cx, |this, cx| {
+                            this.set_menu(crate::overlay_stack::Layer::EditorMenu, false, cx);
+                        });
+                    }),
+            );
+        }
+        let row = settings_row("Open files in")
+            .description("Where a file preview, a Changes row and a session's folder open. An editor that takes a line opens at the selected line.")
+            .control(anchor);
+        self.settings_group("Files", vec![row.into_any_element()], cx)
+    }
 
     /// The Search group: the four engines as one segmented choice. The
     /// address field commits to the chosen one from the next Enter on.

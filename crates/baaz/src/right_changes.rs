@@ -1294,6 +1294,10 @@ pub(crate) fn changes_screen(
             let toggle_change = change.clone();
             let open_root = root_buf.clone();
             let open_abs = root.join(&change.path);
+            // docs/82 7.5: the row's first hunk, when its diff is loaded, is
+            // where "Open in …" lands.
+            let first_line = diffs.get(&change.path).cloned().flatten().and_then(|diff| change_open_line(&diff));
+            let open_label = crate::open_in::open_label(cx);
             let row_el = |id: SharedString, cx: &mut Context<RightPane>| {
                 let (r1, c1, r2, a2) = (toggle_root.clone(), toggle_change.clone(), open_root.clone(), open_abs.clone());
                 let mut row = change_row(id, change.clone(), open).width(px(width)).flash(flash_amount).on_toggle(cx.listener(move |this, _, _, cx| {
@@ -1303,6 +1307,10 @@ pub(crate) fn changes_screen(
                     row = row.on_open_file(cx.listener(move |_, _, _, cx| {
                         cx.emit(RightPaneEvent::Reveal { root: r2.clone(), abs: a2.clone() });
                     }));
+                    let a3 = open_abs.clone();
+                    row = row.on_open_in(open_label.clone(), move |_, _, cx| {
+                        crate::open_in::open_path(&a3, first_line, cx);
+                    });
                 }
                 row
             };
@@ -1860,6 +1868,12 @@ fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, menu: bool, window:
     (Some(row), screen.into_any_element())
 }
 
+/// The line a Changes row's "Open in …" lands on (docs/82 7.5): the new
+/// side's start of the diff's first hunk; `None` opens at the top.
+pub(crate) fn change_open_line(diff: &aui_protocol::Diff) -> Option<u32> {
+    diff.hunks.first().and_then(|hunk| aui::workbench::hunk_new_start(&hunk.header)).filter(|n| *n > 0)
+}
+
 #[cfg(test)]
 mod tests {
     /// docs/82 7.2: the default ticks are the session's own files when it
@@ -1949,6 +1963,15 @@ mod tests {
         assert_eq!(clean_draft("```\nFix the thing\n```"), "Fix the thing");
         assert_eq!(clean_draft("\"Fix it\""), "Fix it");
         assert_eq!(clean_draft("I need to look first.\n<function_calls>\n<invoke name=\"bash\">"), "", "a tool call is no draft");
+    }
+
+    #[test]
+    fn a_rows_open_in_lands_on_its_first_hunk() {
+        let hunk = |header: &str| aui_protocol::Hunk { header: header.into(), lines: Vec::new() };
+        let diff = |hunks| aui_protocol::Diff { path: "a.rs".into(), hunks, added: 1, removed: 0 };
+        assert_eq!(super::change_open_line(&diff(vec![hunk("@@ -40,5 +42,7 @@ fn x"), hunk("@@ -90 +94 @@")])), Some(42));
+        assert_eq!(super::change_open_line(&diff(Vec::new())), None, "no hunk: the top");
+        assert_eq!(super::change_open_line(&diff(vec![hunk("@@ -0,0 +0,0 @@")])), None);
     }
 
     #[test]

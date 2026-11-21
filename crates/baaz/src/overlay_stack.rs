@@ -109,6 +109,8 @@ pub(crate) enum Layer {
     PageMenu,
     /// The Settings page's assistant picker.
     AssistantMenu,
+    /// Settings › General's "Open files in" picker (docs/82 7.5).
+    EditorMenu,
     /// The connect screen's footer menu ("New sessions start in").
     ConnectMenu,
     /// The Settings page's "New sessions start in" menu.
@@ -155,6 +157,7 @@ pub(crate) enum LayerKind {
     FilesMenu,
     PageMenu,
     AssistantMenu,
+    EditorMenu,
     ConnectMenu,
     DefaultProviderMenu,
     HandoffPicker,
@@ -186,6 +189,7 @@ impl Layer {
             Layer::FilesMenu(_) => LayerKind::FilesMenu,
             Layer::PageMenu => LayerKind::PageMenu,
             Layer::AssistantMenu => LayerKind::AssistantMenu,
+            Layer::EditorMenu => LayerKind::EditorMenu,
             Layer::ConnectMenu => LayerKind::ConnectMenu,
             Layer::DefaultProviderMenu => LayerKind::DefaultProviderMenu,
             Layer::HandoffPicker => LayerKind::HandoffPicker,

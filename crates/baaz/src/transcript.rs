@@ -222,6 +222,10 @@ pub struct Folds {
     pub undo_turn: Option<(Rc<HashSet<String>>, CardHandler)>,
     /// docs/82 6.4: turn id → the quiet note drawn under that undone turn.
     pub undone: Rc<HashMap<String, String>>,
+    /// docs/82 7.5: the find bar's marks by markdown view — a user turn's
+    /// id, an assistant text block's [`block_key`]. Empty while the bar is
+    /// closed (one shared map, nothing per frame).
+    pub find_marks: Rc<HashMap<String, Rc<Vec<aui::transcript::FindMark>>>>,
 }
 
 /// Q1b: stamp first-seen wall times for every tool-call id in `turns`
@@ -1649,6 +1653,7 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
                 (None, Some((_, span, strength))) => turn.span_selection(Some(span)).span_strength(*strength),
                 (held, _) => turn.span_selection(held.map(|(_, held)| held)),
             };
+            turn = turn.find_marks(folds.find_marks.get(id).cloned());
             if let Some(on_event) = &folds.span_event {
                 let on_event = on_event.clone();
                 let (turn_id, source) = (id.clone(), text.clone());
@@ -1884,7 +1889,10 @@ fn block(
 ) -> AnyElement {
     let id = ElementId::from(SharedString::from(key.to_owned()));
     match block {
-        Block::Text { text, streaming } => text_card(id, turn_id, text, *streaming, last, meta, timestamp, folds),
+        Block::Text { text, streaming } => {
+            let marks = folds.find_marks.get(key).cloned();
+            text_card(id, turn_id, text, *streaming, last, meta, timestamp, folds, marks)
+        }
         Block::Thinking { text, elapsed_ms, summary, state } => {
             thinking_card(id, key, text, *elapsed_ms, summary.as_deref(), *state, folds)
                 .unwrap_or_else(|| div().into_any_element())
@@ -2013,6 +2021,7 @@ fn text_card(
     meta: Option<&TurnMeta>,
     timestamp: Option<u64>,
     folds: &Folds,
+    find_marks: Option<Rc<Vec<aui::transcript::FindMark>>>,
 ) -> AnyElement {
     // D4: the hover rail (copy + footer) belongs to the message, so only
     // the closing block carries it; relative image paths resolve against
@@ -2020,6 +2029,7 @@ fn text_card(
     let mut turn = assistant_turn(id.clone(), text.to_owned())
         .streaming(streaming)
         .rail(last)
+        .find_marks(find_marks)
         .image_root((!folds.workspace_root.is_empty()).then(|| SharedString::from(folds.workspace_root.clone())));
     if let Some(meta) = meta {
         if last && !streaming && meta != &TurnMeta::default() {
@@ -3247,6 +3257,7 @@ mod tests {
             tool_starts: Rc::new(HashMap::new()),
             undo_turn: None,
             undone: Rc::new(HashMap::new()),
+            find_marks: Rc::new(HashMap::new()),
         }
     }
 

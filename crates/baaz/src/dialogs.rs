@@ -56,6 +56,7 @@ enum OverflowAction {
     StopRun,
     UndoLastTurn,
     MoveBack,
+    OpenProject,
     Archive,
 }
 
@@ -67,8 +68,10 @@ enum OverflowAction {
 /// session whose provider can resume it in the project folder
 /// (`move_back`; docs/82 6.2), and Run — or Show run and Stop run while it
 /// runs — only where the session's folder declares `run` (`run`; docs/82
-/// 7.4).
-fn overflow_rows(fork: bool, run: Option<crate::project_run::RunOffer>, undo_last: bool, move_back: bool) -> (Vec<MenuRow>, Vec<OverflowAction>) {
+/// 7.4). "Open project in …" (`open_project`, the row's words) only while
+/// Settings › General › "Open files in" names an installed editor (docs/82
+/// 7.5).
+fn overflow_rows(fork: bool, run: Option<crate::project_run::RunOffer>, undo_last: bool, move_back: bool, open_project: Option<String>) -> (Vec<MenuRow>, Vec<OverflowAction>) {
     use crate::project_run::RunOffer;
     let mut rows = vec![MenuRow::Toggle { label: "Rename".into(), checked: false }];
     let mut actions = vec![OverflowAction::Rename];
@@ -96,6 +99,10 @@ fn overflow_rows(fork: bool, run: Option<crate::project_run::RunOffer>, undo_las
     if move_back {
         rows.push(MenuRow::Toggle { label: MOVE_BACK_LABEL.into(), checked: false });
         actions.push(OverflowAction::MoveBack);
+    }
+    if let Some(label) = open_project {
+        rows.push(MenuRow::Toggle { label: label.into(), checked: false });
+        actions.push(OverflowAction::OpenProject);
     }
     rows.push(MenuRow::Toggle { label: "Archive".into(), checked: false });
     actions.push(OverflowAction::Archive);
@@ -675,7 +682,9 @@ impl Harness {
             .active
             .as_ref()
             .is_some_and(|view| view.read(cx).rt(cx).offers(provider::Capability::ForkSession));
-        let (rows, actions) = overflow_rows(fork, self.run_offer(cx), self.undo_last_offered(cx), self.move_back_offered(cx));
+        let folder = self.active.as_ref().and_then(|view| crate::open_in::project_folder(view.read(cx).rt(cx).workspace_path()));
+        let open_project = folder.as_ref().and_then(|_| crate::open_in::project_label(cx));
+        let (rows, actions) = overflow_rows(fork, self.run_offer(cx), self.undo_last_offered(cx), self.move_back_offered(cx), open_project);
         let activate = cx.listener(move |this: &mut Self, index: &usize, window, cx| {
             let action = actions.get(*index).copied();
             this.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
@@ -714,6 +723,11 @@ impl Harness {
                 Some(OverflowAction::MoveBack) => {
                     if let Err(why) = this.move_back_to_root(cx) {
                         this.overlays.update(cx, |overlays, cx| overlays.toast("Couldn't move back", why, cx));
+                    }
+                }
+                Some(OverflowAction::OpenProject) => {
+                    if let Some(folder) = folder.as_ref() {
+                        crate::open_in::open_path(folder, None, cx);
                     }
                 }
                 Some(OverflowAction::Archive) => {
@@ -1188,32 +1202,37 @@ mod tests {
             MenuRow::Toggle { label, checked } => (label.to_string(), *checked),
             _ => panic!("overflow rows are toggles"),
         };
-        let (rows, actions) = super::overflow_rows(true, None, false, false);
+        let (rows, actions) = super::overflow_rows(true, None, false, false, None);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Fork", "Archive"]);
         assert!(rows.iter().all(|r| !label(r).1), "no row is checked");
         assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::Fork, super::OverflowAction::Archive]);
         // A provider that cannot fork shows no Fork row (docs/82 5.5).
-        let (rows, actions) = super::overflow_rows(false, None, false, false);
+        let (rows, actions) = super::overflow_rows(false, None, false, false, None);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Archive"]);
         assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::Archive]);
         // A worktree session whose provider resumes in a named folder gets
         // Move back, above Archive (docs/82 6.2).
-        let (rows, actions) = super::overflow_rows(false, None, false, true);
+        let (rows, actions) = super::overflow_rows(false, None, false, true, None);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Move back to project folder", "Archive"]);
         assert_eq!(actions, [super::OverflowAction::Rename, super::OverflowAction::MoveBack, super::OverflowAction::Archive]);
         // A finished turn Undo can act on adds Undo last turn (docs/82 6.4).
-        let (rows, actions) = super::overflow_rows(true, None, true, false);
+        let (rows, actions) = super::overflow_rows(true, None, true, false, None);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Fork", "Undo last turn", "Archive"]);
         assert_eq!(actions[2], super::OverflowAction::UndoLastTurn);
         // A folder that declares `run` gets Run; while it runs, Show run and
         // Stop run instead — never a second Run (docs/82 7.4).
         use crate::project_run::RunOffer;
-        let (rows, actions) = super::overflow_rows(false, Some(RunOffer::Idle), false, false);
+        let (rows, actions) = super::overflow_rows(false, Some(RunOffer::Idle), false, false, None);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Run", "Archive"]);
         assert_eq!(actions[1], super::OverflowAction::Run);
-        let (rows, actions) = super::overflow_rows(false, Some(RunOffer::Running), false, false);
+        let (rows, actions) = super::overflow_rows(false, Some(RunOffer::Running), false, false, None);
         assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Show run", "Stop run", "Archive"]);
         assert_eq!(&actions[1..3], [super::OverflowAction::ShowRun, super::OverflowAction::StopRun]);
+        // An editor chosen in Settings › General adds "Open project in …"
+        // above Archive (docs/82 7.5); the default app adds nothing.
+        let (rows, actions) = super::overflow_rows(false, None, false, false, Some("Open project in Zed".into()));
+        assert_eq!(rows.iter().map(|r| label(r).0).collect::<Vec<_>>(), ["Rename", "Open project in Zed", "Archive"]);
+        assert_eq!(actions[1], super::OverflowAction::OpenProject);
     }
 
     use crate::palette::{filter_commands, tilde_root};

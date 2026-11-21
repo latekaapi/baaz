@@ -18,6 +18,7 @@ pub mod clock;
 pub mod conn;
 pub mod db;
 pub mod details;
+pub mod editors;
 pub mod files;
 pub mod full_output;
 pub mod git_ops;

@@ -76,6 +76,7 @@ mod login;
 mod mascot;
 mod native_lights;
 mod newtab_ground;
+mod open_in;
 mod overlay;
 mod overlay_stack;
 mod overlays;

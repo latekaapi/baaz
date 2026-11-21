@@ -216,6 +216,7 @@ mod clocks;
 mod commands;
 mod composer;
 mod events;
+pub(crate) mod find;
 mod handoff;
 mod lane;
 mod runtime;

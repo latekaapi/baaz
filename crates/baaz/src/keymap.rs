@@ -159,6 +159,9 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "SkillsFind", keystroke: "cmd-f", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Search skills" },
     KeymapEntry { action: "SkillsClose", keystroke: "escape", context: Some(crate::skills_page::SKILLS_CONTEXT), category: "skills", label: "Leave the Skills page" },
     KeymapEntry { action: "SettingsFind", keystroke: "cmd-f", context: Some(crate::app::SETTINGS_CONTEXT), category: "settings", label: "Search shortcuts" },
+    KeymapEntry { action: "FindInTranscript", keystroke: "cmd-f", context: Some(crate::app::SESSIONS_ROOT_CONTEXT), category: "transcript", label: "Find in transcript" },
+    KeymapEntry { action: "FindNextInTranscript", keystroke: "cmd-g", context: Some(crate::app::SESSIONS_ROOT_CONTEXT), category: "transcript", label: "Next match" },
+    KeymapEntry { action: "FindPrevInTranscript", keystroke: "cmd-shift-g", context: Some(crate::app::SESSIONS_ROOT_CONTEXT), category: "transcript", label: "Previous match" },
 ];
 
 /// Builds one [`gpui::KeyBinding`] per [`KEYMAP`] row, in table order.
@@ -353,6 +356,9 @@ fn binding_for_action(action: &str, keystroke: &str, context: Option<&str>) -> O
         "SkillsFind" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsFind, context)),
         "SkillsClose" => Some(gpui::KeyBinding::new(keystroke, crate::app::SkillsClose, context)),
         "SettingsFind" => Some(gpui::KeyBinding::new(keystroke, crate::app::SettingsFind, context)),
+        "FindInTranscript" => Some(gpui::KeyBinding::new(keystroke, crate::app::FindInTranscript, context)),
+        "FindNextInTranscript" => Some(gpui::KeyBinding::new(keystroke, crate::app::FindNextInTranscript, context)),
+        "FindPrevInTranscript" => Some(gpui::KeyBinding::new(keystroke, crate::app::FindPrevInTranscript, context)),
         "NoAction" => Some(gpui::KeyBinding::new(keystroke, gpui::NoAction {}, context)),
         _ => None,
     }
@@ -1849,6 +1855,45 @@ mod tests {
         let claimed = super::claimed_shortcuts(&loaded.bindings);
         assert!(!claimed_has(&claimed, "cmd-k"), "the unbound library ⌘K stays with the page");
         assert!(claimed_has(&claimed, "cmd-l"), "the rest of the set is untouched");
+    }
+
+    /// docs/82 7.5: ⌘F opens the transcript's find at the Sessions root, and
+    /// never takes ⌘F from Browse (whose root wears `BaazBrowse`), Settings
+    /// or Skills (deeper nodes), nor ⌘G from anything; the find keys stay out
+    /// of the set a focused web page yields to the app.
+    #[test]
+    fn transcript_find_keys_never_take_cmd_f_from_browse_settings_or_skills() {
+        let keymap = gpui::Keymap::new(super::build_bindings());
+        let ctx = |source: &str| gpui::KeyContext::parse(source).expect("a context");
+        let winner = |key: &'static str, stack: &[gpui::KeyContext]| -> Option<String> {
+            let keystroke = gpui::Keystroke::parse(key).expect("a keystroke");
+            let (found, _) = keymap.bindings_for_input(&[keystroke], stack);
+            found.first().map(|binding| binding.action().name().rsplit("::").next().unwrap_or_default().to_owned())
+        };
+        let sessions_root = ctx(aui::keys::ROOT_CONTEXT);
+        let browse_root = ctx(crate::app::BROWSE_ROOT_CONTEXT);
+        // Sessions, focus anywhere under the root (the composer included).
+        assert_eq!(winner("cmd-f", std::slice::from_ref(&sessions_root)).as_deref(), Some("FindInTranscript"));
+        assert_eq!(winner("cmd-f", &[sessions_root.clone(), ctx(crate::app::COMPOSER_CONTEXT)]).as_deref(), Some("FindInTranscript"));
+        assert_eq!(winner("cmd-g", std::slice::from_ref(&sessions_root)).as_deref(), Some("FindNextInTranscript"));
+        assert_eq!(winner("cmd-shift-g", std::slice::from_ref(&sessions_root)).as_deref(), Some("FindPrevInTranscript"));
+        // Browse keeps its own find.
+        assert_eq!(winner("cmd-f", std::slice::from_ref(&browse_root)).as_deref(), Some("FindInPage"));
+        assert_eq!(winner("cmd-g", std::slice::from_ref(&browse_root)), None);
+        // Settings and Skills keep their search fields.
+        assert_eq!(winner("cmd-f", &[sessions_root.clone(), ctx(crate::app::SETTINGS_CONTEXT)]).as_deref(), Some("SettingsFind"));
+        assert_eq!(winner("cmd-f", &[sessions_root.clone(), ctx(crate::skills_page::SKILLS_CONTEXT)]).as_deref(), Some("SkillsFind"));
+        // A focused page keeps ⌘F and ⌘G in Sessions: the find rows are not
+        // app-level claims, so ⌘F stays Browse-only and ⌘G unclaimed.
+        let bindings = super::build_bindings();
+        assert!(claimed_has(&super::browse_only_shortcuts(&bindings), "cmd-f"));
+        assert!(!claimed_has(&super::claimed_shortcuts(&bindings), "cmd-g"));
+        // The rows list under the transcript in Settings › Shortcuts.
+        for action in ["FindInTranscript", "FindNextInTranscript", "FindPrevInTranscript"] {
+            let row = super::KEYMAP.iter().find(|row| row.action == action).expect("a row");
+            assert_eq!(row.category, "transcript");
+            assert_eq!(row.context, Some(crate::app::SESSIONS_ROOT_CONTEXT));
+        }
     }
 
     /// B2a-H3b: the `BaazBrowse`-only subset is exactly the chords that

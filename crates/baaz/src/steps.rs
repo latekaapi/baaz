@@ -79,6 +79,10 @@
 //! | `quote` | quote the held selection into the composer (the selection bar's Quote, D6 §0) |
 //! | `copy:<turn>` | capture aid: press the turn's copy button (0-based, like `select-span`), so the success check holds for the screenshot, free |
 //! | `top` | jump to the head of the transcript |
+//! | `transcript-find:<query>` | ⌘F's bar on the open transcript with `<query>` typed: every match tinted, the first from the reader's place current and scrolled to (docs/82 7.5); fails on an empty query or no match |
+//! | `transcript-find-next` | ⌘G / ⏎ in the bar: the next match, wrapping; fails with no bar or no match |
+//! | `transcript-find-prev` | ⇧⌘G / ⇧⏎: the previous match, wrapping; fails with no bar or no match |
+//! | `transcript-find-close` | Esc / Done: close the bar and clear every mark; fails with no bar |
 //! | `mid` | jump to the middle of the transcript |
 //! | `end` | jump to the tail of the transcript |
 //! | `expand-groups` | open every folded tool group |
@@ -1009,6 +1013,20 @@ fn post_key_event(code: u16, _flags: u64) {
 /// The open session's `--steps` verbs.
 pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "draft", run: |v, rest, window, cx| { v.set_draft(rest.to_owned(), window, cx); Ok(()) } },
+    // ⌘F's bar on the transcript (docs/82 7.5): `transcript-find:<query>`
+    // types the query (opening the bar); fails on an empty query or when
+    // nothing matched. Next / previous fail with no bar or no match; close
+    // fails with no bar.
+    SessionVerb {
+        verb: "transcript-find",
+        run: |v, rest, window, cx| match v.step_find(rest, window, cx)? {
+            label if label == "No matches" => Err(format!("transcript-find: no match for `{rest}`")),
+            _ => Ok(()),
+        },
+    },
+    SessionVerb { verb: "transcript-find-next", run: |v, _, _, cx| if v.find_step(true, cx) { Ok(()) } else { Err("transcript-find-next: no bar or no match".into()) } },
+    SessionVerb { verb: "transcript-find-prev", run: |v, _, _, cx| if v.find_step(false, cx) { Ok(()) } else { Err("transcript-find-prev: no bar or no match".into()) } },
+    SessionVerb { verb: "transcript-find-close", run: |v, _, window, cx| if v.close_find(window, cx) { Ok(()) } else { Err("transcript-find-close: no bar open".into()) } },
     SessionVerb { verb: "send", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_send(rest, cx)) },
     // The billing banner's "Send anyway", as a verb: sends what the guard
     // held back — **costs a turn** when there is anything to send.

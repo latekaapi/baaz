@@ -250,6 +250,12 @@ actions!(
         SkillsClose,
         /// Focus the Settings Shortcuts search field (⌘F on the page).
         SettingsFind,
+        /// Open the find bar over the open transcript (⌘F in Sessions).
+        FindInTranscript,
+        /// The transcript find's next match (⌘G).
+        FindNextInTranscript,
+        /// The transcript find's previous match (⇧⌘G).
+        FindPrevInTranscript,
     ]
 );
 
@@ -317,6 +323,11 @@ pub(crate) const TERMINAL_CONTEXT: &str = "BaazTerminal";
 /// the window. Worn on a wrapper around the window body while
 /// [`layout::Mode::Browse`] is current (see `render`), never in Sessions.
 pub(crate) const BROWSE_CONTEXT: &str = "BaazBrowse";
+/// The transcript find's keys (⌘F, ⌘G, ⇧⌘G; docs/82 7.5): the root node
+/// outside Browse, whose root wears [`BROWSE_CONTEXT`] too — so Browse keeps
+/// its own ⌘F — while Settings' and Skills' ⌘F bind on deeper nodes and win
+/// wherever they hold focus.
+pub(crate) const SESSIONS_ROOT_CONTEXT: &str = "AuiRoot && !BaazBrowse";
 /// The root node's contexts in Browse: `AuiRoot` and [`BROWSE_CONTEXT`] on one
 /// node (pinned against `aui::keys::ROOT_CONTEXT` by a test).
 pub(crate) const BROWSE_ROOT_CONTEXT: &str = "AuiRoot BaazBrowse";
@@ -3993,10 +4004,15 @@ impl Harness {
                     .children(self.render_corner_stack(cx).map(Self::corner_above_band))
                     .into_any_element();
                 let overlay = view.update(cx, |view, cx| view.render_drop_overlay(window, cx));
-                div()
+                // ⌘F's bar (docs/82 7.5) above the transcript, composed live
+                // like the band so typing never rebuilds the transcript; the
+                // list gives up its height while it stands.
+                let find = view.update(cx, |view, cx| view.render_find_bar(window, cx));
+                v_flex()
                     .size_full()
                     .relative()
-                    .child(transcript)
+                    .children(find)
+                    .child(div().w_full().flex_1().min_h(px(0.0)).child(transcript))
                     .child(band)
                     .children(overlay)
                     // gpui reports an external drag only while it moves, so
@@ -4078,6 +4094,30 @@ impl Harness {
                         view.send(window, cx);
                     }
                 });
+            }))
+            .on_action(cx.listener(|this, _: &FindInTranscript, window, cx| {
+                // docs/82 7.5: Sessions with a session open; Settings and
+                // Skills keep their own ⌘F (their contexts sit deeper), and
+                // Browse never reaches here (the binding excludes it).
+                if this.transcript_find_available(cx) {
+                    this.with_session(cx, |view, cx| view.open_find(window, cx));
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FindNextInTranscript, _, cx| {
+                let stepped = this.transcript_find_available(cx)
+                    && this.active.clone().is_some_and(|view| view.update(cx, |view, cx| view.find_step(true, cx)));
+                if !stepped {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FindPrevInTranscript, _, cx| {
+                let stepped = this.transcript_find_available(cx)
+                    && this.active.clone().is_some_and(|view| view.update(cx, |view, cx| view.find_step(false, cx)));
+                if !stepped {
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(|this, _: &CopySelection, window, cx| {
                 this.with_session(cx, |view, cx| view.copy_selected(window, cx));
@@ -4170,6 +4210,17 @@ impl Harness {
     /// nothing instead of acting on the hidden session. Session verbs
     /// already wait out the switch through `steps_ready`; Muse sessions
     /// swap synchronously and never trip this.
+    /// Whether ⌘F / ⌘G belong to the transcript's find (docs/82 7.5): the
+    /// Sessions view with a session open and neither Settings nor Skills
+    /// over it, and no switch pending.
+    pub(crate) fn transcript_find_available(&self, cx: &gpui::App) -> bool {
+        crate::layout::Layout::get(cx).mode == layout::Mode::Sessions
+            && self.active.is_some()
+            && !self.settings_open(cx)
+            && !self.skills_open(cx)
+            && self.pending_switch_dest(cx).is_none()
+    }
+
     pub(crate) fn with_session(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut SessionView, &mut Context<SessionView>)) {
         if self.pending_switch_dest(cx).is_some() {
             return;

@@ -566,6 +566,12 @@ pub struct Layout {
     /// branch reads merged (docs/82 7.3). Off by default.
     #[serde(rename = "archiveOnMerge", default)]
     pub archive_on_merge: bool,
+    /// Settings › General › "Open files in" (docs/82 7.5): an editor id from
+    /// [`crate::editors::KNOWN_EDITORS`], or `None` / `"default"` for macOS's
+    /// own pick. Read it through [`crate::editors::chosen`], which falls back
+    /// to the default when the editor is no longer installed.
+    #[serde(rename = "openIn", default, skip_serializing_if = "Option::is_none")]
+    pub open_in: Option<String>,
 }
 
 impl Layout {
@@ -720,6 +726,7 @@ impl Default for Layout {
             adblock: Default::default(),
             worktree_branch_prefix: None,
             archive_on_merge: false,
+            open_in: None,
         }
     }
 }

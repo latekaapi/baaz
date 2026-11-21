@@ -376,9 +376,16 @@ fn preview_screen(
     let gone = matches!(&preview.content, PreviewContent::Card { meta } if meta.contains("gone"));
     let mut row = pushed_row("right-file-row", preview.path.clone());
     if !gone {
-        row = row.action(pane_action("right-file-open", IconName::External, "Open in default app").on_click(move |_, _, cx| {
+        // docs/82 7.5: the one open button follows Settings › General ›
+        // "Open files in" ("Open in Zed"), at the first held line (7.1), else
+        // a link's banded line, when the editor takes one.
+        let held = cache
+            .line_select
+            .range_for(&crate::right_quote::LineTarget::Preview { root: root.to_path_buf(), path: preview.path.clone() });
+        let line = preview_open_line(held.as_ref(), preview.highlight.as_ref());
+        row = row.action(pane_action("right-file-open", IconName::External, crate::open_in::open_label(cx)).on_click(move |_, _, cx| {
             if open_abs.exists() {
-                cx.open_with_system(&open_abs);
+                crate::open_in::open_path(&open_abs, line, cx);
             }
         }));
     }
@@ -508,6 +515,16 @@ impl RightPane {
 mod tests {
     use super::*;
 
+    /// docs/82 7.5: the preview's "Open in …" opens at the first held line
+    /// (0-based held → 1-based line), else a link's band, else the top.
+    #[test]
+    fn the_preview_opens_at_the_held_line_then_the_band() {
+        assert_eq!(preview_open_line(Some(&(9..12)), Some(&(40..41))), Some(10));
+        assert_eq!(preview_open_line(None, Some(&(40..41))), Some(40));
+        assert_eq!(preview_open_line(None, Some(&(40..40))), None, "an empty band is no line");
+        assert_eq!(preview_open_line(None, None), None);
+    }
+
     #[test]
     fn the_filter_keeps_matches_inside_their_open_folders() {
         let paths = vec!["crates/baaz/src/right.rs".to_string(), "crates/baaz/src/app.rs".into(), "docs/right-pane.md".into(), "README.md".into()];
@@ -551,6 +568,13 @@ pub(crate) enum FilesMenuAction {
     OpenDefault,
     Reveal,
     ViewSource,
+}
+
+/// The 1-based line a preview's open button opens at: the first held line
+/// (`held` is 0-based, end exclusive), else the first line a link banded;
+/// `None` opens at the top.
+pub(crate) fn preview_open_line(held: Option<&std::ops::Range<usize>>, band: Option<&std::ops::Range<u32>>) -> Option<u32> {
+    held.map(|r| r.start as u32 + 1).or_else(|| band.filter(|r| !r.is_empty()).map(|r| r.start)).filter(|n| *n > 0)
 }
 
 /// The menu's rows for a row: every file gets Open in default app and Reveal
