@@ -207,13 +207,6 @@ impl Harness {
         Ok(())
     }
 
-    /// `hidden`: list hidden sessions anyway (a toggle).
-    pub(crate) fn step_toggle_hidden(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        self.session_list.update(cx, |list, _| list.show_hidden = !list.show_hidden);
-        self.invalidate_list(cx);
-        Ok(())
-    }
-
     /// `empty`: list sessions with no turns anyway (a toggle).
     pub(crate) fn step_toggle_empty(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
         self.session_list.update(cx, |list, _| list.show_empty = !list.show_empty);
@@ -615,11 +608,8 @@ impl Harness {
         if !self.knows_session(id, cx) && !self.knows_session(&head, cx) {
             return Err(format!("no session `{id}`"));
         }
-        if self.session_list.read(cx).overrides.get(&head).is_some_and(|m| m.hidden) && !self.session_list.read(cx).show_hidden {
-            return Err(format!("session `{id}` is hidden"));
-        }
-        if self.session_list.read(cx).overrides.get(&head).is_some_and(|m| m.archived) && !self.session_list.read(cx).show_archived {
-            return Err(format!("session `{id}` is archived"));
+        if self.session_list.read(cx).kept_out(&head) {
+            return Err(format!("session `{id}` is hidden or archived"));
         }
         if quiet {
             self.resume_quiet(id.to_owned(), window, cx);

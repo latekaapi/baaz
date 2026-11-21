@@ -646,7 +646,7 @@ impl Harness {
             | Command::Name
             | Command::Resume
             | Command::Search
-            | Command::Hide
+            | Command::Archive
             | Command::Empty
             | Command::Logout
             | Command::Help => false,

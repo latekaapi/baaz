@@ -696,8 +696,9 @@ pub enum SessionEvent {
     },
     /// `/name` with nothing after it: open the sidebar row's inline field.
     RenameStart,
-    /// `/hide`: take this session out of the list.
-    Hide,
+    /// `/archive` (or `/hide`): archive this session at once, with the
+    /// toast's Undo as the way back (no confirm: the command already asked).
+    Archive,
     /// `/empty`: show sessions with no turns in the sidebar, or hide them
     /// again. A window-level filter, so the application owns the state.
     ToggleEmpty,

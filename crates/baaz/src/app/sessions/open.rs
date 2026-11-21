@@ -528,13 +528,11 @@ impl Harness {
         // fallback divider's source link bypasses, through
         // `resume_source_read_only`.
         let session_id = if bypass_chain { session_id } else { self.chain_head(&session_id, cx) };
-        // A hidden session is never loaded. Hiding is a decision about this
-        // window's list, and a list that still opened what it refuses to show
-        // would be a list that means nothing. Archived sessions are the same.
-        if self.session_list.read(cx).overrides.get(&session_id).is_some_and(|m| m.hidden) && !self.session_list.read(cx).show_hidden {
-            return;
-        }
-        if self.session_list.read(cx).overrides.get(&session_id).is_some_and(|m| m.archived) && !self.session_list.read(cx).show_archived {
+        // A hidden session is never loaded, and an archived one only while
+        // "Show archived" lists it: a list that still opened what it refuses
+        // to show would be a list that means nothing
+        // ([`crate::session_list::SessionList::kept_out`]).
+        if self.session_list.read(cx).kept_out(&session_id) {
             return;
         }
         // B2a-H2b: opening a session while in Browse switches to

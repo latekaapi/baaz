@@ -131,7 +131,7 @@ pub(crate) struct SessionList {
     /// Bumped by [`Self::invalidate`] whenever anything the sidebar and the
     /// palette read out of [`Self::sessions`] changed: the rows themselves,
     /// the overrides that relabel them, the index, or the
-    /// show-hidden/empty/archived flags. It is the key the list cache is
+    /// show-empty/archived flags. It is the key the list cache is
     /// validated against (findings `performance-5`, `support-2`).
     pub(crate) epoch: u64,
     /// One sorted visible list and one grouping per change, not per frame.
@@ -172,8 +172,6 @@ pub(crate) struct SessionList {
     /// The `session/list` fetch in flight, the refresh owed after it, and
     /// the saved listing it is incremental against.
     pub(crate) fetch: ListFetch,
-    /// Whether hidden sessions are listed anyway (the Sessions menu's toggle).
-    pub(crate) show_hidden: bool,
     /// Whether sessions with no turns are listed anyway (the Sessions menu's toggle).
     pub(crate) show_empty: bool,
     /// Whether archived sessions are listed anyway (the Sessions menu's toggle).
@@ -202,8 +200,8 @@ pub(crate) struct SessionList {
     /// genuinely is not there is not asked for once a frame (finding F10).
     pub(crate) titled: HashSet<String>,
     /// Batches taken out of the list in the last few seconds, newest last:
-    /// the toast's Undo. One `/hide` is a batch of one; one "Clear empty" is
-    /// a batch of everything it hid; one archive confirm is a batch of one
+    /// the toast's Undo. One "Clear empty" is a batch of everything it
+    /// hid; one archive (the confirm, or `/archive`) is a batch of one
     /// archived session. One Undo restores the whole batch.
     pub(crate) undo_stack: Vec<UndoBatch>,
     /// What each pull request read said, by folder and branch (docs/82
@@ -230,7 +228,6 @@ impl SessionList {
             sessions_loaded: false,
             index_loaded: false,
             fetch: ListFetch::default(),
-            show_hidden: false,
             show_empty: false,
             show_archived: false,
             migration: crate::session_migration::MigrationPlan::default(),
@@ -409,11 +406,12 @@ impl SessionList {
         let pending_head = pending.as_deref().and_then(|id| exempt(id, facts.pending_unsent));
         let mut rows: Vec<SessionEntry> = collapsed
             .into_iter()
-            // Show hidden reveals what the person hid, never a side session
-            // or one another client made (`side_marker`): those are not
-            // theirs, and there are thousands.
-            .filter(|entry| (self.show_hidden && !entry.side_marker) || !entry.hidden)
-            .filter(|entry| self.show_archived || !entry.archived)
+            // Hidden rows stay out — side sessions, browser chats, ones
+            // another client made (`side_marker`), "Clear empty" — except
+            // a person's own older hide, which reads as archived. Archived
+            // rows show only under "Show archived".
+            .filter(|entry| !entry.hidden || self.hidden_reads_archived(entry))
+            .filter(|entry| self.show_archived || !self.reads_archived(entry))
             .filter(|entry| {
                 // An archived row shown on request is explicitly asked for;
                 // the empty filter must not swallow it back. An index-only
@@ -422,7 +420,7 @@ impl SessionList {
                 // still apply above, from the same overrides the real rows
                 // get. Only labelled index entries ever become provisional,
                 // which is what keeps the index's own zero-turn rows out.
-                (self.show_archived && entry.archived)
+                (self.show_archived && self.reads_archived(entry))
                     || self.show_empty
                     || entry.turns_unknown
                     || !entry.is_empty()
@@ -561,9 +559,40 @@ impl SessionList {
         self.cache.borrow().grouping.as_ref().map(|(_, _, pinned)| Rc::clone(pinned)).unwrap_or_default()
     }
 
-    /// How many listed sessions are hidden: the view menu's Show hidden count.
-    pub(crate) fn hidden_count(&self) -> usize {
-        self.sessions.iter().filter(|entry| entry.hidden && !entry.side_marker && !entry.archived).count()
+    /// Whether `entry` is a session the person hid with an older build's
+    /// `/hide` or row eye, which now reads as archived (docs/82 8.9: Hide
+    /// folded into Archive). Decided: treat, not migrate — nothing is
+    /// rewritten, so the flag means the same to an older build — and the
+    /// Archived page, "Show archived" and Unarchive all take it as archived.
+    /// Only a session with turns: an empty one hidden by "Clear empty
+    /// sessions" or a moved draft stays hidden (an empty draft is not a
+    /// concept), and the side sessions and browser chats Baaz hides itself
+    /// (`side_session`, `browser_chat`, a side marker) never count.
+    pub(crate) fn hidden_reads_archived(&self, entry: &SessionEntry) -> bool {
+        entry.hidden
+            && !entry.side_marker
+            && !self.side_sessions.contains(&entry.id)
+            && !entry.is_empty()
+            && self.overrides.get(&entry.id).is_some_and(|meta| meta.hidden && !meta.side_session && !meta.browser_chat)
+    }
+
+    /// Whether `entry` reads as archived: archived, or hidden by the person
+    /// before Hide folded into Archive ([`Self::hidden_reads_archived`]).
+    pub(crate) fn reads_archived(&self, entry: &SessionEntry) -> bool {
+        entry.archived || self.hidden_reads_archived(entry)
+    }
+
+    /// Whether opening `id` is refused because the list keeps it out of
+    /// view: hidden (and not one that reads as archived while "Show
+    /// archived" lists those), or archived while archived rows are not
+    /// listed. Hidden and archived sessions are never loaded.
+    pub(crate) fn kept_out(&self, id: &str) -> bool {
+        let Some(meta) = self.overrides.get(id) else { return false };
+        let legacy = self.sessions.iter().find(|entry| entry.id == id).is_some_and(|entry| self.hidden_reads_archived(entry));
+        if meta.hidden && !legacy {
+            return true;
+        }
+        (meta.archived || legacy) && !self.show_archived
     }
 
     /// Whether the sidebar still draws its skeleton rows: until the index

@@ -991,7 +991,7 @@ impl SessionView {
                     _ => cx.emit(SessionEvent::Rename { name: Some(text.to_owned()) }),
                 }
             }
-            Command::Hide => cx.emit(SessionEvent::Hide),
+            Command::Archive => cx.emit(SessionEvent::Archive),
             Command::Empty => cx.emit(SessionEvent::ToggleEmpty),
             Command::Resume => cx.emit(SessionEvent::Resume),
             Command::Search => cx.emit(SessionEvent::Search),

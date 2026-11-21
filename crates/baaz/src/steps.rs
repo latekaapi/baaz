@@ -47,7 +47,7 @@
 //! | `folder` | open the new-session row's folder picker (docs/82 6.6); fails when the session shows no row (it has turns), the draft is moving, or the picker is already open |
 //! | `confirm` | activate the open menu's selected row |
 //! | `name:<name>` | `/name`, the session rename command |
-//! | `hide` | `/hide` the open session |
+//! | `archive` | `/archive` the open session (archived at once, with the Undo toast) |
 //! | `setmodel:<id>` | `session/setModel`, without waiting for the catalog |
 //! | `handoff:<provider>` | "Continue in X" as a verb (`muse`, `claude-code`, `codex`), headless: no confirm dialog — the command line already asked. Needs turns, refuses on a pending question or approval, and never fires for the session's own provider; an unknown id fails, free |
 //! | `setprovider:<id>` | the provider menu's row as a verb (`muse`, `claude-code`, `codex`): a fresh session swaps lanes, a session with turns starts a new session on the pick instead and the step fails saying so; an unknown id fails, free |
@@ -96,7 +96,6 @@
 //! | `resume` | open the resume picker |
 //! | `fork-picker` | open the fork picker |
 //! | `rename:<name>` | open the sidebar row's inline rename field |
-//! | `hidden` | list hidden sessions anyway |
 //! | `empty` | list sessions with no turns anyway |
 //! | `show-archived` | list archived sessions anyway |
 //! | `sidebar` | collapse or expand the sidebar |
@@ -403,7 +402,6 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "resume", run: |this, _, _, cx| { this.open_palette(PaletteKind::Resume, cx); Ok(()) } },
     WindowVerb { verb: "fork-picker", run: |this, _, _, cx| { this.open_palette(PaletteKind::Fork, cx); Ok(()) } },
     WindowVerb { verb: "rename", run: |this, rest, window, cx| this.step_rename(rest, window, cx) },
-    WindowVerb { verb: "hidden", run: |this, _, _, cx| this.step_toggle_hidden(cx) },
     WindowVerb { verb: "empty", run: |this, _, _, cx| this.step_toggle_empty(cx) },
     WindowVerb { verb: "sidebar-width", run: |this, rest, _, cx| this.step_sidebar_width(rest, cx) },
     WindowVerb { verb: "right", run: |this, rest, _, cx| this.step_right(rest, cx) },
@@ -1140,7 +1138,7 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
         verb: "name",
         run: |v, rest, window, cx| v.step_name(rest, window, cx),
     },
-    SessionVerb { verb: "hide", run: |_, _, _, cx| { cx.emit(SessionEvent::Hide); Ok(()) } },
+    SessionVerb { verb: "archive", run: |_, _, _, cx| { cx.emit(SessionEvent::Archive); Ok(()) } },
     SessionVerb { verb: "resume", run: |_, _, _, cx| { cx.emit(SessionEvent::Resume); Ok(()) } },
     SessionVerb { verb: "setmodel", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_setmodel(rest, cx)) },
     SessionVerb { verb: "setprovider", run: |v, rest, _, cx| v.step_setprovider(rest, cx) },

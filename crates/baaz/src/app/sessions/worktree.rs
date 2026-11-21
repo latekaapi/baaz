@@ -298,11 +298,20 @@ impl Harness {
     /// archived gets it back first, off the UI thread (folder added on its
     /// branch, its work put back unstaged, re-locked), and the rows return
     /// once that is done, so no session opens onto a missing folder. With
-    /// no worktree among them the rows return at once.
+    /// no worktree among them the rows return at once. A person's hide from
+    /// before Hide folded into Archive comes off with it (it read as
+    /// archived, [`crate::session_list::SessionList::hidden_reads_archived`]);
+    /// the hides Baaz keeps for its own side sessions and browser chats stay.
     pub(crate) fn unarchive_with_worktrees(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+        fn unarchive(meta: &mut SessionMeta) {
+            meta.archived = false;
+            if !meta.side_session && !meta.browser_chat {
+                meta.hidden = false;
+            }
+        }
         let members = self.worktree_members(&ids, cx);
         if members.is_empty() {
-            self.set_overrides(&ids, |meta| meta.archived = false, cx);
+            self.set_overrides(&ids, unarchive, cx);
             return;
         }
         let state_dir = crate::store::support_dir();
@@ -344,7 +353,7 @@ impl Harness {
                 this.persist_provider_sessions(cx);
                 this.merge_provider_rows(cx);
             }
-            this.set_overrides(&ids, |meta| meta.archived = false, cx);
+            this.set_overrides(&ids, unarchive, cx);
             if let Some(note) = notes.into_iter().next() {
                 crate::baaz_log!("worktree: unarchive: {note}");
                 this.overlays.update(cx, |overlays, cx| overlays.toast("Worktree restored with a note", note, cx));

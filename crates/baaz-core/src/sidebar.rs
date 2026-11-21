@@ -108,11 +108,15 @@ pub struct SessionEntry {
     pub running: bool,
     /// Completed turns, shown on the meta line.
     pub turns: u64,
-    /// Hidden from this window's list (`/hide`).
+    /// Hidden from this window's list: a side session, a browser chat, one
+    /// another client made, or an empty one "Clear empty sessions" took out.
+    /// A person's own older `/hide` reads as archived instead (Baaz's
+    /// `SessionList::hidden_reads_archived`, docs/82 8.9).
     pub hidden: bool,
     /// Pinned to the top of the date view, in its own group.
     pub pinned: bool,
-    /// Archived out of the list (shown only from the Sessions menu).
+    /// Archived out of the list (Settings › Archived brings it back; the
+    /// view menu's "Show archived" lists it).
     pub archived: bool,
     /// The muted second line: the last summary when one exists, else the
     /// first prompt — but only when the row's label does not already say it

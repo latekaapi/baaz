@@ -77,6 +77,10 @@ pub struct SessionMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Hidden from this window's list. A hidden session is never loaded.
+    /// Written by Baaz for its side sessions and browser chats and by
+    /// "Clear empty sessions"; an older build also wrote it for `/hide`,
+    /// and such a session (one with turns) now reads as archived
+    /// (docs/82 8.9: Hide folded into Archive).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
     /// The title derived from the transcript — the first user prompt, or the

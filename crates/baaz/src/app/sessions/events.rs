@@ -287,9 +287,12 @@ impl Harness {
                     let _ = this.update_in(cx, |this, window, cx| this.start_rename(session_id, window, cx));
                 }));
             }
-            SessionEvent::Hide => {
-                let session_id = runtime.read(cx).session_id.clone();
-                self.hide_session(session_id, cx);
+            SessionEvent::Archive => {
+                // The row's id (a chain's head), as the row menu archives it.
+                let session_id = self.chain_head(&runtime.read(cx).session_id.clone(), cx);
+                self.tasks.push(cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| this.archive_session(session_id, Some(window), cx));
+                }));
             }
             SessionEvent::ToggleEmpty => {
                 self.session_list.update(cx, |list, _| list.show_empty = !list.show_empty);

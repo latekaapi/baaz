@@ -605,8 +605,9 @@ pub enum Command {
     Resume,
     /// Search past sessions and created files.
     Search,
-    /// Hide this session from the sidebar.
-    Hide,
+    /// Archive this session (`/archive`; `/hide` still parses onto it —
+    /// Hide folded into Archive, docs/82 8.9).
+    Archive,
     /// Show sessions with no turns in the sidebar again.
     Empty,
     /// The session status dialog.
@@ -680,7 +681,7 @@ impl Command {
         Command::Name,
         Command::Resume,
         Command::Search,
-        Command::Hide,
+        Command::Archive,
         Command::Empty,
         Command::Logout,
         Command::RightBrowser,
@@ -735,7 +736,7 @@ impl Command {
             Command::Name => "/name",
             Command::Resume => "/resume",
             Command::Search => "/search",
-            Command::Hide => "/hide",
+            Command::Archive => "/archive",
             Command::Empty => "/empty",
             Command::Status => "/status",
             Command::Usage => "/usage",
@@ -766,7 +767,7 @@ impl Command {
             Command::Name => "Show or rename this session",
             Command::Resume => "Resume an earlier session",
             Command::Search => "Search sessions and created files",
-            Command::Hide => "Hide this session from the sidebar",
+            Command::Archive => "Archive this session",
             Command::Empty => "Show sessions with no turns in the sidebar",
             Command::Status => "Show current session status",
             Command::Usage => "Show session usage",
@@ -797,9 +798,14 @@ impl Command {
     /// Older spellings that still parse, each onto the command that
     /// replaced it; none lists a row of its own. `/diff` is `/changes`;
     /// `/handoff` is `/continue` (docs/07 §1a: one verb, Continue in…);
-    /// `/browser` is `/page` (one name for the pane's web view).
-    pub const ALIASES: [(&'static str, Command); 3] =
-        [("/diff", Command::RightGit), ("/handoff", Command::Handoff), ("/browser", Command::RightBrowser)];
+    /// `/browser` is `/page` (one name for the pane's web view); `/hide`
+    /// is `/archive` (Hide folded into Archive).
+    pub const ALIASES: [(&'static str, Command); 4] = [
+        ("/diff", Command::RightGit),
+        ("/handoff", Command::Handoff),
+        ("/browser", Command::RightBrowser),
+        ("/hide", Command::Archive),
+    ];
 
     /// Parse a whole typed line into a command and whatever followed it.
     ///
@@ -973,6 +979,7 @@ mod tests {
         assert_eq!(Command::parse("/changes"), Some(Command::RightGit));
         assert_eq!(Command::parse("/handoff"), Some(Command::Handoff), "the older spelling of /continue");
         assert_eq!(Command::parse("/browser"), Some(Command::RightBrowser), "the older spelling of /page");
+        assert_eq!(Command::parse("/hide"), Some(Command::Archive), "Hide folded into Archive");
         for (alias, _) in Command::ALIASES {
             assert!(Command::ALL.iter().all(|command| command.slash() != alias), "{alias} lists no palette row of its own");
         }

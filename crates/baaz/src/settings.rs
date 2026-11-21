@@ -2920,7 +2920,10 @@ impl Harness {
         };
         match section {
             "archived" => {
-                let mut archived: Vec<&crate::sidebar::SessionEntry> = self.session_list.read(cx).sessions.iter().filter(|e| e.archived).collect();
+                // Archived, and the sessions a person hid before Hide folded
+                // into Archive (docs/82 8.9: they read as archived).
+                let list = self.session_list.read(cx);
+                let mut archived: Vec<&crate::sidebar::SessionEntry> = list.sessions.iter().filter(|e| list.reads_archived(e)).collect();
                 archived.sort_by(|a, b| a.updated.cmp(&b.updated).reverse());
                 facts.archived = archived
                     .into_iter()

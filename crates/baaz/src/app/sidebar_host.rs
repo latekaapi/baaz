@@ -686,15 +686,10 @@ impl Harness {
                 self.session_list.update(cx, |list, _| list.show_empty = !list.show_empty);
                 self.invalidate_list(cx);
             }
-            ViewOption::ToggleHidden => {
-                self.session_list.update(cx, |list, _| list.show_hidden = !list.show_hidden);
-                self.invalidate_list(cx);
-            }
             ViewOption::ToggleArchived => {
                 self.session_list.update(cx, |list, _| list.show_archived = !list.show_archived);
                 self.invalidate_list(cx);
             }
-            // Disabled while Baaz reads no PR data: never reported.
             ViewOption::ToggleSearchAll => self.toggle_search_scope(cx),
             ViewOption::ClearEmpty => {
                 self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));

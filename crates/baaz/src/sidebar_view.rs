@@ -441,7 +441,7 @@ pub(crate) fn note_baaz_render() {
 }
 
 /// What a regroup or filter change looks like to the virtual list (owner
-/// round 6): the grouping mode and the three list-management toggles.
+/// round 6): the grouping mode and the two list-management toggles.
 /// [`SidebarPane::sync_list`] resets the list state when this changes
 /// and splices everything else, so group open/close and fold expand keep
 /// the offset.
@@ -449,7 +449,6 @@ pub(crate) fn note_baaz_render() {
 pub(crate) struct SidebarRegroupKey {
     group_by: crate::layout::GroupBy,
     sort_by: crate::layout::SortBy,
-    show_hidden: bool,
     show_empty: bool,
     show_archived: bool,
     /// The summary line changes every session row's height: the list's
@@ -898,7 +897,7 @@ impl SidebarPane {
     }
 
     /// What a regroup or filter change looks like to the virtual list: the
-    /// mode and the three list-management toggles. Group open/close and
+    /// mode and the two list-management toggles. Group open/close and
     /// fold expand are NOT in the key — they splice like any other local
     /// insert or remove, so the offset survives them. Compared on every
     /// render before anything draws; a change resets the list state to the
@@ -908,7 +907,6 @@ impl SidebarPane {
         SidebarRegroupKey {
             group_by: SessionList::effective_group_by(cx),
             sort_by: crate::layout::Layout::get(cx).sort_by,
-            show_hidden: list.show_hidden,
             show_empty: list.show_empty,
             show_archived: list.show_archived,
             summary_line: crate::layout::Layout::get(cx).summary_line,
@@ -1216,11 +1214,7 @@ impl SidebarPane {
                 group_by,
                 sort_by,
                 show_empty: list.show_empty,
-                show_hidden: list.show_hidden,
-                hidden_count: list.hidden_count(),
                 show_archived: list.show_archived,
-                // Baaz reads no PR data yet: the row stays, disabled, "Soon"
-                // (owner 2026-10-11).
                 search_all_projects: layout.search_all_projects,
             },
             // Settings › Sidebar › "Show a summary line" (docs/83 §4).

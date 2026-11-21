@@ -695,3 +695,67 @@ fn a_merged_pr_archives_its_session_once_and_only_when_asked(cx: &mut gpui::Test
     assert!(!archived(vc, "s-pr"), "a PR settles its session once");
     lane_restore(state);
 }
+
+/// docs/82 8.9: Hide folded into Archive. A session a person hid with an
+/// older build (one with turns) reads as archived — out of the list, in
+/// Settings › Archived and under "Show archived", and Unarchive brings it
+/// back with its hide cleared — while an empty one "Clear empty" hid and a
+/// side session Baaz hid itself stay hidden and never read as archived.
+#[gpui::test]
+fn a_person_hidden_session_reads_as_archived_and_comes_back(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("hidden-reads-archived");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, cx| {
+            for (id, turns) in [("s-hid", 2), ("s-empty", 0), ("s-side", 3), ("s-open", 1)] {
+                let mut entry = chain_muse_entry(id, id, turns);
+                entry.hidden = id != "s-open";
+                harness.session_list.update(cx, |list, _| list.sessions.push(entry));
+            }
+            harness.set_override("s-hid", |meta| meta.hidden = true, cx);
+            harness.set_override("s-empty", |meta| meta.hidden = true, cx);
+            harness.set_override("s-side", |meta| {
+                meta.hidden = true;
+                meta.side_session = true;
+            }, cx);
+            harness.invalidate_list(cx);
+        });
+    });
+    let shown = |vc: &mut gpui::VisualTestContext| -> Vec<String> {
+        vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.visible_sessions(cx).iter().map(|e| e.id.clone()).collect()))
+    };
+    let reads_archived = |vc: &mut gpui::VisualTestContext, id: &str| {
+        vc.update(|_, cx| {
+            let list = baaz.read(cx).session_list.read(cx);
+            list.sessions.iter().find(|e| e.id == id).is_some_and(|e| list.reads_archived(e))
+        })
+    };
+    assert_eq!(shown(vc), ["s-open"], "hidden rows stay out of the list");
+    assert!(reads_archived(vc, "s-hid"), "a person's older hide reads as archived");
+    assert!(!reads_archived(vc, "s-empty"), "an empty session stays merely hidden");
+    assert!(!reads_archived(vc, "s-side"), "Baaz's own side session never reads as archived");
+    assert!(vc.update(|_, cx| baaz.read(cx).session_list.read(cx).kept_out("s-hid")), "not opened while archived rows are not listed");
+    // "Show archived" lists it, and only it of the hidden ones.
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| {
+        harness.session_list.update(cx, |list, _| list.show_archived = true);
+        harness.invalidate_list(cx);
+    }));
+    let mut listed = shown(vc);
+    listed.sort();
+    assert_eq!(listed, ["s-hid", "s-open"]);
+    assert!(!vc.update(|_, cx| baaz.read(cx).session_list.read(cx).kept_out("s-hid")), "opens while listed");
+    // Unarchive (Settings › Archived's button) clears the hide too.
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| {
+        harness.session_list.update(cx, |list, _| list.show_archived = false);
+        harness.unarchive_session("s-hid".into(), cx);
+    }));
+    vc.update(|_, cx| {
+        let list = baaz.read(cx).session_list.read(cx);
+        let meta = list.overrides.get("s-hid").expect("its record");
+        assert!(!meta.hidden && !meta.archived, "unarchived and unhidden");
+        assert!(list.overrides.get("s-side").is_some_and(|meta| meta.hidden), "the side session keeps Baaz's hide");
+    });
+    lane_restore(state);
+}

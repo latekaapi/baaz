@@ -239,29 +239,15 @@ impl Harness {
         let _ = window;
     }
 
-    /// `/hide` and the row's eye: take a session out of the list, with a way
-    /// back for eight seconds.
-    ///
-    /// A hidden session is never loaded — the row is gone and so is the
-    /// transcript — so the active one is closed when it is the one hidden.
-    pub(super) fn hide_session(&mut self, session_id: String, cx: &mut Context<Self>) {
-        if self.active.as_ref().is_some_and(|a| a.read(cx).rt(cx).session_id == session_id) {
-            self.active = None;
-        }
-        self.hide_batch(
-            vec![session_id],
-            "Session hidden".to_owned(),
-            "It is still on disk.",
-            cx,
-        );
-    }
-
-    /// Hide a batch of sessions with a way back for eight seconds: one
-    /// toast, one Undo that restores the whole batch. One `/hide` is a
-    /// batch of one; one "Clear empty" is a batch of everything it hid.
+    /// Hide a batch of EMPTY sessions with a way back for eight seconds:
+    /// one toast, one Undo that restores the whole batch — "Clear empty
+    /// sessions" (everything it cleared). Hiding is not a person's concept
+    /// any more (docs/82 8.9: Hide folded into Archive, `/hide` archives);
+    /// it stays for sessions with no turns because an empty draft is not a
+    /// session the person holds either, so there is nothing to archive.
     pub(super) fn hide_batch(&mut self, ids: Vec<String>, title: String, detail: &str, cx: &mut Context<Self>) {
         // Hidden sessions are never cached: a parked view of one is dropped,
-        // and reopening (after Undo, or under "Show hidden") pages it afresh.
+        // and reopening (after Undo) pages it afresh.
         self.registry.forget_where(|id| ids.iter().any(|hidden| hidden == id));
         self.forget_terminal_tasks(&ids, cx);
         self.set_overrides(&ids, |meta| meta.hidden = true, cx);
@@ -297,9 +283,9 @@ impl Harness {
         self.session_list.update(cx, |list, _| list.undo_stack.push(batch));
     }
 
-    /// The toast's Undo: put the newest batch back — one hidden row, one
-    /// "Clear empty" whole, one archived session, one import, or one undone
-    /// turn or reverted file taken back.
+    /// The toast's Undo: put the newest batch back — one "Clear empty"
+    /// whole, one archived session, one import, or one undone turn or
+    /// reverted file taken back.
     pub(crate) fn undo_newest(&mut self, cx: &mut Context<Self>) {
         let Some(batch) = self.session_list.update(cx, |list, _| list.undo_stack.pop()) else { return };
         match batch {
@@ -327,7 +313,7 @@ impl Harness {
             .unwrap_or_else(|| sidebar::UNNAMED.to_owned());
         self.set_dialog(cx, Dialog {
             title: format!("Archive \"{label}\"?"),
-            detail: "Archived sessions stay on disk and can be shown from the Sessions menu.".into(),
+            detail: "Archived sessions stay on disk; Settings › Archived brings them back.".into(),
             kind: DialogKind::Warning,
             primary: "Archive",
             action: DialogAction::Archive,
@@ -398,7 +384,7 @@ impl Harness {
         self.push_undo(
             UndoBatch::Archived(members),
             "Session archived".to_owned(),
-            "It is still on disk; show it again from the Sessions menu.".to_owned(),
+            "It is still on disk; bring it back from Settings › Archived.".to_owned(),
             cx,
         );
         // The newest remaining visible session opens in place of the archived
@@ -708,7 +694,7 @@ impl Harness {
         let n = cleared.len();
         self.hide_batch(
             cleared,
-            format!("{n} empty session{} hidden", if n == 1 { "" } else { "s" }),
+            format!("Cleared {n} empty session{}", if n == 1 { "" } else { "s" }),
             "They are still on disk.",
             cx,
         );
