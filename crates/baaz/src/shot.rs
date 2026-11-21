@@ -99,6 +99,38 @@ fn write_capture(
     Ok((target_w, target_h))
 }
 
+type Rgba = image::ImageBuffer<image::Rgba<u8>, Vec<u8>>;
+
+/// Every other window of this app, drawn now and rendered, with its
+/// bounds: the overlay windows a capture lays over the main image
+/// ([`composite`]). A window that cannot render is left out.
+fn overlay_images(main: WindowHandle<Root>, cx: &mut App) -> Vec<(Rgba, gpui::Bounds<gpui::Pixels>)> {
+    let main_id = main.window_id();
+    let mut out = Vec::new();
+    for any in cx.windows() {
+        if any.window_id() == main_id {
+            continue;
+        }
+        let _ = gpui::AppContext::update_window(cx, any, |_, window, cx| window.draw(cx).clear(cx));
+        if let Ok(Ok(shot)) = any.update(cx, |_, window, _| window.render_to_image().map(|image| (image, window.bounds()))) {
+            out.push(shot);
+        }
+    }
+    out
+}
+
+/// `main` with each of `floats` alpha-blended over it at its offset from
+/// `bounds` (the main window's), in device pixels at `scale`. A float
+/// wholly outside the main window changes nothing.
+fn composite(mut main: Rgba, scale: f32, bounds: gpui::Bounds<gpui::Pixels>, floats: Vec<(Rgba, gpui::Bounds<gpui::Pixels>)>) -> Rgba {
+    for (image, at) in floats {
+        let x = ((f32::from(at.origin.x) - f32::from(bounds.origin.x)) * scale).round() as i64;
+        let y = ((f32::from(at.origin.y) - f32::from(bounds.origin.y)) * scale).round() as i64;
+        image::imageops::overlay(&mut main, &image, x, y);
+    }
+    main
+}
+
 /// A scripted run's own steps do not promise the turn they started
 /// is finished — a trailing `send:` with no matching `wait:` after
 /// it, or the steps ceiling above giving up early, both leave one in
@@ -290,13 +322,22 @@ pub fn capture_and_quit(
             handle.update(cx, |_root, window, _cx| {
                 let scale = window.scale_factor();
                 let image = window.render_to_image()?;
-                anyhow::Ok((image, scale))
+                anyhow::Ok((image, scale, window.bounds()))
             })
         });
+        // The overlay windows (Browse's menus, the Field, the Ask line, the
+        // agent cursor) draw above the page in windows of their own, which
+        // a render of the main window alone never showed: four entries
+        // captured the shell with no menu (Gate 8). Each window that stands
+        // now is live (overlay.rs removes one the moment it is unwanted), so
+        // draw it and lay it over the main image at its offset.
+        let floats = cx.update(|cx| overlay_images(handle, cx));
         let result = match rendered {
-            Ok(Ok((image, scale))) => {
+            Ok(Ok((image, scale, bounds))) => {
                 let path = path.clone();
-                cx.background_executor().spawn(async move { write_capture(image, scale, &path) }).await
+                cx.background_executor()
+                    .spawn(async move { write_capture(composite(image, scale, bounds, floats), scale, &path) })
+                    .await
             }
             Ok(Err(err)) | Err(err) => Err(err),
         };
