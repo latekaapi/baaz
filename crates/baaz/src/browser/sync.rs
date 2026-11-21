@@ -238,6 +238,21 @@ impl Harness {
         self.browser.update(cx, |browser, cx| browser.arm_discard(cx));
         // Task folders done for 15 minutes close their tabs (R3).
         self.close_done_task_tabs(cx);
+        // The person's first page loaded in front in Browse raises the
+        // one-time default-browser offer (docs/82 8.7).
+        if crate::layout::Layout::get(cx).onboarding.default_browser == crate::layout::Once::NotYet {
+            let browser = self.browser.read(cx);
+            let person_page_loaded = shown_now.is_some_and(|id| {
+                browser.tabs.get(id).is_some_and(|tab| matches!(tab.owner, Owner::Person))
+                    && browser.states.get(&id).is_some_and(|state| {
+                        let page = state.read(cx);
+                        !page.loading() && history::recordable(page.url().as_ref())
+                    })
+            });
+            if person_page_loaded {
+                self.note_browse_used(cx);
+            }
+        }
     }
 }
 

@@ -421,6 +421,40 @@ fn the_first_runs_folder_step_opens_the_composer_where_it_says(cx: &mut gpui::Te
     }
 }
 
+/// docs/82 8.7: the default-browser offer waits for the handler, rises
+/// once after Browse is used, ends for good on an answer, and never rises
+/// when Baaz already is the default. "Not now" only: a test never changes
+/// the system default (and the answer path refuses to under test).
+#[gpui::test]
+fn the_default_browser_offer_rises_once(cx: &mut gpui::TestAppContext) {
+    use crate::layout::Once;
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("default-browser-offer");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, cx| {
+            crate::layout::Layout::update(cx, |layout| layout.onboarding.default_browser = Once::NotYet);
+            harness.browser.update(cx, |browser, _| browser.default_browser_cache = None);
+            harness.note_browse_used(cx);
+            assert_eq!(crate::layout::Layout::get(cx).onboarding.default_browser, Once::NotYet, "the handler is not read yet");
+            harness.browser.update(cx, |browser, _| browser.default_browser_cache = Some(Some("com.apple.safari".into())));
+            harness.note_browse_used(cx);
+            assert_eq!(crate::layout::Layout::get(cx).onboarding.default_browser, Once::Due, "the first use raises it");
+            harness.answer_default_browser_offer(false, cx);
+            assert_eq!(crate::layout::Layout::get(cx).onboarding.default_browser, Once::Done, "an answer ends it");
+            harness.note_browse_used(cx);
+            assert_eq!(crate::layout::Layout::get(cx).onboarding.default_browser, Once::Done, "never again");
+            // Already the default: done without showing.
+            crate::layout::Layout::update(cx, |layout| layout.onboarding.default_browser = Once::NotYet);
+            harness.browser.update(cx, |browser, _| browser.default_browser_cache = Some(Some("sh.baaz.app".into())));
+            harness.note_browse_used(cx);
+            assert_eq!(crate::layout::Layout::get(cx).onboarding.default_browser, Once::Done, "moot when Baaz is the default");
+        });
+    });
+    lane_restore(state);
+}
+
 /// docs/82 0.14: ⌘Q with a parked session's turn running asks first and
 /// names it; with nothing running it quits without asking.
 #[gpui::test]

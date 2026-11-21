@@ -656,9 +656,10 @@ pub struct Layout {
     /// to the default when the editor is no longer installed.
     #[serde(rename = "openIn", default, skip_serializing_if = "Option::is_none")]
     pub open_in: Option<String>,
-    /// The first run's one-time hints (docs/82 8.7): the four regions
-    /// named on the first composer. `NotYet` in an old file, so a person
-    /// who never met the first run never sees the regions strip.
+    /// The one-time hints (docs/82 8.7): the four regions named on the
+    /// first composer, and the default-browser offer after the first use of
+    /// Browse. Both `NotYet` in an old file, so a person who never met the
+    /// first run never sees the regions strip.
     #[serde(rename = "onboarding", default)]
     pub onboarding: Onboarding,
 }
@@ -677,8 +678,8 @@ pub enum Once {
     Done,
 }
 
-/// The first run's one-time hints (docs/82 8.7), kept with the other
-/// window preferences in `layout.json`.
+/// The one-time hints (docs/82 8.7), kept with the other window
+/// preferences in `layout.json`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Onboarding {
     /// The strip naming the window's four regions on the first composer:
@@ -686,6 +687,11 @@ pub struct Onboarding {
     /// "Got it" or Escape dismisses it.
     #[serde(default, deserialize_with = "crate::store::lenient")]
     pub regions: Once,
+    /// "Make Baaz your default browser?" above the Browse page: `Due` after
+    /// the first page a person tab loaded in Browse, `Done` once answered
+    /// or dismissed (or found moot: Baaz already is the default).
+    #[serde(rename = "defaultBrowser", default, deserialize_with = "crate::store::lenient")]
+    pub default_browser: Once,
 }
 
 impl Layout {
@@ -1326,11 +1332,12 @@ mod tests {
     fn the_first_run_hints_are_kept_and_tolerant() {
         let old: Layout = serde_json::from_str("{\"sidebar_width\":300.0}").expect("an old file");
         assert_eq!(old.onboarding.regions, Once::NotYet);
-        let stored = Layout { onboarding: Onboarding { regions: Once::Due }, ..Layout::default() };
+        assert_eq!(old.onboarding.default_browser, Once::NotYet);
+        let stored = Layout { onboarding: Onboarding { regions: Once::Due, default_browser: Once::Done }, ..Layout::default() };
         let text = serde_json::to_string(&stored).expect("encodes");
-        assert!(text.contains("\"onboarding\":{\"regions\":\"due\""), "{text}");
+        assert!(text.contains("\"onboarding\":{\"regions\":\"due\",\"defaultBrowser\":\"done\"}"), "{text}");
         let back: Layout = serde_json::from_str(&text).expect("decodes");
-        assert_eq!(back.onboarding.regions, Once::Due);
+        assert_eq!(back.onboarding, stored.onboarding);
         let odd: Layout =
             serde_json::from_str("{\"sidebar_width\":300.0,\"onboarding\":{\"regions\":\"later\"}}").expect("tolerant");
         assert_eq!(odd.onboarding.regions, Once::NotYet);

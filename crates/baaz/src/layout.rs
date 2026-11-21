@@ -271,7 +271,7 @@ mod tests {
             worktree_branch_prefix: Some("lk/".into()),
             archive_on_merge: true,
             open_in: Some("zed".into()),
-            onboarding: Onboarding { regions: Once::Done },
+            onboarding: Onboarding { regions: Once::Done, default_browser: Once::Due },
         };
         let text = serde_json::to_string(&stored).unwrap();
         assert!(text.contains("\"worktreeBranchPrefix\":\"lk/\""));
@@ -299,7 +299,7 @@ mod tests {
         assert!(text.contains("\"searchEngine\":\"kagi\""));
         assert!(text.contains("\"downloadDir\":\"/tmp/baaz-downloads\""));
         assert!(text.contains("\"archiveOnMerge\":true"));
-        assert!(text.contains("\"onboarding\":{\"regions\":\"done\"}"));
+        assert!(text.contains("\"onboarding\":{\"regions\":\"done\",\"defaultBrowser\":\"due\"}"));
         assert!(text.contains("\"openIn\":\"zed\""));
         let back: Layout = serde_json::from_str(&text).unwrap();
         assert!(back.archive_on_merge);

@@ -3340,7 +3340,10 @@ impl Harness {
         // shows while they stand open.
         let find = (!blank_page).then(|| self.render_browse_find(window, cx)).flatten();
         let permission = (!blank_page).then(|| self.render_browse_permission(cx)).flatten();
-        let body = if find.is_some() || permission.is_some() {
+        // The one-time default-browser offer (docs/82 8.7) stands in the same
+        // place, behind a permission ask.
+        let offer = (!blank_page && permission.is_none()).then(|| self.render_default_browser_offer(cx)).flatten();
+        let body = if find.is_some() || permission.is_some() || offer.is_some() {
             div().flex_1().min_h_0().w_full().child(body).into_any_element()
         } else {
             body
@@ -3392,6 +3395,7 @@ impl Harness {
             .aria_label("Browse")
             .children(find)
             .children(permission)
+            .children(offer)
             .child(body)
             .children(omnibox)
             .children(scrim)

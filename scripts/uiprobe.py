@@ -439,6 +439,11 @@ ENTRIES = {
     # which the predicate counts like a real one), then `toast:` raises
     # the production toast through the production path. Offline, fake
     # backend.
+    # docs/82 8.7: the one-time default-browser offer above the Browse page
+    # (a capture never raises it by itself; the verb does, and nothing ever
+    # changes the system default).
+    "browse-default-offer": {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;default-browser-offer"]},
     "toast-header":         {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://example.com;toast:Saved · 3 files|/tmp/baaz-downloads"]},
     "right-changes":        {"shot": ["--no-connect", "--login", "signed-in",

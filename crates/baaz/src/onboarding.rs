@@ -1,6 +1,8 @@
 //! The first run after Connect (docs/82 8.7; docs/81 F A4, A6): one calm
 //! step asks where the person will work, and the composer opens there with
-//! the window's four regions named once.
+//! the window's four regions named once; the first page the person opens
+//! in Browse is followed by a one-time offer to make Baaz the default
+//! browser.
 //!
 //! - **The folder step** is the connect screen's second step
 //!   ([`crate::connect::ConnectStep::Folder`]), shown only after the first
@@ -16,6 +18,14 @@
 //!   set by the folder step, so only a first run ever sees it — and names
 //!   the sidebar, the conversation and its composer, the workspace pane and
 //!   Browse. "Got it" or Escape ends it for good.
+//! - **The default-browser offer** ([`default_browser_strip`]) is a row in
+//!   the chrome above the Browse page, like the permission strip, while
+//!   [`crate::layout::Onboarding::default_browser`] is `Due`: set after the
+//!   first page a person tab loads in front in Browse
+//!   ([`Harness::note_browse_used`]), never in a capture (a verb asks for it
+//!   there), and never when Baaz already is the default. "Make default"
+//!   runs the Settings row's own [`crate::default_browser::make_baaz_default`];
+//!   either answer ends it for good. Settings › Browser keeps its row.
 //!
 //! The state is the layout store's ([`crate::layout::Onboarding`]): a
 //! relaunch keeps what was shown, and nothing shows twice.
@@ -230,6 +240,77 @@ pub(crate) fn regions_strip(dismiss: impl Fn(&gpui::ClickEvent, &mut Window, &mu
         .into_any_element()
 }
 
+/// The default-browser offer's words.
+pub(crate) const OFFER_TEXT: &str = "Make Baaz your default browser? Links you open in other apps would open here, in Browse.";
+
+/// The default-browser offer (docs/82 8.7): one row in the chrome above
+/// the Browse page, like the permission strip, with "Not now" and "Make
+/// default". `answer(true)` makes Baaz the default; either answer ends the
+/// offer for good.
+pub(crate) fn default_browser_strip(answer: impl Fn(bool, &mut Window, &mut App) + 'static, cx: &App) -> AnyElement {
+    let p = cx.aui().colors;
+    let answer = std::rc::Rc::new(answer);
+    let later = {
+        let answer = answer.clone();
+        move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| answer(false, window, cx)
+    };
+    let make = move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| answer(true, window, cx);
+    h_flex()
+        .id("browse-default-offer")
+        .w_full()
+        .flex_none()
+        .items_center()
+        .h(px(scale::H_XL))
+        .px(px(scale::SP_3))
+        .gap(px(scale::SP_2))
+        .bg(p.surface_1)
+        .border_b_1()
+        .border_color(p.line)
+        .role(gpui::Role::Group)
+        .aria_label("Default browser")
+        .child(icon(IconName::Globe).size(px(scale::ICON_SM)).color(p.fg_muted))
+        .child(
+            div()
+                .id("browse-default-offer-text")
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .ui(TextRole::Body)
+                .text_color(p.ink)
+                .role(gpui::Role::Label)
+                .aria_label(OFFER_TEXT)
+                .child(OFFER_TEXT),
+        )
+        .child(
+            button("browse-default-later", "Not now")
+                .sm()
+                .ghost()
+                .accessibility_label("Not now: keep your default browser")
+                .on_click(later),
+        )
+        .child(
+            button("browse-default-make", "Make default")
+                .sm()
+                .primary()
+                .accessibility_label("Make Baaz your default browser")
+                .on_click(make),
+        )
+        .into_any_element()
+}
+
+/// Whether the person's first use of Browse is the moment for the offer:
+/// it has not been asked for yet, this is no capture, and the handler is
+/// known (`handler`: the cached `https` handler; `None` while unread) and
+/// is not Baaz. `Some(false)` when the handler says the offer is moot
+/// (Baaz already is the default): the offer is done without showing.
+pub(crate) fn offer_due(state: Once, capture: bool, handler: Option<Option<&str>>) -> Option<bool> {
+    if state != Once::NotYet || capture {
+        return None;
+    }
+    let handler = handler?;
+    Some(crate::default_browser::offers_make_default(handler))
+}
+
 impl Harness {
     /// The regions strip for this frame: on the session column while it is
     /// due (docs/82 8.7).
@@ -305,6 +386,57 @@ impl Harness {
             });
         }));
     }
+
+    /// The default-browser offer for this frame: above the Browse page
+    /// while it is due (docs/82 8.7).
+    pub(crate) fn render_default_browser_offer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if crate::layout::Layout::get(cx).onboarding.default_browser != Once::Due {
+            return None;
+        }
+        let answer = cx.listener(|this: &mut Self, make: &bool, _, cx| this.answer_default_browser_offer(*make, cx));
+        Some(default_browser_strip(move |make, window, cx| answer(&make, window, cx), cx))
+    }
+
+    /// The offer answered: "Make default" runs the Settings row's own call
+    /// (macOS confirms it); either answer ends the offer for good.
+    pub(crate) fn answer_default_browser_offer(&mut self, make: bool, cx: &mut Context<Self>) {
+        crate::layout::Layout::update(cx, |layout| layout.onboarding.default_browser = Once::Done);
+        // Only a person's click changes the system default: never a test,
+        // never a capture.
+        if make && !cfg!(test) && !crate::runtime::captures() {
+            if !crate::default_browser::make_baaz_default() {
+                crate::baaz_log!("Couldn't change the default browser (macOS refused the request)");
+            }
+            self.browser.update(cx, |browser, cx| browser.await_default_browser(cx));
+        }
+    }
+
+    /// A person tab's page has loaded in front in Browse: the first time,
+    /// the default-browser offer becomes due — unless this is a capture,
+    /// the handler is not read yet, or Baaz already is the default (then
+    /// the offer is done without showing).
+    pub(crate) fn note_browse_used(&mut self, cx: &mut Context<Self>) {
+        let state = crate::layout::Layout::get(cx).onboarding.default_browser;
+        let handler = self.browser.read(cx).default_browser_cache.as_ref().map(|inner| inner.as_deref());
+        let Some(offer) = offer_due(state, crate::runtime::captures(), handler) else { return };
+        let next = if offer { Once::Due } else { Once::Done };
+        crate::layout::Layout::update(cx, |layout| layout.onboarding.default_browser = next);
+    }
+
+    #[cfg(feature = "probe")]
+    /// `default-browser-offer`: the offer as the first use of Browse raises
+    /// it (a capture never raises it by itself). An `Err` when Browse shows
+    /// no page, or the offer was already raised or answered.
+    pub(crate) fn step_default_browser_offer(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if self.browse_centre_state(cx).is_none() {
+            return Err("Browse shows no page".to_owned());
+        }
+        if crate::layout::Layout::get(cx).onboarding.default_browser != Once::NotYet {
+            return Err("the default-browser offer was already raised".to_owned());
+        }
+        crate::layout::Layout::update(cx, |layout| layout.onboarding.default_browser = Once::Due);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -326,6 +458,18 @@ mod tests {
     fn not_now_says_where_the_session_starts() {
         assert!(skip_line(Some("acme-web"), "~/baaz-sessions").contains("keeps you in acme-web"));
         assert!(skip_line(None, "~/baaz-sessions").contains("starts in ~/baaz-sessions"));
+    }
+
+    /// The offer waits for the handler, never shows in a capture, never
+    /// twice, and is moot when Baaz already is the default.
+    #[test]
+    fn the_default_browser_offer_is_due_once_and_only_when_it_means_something() {
+        assert_eq!(offer_due(Once::NotYet, false, Some(Some("com.apple.safari"))), Some(true));
+        assert_eq!(offer_due(Once::NotYet, false, Some(Some("sh.baaz.app"))), Some(false), "already the default");
+        assert_eq!(offer_due(Once::NotYet, false, None), None, "handler not read yet: wait");
+        assert_eq!(offer_due(Once::NotYet, true, Some(Some("com.apple.safari"))), None, "never in a capture");
+        assert_eq!(offer_due(Once::Due, false, Some(Some("com.apple.safari"))), None);
+        assert_eq!(offer_due(Once::Done, false, Some(Some("com.apple.safari"))), None, "answered: never again");
     }
 
     /// The strip names four regions, the workspace pane with all five of
