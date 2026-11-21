@@ -240,9 +240,9 @@ impl Harness {
         self.browse_ask(&query, window, cx);
     }
 
-    /// The omnibox rows for the field's current text: this project's open
-    /// tabs (person tabs plus session tabs), its sessions, commands and
-    /// history from `browser.db` (R4). Sessions
+    /// The omnibox rows for the field's current text: this Space's open
+    /// tabs (person tabs plus session tabs), the current project's
+    /// sessions, commands and history from `browser.db` (R4). Sessions
     /// stay inside this project and out of the hidden list.
     pub(crate) fn browse_suggestions(&self, cx: &gpui::App) -> Vec<OmniRow> {
         let query = self.browser.read(cx).browse_address_text(cx);
@@ -413,13 +413,19 @@ impl Harness {
         }
     }
 
-    /// The new-tab page's pick-up rows (B2a-H4) with what each opens: this
-    /// project's open tabs (blank ones excluded — the current empty tab is
-    /// not somewhere to pick up), then its recent sessions, then recently
-    /// closed tabs — capped at 5.
+    /// The new-tab page's pick-up rows (B2a-H4) with what each opens: the
+    /// current Space's open tabs, named by that Space (blank ones excluded —
+    /// the current empty tab is not somewhere to pick up), then the current
+    /// project's recent sessions, named by the project, then the Space's
+    /// recently closed tabs — capped at 5. A tab is never named by a
+    /// project: tabs belong to a Space (docs/07 §1a).
     pub(crate) fn browse_pickup_full(&self, cx: &gpui::App) -> Vec<(toolbar::PickupRow, PickupTarget)> {
         let space = self.browser.read(cx).browse_space();
         let project_name = self.current_project(cx).map(|project| project.name.clone()).unwrap_or_default();
+        let space_name = {
+            let tabs = &self.browser.read(cx).tabs;
+            tabs.spaces.iter().find(|s| Some(s.id.as_str()) == space.as_deref()).map(|s| s.name.clone()).unwrap_or_default()
+        };
         let tab_items: Vec<(TabId, String, String)> = if self.browser.read(cx).tabs_loaded {
             self.browser
                 .read(cx)
@@ -429,7 +435,7 @@ impl Harness {
                 .filter(|tab| !tab.url.is_empty() && tab.url != BLANK)
                 .map(|tab| {
                     let label = tabs::tab_label(&tab.title, &tab.url);
-                    (tab.id, if label.is_empty() { tab.url.clone() } else { label }, project_name.clone())
+                    (tab.id, if label.is_empty() { tab.url.clone() } else { label }, space_name.clone())
                 })
                 .collect()
         } else {
@@ -443,8 +449,8 @@ impl Harness {
             .take(5)
             .map(|entry| (entry.id.clone(), entry.label.clone(), project_name.clone()))
             .collect();
-        // Recently closed tabs are this project's person tabs only — another
-        // project's tabs never offer here — newest first, and clickable:
+        // Recently closed tabs are this Space's person tabs only — another
+        // Space's tabs never offer here — newest first, and clickable:
         // each row reopens exactly the tab it names.
         let now = tabs::now_ms();
         let closed_items: Vec<(TabId, String, String)> = self
@@ -468,7 +474,7 @@ impl Harness {
             })
             .collect();
         let tab_pairs: Vec<(String, String)> =
-            tab_items.iter().map(|(_, title, project)| (title.clone(), project.clone())).collect();
+            tab_items.iter().map(|(_, title, space)| (title.clone(), space.clone())).collect();
         let session_pairs: Vec<(String, String)> =
             session_items.iter().map(|(_, label, project)| (label.clone(), project.clone())).collect();
         let closed_pairs: Vec<(String, String)> =

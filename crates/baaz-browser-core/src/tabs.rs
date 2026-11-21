@@ -26,7 +26,7 @@ pub struct TabId(pub u64);
 /// Who a tab belongs to: the person, or one session by id.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Owner {
-    /// The person's own tabs, shown per project in Browse mode.
+    /// The person's own tabs, shown per Space in Browse mode.
     Person,
     /// One agent/coding session's tabs, shown in Sessions mode.
     Session(String),
@@ -36,8 +36,9 @@ pub enum Owner {
 pub const BLANK: &str = "about:blank";
 
 /// The map key for [`Tabs::active`]: `"person:<space>"` for the person's
-/// per-project tabs (`""` with no project open) or `"session:<id>"` for a
-/// session (a session already belongs to one project, so the id suffices).
+/// tabs in one Space (`""` with none, an older file before
+/// [`Tabs::ensure_spaces`]) or `"session:<id>"` for a session (its tabs
+/// show in every Space, so the id suffices).
 /// A plain string (not the enum) so the map serialises as JSON.
 pub fn active_key(owner: &Owner, space: Option<&str>) -> String {
     match owner {
@@ -51,7 +52,12 @@ pub fn active_key(owner: &Owner, space: Option<&str>) -> String {
 pub struct Tab {
     /// Stable identity, from [`Tabs::next_id`].
     pub id: TabId,
-    /// The project this tab belongs to (`None` with no project open).
+    /// The Space this tab belongs to (a [`Space`] id). `None` only in an
+    /// older file, before [`Tabs::ensure_spaces`] — which also moved the
+    /// project ids older builds kept here into folders — or for a session's
+    /// tab its migration opened with the session's project
+    /// ([`Tabs::migrate_from_overrides`]); a session's tabs show in every
+    /// Space, so nothing reads that value as a Space.
     pub space: Option<String>,
     /// The person, or one session.
     pub owner: Owner,
@@ -334,10 +340,9 @@ impl Tabs {
     }
 
     /// The owner's active tab, when it has one still open. Person tabs
-    /// are per project: `space` is the project asking, and switching
-    /// project shows that project's active person tab (or none).
-    /// Sessions already belong to one project, so `space` is ignored
-    /// for them.
+    /// are per Space: `space` is the Space asking, and switching Space
+    /// shows that Space's active person tab (or none). A session's tabs
+    /// show in every Space, so `space` is ignored for them.
     pub fn active_of(&self, owner: &Owner, space: Option<&str>) -> Option<TabId> {
         let id = self.active.get(&active_key(owner, space))?;
         self.tabs.iter().any(|tab| &tab.id == id).then_some(*id)
@@ -351,8 +356,8 @@ impl Tabs {
     /// The ONE display ordering behind the strip, `strip_tab_at` (so
     /// `tab-select:n`/`tab-close:n` hit the n-th tab ON SCREEN), the
     /// close-neighbour choice, and future sidebars: pinned first, then
-    /// model order. Person tabs are per project; sessions already belong
-    /// to one project, so every session tab shows regardless of `space`.
+    /// model order. Person tabs are per Space; every session tab shows
+    /// regardless of `space`.
     pub fn ordered_tabs(&self, owner: &Owner, space: Option<&str>) -> Vec<&Tab> {
         // One position walk, then a sort on cached keys: O(n log n), not
         // the O(n² log n) the per-comparison `position` scan cost.
@@ -382,8 +387,8 @@ impl Tabs {
             let Owner::Session(session) = &tab.owner else {
                 continue;
             };
-            // Task folders show in every space (docs/27 §4.3); `space`
-            // narrows only when a caller still asks per project.
+            // Task folders show in every Space (docs/27 §4.3); `space`
+            // narrows only when a caller asks for one.
             if space.is_some_and(|space| tab.space.as_deref() != Some(space)) {
                 continue;
             }
@@ -594,7 +599,8 @@ impl Tabs {
     }
 
     /// Give every session with a stored `browser_url` and no tabs yet one
-    /// session tab with that URL (space from the session's project).
+    /// session tab with that URL (its `space` is the session's project, as
+    /// the older file had it; a session's tabs show in every Space).
     /// Give an older file its spaces (owner decision 2026-10-11): one space,
     /// "Personal", becomes current; every person tab moves into it, and the
     /// tabs that belonged to a project go into a folder named after that

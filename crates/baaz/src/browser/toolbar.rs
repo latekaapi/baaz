@@ -199,7 +199,7 @@ pub(crate) fn split_host_path(url: &str) -> (String, String, String) {
 pub(crate) enum SuggestKind {
     /// Ask the agent (⌘↵): always first while anything is typed.
     Ask,
-    /// An open tab of this project.
+    /// An open tab in this Space (the person's, or a session's).
     Tab,
     /// A session whose name matches.
     Session,
@@ -320,7 +320,7 @@ pub(crate) fn display_url(url: &str) -> String {
     rest.strip_suffix('/').unwrap_or(rest).to_owned()
 }
 
-/// Rank the omnibox rows for `query` over this project's open tabs
+/// Rank the omnibox rows for `query` over this Space's open tabs
 /// (`(id, title, url, recency_ms)`), sessions (`(id, name, recency_ms)`)
 /// and read history (`(title, url, recency_ms)`): Ask first, then matching
 /// tabs and sessions, then matching history — the history section omitted
@@ -486,13 +486,16 @@ pub(crate) fn rank_omnibox(
 pub(crate) struct PickupRow {
     /// The row's title.
     pub title: String,
-    /// `"harness · tab"`, `"harness · session"`, `"closed 10 min ago"`.
+    /// `"Personal · tab"` (a tab names its Space), `"harness · session"`
+    /// (a session names its project), `"closed 10 min ago"`.
     pub detail: String,
 }
 
-/// The new-tab page's pick-up rows: this project's open tabs, then its
-/// recent sessions, then recently closed tabs — capped at `cap` (5 on the
-/// page). Closed rows carry their pre-rendered age (`"10 min ago"`).
+/// The new-tab page's pick-up rows: the Space's open tabs (`tabs` pairs a
+/// title with its Space's name), then the project's recent sessions
+/// (`sessions` pairs a name with its project's), then recently closed tabs
+/// — capped at `cap` (5 on the page). Closed rows carry their pre-rendered
+/// age (`"10 min ago"`). A Space with no name leaves the tab's row "tab".
 pub(crate) fn pickup_rows(
     tabs: &[(String, String)],
     sessions: &[(String, String)],
@@ -500,8 +503,9 @@ pub(crate) fn pickup_rows(
     cap: usize,
 ) -> Vec<PickupRow> {
     let mut rows = Vec::new();
-    for (title, project) in tabs {
-        rows.push(PickupRow { title: title.clone(), detail: format!("{project} · tab") });
+    for (title, space) in tabs {
+        let detail = if space.is_empty() { "tab".to_owned() } else { format!("{space} · tab") };
+        rows.push(PickupRow { title: title.clone(), detail });
     }
     for (name, project) in sessions {
         rows.push(PickupRow { title: name.clone(), detail: format!("{project} · session") });
@@ -645,8 +649,8 @@ mod tests {
     #[test]
     fn pickup_rows_cap_at_five_with_details() {
         let tabs = vec![
-            ("Recharts · API reference".to_owned(), "harness".to_owned()),
-            ("Extra tab".to_owned(), "harness".to_owned()),
+            ("Recharts · API reference".to_owned(), "Personal".to_owned()),
+            ("Extra tab".to_owned(), String::new()),
         ];
         let sessions = vec![
             ("Fix ledger chart".to_owned(), "harness".to_owned()),
@@ -658,7 +662,8 @@ mod tests {
         ];
         let rows = pickup_rows(&tabs, &sessions, &closed, 5);
         assert_eq!(rows.len(), 5);
-        assert_eq!(rows[0].detail, "harness · tab");
+        assert_eq!(rows[0].detail, "Personal · tab", "a tab names its Space, never a project");
+        assert_eq!(rows[1].detail, "tab");
         assert_eq!(rows[2].detail, "harness · session");
         assert_eq!(rows[4].detail, "closed 10 min ago");
         assert_eq!(rows[4].title, "Weekend weather");

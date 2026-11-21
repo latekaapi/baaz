@@ -74,7 +74,7 @@ pub(crate) struct BrowserView {
     pub drop_cover: bool,
     /// Sessions whose Screenshot intent still waits for bytes.
     pub shot_pending: HashSet<String>,
-    /// The tab model: tabs per session and per project, persisted.
+    /// The tab model: tabs per session and per Space, persisted.
     pub tabs: Tabs,
     /// Whether [`Tabs`] has been loaded and migrated yet. Lazy: the
     /// registry is built before the session facts are read, so the first
