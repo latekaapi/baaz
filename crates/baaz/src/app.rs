@@ -3116,14 +3116,11 @@ impl Harness {
         let term_toggle = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, window, cx| {
             this.toggle_terminal(window, cx);
         });
-        let mut term_button = icon_button("hd-centre-terminal", IconName::Terminal)
-            .ghost()
-            .accessibility_label("Toggle terminal");
-        if crate::layout::Layout::get(cx).terminal_shown() {
-            term_button = term_button.on_click(term_toggle);
-        } else {
-            term_button = term_button.muted().on_click(term_toggle);
-        }
+        // Lit like the pane's other views (docs/82 8.1: the terminal is one
+        // of them now), wherever it shows.
+        let term_lit = crate::layout::Layout::get(cx).terminal_shown();
+        let term_button = aui::workbench::pane_toggle("hd-centre-terminal", right::screen_glyph(layout::RightKind::Terminal), "Terminal", term_lit)
+            .on_click(term_toggle);
         // D6 (docs/43 §2.2): Changes · Files · Page choose the pane's screen
         // (lit = the screen it shows); then Terminal, a hairline, the menu.
         let toggles = self.pane_toggles(cx);

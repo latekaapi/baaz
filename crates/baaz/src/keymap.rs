@@ -113,7 +113,7 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "ConfirmRename", keystroke: "enter", context: Some(crate::app::RENAME_CONTEXT), category: "sidebar", label: "Confirm rename" },
     KeymapEntry { action: "CopySelection", keystroke: "cmd-c", context: Some(crate::session::TRANSCRIPT_COPY_KEYS), category: "transcript", label: "Copy selection" },
     KeymapEntry { action: "JumpNextWaiting", keystroke: "cmd-shift-j", context: Some(aui::keys::ROOT_CONTEXT), category: "session", label: "Jump to the next session that needs you" },
-    KeymapEntry { action: "ToggleTerminal", keystroke: "ctrl-`", context: Some(aui::keys::ROOT_CONTEXT), category: "terminal", label: "Toggle terminal dock" },
+    KeymapEntry { action: "ToggleTerminal", keystroke: "ctrl-`", context: Some(aui::keys::ROOT_CONTEXT), category: "terminal", label: "Toggle terminal" },
     KeymapEntry { action: "CommitMessage", keystroke: "cmd-enter", context: Some("CommitMessage"), category: "pane", label: "Commit from the message" },
     KeymapEntry { action: "RightBack", keystroke: "cmd-[", context: Some("RightPane"), category: "pane", label: "Back in the right pane" },
     KeymapEntry { action: "ShowRightChanges", keystroke: "cmd-shift-d", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Changes in the right pane" },
