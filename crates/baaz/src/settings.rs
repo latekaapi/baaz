@@ -178,6 +178,7 @@ pub(crate) fn settings_blurb(section: &str) -> &'static str {
         "shortcuts" => "Click a keycap to rebind it. Changes apply live.",
         "archived" => "Sessions you archived, grouped by project.",
         _ if is_provider_subpage(section) => "Account, tools and defaults for this provider.",
+        _ if site_subpage_origin(section).is_some() => "What this site may do, kept from your answers. Changes apply to its next ask.",
         _ => "Settings.",
     }
 }
@@ -212,7 +213,7 @@ pub(crate) fn normalize_settings_target(raw: &str, last_visited: &str) -> String
     if SETTINGS_SECTIONS.iter().any(|(id, _)| *id == lower) {
         return lower;
     }
-    if provider_subpage_id(&lower).is_some() {
+    if provider_subpage_id(&lower).is_some() || site_subpage_origin(&lower).is_some() {
         return lower;
     }
     if let Some(home) = setting_home(&lower) {
@@ -240,6 +241,7 @@ pub(crate) fn settings_target_known(raw: &str) -> bool {
     let lower = target.to_lowercase();
     SETTINGS_SECTIONS.iter().any(|(id, _)| *id == lower)
         || provider_subpage_id(&lower).is_some()
+        || site_subpage_origin(&lower).is_some()
         || setting_home(&lower).is_some()
         || lower == "sidebar"
 }
@@ -250,6 +252,8 @@ pub(crate) fn settings_target_known(raw: &str) -> bool {
 pub(crate) fn settings_parent(section: &str) -> &str {
     if is_provider_subpage(section) {
         "providers"
+    } else if site_subpage_origin(section).is_some() {
+        "browser"
     } else {
         section
     }
@@ -263,6 +267,11 @@ pub(crate) fn settings_breadcrumb(section: &str) -> Vec<String> {
         if let Some(id) = provider_subpage_id(section) {
             crumbs.push(id.label().to_owned());
         }
+        return crumbs;
+    }
+    if let Some(origin) = site_subpage_origin(section) {
+        crumbs.push("Browser".to_owned());
+        crumbs.push(crate::browser::history::host_of(origin));
         return crumbs;
     }
     match section {
@@ -290,6 +299,7 @@ pub(crate) fn settings_crumb_target(section: &str, index: usize) -> Option<&'sta
     match index {
         0 => Some("general"),
         1 if is_provider_subpage(section) => Some("providers"),
+        1 if site_subpage_origin(section).is_some() => Some("browser"),
         _ => None,
     }
 }
@@ -568,6 +578,9 @@ pub(crate) struct SettingsFacts {
     pub history_pages: u64,
     /// Browser › Your data: the sites history never records.
     pub excluded_sites: Vec<String>,
+    /// Browser › Site permissions and a site's page: every site's kept
+    /// answers and zoom.
+    pub sites: baaz_browser_core::sites::SiteSettings,
     /// Providers: the move row, while moves remain.
     pub migration: Option<MigrationRow>,
     /// A provider sub-page: the import offer under its card.
@@ -611,6 +624,14 @@ pub(crate) enum SettingsEvent {
     ImportChrome,
     /// Browser › Your data: record this site again.
     IncludeSite(String),
+    /// A site's page: keep (`Some`) or drop (`None`) the answer for one
+    /// permission kind, by its stored key.
+    SetSitePermission { origin: String, key: String, answer: Option<baaz_browser_core::sites::Answer> },
+    /// A site's page: back to 100 %.
+    ResetSiteZoom(String),
+    /// Site permissions › Remove, or a site's page › Forget: everything
+    /// kept for the site goes.
+    ClearSite(String),
     /// Browser › Default browser: Make default.
     MakeDefaultBrowser,
     /// Browser › Chromium: open `chrome://settings` in Browse.
@@ -926,6 +947,8 @@ pub(crate) fn set_download_dir(dir: std::path::PathBuf, cx: &mut App) {
 pub(crate) fn page_title(section: &str) -> &'static str {
     if let Some(id) = provider_subpage_id(section) {
         id.label()
+    } else if site_subpage_origin(section).is_some() {
+        "Site settings"
     } else {
         SETTINGS_SECTIONS.iter().find(|(id, _)| *id == section).map(|(_, label)| *label).unwrap_or("General")
     }
@@ -1169,7 +1192,11 @@ impl SettingsPage {
             self.search.read(cx).value().trim().to_owned();
         let section = self.state.section.clone();
         let p = cx.aui().colors;
-        let title = page_title(&section);
+        // A site's page is titled by its host (docs/82 8.6).
+        let title: String = match site_subpage_origin(&section) {
+            Some(origin) => crate::browser::history::host_of(origin),
+            None => page_title(&section).to_owned(),
+        };
         let blurb = settings_blurb(&section);
         let body: AnyElement = match section.as_str() {
             "general" => self.settings_general_page(window, cx),
@@ -1181,6 +1208,7 @@ impl SettingsPage {
             "shortcuts" => self.settings_shortcuts_page(window, cx),
             "archived" => self.settings_archived_page(cx),
             _ if is_provider_subpage(&section) => self.settings_provider_subpage(window, cx),
+            _ if site_subpage_origin(&section).is_some() => self.settings_site_page(cx),
             _ => self.settings_general_page(window, cx),
         };
         // While a shortcut records, the next keystroke binds it (the old
@@ -1718,6 +1746,148 @@ impl SettingsPage {
         self.settings_group("Your data", rows, cx)
     }
 
+    /// Browser › Site permissions (docs/82 8.6): every site with a kept
+    /// answer or zoom, each with Edit (its own page) and Remove.
+    fn settings_browser_sites_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        let origins = self.facts.sites.origins();
+        let mut rows = vec![settings_row("Sites")
+            .description(if origins.is_empty() {
+                "None yet. \u{201C}Always allow\u{201D} or \u{201C}Always block\u{201D} on a site\u{2019}s ask keeps the answer here.".to_owned()
+            } else {
+                "Answers kept for good, and pages you zoomed. Remove a site to be asked again.".to_owned()
+            })
+            .into_any_element()];
+        for (index, origin) in origins.iter().enumerate() {
+            let host = crate::browser::history::host_of(origin);
+            let summary = site_summary(&self.facts.sites, origin);
+            let (edit_origin, remove_origin) = (origin.clone(), origin.clone());
+            let edit = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                cx.emit(SettingsEvent::Navigate(site_subpage(&edit_origin)));
+            });
+            let remove = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                cx.emit(SettingsEvent::ClearSite(remove_origin.clone()));
+            });
+            let actions = h_flex()
+                .gap(px(scale::SP_2))
+                .child(
+                    button(SharedString::from(format!("settings-site-edit-{index}")), "Edit")
+                        .accessibility_label(SharedString::from(format!("Edit the settings for {host}")))
+                        .on_click(move |e, w, cx| edit(e, w, cx)),
+                )
+                .child(
+                    button(SharedString::from(format!("settings-site-remove-{index}")), "Remove")
+                        .accessibility_label(SharedString::from(format!("Remove the settings for {host}")))
+                        .on_click(move |e, w, cx| remove(e, w, cx)),
+                );
+            rows.push(site_row(origin, Some(&summary), actions, cx));
+        }
+        self.settings_group("Site permissions", rows, cx)
+    }
+
+    /// One site's page (docs/82 8.6): each permission kind's kept answer
+    /// as Ask / Allow / Block, the agents' rule for the site, its zoom, and
+    /// Forget. Opened from Site permissions › Edit, the page menu's "Site
+    /// settings…" and the address line's site information.
+    fn settings_site_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        use baaz_browser_core::sites::Answer;
+        use crate::browser::agents::SiteRule;
+        let page = self.state.section.clone();
+        let Some(origin) = site_subpage_origin(&page).map(str::to_owned) else {
+            return div().into_any_element();
+        };
+        let host = crate::browser::history::host_of(&origin);
+        let sites = &self.facts.sites;
+        let mut keys: Vec<(String, String)> = SITE_PERMISSION_ROWS.iter().map(|(key, label)| ((*key).to_owned(), (*label).to_owned())).collect();
+        for (key, _) in sites.answers(&origin) {
+            if !keys.iter().any(|(k, _)| *k == key) {
+                keys.push((key, "Another device".to_owned()));
+            }
+        }
+        let mut permissions = Vec::new();
+        for (index, (key, label)) in keys.into_iter().enumerate() {
+            let current = match sites.answer(&origin, &key) {
+                None => 0,
+                Some(Answer::Allow) => 1,
+                Some(Answer::Block) => 2,
+            };
+            let (origin_owned, key_owned) = (origin.clone(), key.clone());
+            let set = cx.listener(move |_: &mut Self, index: &usize, _, cx| {
+                let answer = match *index {
+                    1 => Some(Answer::Allow),
+                    2 => Some(Answer::Block),
+                    _ => None,
+                };
+                cx.emit(SettingsEvent::SetSitePermission { origin: origin_owned.clone(), key: key_owned.clone(), answer });
+            });
+            let control = segmented(SharedString::from(format!("settings-site-permission-{index}")), vec!["Ask".into(), "Allow".into(), "Block".into()], current)
+                .accessibility_label(SharedString::from(format!("{label} on {host}")))
+                .on_select(move |index, w, cx| set(&index, w, cx));
+            permissions.push(settings_row(label).control(control).into_any_element());
+        }
+        // The agents' rule is the host's (Settings › Browser › Agents › Sites).
+        let rule = crate::layout::Layout::get(cx).agents.site(&host);
+        let rule_index = match rule {
+            None => 0,
+            Some(SiteRule::Always) => 1,
+            Some(SiteRule::Never) => 2,
+        };
+        let rule_host = host.clone();
+        let set_rule = cx.listener(move |_: &mut Self, index: &usize, _, cx| {
+            let rule = match *index {
+                1 => Some(SiteRule::Always),
+                2 => Some(SiteRule::Never),
+                _ => None,
+            };
+            crate::layout::Layout::update(cx, |layout| layout.agents.set_site(&rule_host, rule));
+        });
+        let agents = settings_row("Agents on this site")
+            .description(match rule {
+                None => "As Settings \u{203A} Browser \u{203A} Agents says.",
+                Some(SiteRule::Always) => "Agents act here without asking.",
+                Some(SiteRule::Never) => "Agents may not act here.",
+            })
+            .control(
+                segmented("settings-site-agents", vec!["Default".into(), "Always".into(), "Never".into()], rule_index)
+                    .accessibility_label(SharedString::from(format!("Agents on {host}")))
+                    .on_select(move |index, w, cx| set_rule(&index, w, cx)),
+            )
+            .into_any_element();
+        let zoom = sites.zoom(&origin);
+        let mut zoom_row = settings_row("Zoom").description(match zoom {
+            Some(zoom) => format!("{zoom}% on every page of this site"),
+            None => "100% (pages here open at the normal size)".to_owned(),
+        });
+        if zoom.is_some() {
+            let reset_origin = origin.clone();
+            let reset = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(SettingsEvent::ResetSiteZoom(reset_origin.clone())));
+            zoom_row = zoom_row.control(
+                button("settings-site-zoom-reset", "Reset")
+                    .accessibility_label(SharedString::from(format!("Reset the zoom for {host}")))
+                    .on_click(move |e, w, cx| reset(e, w, cx)),
+            );
+        }
+        let forget_origin = origin.clone();
+        let forget = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(SettingsEvent::ClearSite(forget_origin.clone())));
+        let forget_row = settings_row("Forget this site\u{2019}s settings")
+            .description("Every answer above goes back to Ask and the zoom to 100%.")
+            .control(
+                button("settings-site-forget", "Forget")
+                    .danger()
+                    .accessibility_label(SharedString::from(format!("Forget the settings for {host}")))
+                    .on_click(move |e, w, cx| forget(e, w, cx)),
+            )
+            .into_any_element();
+        settings_sections_stack()
+            .child(
+                section(origin.clone())
+                    .rows(permissions)
+                    .note("Ask shows the strip above the page the next time the site asks."),
+            )
+            .child(self.settings_group("Agents", vec![agents], cx))
+            .child(self.settings_group("Page", vec![zoom_row.into_any_element(), forget_row], cx))
+            .into_any_element()
+    }
+
     /// R4 Ad blocking: the switch and the sites ads are allowed on.
     fn settings_browser_adblock_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let prefs = crate::layout::Layout::get(cx).adblock.clone();
@@ -1824,6 +1994,7 @@ impl SettingsPage {
         // else it would be a dead row.
         let mut page = settings_sections_stack()
             .child(self.settings_browser_data_group(cx))
+            .child(self.settings_browser_sites_group(cx))
             .child(self.settings_browser_assistant_group(cx))
             .child(self.settings_browser_agents_group(cx))
             .child(self.settings_browser_search_group(cx))
@@ -2557,6 +2728,10 @@ impl Harness {
                 let data = self.browser.read(cx).data.read(cx);
                 facts.history_pages = data.history_len();
                 facts.excluded_sites = data.excluded().to_vec();
+                facts.sites = data.sites().clone();
+            }
+            _ if site_subpage_origin(section).is_some() => {
+                facts.sites = self.browser.read(cx).data.read(cx).sites().clone();
             }
             "providers" => {
                 let empty: &[crate::session_migration::PlannedMove] = &[];
@@ -2636,6 +2811,20 @@ impl Harness {
             SettingsEvent::IncludeSite(site) => {
                 self.browser.read(cx).data.clone().update(cx, |data, cx| data.include(site, cx));
             }
+            SettingsEvent::SetSitePermission { origin, key, answer } => {
+                let value = answer.map(|answer| answer.as_str());
+                // The store's front changes, and the Browse view (whose
+                // frame the page's facts come from) redraws with it.
+                self.browser.read(cx).data.clone().update(cx, |data, cx| data.set_site(origin, key, value, cx));
+            }
+            SettingsEvent::ResetSiteZoom(origin) => self.set_site_zoom(origin, 100, cx),
+            SettingsEvent::ClearSite(origin) => {
+                self.browser.read(cx).data.clone().update(cx, |data, cx| data.clear_site(origin, cx));
+                self.apply_site_zoom_to_open_pages(origin, 100, cx);
+                if site_subpage_origin(&self.settings_page.read(cx).state.section) == Some(origin.as_str()) {
+                    self.open_settings_page("browser", cx);
+                }
+            }
             SettingsEvent::MakeDefaultBrowser => {
                 if !crate::default_browser::make_baaz_default() {
                     crate::baaz_log!("Couldn't change the default browser (macOS refused the request)");
@@ -2657,13 +2846,53 @@ fn settings_sections_stack() -> gpui::Div {
 
 /// One per-site rule or exception under its group's row: the host as the
 /// row's title, the rule's word under it, its action at the right.
-fn site_row(host: &str, word: Option<&'static str>, action: impl IntoElement, _cx: &App) -> AnyElement {
+fn site_row(host: &str, word: Option<&str>, action: impl IntoElement, _cx: &App) -> AnyElement {
     let row = settings_row(host.to_owned()).control(action);
     match word {
-        Some(word) => row.description(word),
+        Some(word) => row.description(word.to_owned()),
         None => row,
     }
     .into_any_element()
+}
+
+/// The Settings section that edits one site's settings (docs/82 8.6):
+/// `browser/site:<origin>`.
+pub(crate) fn site_subpage(origin: &str) -> String {
+    format!("browser/site:{origin}")
+}
+
+/// The origin a site sub-page edits, or `None` for any other section.
+pub(crate) fn site_subpage_origin(section: &str) -> Option<&str> {
+    section.strip_prefix("browser/site:").filter(|origin| baaz_browser_core::sites::origin_of(origin).as_deref() == Some(*origin))
+}
+
+/// The permission kinds a site's page lists, as (stored key, label): every
+/// ask the strip can show, in its order.
+pub(crate) const SITE_PERMISSION_ROWS: [(&str, &str); 6] = [
+    ("camera", "Camera"),
+    ("microphone", "Microphone"),
+    ("geolocation", "Location"),
+    ("notifications", "Notifications"),
+    ("clipboard", "Clipboard"),
+    ("midi", "MIDI devices"),
+];
+
+/// A site's row under Browser › Site permissions: what is kept, in a
+/// line (`Camera allowed · Microphone blocked · Zoom 125 %`).
+pub(crate) fn site_summary(sites: &baaz_browser_core::sites::SiteSettings, origin: &str) -> String {
+    use baaz_browser_core::sites::Answer;
+    let mut parts: Vec<String> = sites
+        .answers(origin)
+        .into_iter()
+        .map(|(key, answer)| {
+            let label = SITE_PERMISSION_ROWS.iter().find(|(k, _)| *k == key).map(|(_, label)| (*label).to_owned()).unwrap_or_else(|| "Another device".to_owned());
+            format!("{label} {}", if answer == Answer::Allow { "allowed" } else { "blocked" })
+        })
+        .collect();
+    if let Some(zoom) = sites.zoom(origin) {
+        parts.push(format!("Zoom {zoom}%"));
+    }
+    parts.join(" · ")
 }
 
 /// Whether the live bindings differ from the shipped defaults (a user
@@ -2945,6 +3174,25 @@ mod tests {
                 rows: Vec::new(),
             },
         ]
+    }
+
+    /// docs/82 8.6: a site's page is a Browser sub-page, titled and
+    /// crumbed by its host, and only a real web origin names one.
+    #[test]
+    fn site_pages_nest_under_browser() {
+        let page = site_subpage("https://cam.example");
+        assert_eq!(normalize_settings_target(&page, ""), page, "the target survives");
+        assert_eq!(settings_parent(&page), "browser");
+        assert_eq!(settings_breadcrumb(&page), ["Settings", "Browser", "cam.example"]);
+        assert_eq!(settings_crumb_target(&page, 1), Some("browser"));
+        assert_eq!(site_subpage_origin("browser/site:about:blank"), None, "no site, no page");
+        assert_eq!(normalize_settings_target("browser/site:nonsense", ""), "general");
+        let sites = baaz_browser_core::sites::SiteSettings::from_rows([
+            ("https://cam.example".to_owned(), "camera".to_owned(), "allow".to_owned()),
+            ("https://cam.example".to_owned(), "microphone".to_owned(), "block".to_owned()),
+            ("https://cam.example".to_owned(), "zoom".to_owned(), "125".to_owned()),
+        ]);
+        assert_eq!(site_summary(&sites, "https://cam.example"), "Camera allowed · Microphone blocked · Zoom 125%");
     }
 
     #[test]

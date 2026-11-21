@@ -1472,6 +1472,40 @@ impl TerminalService {
         }
     }
 
+    /// The session whose page tool is acting on `view` now (not held by the
+    /// person), and where its last action landed on that page, in the
+    /// page's CSS pixels (docs/82 8.6): what the agent cursor draws.
+    pub fn driving(&self, view: &Entity<WebviewState>) -> Option<(String, (f64, f64))> {
+        let held = self.held.borrow();
+        let jobs = self.jobs.borrow();
+        let job = jobs.iter().find(|job| job.view.as_ref().is_some_and(|v| v.entity_id() == view.entity_id()) && !held.contains(&job.session))?;
+        let point = self.tab_agents.borrow().get(&view.entity_id())?.borrow().last_point?;
+        Some((job.session.clone(), point))
+    }
+
+    /// A page tool that `session` runs on `view` and that never finishes,
+    /// having last acted at `point`: the agent cursor and the driving bar's
+    /// capture fixture (`agent-drive:`), on the real activity path. It
+    /// sends nothing anywhere; its deadline is a day away.
+    #[cfg(feature = "probe")]
+    pub fn script_driving(&self, session: &str, view: &Entity<WebviewState>, label: &str, point: (f64, f64)) {
+        self.tab_handle(view).borrow_mut().last_point = Some(point);
+        let (reply, _) = mpsc::channel();
+        self.jobs.borrow_mut().push(RunningJob {
+            id: Value::Null,
+            session: session.to_owned(),
+            tab: None,
+            label: label.to_owned(),
+            deadline: Instant::now() + Duration::from_secs(86_400),
+            reply,
+            start: Some(Box::new(|tab: TabHandle| PageJob::new(tab, |_| std::future::pending::<Result<Value, String>>()))),
+            job: None,
+            view: Some(view.clone()),
+            in_flight: None,
+            asking: None,
+        });
+    }
+
     /// The host of `session`'s current page.
     pub fn page_host(&self, session: &str, cx: &App) -> Option<String> {
         let key = self.resolve_session(session);
@@ -1488,6 +1522,9 @@ impl TerminalService {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for job in self.jobs.borrow().iter() {
             (&job.session, &job.label, job.asking.is_some()).hash(&mut hasher);
+            // Where it last acted: the agent cursor moves with it.
+            let point = job.view.as_ref().and_then(|view| self.tab_agents.borrow().get(&view.entity_id()).and_then(|tab| tab.borrow().last_point));
+            point.map(|(x, y)| (x.to_bits(), y.to_bits())).hash(&mut hasher);
         }
         let mut held: Vec<String> = self.held.borrow().iter().cloned().collect();
         held.sort();

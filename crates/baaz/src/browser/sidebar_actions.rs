@@ -100,6 +100,7 @@ impl Harness {
             devtools: page.supports(aui_webview::BackendFeature::DevTools),
             annotating: page.annotating(),
             offers: self.shown_page_offers(cx),
+            zoom: self.shown_page_zoom(cx),
         };
         let mut menu = BrowseMenu { target, at: window.mouse_position() };
         if let Some(anchor) = anchor {
@@ -111,8 +112,23 @@ impl Harness {
     /// A page menu row: the B2a page menu's actions, on the shown page.
     pub(crate) fn browse_page_action(&mut self, action: aui::screens::sidebar::PageAction, window: &mut Window, cx: &mut Context<Self>) {
         use aui::screens::sidebar::PageAction;
+        // The Zoom row's controls walk the level with the menu open.
+        let zoom = match action {
+            PageAction::ZoomIn => Some(1),
+            PageAction::ZoomOut => Some(-1),
+            PageAction::ZoomReset => Some(0),
+            _ => None,
+        };
+        if let Some(direction) = zoom {
+            self.zoom_shown_page(direction, cx);
+            return;
+        }
         self.close_browse_menu(cx);
         match action {
+            PageAction::ZoomIn | PageAction::ZoomOut | PageAction::ZoomReset => {}
+            PageAction::SiteSettings => self.open_shown_site_settings(cx),
+            PageAction::Bookmarks => self.open_library(crate::browser::library::Shelf::Bookmarks, window, cx),
+            PageAction::History => self.open_library(crate::browser::library::Shelf::History, window, cx),
             PageAction::NewTab => self.new_browse_sidebar_tab(window, cx),
             PageAction::Find => self.open_browse_find(window, cx),
             PageAction::CopyLink => self.copy_shown_browse_link(cx),

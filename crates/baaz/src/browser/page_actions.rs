@@ -108,6 +108,19 @@ impl Harness {
         self.open_settings_page("browser", cx);
     }
 
+    /// "Site settings…" (the page menu, the Field, the site information):
+    /// the shown page's site's own Settings page — what it may do, the
+    /// agents' rule there, its zoom. A page with no site (`about:`, a
+    /// file) opens Browser settings.
+    pub(crate) fn open_shown_site_settings(&mut self, cx: &mut Context<Self>) {
+        let url = self.browse_centre_state(cx).map(|state| state.read(cx).url().to_string()).unwrap_or_default();
+        self.dismiss_browse_popovers(cx);
+        match baaz_browser_core::sites::origin_of(&url) {
+            Some(origin) => self.open_settings_page(&crate::settings::site_subpage(&origin), cx),
+            None => self.open_settings_page("browser", cx),
+        }
+    }
+
     /// Reload the shown tab at its own URL (the crashed page's Reload):
     /// the navigation clears the crash, whatever the tab's owner.
     pub(crate) fn reload_browse_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -159,21 +172,16 @@ impl Harness {
     /// moved itself steps back the way a browser does. The tab's URL follows
     /// what the page reports, like any navigation.
     pub(crate) fn browse_go_back(&mut self, cx: &mut Context<Self>) {
+        // The engine's answer (its new address) redraws the page.
         if let Some(state) = self.browse_centre_state(cx) {
-            state.update(cx, |state, cx| {
-                state.go_back();
-                cx.notify();
-            });
+            state.update(cx, |state, _| state.go_back());
         }
     }
 
     /// Step the shown tab forward in its engine's own history.
     pub(crate) fn browse_go_forward(&mut self, cx: &mut Context<Self>) {
         if let Some(state) = self.browse_centre_state(cx) {
-            state.update(cx, |state, cx| {
-                state.go_forward();
-                cx.notify();
-            });
+            state.update(cx, |state, _| state.go_forward());
         }
     }
 
@@ -240,5 +248,150 @@ impl Harness {
     pub(crate) fn clear_history_now(&mut self, cx: &mut Context<Self>) {
         self.browser.read(cx).data.clone().update(cx, |data, cx| data.clear_history(cx));
         self.overlays.update(cx, |o, cx| o.toast("History cleared", "", cx));
+    }
+}
+
+/// Page zoom (docs/82 8.6): the page menu's Zoom row and ⌘= ⌘- ⌘0 set
+/// the shown page's zoom and keep it for its site, beside the site's
+/// permission answers in `browser.db`; a page reaching a site takes the
+/// site's kept zoom (or 100 %) on arrival.
+impl Harness {
+    /// Step the shown page's zoom: `direction` +1 in, −1 out, 0 back to
+    /// 100 %. Nothing on a page whose engine cannot zoom (rule 13: the
+    /// row and keys only work where the engine does).
+    pub(crate) fn zoom_shown_page(&mut self, direction: i8, cx: &mut Context<Self>) {
+        let Some(state) = self.browse_centre_state(cx) else {
+            return;
+        };
+        let (url, current, zooms) = {
+            let page = state.read(cx);
+            (page.url().to_string(), page.zoom(), page.supports(aui_webview::BackendFeature::Zoom))
+        };
+        if !zooms {
+            return;
+        }
+        let origin = baaz_browser_core::sites::origin_of(&url);
+        // The level asked last (kept at once) beats the engine's report,
+        // which lands a poll later: two quick presses are two steps.
+        let current = origin.as_deref().and_then(|origin| self.browser.read(cx).data.read(cx).sites().zoom(origin)).unwrap_or(current);
+        let target = if direction == 0 { 100 } else { baaz_browser_core::sites::zoom_step(current, direction) };
+        match origin {
+            Some(origin) => self.set_site_zoom(&origin, target, cx),
+            // The engine's answer redraws the page (its `Zoom` event).
+            None => state.update(cx, |state, _| state.set_zoom(target)),
+        }
+    }
+
+    /// Keep `percent` as `origin`'s zoom (100 forgets it) and zoom every
+    /// open page on that site to it.
+    pub(crate) fn set_site_zoom(&mut self, origin: &str, percent: u16, cx: &mut Context<Self>) {
+        let value = (percent != 100).then(|| percent.to_string());
+        let data = self.browser.read(cx).data.clone();
+        data.update(cx, |data, cx| data.set_site(origin, baaz_browser_core::sites::ZOOM_KEY, value.as_deref(), cx));
+        self.apply_site_zoom_to_open_pages(origin, percent, cx);
+    }
+
+    /// Zoom every open page on `origin` to `percent` (its kept zoom just
+    /// changed, or was forgotten).
+    pub(crate) fn apply_site_zoom_to_open_pages(&mut self, origin: &str, percent: u16, cx: &mut Context<Self>) {
+        let pages: Vec<Entity<WebviewState>> = self.browser.read(cx).states.values().cloned().collect();
+        for state in pages {
+            let on_site = baaz_browser_core::sites::origin_of(&state.read(cx).url()).as_deref() == Some(origin);
+            if on_site && state.read(cx).supports(aui_webview::BackendFeature::Zoom) && state.read(cx).zoom() != percent {
+                state.update(cx, |state, _| state.set_zoom(percent));
+            }
+        }
+    }
+
+    /// The shown page's zoom for the page menu's Zoom row: `None` when its
+    /// engine cannot zoom (the row does not show).
+    pub(crate) fn shown_page_zoom(&self, cx: &gpui::App) -> Option<u16> {
+        let state = self.browse_centre_state(cx)?;
+        let page = state.read(cx);
+        page.supports(aui_webview::BackendFeature::Zoom).then(|| page.zoom())
+    }
+}
+
+impl BrowserView {
+    /// Each live page that reached another site since the last pass takes
+    /// that site's kept zoom, or 100 % (an engine such as WebKit keeps the
+    /// last zoom across navigations, so a site with none must be put back).
+    /// Once per arrival: within a site the person's own zoom stands.
+    pub(super) fn zoom_new_sites(&mut self, live: &[(TabId, String, String, Option<String>)], cx: &mut Context<Self>) {
+        self.zoomed_for.retain(|id, _| live.iter().any(|(live, ..)| live == id));
+        for (id, url, _, _) in live {
+            let Some(origin) = baaz_browser_core::sites::origin_of(url) else {
+                continue;
+            };
+            if self.zoomed_for.get(id) == Some(&origin) {
+                continue;
+            }
+            self.zoomed_for.insert(*id, origin.clone());
+            let Some(state) = self.states.get(id).cloned() else {
+                continue;
+            };
+            if !state.read(cx).supports(aui_webview::BackendFeature::Zoom) {
+                continue;
+            }
+            let target = self.data.read(cx).sites().zoom(&origin).unwrap_or(100);
+            if state.read(cx).zoom() != target {
+                state.update(cx, |state, _| state.set_zoom(target));
+            }
+        }
+    }
+}
+
+/// The Bookmarks and History page (docs/82 8.6, [`super::library`]).
+impl Harness {
+    /// Open the page on `shelf` over the Browse centre (entering Browse).
+    pub(crate) fn open_library(&mut self, shelf: super::library::Shelf, window: &mut Window, cx: &mut Context<Self>) {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
+            self.set_mode(crate::layout::Mode::Browse, window, cx);
+        }
+        self.dismiss_browse_popovers(cx);
+        if self.settings_open(cx) {
+            self.close_settings(cx);
+        }
+        let Some(page) = self.browser.read(cx).library.clone() else {
+            return;
+        };
+        // The page redraws itself; the root read it last frame (whether it
+        // stands open), so the root's frame follows.
+        page.update(cx, |page, cx| page.show(shelf, window, cx));
+    }
+
+    /// Shut the page, if it stands open.
+    pub(crate) fn close_library(&mut self, cx: &mut Context<Self>) {
+        if let Some(page) = self.browser.read(cx).library.clone() {
+            page.update(cx, |page, cx| page.close(cx));
+        }
+    }
+
+    /// Whether the page stands open over the Browse centre.
+    pub(crate) fn library_open(&self, cx: &gpui::App) -> bool {
+        crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse
+            && self.browser.read(cx).library.as_ref().is_some_and(|page| page.read(cx).is_open())
+    }
+
+    /// ⌘Y / ⇧⌘Y: the shelf, or shut it when it is the one shown.
+    pub(crate) fn toggle_library(&mut self, shelf: super::library::Shelf, window: &mut Window, cx: &mut Context<Self>) {
+        let showing = self.library_open(cx) && self.browser.read(cx).library.as_ref().is_some_and(|page| page.read(cx).shelf() == shelf);
+        if showing {
+            self.close_library(cx);
+        } else {
+            self.open_library(shelf, window, cx);
+        }
+    }
+
+    pub(crate) fn on_library_event(&mut self, event: super::library::LibraryEvent, window: &mut Window, cx: &mut Context<Self>) {
+        use super::library::LibraryEvent;
+        match event {
+            LibraryEvent::Close => self.close_library(cx),
+            LibraryEvent::Open(url) => {
+                self.close_library(cx);
+                let _ = self.open_new_tab(&url, window, cx);
+            }
+            LibraryEvent::ClearHistory => self.ask_clear_history(cx),
+        }
     }
 }

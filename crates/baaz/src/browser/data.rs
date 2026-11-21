@@ -1,14 +1,17 @@
 //! `browser.db` as a service (task 4.5, audit F13): history, page words,
-//! bookmarks and the never-remember list, read and written off the UI
-//! thread.
+//! bookmarks, the never-remember list and each site's settings (its
+//! stored permission answers and zoom, docs/82 8.6), read and written off
+//! the UI thread.
 //!
 //! [`BrowserData`] is an entity with two halves:
 //!
 //! - **The front**, in memory on the UI thread: every bookmark and folder,
 //!   the excluded sites, how many pages history holds, and the Field's last
-//!   history search. Everything the UI reads synchronously (the ★, the
-//!   Field's bookmark rows and scoped view, the bookmark popover, Settings ›
-//!   Browser › Your data) reads this, never the file.
+//!   history search, the site settings and the History page's last rows.
+//!   Everything the UI reads synchronously (the ★, the Field's bookmark
+//!   rows and scoped view, the bookmark popover, Settings › Browser › Your
+//!   data and Site permissions, a permission ask's stored answer, a page's
+//!   zoom on load) reads this, never the file.
 //! - **The worker**, one task on the background executor that owns the one
 //!   [`BrowserDb`] connection. Every write and every history search is an
 //!   [`Op`] queued to it, run in order; what it learns comes back as a
@@ -54,6 +57,14 @@ pub(crate) enum Op {
     Include(String),
     ClearHistory,
     SearchHistory { query: String },
+    /// The History page's rows for `query` (empty: the newest).
+    HistoryPage { query: String },
+    /// Forget one page (the History page's delete).
+    RemoveVisit(String),
+    /// Store (`Some`) or clear (`None`) one site setting.
+    Site { origin: String, key: String, value: Option<String> },
+    /// Forget everything stored for a site.
+    ClearSite(String),
     AddBookmark { provisional: i64, url: String, title: String, folder: i64, now: u64 },
     // Issued only by the probe's `bookmark:` step.
     #[cfg_attr(not(feature = "probe"), allow(dead_code))]
@@ -69,12 +80,18 @@ pub(crate) enum Op {
     Flush(std::sync::mpsc::Sender<()>),
 }
 
+/// How many pages the History page lists at most (newest first, or the
+/// newest matches): a page of history, not the whole file.
+const HISTORY_PAGE_ROWS: usize = 500;
+
 /// What the worker sends back, in order.
 pub(crate) enum Landed {
     Snapshot { seq: u64, front: Front },
     /// How many pages history holds after a write that may change it.
     Len(u64),
     Hits { query: String, visits: Vec<Visit> },
+    /// The History page's rows for `query`.
+    Page { query: String, visits: Vec<Visit> },
     /// A provisional bookmark or folder id got its row id.
     Assigned { provisional: i64, real: i64 },
 }
@@ -103,6 +120,8 @@ pub(crate) struct Front {
     pub folders: Vec<FolderRow>,
     pub excluded: Vec<String>,
     pub history_len: u64,
+    /// Each site's stored permission answers and zoom.
+    pub sites: baaz_browser_core::sites::SiteSettings,
 }
 
 // Issued only by the probe's `bookmark:` step.
@@ -118,6 +137,10 @@ enum FrontOp {
     Exclude(String),
     Include(String),
     ClearHistory,
+    Site { origin: String, key: String, value: Option<String> },
+    ClearSite(String),
+    /// One page left history: one fewer until the worker's count lands.
+    RemoveVisit,
 }
 
 impl Front {
@@ -146,6 +169,9 @@ impl Front {
             }
             FrontOp::Include(site) => self.excluded.retain(|s| s != site),
             FrontOp::ClearHistory => self.history_len = 0,
+            FrontOp::Site { origin, key, value } => self.sites.set(origin, key, value.as_deref()),
+            FrontOp::ClearSite(origin) => self.sites.clear_site(origin),
+            FrontOp::RemoveVisit => self.history_len = self.history_len.saturating_sub(1),
         }
     }
 
@@ -197,7 +223,7 @@ impl FrontOp {
                 fix(folder);
             }
             FrontOp::RemoveBookmark(id) => fix(id),
-            FrontOp::Exclude(_) | FrontOp::Include(_) | FrontOp::ClearHistory => {}
+            FrontOp::Exclude(_) | FrontOp::Include(_) | FrontOp::ClearHistory | FrontOp::Site { .. } | FrontOp::ClearSite(_) | FrontOp::RemoveVisit => {}
         }
     }
 }
@@ -227,6 +253,10 @@ pub(crate) struct BrowserData {
     hits: RefCell<Option<Hits>>,
     /// The search in flight, so a render never asks twice.
     asked: RefCell<Option<String>>,
+    /// The History page's last rows, kept like the Field's hits.
+    page: RefCell<Option<Hits>>,
+    /// The History page query in flight.
+    page_asked: RefCell<Option<String>>,
     _worker: Task<()>,
     _drain: Task<()>,
 }
@@ -273,6 +303,8 @@ impl BrowserData {
             alias: HashMap::new(),
             hits: RefCell::new(None),
             asked: RefCell::new(None),
+            page: RefCell::new(None),
+            page_asked: RefCell::new(None),
             _worker,
             _drain,
         };
@@ -369,6 +401,16 @@ impl BrowserData {
                 if same {
                     // Nothing on screen changes: no frame (a re-ask after
                     // history changed must not keep the window awake).
+                    return;
+                }
+            }
+            Landed::Page { query, visits } => {
+                if self.page_asked.borrow().as_deref() == Some(query.as_str()) {
+                    self.page_asked.borrow_mut().take();
+                }
+                let same = self.page.borrow().as_ref().is_some_and(|page| page.query == query && page.visits == visits);
+                *self.page.borrow_mut() = Some(Hits { query, visits, fresh: true });
+                if same {
                     return;
                 }
             }
@@ -541,13 +583,66 @@ impl BrowserData {
         self.front.excluded.iter().any(|site| host == *site || host.ends_with(&format!(".{site}")))
     }
 
-    /// History changed: the Field's rows are asked for again on the next
-    /// read (and shown as they are until then).
+    /// History changed: the Field's rows and the History page's are asked
+    /// for again on the next read (and shown as they are until then).
     pub(crate) fn history_changed(&self) {
         if let Some(hits) = self.hits.borrow_mut().as_mut() {
             hits.fresh = false;
         }
         self.asked.borrow_mut().take();
+        if let Some(page) = self.page.borrow_mut().as_mut() {
+            page.fresh = false;
+        }
+        self.page_asked.borrow_mut().take();
+    }
+
+    /// The History page's rows for `query` (empty: the newest pages): the
+    /// last rows read for it, asking the worker when there are none (or
+    /// history changed since) and meanwhile the last rows shown. `None`
+    /// until the first rows land.
+    pub(crate) fn history_page(&self, query: &str) -> Option<Vec<Visit>> {
+        let query = query.trim();
+        let current = self.page.borrow().as_ref().is_some_and(|page| page.fresh && page.query == query);
+        if !current && self.page_asked.borrow().as_deref() != Some(query) {
+            *self.page_asked.borrow_mut() = Some(query.to_owned());
+            self.send(Op::HistoryPage { query: query.to_owned() });
+        }
+        self.page.borrow().as_ref().map(|page| page.visits.clone())
+    }
+
+    /// Forget one page (the History page's delete): gone from the page's
+    /// rows at once, from the file in the background.
+    pub(crate) fn remove_visit(&mut self, url: &str, cx: &mut Context<Self>) {
+        if let Some(page) = self.page.borrow_mut().as_mut() {
+            page.visits.retain(|visit| visit.url != url);
+        }
+        if let Some(hits) = self.hits.borrow_mut().as_mut() {
+            hits.visits.retain(|visit| visit.url != url);
+        }
+        self.send(Op::RemoveVisit(url.to_owned()));
+        self.history_changed();
+        self.apply(FrontOp::RemoveVisit, cx);
+    }
+
+    /// Every site's stored answers and zoom.
+    pub(crate) fn sites(&self) -> &baaz_browser_core::sites::SiteSettings {
+        &self.front.sites
+    }
+
+    /// Store (`Some`) or clear (`None`) one setting for `origin`: the front
+    /// at once, the file in the background.
+    pub(crate) fn set_site(&mut self, origin: &str, key: &str, value: Option<&str>, cx: &mut Context<Self>) {
+        if self.front.sites.origins().iter().any(|o| o == origin) || value.is_some() {
+            let (origin, key, value) = (origin.to_owned(), key.to_owned(), value.map(str::to_owned));
+            self.apply(FrontOp::Site { origin: origin.clone(), key: key.clone(), value: value.clone() }, cx);
+            self.send(Op::Site { origin, key, value });
+        }
+    }
+
+    /// Forget everything stored for `origin`.
+    pub(crate) fn clear_site(&mut self, origin: &str, cx: &mut Context<Self>) {
+        self.apply(FrontOp::ClearSite(origin.to_owned()), cx);
+        self.send(Op::ClearSite(origin.to_owned()));
     }
 
     /// The writer the history recorder queues visits and titles through.
@@ -602,6 +697,8 @@ impl BrowserData {
         self.send(Op::ClearHistory);
         *self.hits.borrow_mut() = None;
         self.asked.borrow_mut().take();
+        *self.page.borrow_mut() = Some(Hits { query: String::new(), visits: Vec::new(), fresh: true });
+        self.page_asked.borrow_mut().take();
     }
 
     /// Bookmark `url` into `folder` (⌘D: the Bookmarks bar): the existing
@@ -683,7 +780,7 @@ impl Worker {
     fn snapshot(&mut self) -> Front {
         let db = self.db();
         let (marks, folders) = bookmarks::load_front(db.conn());
-        Front { marks, folders, excluded: db.excluded(), history_len: db.len() }
+        Front { marks, folders, excluded: db.excluded(), history_len: db.len(), sites: db.site_settings() }
     }
 
     fn run(&mut self, op: Op, out: &mpsc::UnboundedSender<Landed>) {
@@ -712,6 +809,16 @@ impl Worker {
                 let visits = self.db().search(&query, 12);
                 send(Landed::Hits { query, visits });
             }
+            Op::HistoryPage { query } => {
+                let visits = self.db().history_page(&query, HISTORY_PAGE_ROWS);
+                send(Landed::Page { query, visits });
+            }
+            Op::RemoveVisit(url) => {
+                self.db().remove(&url);
+                send(Landed::Len(self.db().len()));
+            }
+            Op::Site { origin, key, value } => self.db().set_site(&origin, &key, value.as_deref()),
+            Op::ClearSite(origin) => self.db().clear_site(&origin),
             Op::AddBookmark { provisional, url, title, folder, now } => {
                 let folder = self.resolve(folder);
                 if let Some(mark) = bookmarks::add(self.db().conn(), &url, &title, folder, now) {
@@ -800,6 +907,48 @@ mod tests {
     /// behind every write queued before it, never ahead. The bounded wait
     /// never hangs: on the test executor the worker cannot run while this
     /// thread waits, so the drain gives up at its bound and says so.
+    /// docs/82 8.6: a site's kept answer and zoom read from the front at
+    /// once, reach the file, and come back with the next launch's store;
+    /// the History page's rows come from the worker and a deleted page
+    /// leaves them at once.
+    #[gpui::test]
+    fn site_settings_and_the_history_page_survive_a_relaunch(cx: &mut gpui::TestAppContext) {
+        let path = temp_db("site-settings");
+        let data = cx.new(|cx| BrowserData::at(path.clone(), cx));
+        cx.run_until_parked();
+        let now = crate::browser::tabs::now_ms();
+        data.update(cx, |data, cx| {
+            data.set_site("https://cam.example", "camera", Some("allow"), cx);
+            data.set_site("https://cam.example", baaz_browser_core::sites::ZOOM_KEY, Some("150"), cx);
+            data.writer().record_visit("https://a.example/", "Alpha", now);
+            data.writer().record_visit("https://b.example/", "Beta", now);
+            data.history_changed();
+        });
+        data.read_with(cx, |data, _| {
+            assert_eq!(data.sites().answer("https://cam.example", "camera"), Some(baaz_browser_core::sites::Answer::Allow), "the front has it at once");
+            assert_eq!(data.history_page(""), None, "the page's rows are asked for, not read here");
+        });
+        cx.run_until_parked();
+        let rows = data.read_with(cx, |data, _| data.history_page("")).expect("the rows landed");
+        assert_eq!(rows.len(), 2);
+        data.update(cx, |data, cx| data.remove_visit("https://a.example/", cx));
+        assert_eq!(data.read_with(cx, |data, _| data.history_page("")).map(|rows| rows.len()), Some(1), "gone from the page at once");
+        cx.run_until_parked();
+        assert_eq!(on_disk(&path, |db| db.len()), 1, "and from the file");
+        drop(data);
+        // The next launch: a fresh store on the same file.
+        let again = cx.new(|cx| BrowserData::at(path.clone(), cx));
+        cx.run_until_parked();
+        again.read_with(cx, |data, _| {
+            assert_eq!(data.sites().answer("https://cam.example", "camera"), Some(baaz_browser_core::sites::Answer::Allow));
+            assert_eq!(data.sites().zoom("https://cam.example"), Some(150));
+        });
+        again.update(cx, |data, cx| data.clear_site("https://cam.example", cx));
+        cx.run_until_parked();
+        assert!(on_disk(&path, |db| db.site_settings().origins().is_empty()), "Forget reaches the file");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
     #[gpui::test]
     fn writes_queued_before_quit_are_in_the_file_after_the_drain(cx: &mut gpui::TestAppContext) {
         let path = temp_db("quit-drain");

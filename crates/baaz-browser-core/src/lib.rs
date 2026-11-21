@@ -20,6 +20,7 @@ pub mod chrome_import;
 pub mod clone_sweep;
 pub mod favicons;
 pub mod history;
+pub mod sites;
 pub mod tabs;
 
 // The core's modules and logging macro, under the `crate::` paths these

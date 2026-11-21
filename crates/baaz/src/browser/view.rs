@@ -94,12 +94,13 @@ pub(crate) struct BrowserView {
     /// Every tab's find strip (B2a-H5): per tab, so switching hides the
     /// strip and returning restores the query.
     pub find_strips: chrome::FindStrips,
-    /// Origins trusted "while visiting" (B2a-H5): in memory for this run
-    /// only — persistence is B2b.
-    pub visit_allows: chrome::VisitAllows,
-    /// Each live tab's last seen origin: navigating to another origin (or
-    /// closing) revokes that origin's "while visiting" grants.
-    pub permission_origins: HashMap<TabId, String>,
+    /// The Bookmarks and History page ([`super::library`]): made with the
+    /// window (its search field needs one, `Harness::new`), then kept.
+    pub(crate) library: Option<gpui::Entity<super::library::LibraryPage>>,
+    /// The site each live page's zoom was last set for (docs/82 8.6): a
+    /// page that reaches another site takes that site's kept zoom (or
+    /// 100 %) once, on arrival.
+    pub(crate) zoomed_for: HashMap<TabId, String>,
     /// The window's overlay stack ([`crate::overlay_stack`]): which Browse
     /// chrome popover (downloads, extensions), Browse menu, site
     /// information or bookmark popover stands open lives there, not here.
@@ -296,6 +297,8 @@ pub(crate) struct BrowserView {
     pub(crate) corner: Option<crate::overlay::Overlay>,
     /// D6: the Page screen's float (pill, notes panel) over its native page.
     pub(crate) page_float: Option<crate::overlay::Overlay>,
+    /// docs/82 8.6: the agent cursor's float over the centre's native page.
+    pub(crate) cursor_float: Option<crate::overlay::Overlay>,
     /// A session-owned tab the Browse centre shows: a task-folder row, or
     /// the session's page carried over from the pane. It stays owned by its
     /// session and survives a mode switch. Cleared by any person-tab select,
@@ -349,10 +352,10 @@ impl BrowserView {
             tabs_loaded: false,
             agent_tabs: HashMap::new(),
             centre_page_rect: None,
+            zoomed_for: HashMap::new(),
+            library: None,
             pane_page_rect: None,
             find_strips: chrome::FindStrips::default(),
-            visit_allows: chrome::VisitAllows::default(),
-            permission_origins: HashMap::new(),
             overlays,
             downloads_anchor: None,
             downloads_rendered: false,
@@ -407,6 +410,7 @@ impl BrowserView {
             overlay: None,
             corner: None,
             page_float: None,
+            cursor_float: None,
             browse_session_tab: None,
             agent_window: crate::app::agent_window::AgentWindowState::default(),
             occlusion: NativeOcclusion::default(),

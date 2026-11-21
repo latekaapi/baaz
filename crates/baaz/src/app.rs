@@ -197,6 +197,16 @@ actions!(
         MoveBrowseTabUp,
         /// Open the find strip on the shown Browse tab (⌘F in Browse).
         FindInPage,
+        /// Zoom the shown Browse page in one step (⌘=), kept for its site.
+        ZoomIn,
+        /// Zoom the shown Browse page out one step (⌘-).
+        ZoomOut,
+        /// The shown Browse page back to 100 % (⌘0).
+        ZoomReset,
+        /// The History page in Browse (⌘Y), or shut it.
+        ShowHistory,
+        /// The Bookmarks page in Browse (⇧⌘Y), or shut it.
+        ShowBookmarks,
         BookmarkPage,
         ClosePeek,
         PeekToTab,
@@ -1068,6 +1078,14 @@ impl Harness {
         // `browser.db` landings redraw the view itself, never the root.
         let browser = this.browser.clone();
         this.field_subscriptions.push(cx.subscribe_in(&browser, window, Self::on_browser_event));
+        // The Bookmarks and History page (docs/82 8.6): made here, where the
+        // window is (its search field needs one), owned by the Browse view.
+        let data = browser.read(cx).data.clone();
+        let library = cx.new(|cx| crate::browser::library::LibraryPage::new(data, window, cx));
+        this.field_subscriptions.push(cx.subscribe_in(&library, window, |this, _, event: &crate::browser::library::LibraryEvent, window, cx| {
+            this.on_library_event(event.clone(), window, cx);
+        }));
+        browser.update(cx, |browser, _| browser.library = Some(library));
         // The sidebar column's intents and wake-ups (task 4.7).
         let sidebar = this.sidebar_pane.clone();
         this.field_subscriptions.push(cx.subscribe_in(&sidebar, window, Self::on_sidebar_event));
@@ -2509,9 +2527,9 @@ impl Harness {
 
     /// The permission strip (B2a-H5): a row above the page while the shown
     /// tab holds an unanswered ask — a site glyph, the host in bold, the
-    /// ask, then Block (ghost), Allow once (secondary) and Allow while
-    /// visiting (primary). Trusted (origin, kind) grants never reach it
-    /// (the page reconcile auto-answers), and a page dismissal drops it with no
+    /// ask, then Block and Always block (ghost), Allow once (secondary) and
+    /// Always allow (primary). Asks with a kept answer never reach it (the
+    /// page reconcile answers them), and a page dismissal drops it with no
     /// state here.
     fn render_browse_permission(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::browser::chrome::{permission_sentence, permission_want};
@@ -2561,24 +2579,20 @@ impl Harness {
                     .aria_label(sentence.clone())
                     .child(format!("wants to {want}")),
             );
-        let block = button("browse-permission-block", "Block")
-            .ghost()
-            .sm()
-            .on_click(cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.answer_shown_permission(id, false, false, cx);
-            }));
-        let once = button("browse-permission-once", "Allow once").sm().on_click(cx.listener(
-            move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.answer_shown_permission(id, true, false, cx);
-            },
-        ));
-        let visiting = button("browse-permission-visiting", "Allow while visiting")
-            .primary()
-            .sm()
-            .on_click(cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                this.answer_shown_permission(id, true, true, cx);
-            }));
-        row = row.child(block).child(once).child(visiting);
+        use crate::browser::PermissionAnswer;
+        let answer = |id_str: &'static str, label: &'static str, answer: PermissionAnswer, cx: &mut Context<Self>| {
+            button(id_str, label).sm().on_click(cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.answer_shown_permission(id, answer, cx);
+            }))
+        };
+        // This time, or for good on this site (docs/82 8.6): the "always"
+        // answers are kept and Settings › Browser › Site permissions lists
+        // them.
+        let block = answer("browse-permission-block", "Block", PermissionAnswer::Block, cx).ghost();
+        let never = answer("browse-permission-always-block", "Always block", PermissionAnswer::AlwaysBlock, cx).ghost();
+        let once = answer("browse-permission-once", "Allow once", PermissionAnswer::AllowOnce, cx);
+        let always = answer("browse-permission-always-allow", "Always allow", PermissionAnswer::AlwaysAllow, cx).primary();
+        row = row.child(block).child(never).child(once).child(always);
         Some(row.into_any_element())
     }
 
@@ -3252,6 +3266,13 @@ impl Harness {
     /// render side effect elsewhere. With no person tab open the centre
     /// names itself and offers a New tab — render never opens one (B2a-H2b).
     fn render_browse_centre(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Bookmarks and History fill the centre while open (docs/82 8.6);
+        // the occlusion hides the native page under them.
+        if self.library_open(cx) {
+            if let Some(page) = self.browser.read(cx).library.clone() {
+                return page.into_any_element();
+            }
+        }
         let harness = cx.weak_entity();
         let mut blank_page = false;
         let body = match self.browse_centre_page(window, cx) {
@@ -3286,6 +3307,9 @@ impl Harness {
                     // square native corners (a tab that was the Peek's
                     // rounded page gets them back here).
                     state.update(cx, |state, _| state.set_corner_radius(0.0));
+                    // The agent cursor (docs/82 8.6) over a page gpui draws;
+                    // over a native page its own float draws it.
+                    let cursor = (!state.read(cx).is_native()).then(|| self.agent_cursor_layer(window, cx)).flatten();
                     let page = aui_webview::webview_pane("browse-centre-page", &state)
                         .without_nav()
                         .on_intent(move |intent, window, cx| {
@@ -3296,6 +3320,10 @@ impl Harness {
                             }
                         })
                         .into_any_element();
+                    let page = match cursor {
+                        Some(cursor) => div().relative().size_full().child(page).child(cursor).into_any_element(),
+                        None => page,
+                    };
                     match self.render_split(page, window, cx) {
                         Ok(split) => split,
                         Err(page) => page,
@@ -4957,6 +4985,27 @@ impl Render for Harness {
                         this.bookmark_shown_page(window, cx);
                     }
                 }))
+                .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                    if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
+                        this.zoom_shown_page(1, cx);
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                    if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
+                        this.zoom_shown_page(-1, cx);
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &ZoomReset, _, cx| {
+                    if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
+                        this.zoom_shown_page(0, cx);
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &ShowHistory, window, cx| {
+                    this.toggle_library(crate::browser::library::Shelf::History, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &ShowBookmarks, window, cx| {
+                    this.toggle_library(crate::browser::library::Shelf::Bookmarks, window, cx);
+                }))
                 .on_action(cx.listener(|this, _: &FindInPage, window, cx| {
                     if crate::layout::Layout::get(cx).mode == layout::Mode::Browse {
                         this.open_browse_find(window, cx);
@@ -6054,6 +6103,155 @@ mod tests {
         vc.executor().advance_clock(std::time::Duration::from_millis(200));
         vc.run_until_parked();
         assert_eq!(fake.borrow().url().as_ref(), "https://a.example/#step-2", "forward walked the engine's entry");
+        restore_state(state);
+    }
+
+    /// docs/82 8.6: "Always allow" keeps the answer for the site and kind,
+    /// so the next ask of that kind there answers itself with no strip;
+    /// "Always block" keeps a no the same way; a kind never answered still
+    /// asks. (The run-only "while visiting" grant this replaced asked again
+    /// every launch.)
+    #[gpui::test]
+    fn always_answers_are_kept_and_answer_the_next_ask(cx: &mut gpui::TestAppContext) {
+        use aui_webview::{PermissionDecision, PermissionKind};
+        let state = hermetic_state("browse-site-permissions");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (baaz, _id, fake) = browse_tab_on_shared_page(vc, &state.2, "https://cam.example/call");
+        // The test window draws no frame, so the page counts as hidden and
+        // its asks notify nobody: run the reconcile a shown page's change
+        // would run.
+        let browser = vc.update(|_, cx| baaz.read(cx).browser.clone());
+        let settle = |vc: &mut gpui::VisualTestContext| {
+            vc.executor().advance_clock(std::time::Duration::from_millis(200));
+            vc.run_until_parked();
+            vc.update(|_, cx| browser.update(cx, |browser, cx| browser.reconcile_pages(cx)));
+            vc.run_until_parked();
+        };
+        fake.borrow_mut().script_permission(1, "https://cam.example", vec![PermissionKind::Camera]);
+        fake.borrow_mut().script_permission(2, "https://cam.example", vec![PermissionKind::Microphone]);
+        settle(vc);
+        assert!(fake.borrow().answers().is_empty(), "a first ask waits for the person");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.answer_shown_permission(1, crate::browser::PermissionAnswer::AlwaysAllow, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.answer_shown_permission(2, crate::browser::PermissionAnswer::AlwaysBlock, cx)));
+        settle(vc);
+        vc.update(|_, cx| {
+            let sites = baaz.read(cx).browser.read(cx).data.read(cx).sites().clone();
+            assert_eq!(sites.answer("https://cam.example", "camera"), Some(baaz_browser_core::sites::Answer::Allow));
+            assert_eq!(sites.answer("https://cam.example", "microphone"), Some(baaz_browser_core::sites::Answer::Block));
+        });
+        // The site asks again: answered from what was kept, no strip.
+        fake.borrow_mut().script_permission(3, "https://cam.example", vec![PermissionKind::Camera]);
+        fake.borrow_mut().script_permission(4, "https://cam.example", vec![PermissionKind::Camera, PermissionKind::Microphone]);
+        fake.borrow_mut().script_permission(5, "https://cam.example", vec![PermissionKind::Geolocation]);
+        settle(vc);
+        let answers = fake.borrow().answers().to_vec();
+        assert!(answers.contains(&(3, PermissionDecision::Allow)), "the kept allow answered: {answers:?}");
+        assert!(answers.contains(&(4, PermissionDecision::Deny)), "one kept block blocks the ask: {answers:?}");
+        assert!(!answers.iter().any(|(id, _)| *id == 5), "a kind never answered still asks: {answers:?}");
+        restore_state(state);
+    }
+
+    /// docs/82 8.6: zoom is kept per site. The shown page's zoom steps and
+    /// is stored for its site; another site's page opens at 100 %, and
+    /// coming back to the site puts its zoom back.
+    #[gpui::test]
+    fn zoom_is_kept_per_site_and_set_on_arrival(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browse-site-zoom");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (baaz, _id, fake) = browse_tab_on_shared_page(vc, &state.2, "https://a.example/one");
+        // The test window draws no frame, so the page counts as hidden and
+        // its asks notify nobody: run the reconcile a shown page's change
+        // would run.
+        let browser = vc.update(|_, cx| baaz.read(cx).browser.clone());
+        let settle = |vc: &mut gpui::VisualTestContext| {
+            vc.executor().advance_clock(std::time::Duration::from_millis(200));
+            vc.run_until_parked();
+            vc.update(|_, cx| browser.update(cx, |browser, cx| browser.reconcile_pages(cx)));
+            vc.run_until_parked();
+        };
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.zoom_shown_page(1, cx)));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.zoom_shown_page(1, cx)));
+        settle(vc);
+        assert_eq!(fake.borrow().zoom_calls().last(), Some(&125));
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert_eq!(h.browser.read(cx).data.read(cx).sites().zoom("https://a.example"), Some(125), "kept for the site");
+            assert_eq!(h.shown_page_zoom(cx), Some(125), "the page menu's Zoom row reads it");
+        });
+        vc.update(|_, cx| baaz.update(cx, |h, cx| {
+            if let Some(page) = h.browse_centre_state(cx) {
+                page.update(cx, |page, _| page.navigate("https://b.example/"));
+            }
+        }));
+        settle(vc);
+        assert_eq!(fake.borrow().zoom_calls().last(), Some(&100), "another site opens at 100 %");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| {
+            if let Some(page) = h.browse_centre_state(cx) {
+                page.update(cx, |page, _| page.navigate("https://a.example/two"));
+            }
+        }));
+        settle(vc);
+        assert_eq!(fake.borrow().zoom_calls().last(), Some(&125), "the site's zoom comes back with it");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.zoom_shown_page(0, cx)));
+        settle(vc);
+        vc.update(|_, cx| assert_eq!(baaz.read(cx).browser.read(cx).data.read(cx).sites().zoom("https://a.example"), None, "100 % keeps nothing"));
+        restore_state(state);
+    }
+
+    /// docs/82 8.6: the agent cursor sits where the session's page tool
+    /// last acted on the page shown — in the page's coordinates at its zoom
+    /// — named by the session, and goes when the person takes the wheel.
+    #[cfg(feature = "probe")]
+    #[gpui::test]
+    fn the_agent_cursor_follows_the_tools_last_point(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browse-agent-cursor");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (baaz, _id, fake) = browse_tab_on_shared_page(vc, &state.2, "https://shop.example/checkout");
+        assert!(vc.update(|_, cx| baaz.read(cx).agent_cursor_spot(cx)).is_none(), "nobody acts: no cursor");
+        fake.borrow_mut().script_zoom(125);
+        vc.executor().advance_clock(std::time::Duration::from_millis(200));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let page = baaz.read(cx).browse_centre_state(cx).expect("the tab's page");
+            baaz.read(cx).terminal_service.script_driving("cursor-session", &page, "clicking “Next”", (100.0, 40.0));
+        });
+        let spot = vc.update(|_, cx| baaz.read(cx).agent_cursor_spot(cx)).expect("a tool acts on the page shown");
+        assert_eq!((f32::from(spot.0.x), f32::from(spot.0.y)), (125.0, 50.0), "the point, at the page's zoom");
+        assert_eq!(spot.1, "An agent is acting here", "named by the session, never a provider");
+        vc.update(|_, cx| baaz.read(cx).terminal_service.take_over("cursor-session"));
+        assert!(vc.update(|_, cx| baaz.read(cx).agent_cursor_spot(cx)).is_none(), "the person drives: no cursor");
+        restore_state(state);
+    }
+
+    /// docs/82 8.6: Bookmarks and History open over the Browse centre
+    /// (the native page may not show under them), ⌘Y shuts the shelf it
+    /// opened, and a row opens its page in a new tab and leaves the page.
+    #[gpui::test]
+    fn the_history_page_covers_the_centre_and_opens_rows_in_a_tab(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("browse-library");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (baaz, _id, _fake) = browse_tab_on_shared_page(vc, &state.2, "https://a.example/");
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_library(crate::browser::library::Shelf::History, window, cx)));
+        vc.update(|window, cx| {
+            let h = baaz.read(cx);
+            assert!(h.library_open(cx), "the page stands open");
+            assert!(!h.page_covers(window, cx).centre_allowed, "the native page hides under it");
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.on_library_event(crate::browser::library::LibraryEvent::Open("https://b.example/".into()), window, cx)));
+        vc.run_until_parked();
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            assert!(!h.library_open(cx), "opening a row leaves the page");
+            let shown = h.browser.read(cx).browse_centre_shown(cx).and_then(|id| h.browser.read(cx).tabs.get(id).map(|tab| tab.url.clone()));
+            assert_eq!(shown.as_deref(), Some("https://b.example/"), "in a new tab, shown");
+        });
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_library(crate::browser::library::Shelf::Bookmarks, window, cx)));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_library(crate::browser::library::Shelf::Bookmarks, window, cx)));
+        assert!(!vc.update(|_, cx| baaz.read(cx).library_open(cx)), "the same key shuts the shelf it opened");
         restore_state(state);
     }
 

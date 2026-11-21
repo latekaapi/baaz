@@ -107,6 +107,10 @@ pub(crate) enum OverlayKind {
     /// same card docked as a column beside it. Takes the keyboard (its
     /// steering input); hides with Baaz like the page float.
     AgentCard,
+    /// docs/82 8.6: the agent cursor over a native page — a clear window the
+    /// size of the page that ignores the pointer, so every click reaches
+    /// the page under it. Never takes the keyboard.
+    AgentCursor,
 }
 
 mod bookmark;
@@ -227,6 +231,10 @@ fn drop_native_chrome(handle: AnyWindowHandle, kind: OverlayKind, cx: &mut gpui:
         // was not frontmost stayed up over every app, Chrome included
         // (owner, 9 Nov: the Field over the whole screen).
         let _: () = msg_send![ns_window, setHidesOnDeactivate: true];
+        if kind == OverlayKind::AgentCursor {
+            // Clicks fall through to the page: the cursor only shows.
+            let _: () = msg_send![ns_window, setIgnoresMouseEvents: true];
+        }
         if kind != OverlayKind::Modal {
             // Borderless (no titled bit), keeping the two bits gpui's panel
             // relies on: full-size content (its frame maths) and
@@ -401,6 +409,9 @@ impl Render for OverlayView {
         trace(format_args!("render {kind:?} content={} active={}", content.is_some(), window.is_window_active()));
         if kind == OverlayKind::Corner {
             return div().size_full().p(gpui::px(SHADOW_PAD)).flex().flex_col().justify_end().items_end().children(content);
+        }
+        if kind == OverlayKind::AgentCursor {
+            return div().size_full().relative().children(content);
         }
         if kind == OverlayKind::PageFloat && self.baaz.read_with(cx, |baaz, cx| baaz.right_pane.read(cx).page_menu_open(cx) && !baaz.pane_page_covered(cx)).unwrap_or(false) {
             return div().size_full().children(content);
@@ -783,15 +794,130 @@ impl Harness {
             })
     }
 
+    /// A session's title as the person named it (or as the list shows it),
+    /// held to a line's length: how the driving bar and the agent cursor
+    /// name who acts on the page — never the provider (rule 14).
+    pub(crate) fn session_title(&self, session: &str, cx: &App) -> String {
+        let list = self.session_list.read(cx);
+        let title = list
+            .overrides
+            .get(session)
+            .and_then(|meta| meta.name.clone())
+            .or_else(|| list.sessions.iter().find(|entry| entry.id == session).map(|entry| entry.label.clone()))
+            .map(|title| title.trim().to_owned())
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "An agent".to_owned());
+        const MAX: usize = 40;
+        if title.chars().count() > MAX {
+            format!("{}\u{2026}", title.chars().take(MAX - 1).collect::<String>().trim_end())
+        } else {
+            title
+        }
+    }
+
+    /// Where the agent cursor sits over the Browse page (docs/82 8.6): the
+    /// point a session's page tool last acted on, on the page shown, while
+    /// that tool runs and the person has not taken the wheel — in the
+    /// page's own coordinates (its zoom applied) — and its accessible name.
+    pub(crate) fn agent_cursor_spot(&self, cx: &App) -> Option<(gpui::Point<Pixels>, String)> {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.settings_open(cx) || self.library_open(cx) {
+            return None;
+        }
+        let state = self.browse_centre_state(cx)?;
+        let (session, (x, y)) = self.terminal_service.driving(&state)?;
+        let scale = f32::from(state.read(cx).zoom()) / 100.0;
+        let at = gpui::point(gpui::px(x as f32 * scale), gpui::px(y as f32 * scale));
+        Some((at, format!("{} is acting here", self.session_title(&session, cx))))
+    }
+
+    /// The agent cursor in a layer the size of the page, for whichever
+    /// window draws over it: the main window over a drawn page, the cursor
+    /// float over a native one.
+    pub(crate) fn agent_cursor_layer(&self, window: &mut Window, cx: &mut App) -> Option<gpui::AnyElement> {
+        let (at, label) = self.agent_cursor_spot(cx)?;
+        Some(div().absolute().inset_0().child(aui::browse::agent_cursor("browse-agent-cursor", at, label, window, cx)).into_any_element())
+    }
+
+    /// The cursor float's frame over a native page, in screen space, and a
+    /// print of what it shows. `None` when no cursor shows or the page is
+    /// drawn in the window (the main window draws the cursor then).
+    fn wanted_cursor_float(&self, window: &Window, cx: &App) -> Option<(Bounds<Pixels>, u64)> {
+        use std::hash::{Hash, Hasher};
+        let state = self.browse_centre_state(cx)?;
+        if !state.read(cx).is_native() || state.read(cx).obscured() {
+            return None;
+        }
+        let (at, label) = self.agent_cursor_spot(cx)?;
+        let rect = self.browser.read(cx).centre_page_rect?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (f32::from(at.x).to_bits(), f32::from(at.y).to_bits(), label).hash(&mut hasher);
+        Some((Bounds::new(window.bounds().origin + rect.origin, rect.size), hasher.finish()))
+    }
+
+    /// The cursor float: over the native page, the size of the page, never
+    /// taking the pointer or the keyboard (the page under it keeps both).
+    fn sync_cursor_float(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = self.wanted_cursor_float(window, cx);
+        let current = self.browser.read(cx).cursor_float.as_ref().map(|o| o.bounds);
+        if wanted.map(|w| w.0) == current {
+            if let Some((_, print)) = wanted {
+                let stale = self.browser.update(cx, |browser, _| browser.cursor_float.as_mut().and_then(|float| float.stale(print)));
+                if let Some(handle) = stale {
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, window, _| window.refresh());
+                    });
+                }
+            }
+            return;
+        }
+        let old = self.browser.update(cx, |browser, _| std::mem::replace(&mut browser.cursor_float, wanted.map(|(bounds, _)| Overlay::opening(OverlayKind::AgentCursor, bounds))));
+        if let Some(handle) = old.and_then(|old| old.handle) {
+            remove_window(handle, cx);
+        }
+        let Some((bounds, print)) = wanted else {
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        never_main_panels();
+        let baaz = cx.entity().downgrade();
+        cx.spawn(async move |this, cx| {
+            let opened = cx.update(|cx| {
+                let options = WindowOptions {
+                    titlebar: None,
+                    focus: false,
+                    show: true,
+                    kind: WindowKind::PopUp,
+                    is_movable: false,
+                    window_bounds: Some(WindowBounds::Windowed(r3_frame(bounds))),
+                    window_background: WindowBackgroundAppearance::Transparent,
+                    ..Default::default()
+                };
+                cx.open_window(options, move |_, cx| cx.new(|cx| OverlayView { baaz, kind: OverlayKind::AgentCursor, focus: cx.focus_handle(), seen_active: false }))
+            });
+            if let Ok(opened) = &opened {
+                drop_native_chrome((*opened).into(), OverlayKind::AgentCursor, cx);
+            }
+            let _ = this.update(cx, |this, cx| {
+                let opened = opened.ok().map(AnyWindowHandle::from);
+                if let Some(unwanted) = this.browser.update(cx, |browser, _| land(&mut browser.cursor_float, OverlayKind::AgentCursor, bounds, opened, print)) {
+                    remove_window(unwanted, cx);
+                }
+                this.queue_floats(cx);
+            });
+        })
+        .detach();
+    }
+
     /// What the line shows now: the driving bar for a session acting on the
     /// tab on screen (R2), else the line's own state (R3) in Browse. The
     /// session is `Some` for the driving bar.
     fn line_view(&self, cx: &App) -> Option<(aui::browse::agent_window::LineState, Option<String>)> {
         if let Some(session) = self.line_session(cx) {
             if let Some(activity) = self.terminal_service.agent_activity(&session) {
-                let name = self.session_lane_provider(&session, cx).map_or("", |provider| provider.label());
+                // The session by its title, never its provider (rule 14).
+                let name = self.session_title(&session, cx);
                 let host = self.terminal_service.page_host(&session, cx).unwrap_or_default();
-                return Some((Self::agent_line_state(&activity, name, &host), Some(session)));
+                return Some((Self::agent_line_state(&activity, &name, &host), Some(session)));
             }
         }
         if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.settings_open(cx) {
@@ -900,6 +1026,7 @@ impl Harness {
         self.sync_line_float(window, cx);
         // The card seats itself above the line's window, so it follows it.
         self.sync_card_float(window, cx);
+        self.sync_cursor_float(window, cx);
     }
 
     /// The line's (and the right pane's page) float window.
@@ -1217,6 +1344,7 @@ impl Harness {
                 stack
             }
             OverlayKind::PageFloat => self.render_page_float(window, cx),
+            OverlayKind::AgentCursor => self.agent_cursor_layer(window, cx),
             OverlayKind::AgentCard => self.render_agent_card(window, cx),
             OverlayKind::Modal => {
                 // The same elements the main window draws, their listeners
@@ -1442,7 +1570,7 @@ impl Harness {
                     .semibold()
                     .text_color(p.fg)
                     .truncate()
-                    .child(host),
+                    .child(host.clone()),
             )
             .child(
                 h_flex()
@@ -1486,6 +1614,22 @@ impl Harness {
                         .child(div().role_in(TextRole::Micro, cx).font_family(aui_tokens::scale::FONT_MONO).text_color(p.fg).child(cert.sha256.clone())),
                 );
             }
+        }
+        // docs/82 8.6: what the site may do, kept from the person's answers,
+        // and its zoom — its own Settings page, on the main window.
+        if baaz_browser_core::sites::origin_of(&url).is_some() {
+            let open = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                this.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::SiteInfo, cx); });
+                this.run_on_main(cx, |this, _, cx| this.open_shown_site_settings(cx));
+            });
+            panel = panel.child(div().my(inset).mx(-inset).h(gpui::px(1.0)).bg(separator)).child(
+                div().px(metrics.item_px).pb(metrics.item_px).child(
+                    aui::data::button("site-info-settings", "Site settings\u{2026}")
+                        .sm()
+                        .accessibility_label(format!("Site settings for {host}"))
+                        .on_click(open),
+                ),
+            );
         }
         let leave = cx.listener(|this: &mut Self, _: &gpui::MouseDownEvent, _, cx| {
             this.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::SiteInfo, cx); });
@@ -1542,7 +1686,7 @@ impl Harness {
         trace(format_args!("close {kind:?}"));
         match kind {
             OverlayKind::BrowseMenu => self.close_browse_menu(cx),
-            OverlayKind::Corner | OverlayKind::PageFloat | OverlayKind::AgentCard => {}
+            OverlayKind::Corner | OverlayKind::PageFloat | OverlayKind::AgentCard | OverlayKind::AgentCursor => {}
             // Leaving the Field also hands focus back: on the main window.
             OverlayKind::Field => self.run_on_main(cx, |this, window, cx| this.leave_browse_address(window, cx)),
             OverlayKind::SiteInfo => {

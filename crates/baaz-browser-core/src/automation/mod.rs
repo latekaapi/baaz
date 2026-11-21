@@ -49,6 +49,10 @@ pub struct TabAgent {
     /// Hosts the person allowed the agent on in this tab (Your own tabs ›
     /// Ask first, "Allow"): the next action there does not ask again.
     pub allowed_hosts: std::collections::HashSet<String>,
+    /// Where the last action landed, in the page's CSS pixels from its
+    /// top-left (docs/82 8.6): what the agent cursor the window draws over
+    /// the page points at. `None` until an action lands on a point.
+    pub last_point: Option<(f64, f64)>,
 }
 
 /// A shared handle to one tab's [`TabAgent`].

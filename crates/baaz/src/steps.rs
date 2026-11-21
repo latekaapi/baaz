@@ -128,6 +128,10 @@
 //! | `crashed:<reason>` | script a renderer crash on the shown tab, so the Baaz error page shows (empty is "the page crashed (-1)"), free |
 //! | `page-actions` | open the page controls' ⋯ on the shown tab (the library's page menu with its offers); it draws in the overlay window, which a main-window shot does not show; no page fails the step, free |
 //! | `extensions` | open the Browse extensions popover on the shown tab, free |
+//! | `site-set:<origin>\|<key>=<value>,…` | keep site settings for `origin` (capture-only store): `camera=allow`, `microphone=block`, `zoom=125`… (docs/82 8.6); a bad origin, key or value fails the step, free |
+//! | `zoom:<in\|out\|reset>` | step the shown Browse page's zoom, kept for its site, as ⌘= ⌘- ⌘0 do; no page, an engine that cannot zoom, or a level that did not move fails the step, free |
+//! | `agent-drive:<x>,<y>\|<label>` | the session whose tab Browse shows runs a page tool on it that never ends, having last acted at `x`,`y` (the page's CSS pixels) as `label` (`clicking “Next”`): the agent cursor and the driving bar on the real activity path (docs/82 8.6); it sends nothing anywhere. No shown page, a tab that is no session's, or a bad point fails the step, free |
+//! | `library:<bookmarks\|history>` | open the Bookmarks or History page over the Browse centre (docs/82 8.6), idempotently; unknown fails the step, free |
 //! | `browse-ask:<text>` | Browse: the Field's Ask with `text` — the ⌘J line opens on the shown page and asks there (docs/82 8.2); scripted lanes only (the browser chat's lane sends nothing anywhere), so it reaches no model; empty text, no page, live lanes or no line fail the step |
 //! | `keep-tab:<id\|shown>` | Keep this tab on tab `id` or the one shown (Browse's, else the Page's): the session's tab becomes the person's, same page (docs/82 8.3); a tab that is no session's fails the step, free |
 //! | `page-expand` | the Page's "Open in Browse": the session's tab full width in Browse, the same page; no session tab on the Page fails the step, free |
@@ -455,6 +459,10 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "page-collapse", run: |this, _, window, cx| this.step_page_collapse(window, cx) },
     WindowVerb { verb: "send-page", run: |this, rest, window, cx| this.step_send_page(rest, window, cx) },
     WindowVerb { verb: "extensions", run: |this, rest, window, cx| this.step_extensions(rest, window, cx) },
+    WindowVerb { verb: "site-set", run: |this, rest, _, cx| this.step_site_set(rest, cx) },
+    WindowVerb { verb: "zoom", run: |this, rest, _, cx| this.step_zoom(rest, cx) },
+    WindowVerb { verb: "library", run: |this, rest, window, cx| this.step_library(rest, window, cx) },
+    WindowVerb { verb: "agent-drive", run: |this, rest, _, cx| this.step_agent_drive(rest, cx) },
     WindowVerb {
         verb: "fixture-session",
         run: |this, rest, window, cx| this.step_fixture_session(rest, window, cx),

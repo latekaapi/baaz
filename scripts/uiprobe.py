@@ -377,6 +377,31 @@ ENTRIES = {
     # not its look — the gallery's `screens/sidebar-browse-page-offers` is.
     "browse-more-menu":     {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "mode:browse;tab-new:https://example.com;page-actions"]},
+    # docs/82 8.6, work-browser basics. A site's own Settings page (the
+    # per-site sheet: kept answers as Ask / Allow / Block, the agents' rule,
+    # its zoom, Forget), reached from the page menu's "Site settings…" and
+    # the site information; Settings › Browser › Site permissions lists the
+    # sites. The Bookmarks and History pages fill the Browse centre. The
+    # Zoom row lives on the page ⋯ menu, which draws in the overlay window a
+    # main-window shot does not see: `browse-zoom-menu` pins that two zoom
+    # steps and the menu open (a failed step exits 1); its look is the
+    # gallery's `screens/sidebar-browse-page-offers`.
+    "browse-site-sheet":    {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;site-set:https://example.com|camera=allow,microphone=block,notifications=block,zoom=125;settings:browser/site:https://example.com"]},
+    "settings-site-permissions": {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "site-set:https://example.com|camera=allow,zoom=125;site-set:https://meet.example.org|camera=allow,microphone=allow;site-set:https://news.example.net|notifications=block;settings:browser"]},
+    "browse-history-page":  {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;history:https://tokio.rs/tokio/tutorial/spawning|Tokio tutorial · Spawning|0|;history:https://without.boats/blog/pin/|Pin and suffering|0|;history:https://doc.rust-lang.org/book/|The Rust Programming Language|1|;history:https://news.ycombinator.com/|Hacker News|3|;library:history;wait:300"]},
+    "browse-bookmarks-page": {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;bookmark:https://doc.rust-lang.org/book/|The Rust Programming Language|;bookmark:https://news.ycombinator.com/|Hacker News|;bookmark:https://doc.rust-lang.org/rust-by-example/|Rust by Example|Learning;library:bookmarks"]},
+    "browse-zoom-menu":     {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "mode:browse;tab-new:https://example.com;zoom:in;zoom:in;page-actions"]},
+    # docs/82 8.6: a session acting on the page Browse shows — the agent
+    # cursor on the element it acted on (drawn in the main window over the
+    # scripted page; over a native page its own float draws it), the
+    # driving bar naming the session in the page float (not in a shot).
+    "browse-agent-cursor":  {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "fixture-session:Fix ledger chart;agent-drive:180,140|clicking “More information”;wait:400"]},
     # docs/82 8.3: a session's task-folder tab right-clicked in Browse (Keep
     # this tab, Send page to session…). The menu draws in the overlay
     # window, so the shot shows the session's tab shown and its row lit,

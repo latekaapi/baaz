@@ -586,7 +586,8 @@ impl crate::app::Harness {
             // The Skills page and a pending provider switch hide the centre
             // exactly like the palette, menus, dialogs and settings hide the
             // pane's.
-            centre_allowed: self.pending_switch_dest(cx).is_none() && !self.skills_page.read(cx).covers_page(cx),
+            // The Bookmarks and History page fills the centre like Skills.
+            centre_allowed: self.pending_switch_dest(cx).is_none() && !self.skills_page.read(cx).covers_page(cx) && !self.library_open(cx),
             centre_rect: self.browse_centre_page_rect(super::window_content_bounds(window), window, cx),
         }
     }

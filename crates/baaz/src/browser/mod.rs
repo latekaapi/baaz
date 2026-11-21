@@ -63,6 +63,7 @@ mod sidebar_actions;
 mod view;
 mod occlusion;
 pub(crate) mod data;
+pub(crate) mod library;
 mod agent_tabs;
 mod downloads;
 mod find;
@@ -79,6 +80,7 @@ pub(crate) use parcels::{NotesParcel, Parcel};
 #[cfg(test)]
 pub(crate) use parcels::PendingParcel;
 mod permissions;
+pub(crate) use permissions::PermissionAnswer;
 #[cfg(feature = "probe")]
 mod steps;
 mod sync;
@@ -452,7 +454,7 @@ pub(crate) enum FieldAction {
 }
 
 /// What the Field finds by name (docs/27 §4.4): the page's own commands.
-const FIELD_COMMANDS: [(&str, &str, FieldAction); 17] = [
+const FIELD_COMMANDS: [(&str, &str, FieldAction); 20] = [
     ("new-tab", "New tab", FieldAction::Page(aui::screens::sidebar::PageAction::NewTab)),
     ("find", "Find in page", FieldAction::Page(aui::screens::sidebar::PageAction::Find)),
     ("copy-link", "Copy link", FieldAction::Page(aui::screens::sidebar::PageAction::CopyLink)),
@@ -465,6 +467,10 @@ const FIELD_COMMANDS: [(&str, &str, FieldAction); 17] = [
     ("clear-history", "Clear history…", FieldAction::ClearHistory),
     ("bookmark", "Bookmark this page", FieldAction::Bookmark),
     ("bookmarks", "Bookmarks", FieldAction::Bookmarks),
+    // docs/82 8.6: the pages that list and edit them, and the site's own.
+    ("manage-bookmarks", "Manage bookmarks", FieldAction::Page(aui::screens::sidebar::PageAction::Bookmarks)),
+    ("history", "History", FieldAction::Page(aui::screens::sidebar::PageAction::History)),
+    ("site-settings", "Site settings…", FieldAction::Page(aui::screens::sidebar::PageAction::SiteSettings)),
     ("ads-here", "Allow ads on this site", FieldAction::AdsHere),
     // docs/82 8.3: listed only where they work (`field_command_offered`).
     ("send-page", "Send page to session…", FieldAction::Page(aui::screens::sidebar::PageAction::SendPage)),

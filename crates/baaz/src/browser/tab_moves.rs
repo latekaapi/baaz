@@ -132,7 +132,10 @@ impl Harness {
                     *offers = self.tab_offers(tab, cx);
                 }
             }
-            BrowseMenuTarget::Page { offers, .. } => *offers = self.shown_page_offers(cx),
+            BrowseMenuTarget::Page { offers, zoom, .. } => {
+                *offers = self.shown_page_offers(cx);
+                *zoom = self.shown_page_zoom(cx);
+            }
             _ => {}
         }
         Some(menu)

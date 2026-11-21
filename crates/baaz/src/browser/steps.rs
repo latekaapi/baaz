@@ -235,6 +235,107 @@ impl Harness {
         Ok(())
     }
 
+    /// `site-set:<origin>|<key>=<value>,…`: keep settings for `origin` in
+    /// the (capture-only) store — permission answers (`camera=allow`,
+    /// `microphone=block`) and `zoom=<percent>` — as the strip's "Always"
+    /// answers and the Zoom row keep them. An origin that is not a web
+    /// origin, an unknown key or a bad value is an `Err`. Free.
+    pub(crate) fn step_site_set(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let (origin, pairs) = rest.split_once('|').ok_or_else(|| format!("`{rest}` is not <origin>|<key>=<value>,…"))?;
+        let origin = origin.trim();
+        if baaz_browser_core::sites::origin_of(origin).as_deref() != Some(origin) {
+            return Err(format!("`{origin}` is not a web origin"));
+        }
+        let mut set = Vec::new();
+        for pair in pairs.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let (key, value) = pair.split_once('=').ok_or_else(|| format!("`{pair}` is not <key>=<value>"))?;
+            let ok = match key {
+                baaz_browser_core::sites::ZOOM_KEY => value.parse::<u16>().is_ok_and(|zoom| (25..=500).contains(&zoom)),
+                _ if crate::settings::SITE_PERMISSION_ROWS.iter().any(|(k, _)| *k == key) => baaz_browser_core::sites::Answer::parse(value).is_some(),
+                _ => false,
+            };
+            if !ok {
+                return Err(format!("`{pair}` is not a site setting"));
+            }
+            set.push((key.to_owned(), value.to_owned()));
+        }
+        if set.is_empty() {
+            return Err("no settings given".into());
+        }
+        self.browser.read(cx).data.clone().update(cx, |data, cx| {
+            for (key, value) in &set {
+                data.set_site(origin, key, Some(value), cx);
+            }
+        });
+        Ok(())
+    }
+
+    /// `zoom:<in|out|reset>`: step the shown Browse page's zoom as ⌘= ⌘-
+    /// ⌘0 do, kept for its site. No page, an engine that cannot zoom, an
+    /// unknown direction, or a level that did not move is an `Err`. Free.
+    pub(crate) fn step_zoom(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let direction = match rest.trim() {
+            "in" => 1,
+            "out" => -1,
+            "reset" => 0,
+            other => return Err(format!("`{other}` is not in, out or reset")),
+        };
+        let state = self.browse_centre_state(cx).ok_or("no page is shown in Browse")?;
+        if !state.read(cx).supports(aui_webview::BackendFeature::Zoom) {
+            return Err("the shown page's engine cannot zoom".into());
+        }
+        let url = state.read(cx).url().to_string();
+        let kept = |this: &Self, cx: &gpui::App| {
+            baaz_browser_core::sites::origin_of(&url).and_then(|origin| this.browser.read(cx).data.read(cx).sites().zoom(&origin)).unwrap_or(100)
+        };
+        let before = kept(self, cx);
+        self.zoom_shown_page(direction, cx);
+        if kept(self, cx) == before && direction != 0 {
+            return Err(format!("the zoom stayed at {before}%"));
+        }
+        Ok(())
+    }
+
+    /// `agent-drive:<x>,<y>|<label>`: the shown tab's session runs a page
+    /// tool on it that never ends, having last acted at `x`,`y` as `label` —
+    /// the agent cursor and the driving bar, on the service's own activity
+    /// path. No shown page, a tab that is no session's, or a bad point is an
+    /// `Err`. Free: the tool sends nothing anywhere.
+    pub(crate) fn step_agent_drive(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let (point, label) = rest.split_once('|').unwrap_or((rest, "clicking"));
+        let (x, y) = point.split_once(',').ok_or_else(|| format!("`{point}` is not <x>,<y>"))?;
+        let (x, y): (f64, f64) = (
+            x.trim().parse().map_err(|_| format!("`{x}` is not a number"))?,
+            y.trim().parse().map_err(|_| format!("`{y}` is not a number"))?,
+        );
+        let id = self.browser.read(cx).browse_centre_shown(cx).ok_or("no tab is shown in Browse")?;
+        let Some(Owner::Session(session)) = self.browser.read(cx).tabs.get(id).map(|tab| tab.owner.clone()) else {
+            return Err("the shown tab is no session's (fixture-session: first)".into());
+        };
+        let state = self.browse_centre_state(cx).ok_or("the shown tab has no page")?;
+        self.terminal_service.script_driving(&session, &state, label.trim(), (x, y));
+        if self.agent_cursor_spot(cx).is_none() {
+            return Err("the agent cursor did not show".into());
+        }
+        Ok(())
+    }
+
+    /// `library:<bookmarks|history>`: open that page over the Browse
+    /// centre, idempotently. Unknown, or a page that did not open, is an
+    /// `Err`. Free.
+    pub(crate) fn step_library(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let shelf = match rest.trim() {
+            "bookmarks" => super::library::Shelf::Bookmarks,
+            "history" => super::library::Shelf::History,
+            other => return Err(format!("`{other}` is not bookmarks or history")),
+        };
+        self.open_library(shelf, window, cx);
+        if !self.library_open(cx) {
+            return Err("the page did not open".into());
+        }
+        Ok(())
+    }
+
     /// `bookmarks`: enter Browse and open the address field scoped to
     /// bookmarks. No page in the centre to anchor the field is an `Err`.
     /// Free.

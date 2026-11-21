@@ -207,7 +207,7 @@ fn a_floats_native_chrome_comes_off_outside_any_update() {
         opens += text.matches("cx.open_window(").count();
         drops += text.matches("drop_native_chrome((*opened).into(),").count();
     }
-    assert_eq!(opens, 4, "the four floats (overlay, corner, page float, card) open here");
+    assert_eq!(opens, 5, "the five floats (overlay, corner, page float, card, agent cursor) open here");
     assert_eq!(drops, opens, "every float drops its native chrome once it has opened");
     let overlay = source("overlay.rs");
     for signature in ["fn drop_native_chrome(handle: AnyWindowHandle, kind: OverlayKind, cx: &mut gpui::AsyncApp)", "fn drop_native_chrome(_: AnyWindowHandle, _: OverlayKind, _: &mut gpui::AsyncApp)"] {

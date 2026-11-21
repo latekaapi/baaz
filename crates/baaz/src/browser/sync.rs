@@ -342,6 +342,7 @@ impl BrowserView {
             })
             .collect();
         self.record_history(&live, cx);
+        self.zoom_new_sites(&live, cx);
         // B2a-H5: popups become tabs (foreground ones select, so the centre
         // follows), downloads stamp their start for the popover's
         // estimates, and closed tabs drop their find strips.
@@ -359,12 +360,10 @@ impl BrowserView {
             self.browse_find = None;
             self.browse_find_sub = None;
         }
-        // Tabs that navigated away (or closed) drop their "while visiting"
-        // grants; then trusted origins auto-answer and background asks
-        // mark their rows while in Browse.
+        // Asks with a kept answer answer themselves; background asks mark
+        // their rows while in Browse.
         let in_browse = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
         let centre = self.browse_centre_shown(cx);
-        self.revoke_stale_visit_grants();
         self.route_browse_permissions(centre, in_browse, cx);
         if tabs_dirty {
             // The sidebar's rows and the header read the tabs: it redraws.

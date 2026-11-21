@@ -361,18 +361,26 @@ pub async fn act(ctx: Ctx, params: Value) -> Result<Value, String> {
         agent.log.take_navigated();
         agent.log.mark_action();
     }
+    // Where the agent cursor goes (docs/82 8.6): an action on a ref lands on
+    // its box; one on a point lands there. A ref with no box keeps the last.
+    let mark = |x: f64, y: f64| ctx.tab.borrow_mut().last_point = Some((x, y));
     match action.as_str() {
         "click" => {
             let (x, y) = point_of(&ctx, node, &params).await?;
+            mark(x, y);
             click_at(&ctx, x, y).await?;
         }
         "hover" => {
             let (x, y) = point_of(&ctx, node, &params).await?;
+            mark(x, y);
             mouse(&ctx, "mouseMoved", x, y, "none", 0).await?;
         }
         "type" | "fill" => {
             let text = params.get("text").and_then(Value::as_str).ok_or("this action needs text")?.to_owned();
             if let Some(node) = node {
+                if let Ok((x, y)) = point_of(&ctx, Some(node), &params).await {
+                    mark(x, y);
+                }
                 ctx.call("DOM.focus", json!({"backendNodeId": node})).await?;
             }
             if action == "fill" {
@@ -404,6 +412,7 @@ pub async fn act(ctx: Ctx, params: Value) -> Result<Value, String> {
         }
         "scroll" => {
             let (x, y) = point_of(&ctx, node, &params).await.unwrap_or((200.0, 200.0));
+            mark(x, y);
             let delta_x = params.get("delta_x").and_then(Value::as_f64).unwrap_or(0.0);
             let delta_y = params.get("delta_y").and_then(Value::as_f64).unwrap_or(400.0);
             ctx.call(
@@ -417,6 +426,7 @@ pub async fn act(ctx: Ctx, params: Value) -> Result<Value, String> {
             let to = params.get("to").cloned().unwrap_or(Value::Null);
             let to_node = to.get("ref").and_then(Value::as_str).and_then(|r| ctx.tab.borrow().refs.node_for(r));
             let (to_x, to_y) = point_of(&ctx, to_node, &to).await?;
+            mark(to_x, to_y);
             mouse(&ctx, "mouseMoved", x, y, "none", 0).await?;
             mouse(&ctx, "mousePressed", x, y, "left", 1).await?;
             mouse(&ctx, "mouseMoved", to_x, to_y, "left", 0).await?;
@@ -805,6 +815,22 @@ mod tests {
         assert_eq!(kinds, ["mouseMoved", "mousePressed", "mouseReleased"]);
         assert_eq!(pointer[1].1["x"], 20.0);
         assert_eq!(pointer[1].1["y"], 20.0);
+    }
+
+    /// docs/82 8.6: the agent cursor's point is where the action landed —
+    /// the element's centre — and an action the person refused moves it
+    /// nowhere.
+    #[test]
+    fn the_cursor_point_is_where_the_action_landed() {
+        let agent = tab();
+        let _ = run_job(Job::new(agent.clone(), |ctx| snapshot(ctx, json!({}))), page);
+        assert_eq!(agent.borrow().last_point, None, "a snapshot acts nowhere");
+        let _ = run_deciding(Job::new(agent.clone(), |ctx| act(ctx, json!({"action":"click","ref":"e1"}))), page, |_| false);
+        assert_eq!(agent.borrow().last_point, None, "a refused Pay moves nothing");
+        let _ = run_job(Job::new(agent.clone(), |ctx| act(ctx, json!({"action":"click","ref":"e2"}))), page);
+        assert_eq!(agent.borrow().last_point, Some((20.0, 20.0)), "the click's point");
+        let _ = run_job(Job::new(agent.clone(), |ctx| act(ctx, json!({"action":"scroll","x":120.0,"y":300.0}))), page);
+        assert_eq!(agent.borrow().last_point, Some((120.0, 300.0)), "a scroll lands where it wheels");
     }
 
     #[test]

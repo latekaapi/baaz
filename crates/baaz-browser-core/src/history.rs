@@ -153,7 +153,12 @@ impl BrowserDb {
              CREATE INDEX IF NOT EXISTS visits_last ON visits(last_ms DESC);
              CREATE INDEX IF NOT EXISTS visits_host ON visits(host);
              CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(url UNINDEXED, title, body);
-             CREATE TABLE IF NOT EXISTS excluded(host TEXT PRIMARY KEY);",
+             CREATE TABLE IF NOT EXISTS excluded(host TEXT PRIMARY KEY);
+             CREATE TABLE IF NOT EXISTS site_settings(
+                 origin TEXT NOT NULL,
+                 key TEXT NOT NULL,
+                 value TEXT NOT NULL,
+                 PRIMARY KEY(origin, key));",
         )?;
         let _ = conn.busy_timeout(std::time::Duration::from_secs(2));
         super::bookmarks::ensure_schema(&conn)?;
@@ -307,8 +312,58 @@ impl BrowserDb {
         let _ = self.c().execute("DELETE FROM visits WHERE last_ms < ?1", params![cutoff]);
     }
 
+    /// Every site's stored settings ([`crate::sites`]).
+    pub fn site_settings(&self) -> crate::sites::SiteSettings {
+        let rows: Vec<(String, String, String)> = self
+            .c()
+            .prepare_cached("SELECT origin, key, value FROM site_settings ORDER BY origin, key")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).map(|rows| rows.flatten().collect())
+            })
+            .unwrap_or_default();
+        crate::sites::SiteSettings::from_rows(rows)
+    }
+
+    /// Store (`Some`) or clear (`None`) one site setting.
+    pub fn set_site(&self, origin: &str, key: &str, value: Option<&str>) {
+        let result = match value {
+            Some(value) => self.c().execute(
+                "INSERT INTO site_settings(origin, key, value) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(origin, key) DO UPDATE SET value = excluded.value",
+                params![origin, key, value],
+            ),
+            None => self.c().execute("DELETE FROM site_settings WHERE origin = ?1 AND key = ?2", params![origin, key]),
+        };
+        if let Err(error) = result {
+            crate::baaz_log!("browser.db: site setting not stored ({error})");
+        }
+    }
+
+    /// Forget every setting stored for `origin`.
+    pub fn clear_site(&self, origin: &str) {
+        let _ = self.c().execute("DELETE FROM site_settings WHERE origin = ?1", params![origin]);
+    }
+
+    /// The History page's rows: the newest pages first, or with a `query`
+    /// the pages whose title or address match it, newest first. At most
+    /// `limit`.
+    pub fn history_page(&self, query: &str, limit: usize) -> Vec<Visit> {
+        let q = query.trim();
+        if q.is_empty() {
+            return self.recent(limit);
+        }
+        let like = format!("%{}%", q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        self.c()
+            .prepare_cached(
+                "SELECT url, title, last_ms, count FROM visits
+                 WHERE title LIKE ?1 ESCAPE '\\' OR url LIKE ?1 ESCAPE '\\'
+                 ORDER BY last_ms DESC LIMIT ?2",
+            )
+            .and_then(|mut stmt| stmt.query_map(params![like, limit as i64], visit_row).map(|rows| rows.flatten().collect()))
+            .unwrap_or_default()
+    }
+
     /// The most recent pages, newest first.
-    #[cfg(any(test, feature = "test-support"))]
     pub fn recent(&self, limit: usize) -> Vec<Visit> {
         let Ok(mut stmt) =
             self.c().prepare_cached("SELECT url, title, last_ms, count FROM visits ORDER BY last_ms DESC LIMIT ?1")
@@ -379,6 +434,31 @@ fn visit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Visit> {
         count: row.get::<_, i64>(3)? as u64,
         snippet: None,
     })
+}
+
+/// The History page's day groups: `visits` (newest first) under a
+/// heading each — `Today`, `Yesterday`, else the date `local_date` names
+/// for the visit's day — in order. `offset_ms` is the local time zone's
+/// offset from UTC, so a day starts at local midnight.
+pub fn by_day(visits: Vec<Visit>, now_ms: u64, offset_ms: i64, local_date: impl Fn(u64) -> String) -> Vec<(String, Vec<Visit>)> {
+    let day = |ms: u64| (ms as i64 + offset_ms).div_euclid(DAY_MS as i64);
+    let today = day(now_ms);
+    let mut out: Vec<(i64, String, Vec<Visit>)> = Vec::new();
+    for visit in visits {
+        let key = day(visit.last_ms);
+        match out.last_mut() {
+            Some((last, _, rows)) if *last == key => rows.push(visit),
+            _ => {
+                let heading = match today - key {
+                    0 => String::from("Today"),
+                    1 => String::from("Yesterday"),
+                    _ => local_date(visit.last_ms),
+                };
+                out.push((key, heading, vec![visit]));
+            }
+        }
+    }
+    out.into_iter().map(|(_, heading, rows)| (heading, rows)).collect()
 }
 
 /// A relative word for a visit (`just now`, `5 min ago`, `today`,
@@ -480,6 +560,54 @@ pub const PAGE_TEXT_JS: &str = "return (document.body && document.body.innerText
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// docs/82 8.6: a site's answers and zoom go in and come back out of
+    /// the file, and clearing a site forgets only that site.
+    #[test]
+    fn site_settings_round_trip_through_the_file() {
+        let dir = std::env::temp_dir().join(format!("baaz-site-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("browser.db");
+        {
+            let db = BrowserDb::open_at(&path).unwrap();
+            db.set_site("https://cam.example", "camera", Some("allow"));
+            db.set_site("https://cam.example", "microphone", Some("block"));
+            db.set_site("https://cam.example", crate::sites::ZOOM_KEY, Some("125"));
+            db.set_site("https://other.example", "notifications", Some("block"));
+            db.set_site("https://cam.example", "camera", Some("block"));
+        }
+        let db = BrowserDb::open_at(&path).unwrap();
+        let sites = db.site_settings();
+        assert_eq!(sites.answer("https://cam.example", "camera"), Some(crate::sites::Answer::Block), "the last answer wins");
+        assert_eq!(sites.zoom("https://cam.example"), Some(125));
+        assert_eq!(sites.origins(), vec!["https://cam.example", "https://other.example"]);
+        db.set_site("https://cam.example", "microphone", None);
+        db.clear_site("https://other.example");
+        let sites = db.site_settings();
+        assert_eq!(sites.answer("https://cam.example", "microphone"), None);
+        assert_eq!(sites.origins(), vec!["https://cam.example"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The History page: newest first, a query narrows by title or address,
+    /// and the rows group by local day.
+    #[test]
+    fn the_history_page_lists_newest_first_and_groups_by_day() {
+        let db = BrowserDb::memory();
+        let now = 10 * DAY_MS + 12 * 3_600_000;
+        db.record_visit("https://a.example/", "Alpha", now - 60_000);
+        db.record_visit("https://b.example/", "Beta", now - DAY_MS);
+        db.record_visit("https://c.example/", "Gamma notes", now - 3 * DAY_MS);
+        let rows = db.history_page("", 50);
+        assert_eq!(rows.iter().map(|v| v.title.as_str()).collect::<Vec<_>>(), ["Alpha", "Beta", "Gamma notes"]);
+        assert_eq!(db.history_page("gamma", 50).len(), 1);
+        assert_eq!(db.history_page("b.example", 50)[0].title, "Beta");
+        let days = by_day(rows, now, 0, |_| String::from("7 Jan"));
+        let headings: Vec<&str> = days.iter().map(|(h, _)| h.as_str()).collect();
+        assert_eq!(headings, ["Today", "Yesterday", "7 Jan"]);
+        db.remove("https://b.example/");
+        assert_eq!(db.history_page("", 50).len(), 2, "one entry deleted");
+    }
 
     const T0: u64 = 1_800_000_000_000;
 

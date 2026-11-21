@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use aui_webview::{DownloadState, DownloadStatus, PermissionDecision, PermissionKind};
+use aui_webview::{DownloadState, DownloadStatus, PermissionKind};
 
 use super::tabs::{Owner, Tab, TabId, Tabs};
 
@@ -189,35 +189,6 @@ fn permission_noun(kind: &PermissionKind) -> &'static str {
     }
 }
 
-/// Origins the person trusted "while visiting": in memory, this run only.
-/// Persistence is B2b.
-///
-/// Keyed by (origin, kind): trusting the camera on an origin never
-/// auto-allows its microphone — only the kinds granted skip the strip.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct VisitAllows {
-    grants: HashSet<(String, String)>,
-}
-
-impl VisitAllows {
-    /// Trust `origin` for `kinds` for the rest of the run.
-    pub(crate) fn remember(&mut self, origin: &str, kinds: &[PermissionKind]) {
-        for kind in kinds {
-            self.grants.insert((origin.to_owned(), permission_kind_key(kind)));
-        }
-    }
-
-    /// Whether every kind in `kinds` was trusted on `origin`.
-    pub(crate) fn allows_all(&self, origin: &str, kinds: &[PermissionKind]) -> bool {
-        kinds.iter().all(|kind| self.grants.contains(&(origin.to_owned(), permission_kind_key(kind))))
-    }
-
-    /// Drop every grant for `origin`: the tab navigated away or closed.
-    pub(crate) fn revoke_origin(&mut self, origin: &str) {
-        self.grants.retain(|(grant_origin, _)| grant_origin != origin);
-    }
-}
-
 /// The stable key for one asked kind: the grant table's second half.
 pub(crate) fn permission_kind_key(kind: &PermissionKind) -> String {
     match kind {
@@ -279,13 +250,6 @@ fn split_scheme_port(tab_url: &str) -> (Option<String>, String) {
         _ => String::new(),
     };
     (Some(scheme.to_ascii_lowercase()), port)
-}
-
-/// The host's answer for a pending request: auto-allow only when every
-/// asked kind was trusted on the (normalised) origin, no answer
-/// otherwise (the strip asks the person).
-pub(crate) fn auto_answer(origin: &str, kinds: &[PermissionKind], allows: &VisitAllows) -> Option<PermissionDecision> {
-    allows.allows_all(origin, kinds).then_some(PermissionDecision::Allow)
 }
 
 /// Human bytes: "210 KB", "4.2 MB", "9.8 MB", "1.0 GB". One decimal from
@@ -592,35 +556,6 @@ mod tests {
                 &[PermissionKind::Camera, PermissionKind::Microphone, PermissionKind::Geolocation]
             ),
             "https://all.example/ wants to use your camera, microphone and location"
-        );
-    }
-
-    #[test]
-    fn allow_while_visiting_auto_answers_repeats() {
-        use PermissionKind::{Camera, Microphone};
-        let mut allows = VisitAllows::default();
-        assert_eq!(auto_answer("https://cam.example/", &[Camera], &allows), None, "strangers ask");
-        allows.remember("https://cam.example/", &[Camera]);
-        assert_eq!(
-            auto_answer("https://cam.example/", &[Camera], &allows),
-            Some(PermissionDecision::Allow),
-            "trusted origins auto-allow"
-        );
-        assert_eq!(
-            auto_answer("https://cam.example/", &[Camera, Microphone], &allows),
-            None,
-            "only the granted kinds skip the strip"
-        );
-        assert_eq!(
-            auto_answer("https://other.example/", &[Camera], &allows),
-            None,
-            "trust is per origin"
-        );
-        allows.revoke_origin("https://cam.example/");
-        assert_eq!(
-            auto_answer("https://cam.example/", &[Camera], &allows),
-            None,
-            "navigating away revokes the grant"
         );
     }
 
