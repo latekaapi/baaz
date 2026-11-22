@@ -353,7 +353,7 @@ impl LibraryPage {
             return (heading, empty_line(if query.is_empty() { "No history yet." } else { "No pages match." }, cx));
         }
         let now = crate::browser::tabs::now_ms();
-        let offset = chrono::Local::now().offset().local_minus_utc() as i64 * 1000;
+        let offset = crate::clock::now_local().offset().local_minus_utc() as i64 * 1000;
         let days = crate::browser::history::by_day(rows, now, offset, |ms| local_time(ms, "%A, %-d %B"));
         let mut body = v_flex().w_full().gap(px(scale::SP_5));
         for (day_index, (day, visits)) in days.into_iter().enumerate() {

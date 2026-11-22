@@ -897,12 +897,11 @@ fn forget_devtools_pages(tabs: &mut Tabs) {
     tabs.closed.retain(|tab| !tab.url.starts_with("devtools:"));
 }
 
-/// Now, as ms since the epoch: the clock behind `last_shown`.
+/// Now, as ms since the epoch: the clock behind `last_shown` and browser
+/// history. A capture's is frozen (`baaz_core::clock::now_ms`), so the History
+/// page does not change with the day it is shot.
 pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or(0)
+    baaz_core::clock::now_ms()
 }
 
 /// How long a hidden tab's page lives before discard, in seconds:

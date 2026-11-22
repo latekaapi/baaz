@@ -8,6 +8,7 @@
 //! freeze so a capture is byte-identical run to run. Deadline and scheduling clocks (`shot.rs`, `tier.rs`, the
 //! resize double-click) are untouched: they decide timing, never pixels.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -64,9 +65,52 @@ pub fn now_local() -> DateTime<Local> {
     }
 }
 
+/// "Now" for a capture, in ms since the epoch: 2026-09-09T09:00:00Z, the day
+/// the fixtures are written in. A capture's History page and its seeded visits
+/// read this instead of the wall clock, so a heading ("Today", "Monday, 7
+/// September") reads the same on every day the capture is taken.
+pub const FROZEN_EPOCH_MS: u64 = 1_788_944_400_000;
+
+/// Now, as ms since the epoch — the clock behind browser history and tab
+/// recency. Under a frozen clock it is [`FROZEN_EPOCH_MS`] plus one ms per
+/// call, so two reads still order the way they happened but no label can
+/// depend on the day the run is made.
+pub fn now_ms() -> u64 {
+    static TICK: AtomicU64 = AtomicU64::new(0);
+    let wall = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0);
+    ms_at(frozen(), wall, TICK.fetch_add(1, Ordering::Relaxed))
+}
+
+/// [`now_ms`]'s choice, pure: the wall reading, or the frozen epoch `tick` ms in.
+fn ms_at(frozen: bool, wall_ms: u64, tick: u64) -> u64 {
+    if frozen {
+        FROZEN_EPOCH_MS + tick
+    } else {
+        wall_ms
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frozen_run_never_reads_the_wall_for_ms() {
+        // Two different wall days, one answer: that is the History baseline fix.
+        assert_eq!(ms_at(true, 1_700_000_000_000, 3), FROZEN_EPOCH_MS + 3);
+        assert_eq!(ms_at(true, 1_900_000_000_000, 3), FROZEN_EPOCH_MS + 3);
+        assert_eq!(ms_at(false, 1_700_000_000_000, 3), 1_700_000_000_000);
+    }
+
+    #[test]
+    fn now_ms_never_runs_backwards() {
+        let a = now_ms();
+        let b = now_ms();
+        assert!(b >= a || !frozen(), "frozen reads tick forwards: {a} then {b}");
+    }
 
     #[test]
     fn a_frozen_instant_never_advances_within_a_process() {
