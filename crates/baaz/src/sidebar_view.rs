@@ -2304,6 +2304,30 @@ mod tests {
         b3c_teardown(&dir, guard, old);
     }
 
+    /// A toast nobody dismisses leaves by itself after `TOAST_LIFE` (the live
+    /// run found "Data exported" still up 20 minutes on).
+    #[gpui::test]
+    fn a_toast_nobody_dismisses_leaves_after_its_life(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("toast-life");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        let overlays = vc.update(|_, cx| baaz.read(cx).overlays.clone());
+        vc.update(|_, cx| {
+            overlays.update(cx, |overlays, cx| {
+                overlays.toast("Data exported", "5 files", cx);
+            })
+        });
+        vc.update(|_, cx| assert_eq!(overlays.read(cx).toasts.len(), 1));
+        vc.executor().advance_clock(crate::overlays::TOAST_LIFE / 2);
+        vc.run_until_parked();
+        vc.update(|_, cx| assert_eq!(overlays.read(cx).toasts.len(), 1, "still inside its life"));
+        vc.executor().advance_clock(crate::overlays::TOAST_LIFE);
+        vc.run_until_parked();
+        vc.update(|_, cx| assert!(overlays.read(cx).toasts.is_empty(), "gone after its life"));
+        b3c_teardown(&dir, guard, old);
+    }
+
     /// B3c, no active session: the staged boot loads splice rows above a
     /// top-parked list (a newly pinned row lifts a Pinned section over the
     /// date bucket the first batch painted), and gpui's splice carries the

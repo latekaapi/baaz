@@ -256,6 +256,10 @@ pub(crate) fn toast_open_target(action: &str) -> Option<&str> {
     action.strip_prefix(OPEN_ACTION).filter(|session| !session.is_empty())
 }
 
+/// How long a toast stays when nobody dismisses it: the Undo window, so an
+/// Undo toast and a plain one leave on the same beat.
+pub(crate) const TOAST_LIFE: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// The floating state of the window.
 #[derive(Default)]
 pub struct Overlays {
@@ -449,6 +453,18 @@ impl Overlays {
         let id = format!("toast-{}", self.next_toast);
         self.toasts.push(make(id.clone()));
         cx.notify();
+        // A note nobody dismisses used to stay for ever ("Data exported" was
+        // still up 20 minutes later, and notes queue behind it). Every toast
+        // leaves after [`TOAST_LIFE`]; a capture keeps its toast, because a
+        // timer would race the screenshot.
+        if !crate::runtime::captures() {
+            let gone = id.clone();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(TOAST_LIFE).await;
+                let _ = this.update(cx, |this, cx| this.dismiss_toast(&gone, cx));
+            })
+            .detach();
+        }
         id
     }
 
