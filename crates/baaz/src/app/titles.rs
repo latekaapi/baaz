@@ -134,7 +134,7 @@ impl Harness {
         let work = move || crate::utility::complete(provider, model.as_deref(), &prompt, muse);
         self.wire_call(cx, work, move |this, result, cx| {
             let late = !this.session_list.read(cx).titles_pending.contains(&real_id);
-            let reason = match result.map(|text| titles::clean_title(&text)) {
+            let reason = match result.map(|text| titles::clean_title_for(&first_message, &text)) {
                 Ok(Some(title)) => {
                     let known = this.session_list.read(cx).sessions.iter().any(|entry| entry.id == real_id);
                     if late && (!known || !titles::should_land_late(this.session_list.read(cx).overrides.get(&real_id))) {
