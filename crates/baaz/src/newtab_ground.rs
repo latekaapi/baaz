@@ -253,7 +253,6 @@ fn mesh() -> RgbImage {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

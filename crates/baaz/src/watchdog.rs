@@ -340,7 +340,6 @@ fn prune_samples(logs: &std::path::Path) {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

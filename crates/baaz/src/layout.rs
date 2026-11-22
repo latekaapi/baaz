@@ -184,7 +184,6 @@ pub fn right_drag_width(start_w: f32, grab_x: f32, x: f32) -> f32 {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

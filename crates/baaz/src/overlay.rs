@@ -1696,7 +1696,6 @@ impl Harness {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod field_order_tests {
     use super::field_display_order;

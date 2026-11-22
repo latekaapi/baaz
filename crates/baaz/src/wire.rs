@@ -151,7 +151,6 @@ pub trait ProviderCall: WireCall {
 impl<T: WireCall> ProviderCall for T {}
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

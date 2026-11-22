@@ -57,7 +57,6 @@ use crate::layout::LayoutGlobal as _;
 use aui_tokens::ActiveAui as _;
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 thread_local! {
     /// Render probe (tests): how many changed rows the pane's last render
@@ -1025,7 +1024,6 @@ impl Harness {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::lower_drag_share;

@@ -512,7 +512,6 @@ impl RightPane {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,7 +665,6 @@ impl RightPane {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod menu_tests {
     use super::{files_menu_rows, FilesMenuAction};

@@ -2859,7 +2859,6 @@ fn skill_scope_chip(skill: &Skill) -> String {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
 

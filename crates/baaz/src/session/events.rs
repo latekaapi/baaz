@@ -233,7 +233,6 @@ pub(crate) mod bench_support {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     //! The queue strip's reclaims, steering and the billing guard, driven on

@@ -100,7 +100,6 @@ pub fn card_details(status: &ProviderStatus, open: bool) -> CardDetails {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

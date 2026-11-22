@@ -404,7 +404,6 @@ pub fn age_text(as_of: i64, now: i64) -> String {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
 

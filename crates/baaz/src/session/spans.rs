@@ -140,7 +140,6 @@ pub fn clear_spans(held: &mut HashMap<String, HeldSpan>, sessions: &mut HashMap<
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

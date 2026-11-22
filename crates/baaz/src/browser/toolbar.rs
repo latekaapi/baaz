@@ -545,7 +545,6 @@ pub(crate) fn append_draft_line(existing: &str, text: &str) -> String {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

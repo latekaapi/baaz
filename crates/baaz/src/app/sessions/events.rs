@@ -642,7 +642,6 @@ impl Harness {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 thread_local! {
     /// How many times [`Harness::settle_turns`] ran on this thread: what

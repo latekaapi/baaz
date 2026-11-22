@@ -433,7 +433,6 @@ impl BrowserView {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod page_menu_tests {
     use super::*;

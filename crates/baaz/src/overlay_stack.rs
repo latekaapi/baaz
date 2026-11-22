@@ -607,7 +607,6 @@ content!(renaming, renaming_mut, RenameSession, String);
 content!(renaming_project, renaming_project_mut, RenameProject, String);
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

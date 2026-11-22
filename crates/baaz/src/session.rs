@@ -3376,7 +3376,6 @@ fn fork_time(meta: &aui_protocol::TurnMeta) -> String {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -350,7 +350,6 @@ fn payg_banner(send_anyway: bool, probing: bool) -> TierBanner {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

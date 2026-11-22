@@ -1521,7 +1521,6 @@ pub(crate) fn run_login_steps(this: &mut Harness, cx: &mut Context<Harness>) {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::{all_window_steps, LOGIN_VERBS, SESSION_VERBS, WINDOW_VERBS};

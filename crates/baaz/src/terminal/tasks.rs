@@ -527,7 +527,6 @@ fn parse_lsof(out: &str) -> HashMap<i32, u16> {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1223,7 +1223,6 @@ pub fn effective_binding(action: &str, context: Option<&str>) -> Option<Effectiv
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::{build_bindings, KEYMAP};

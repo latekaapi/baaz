@@ -493,7 +493,6 @@ fn visible(statuses: &[ProviderStatus]) -> Vec<ProviderStatus> {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::NewProvider;

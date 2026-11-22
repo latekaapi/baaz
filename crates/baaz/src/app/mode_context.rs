@@ -221,7 +221,6 @@ fn last_session(id: String, title: String, entry: Option<&SessionEntry>) -> Last
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::{pages_open, PagesOpen};

@@ -739,7 +739,6 @@ impl TerminalBackend for ScriptBackend {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

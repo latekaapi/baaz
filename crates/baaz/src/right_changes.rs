@@ -1959,7 +1959,6 @@ pub(crate) fn change_open_line(diff: &aui_protocol::Diff) -> Option<u32> {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     /// docs/82 7.2: the default ticks are the session's own files when it

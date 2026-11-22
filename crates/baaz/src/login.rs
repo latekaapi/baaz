@@ -112,7 +112,6 @@ impl Login {
     }
 
     #[cfg(feature = "probe")]
-
     #[cfg(test)]
     pub(crate) fn api_key_field(&self) -> Entity<InputState> {
         self.api_key.clone()

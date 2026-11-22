@@ -1201,7 +1201,6 @@ impl Harness {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use crate::layout::LayoutGlobal as _;

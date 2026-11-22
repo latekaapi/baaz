@@ -250,7 +250,6 @@ pub(crate) fn diff_target(root: &Path, path: &str) -> LineTarget {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

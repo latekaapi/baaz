@@ -5,7 +5,6 @@
 //! transcript re-derives them from the block's own fields.
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 use aui::transcript::{HandoffStep, HandoffStepState, default_handoff_steps};
 #[cfg(feature = "probe")]
@@ -15,7 +14,6 @@ use aui_protocol::HandoffState;
 pub use baaz_core::handoff::*;
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 /// The card's progress steps: the library's four defaults with this
 /// run's states marked (see [`handoff_steps`], the mapping the
@@ -131,7 +129,6 @@ pub fn handoff_steps(
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,7 +308,6 @@ mod tests {
     }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod cancelled_steps_tests {
     use super::*;

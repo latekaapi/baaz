@@ -1381,7 +1381,6 @@ pub(crate) fn browse_tab_id(key: &str) -> Option<crate::browser::TabId> {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3750,7 +3749,6 @@ pub(crate) fn footer_identity(
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod footer_identity_tests {
     use super::footer_identity;
@@ -3817,7 +3815,6 @@ pub(crate) fn task_face_for(waiting: bool, held: bool, running: bool, typing: bo
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod task_face_tests {
     use super::task_face_for;

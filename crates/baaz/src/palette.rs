@@ -618,7 +618,6 @@ pub(crate) fn tilde_root(root: &str) -> String {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1463,7 +1463,6 @@ impl SessionRuntime {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     /// docs/81 A F25: the newest question is the last to arrive, not the

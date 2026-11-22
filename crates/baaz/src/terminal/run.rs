@@ -55,7 +55,6 @@ impl TerminalDock {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use gpui::AppContext as _;

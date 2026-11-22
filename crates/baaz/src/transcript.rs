@@ -2749,7 +2749,6 @@ pub fn empty_state(provider: crate::providers::ProviderId, display: &str, cx: &m
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

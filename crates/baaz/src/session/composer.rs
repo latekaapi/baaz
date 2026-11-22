@@ -1400,7 +1400,6 @@ pub(crate) fn quote_attachment(quote: super::QuoteDraft) -> aui_protocol::Attach
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod quote_tests {
     use super::super::{QuoteDraft, QuoteLocation, QuoteSide};

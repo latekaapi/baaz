@@ -406,7 +406,6 @@ fn play_sound() {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

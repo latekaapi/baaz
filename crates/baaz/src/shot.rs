@@ -431,7 +431,6 @@ pub fn capture_and_quit(
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

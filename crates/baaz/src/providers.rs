@@ -69,7 +69,6 @@ pub fn provider_from_icon(provider: aui_icons::Provider) -> Option<ProviderId> {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

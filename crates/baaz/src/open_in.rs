@@ -61,14 +61,12 @@ fn spawn(argv: Vec<String>) {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 fn spawn(argv: Vec<String>) {
     OPENED.with(|opened| opened.borrow_mut().push(argv));
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 thread_local! {
     /// The argv each [`open_path`] would have run, for tests.
@@ -95,14 +93,12 @@ fn reveal(folder: PathBuf) {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 fn reveal(folder: PathBuf) {
     REVEALED.with(|revealed| revealed.borrow_mut().push(folder));
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 thread_local! {
     /// The folders [`reveal_folder`] would have shown, for tests.
@@ -117,7 +113,6 @@ pub(crate) fn project_folder(workspace: &str) -> Option<PathBuf> {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1293,7 +1293,6 @@ pub(crate) fn quoted_prompt(quotes: &[super::QuoteDraft], text: &str) -> String 
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     /// Live 2026-10-21: a quoted pair of lines reached the bubble but not

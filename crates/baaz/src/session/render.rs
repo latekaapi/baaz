@@ -3176,8 +3176,6 @@ impl InlineProgress {
 
 
 #[cfg(feature = "probe")]
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4547,7 +4545,6 @@ fn open_externally(path: &std::path::Path, cx: &mut gpui::App) {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 thread_local! {
     /// Paths a test asked the OS to open (see [`open_externally`]).

@@ -461,7 +461,6 @@ pub(crate) fn parse_permission_kinds(rest: &str) -> Option<Vec<PermissionKind>> 
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

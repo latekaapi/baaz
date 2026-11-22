@@ -2037,7 +2037,6 @@ fn key_bytes_for(key: &str) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

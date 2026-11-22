@@ -485,7 +485,6 @@ pub fn provider_mark(id: &str) -> Option<aui_icons::Provider> {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

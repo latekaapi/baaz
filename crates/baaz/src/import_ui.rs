@@ -1444,7 +1444,6 @@ pub(crate) fn card_line_row(
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

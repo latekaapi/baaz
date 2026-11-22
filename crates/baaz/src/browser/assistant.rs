@@ -73,7 +73,6 @@ pub fn resolve(prefs: &AssistantPrefs, usable: impl Fn(ProviderId) -> bool, defa
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

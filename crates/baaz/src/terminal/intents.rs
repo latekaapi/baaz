@@ -78,7 +78,6 @@ pub fn build_ask_draft(command: &str, output: &str, existing: &str) -> String {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

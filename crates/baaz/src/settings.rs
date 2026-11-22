@@ -3392,7 +3392,6 @@ fn keystroke_glyphs(keystroke: &str) -> String {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
     use super::*;

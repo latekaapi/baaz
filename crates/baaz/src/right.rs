@@ -52,7 +52,6 @@ pub(crate) const PREVIEW_MAX_BYTES: u64 = 1024 * 1024;
 const PREVIEW_MD_BLOCKS_CAP: usize = 300;
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 thread_local! {
     // Directory listings served from [`DirListCache`] without a `read_dir`.
@@ -62,7 +61,6 @@ thread_local! {
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 thread_local! {
     // Directory entries collected from `read_dir` before sorting, bounded by
@@ -2328,7 +2326,6 @@ fn browser_pane(
 }
 
 #[cfg(feature = "probe")]
-
 #[cfg(test)]
 mod tests {
 

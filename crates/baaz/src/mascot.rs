@@ -255,8 +255,6 @@ fn mascot_hero_element(path: &'static str, id: &'static str, (w, h): (f32, f32),
 
 
 #[cfg(feature = "probe")]
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
