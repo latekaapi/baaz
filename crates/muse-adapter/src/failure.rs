@@ -11,9 +11,11 @@
 //! * **The provider's own message is never rewritten.** It becomes the detail
 //!   line verbatim, because it is the only part of the failure that knows
 //!   anything specific.
-//! * **The raw reason code is never thrown away.** A sentence the table knows
-//!   is drawn *above* the code, not instead of it — a code you can paste into a
-//!   bug report is worth more than a tidy card.
+//! * **A reason code is never printed.** A code the table knows becomes its
+//!   sentence; a code it does not know (`namespace:detail`, no spaces) is
+//!   left off the card — it is not words a person can use. The code is still
+//!   on the wire record (`session.jsonl`), which is where a bug report gets it.
+//!   Free text that reads as words is shown as it came.
 
 use muse_client::schema::TurnErrorKind;
 
@@ -28,8 +30,8 @@ fn parse_kind(kind: &str) -> TurnErrorKind {
 pub struct Failure {
     /// The card's title, e.g. `"Model error"`.
     pub title: String,
-    /// The card's detail: the provider's message, then the humanized reason and
-    /// its raw code where there is one.
+    /// The card's detail: the provider's message, then the humanized reason
+    /// where there is one. Never a raw reason code.
     pub detail: String,
 }
 
@@ -86,8 +88,14 @@ pub fn reason_sentence(reason: &str) -> Option<&'static str> {
     })
 }
 
+/// Whether a reason is a log token (`namespace:detail`, no spaces) rather than
+/// words: the kind of thing no person should be shown.
+pub fn looks_like_code(reason: &str) -> bool {
+    !reason.contains(char::is_whitespace) && (reason.contains(':') || reason.contains('_'))
+}
+
 /// The whole card: a title from the kind, the provider's message, and the
-/// reason spelled out with its code kept.
+/// reason spelled out (a code with no sentence is left off).
 ///
 /// `reason` is the terminal's free-text reason, which is present on cancelled
 /// turns as often as on failed ones and is `None` when the runtime measured
@@ -98,18 +106,16 @@ pub fn humanize(kind: &str, message: &str, reason: Option<&str>) -> Failure {
         detail.push_str(message.trim());
     }
     if let Some(reason) = reason.map(str::trim).filter(|r| !r.is_empty()) {
-        if !detail.is_empty() {
-            detail.push('\n');
-        }
-        match reason_sentence(reason) {
-            // The sentence first, then the code on its own line: a person reads
-            // the first, a bug report carries the second.
-            Some(sentence) => {
-                detail.push_str(sentence);
+        let words = match reason_sentence(reason) {
+            Some(sentence) => Some(sentence),
+            None if looks_like_code(reason) => None,
+            None => Some(reason),
+        };
+        if let Some(words) = words {
+            if !detail.is_empty() {
                 detail.push('\n');
-                detail.push_str(reason);
             }
-            None => detail.push_str(reason),
+            detail.push_str(words);
         }
     }
     if detail.is_empty() {
@@ -173,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn a_known_reason_keeps_its_raw_code_underneath() {
+    fn a_known_reason_is_a_sentence_and_never_its_code() {
         let failure = humanize(
             "modelError",
             "the provider closed the stream",
@@ -182,14 +188,19 @@ mod tests {
         assert_eq!(failure.title, "Model error");
         assert_eq!(
             failure.detail,
-            "the provider closed the stream\nThe turn was orphaned when the session's process was lost.\nresume_reconcile:orphaned_by_process_loss"
+            "the provider closed the stream\nThe turn was orphaned when the session's process was lost."
         );
+        assert!(!failure.detail.contains("resume_reconcile"), "no raw code on the card");
     }
 
     #[test]
-    fn an_unknown_reason_is_shown_as_it_came() {
+    fn an_unknown_code_is_left_off_and_free_text_is_kept() {
         let failure = humanize("stepLimit", "", Some("something:new"));
-        assert_eq!(failure.detail, "something:new");
+        assert_eq!(failure.detail, "Muse gave no detail.");
+        let failure = humanize("stepLimit", "Stopped.", Some("something:new"));
+        assert_eq!(failure.detail, "Stopped.");
+        let failure = humanize("modelError", "", Some("rate limited by the provider"));
+        assert_eq!(failure.detail, "rate limited by the provider");
     }
 
     #[test]

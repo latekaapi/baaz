@@ -853,8 +853,8 @@ impl Folded {
         if terminal == "failed" {
             let error = params.get("error");
             // The wire's `kind` is a log token and its `reason` is a code; both
-            // go through one table (`failure.rs`) so the card reads as a
-            // sentence and still carries what a bug report needs.
+            // go through one table (`failure.rs`) so the card reads as words.
+            // The raw code is not printed; it stays on the wire record.
             let kind =
                 error.and_then(|e| e.get("kind")).and_then(Value::as_str).unwrap_or("modelError");
             let message =
@@ -1916,13 +1916,15 @@ const CANCEL_REASON_CAP: usize = 200;
 
 /// A `turn/completed { terminal: "cancelled" }` reason, humanized like a
 /// failure's through `failure::reason_sentence` when the code is one this
-/// build recognizes, and truncated rather than shown raw and unbounded
-/// otherwise. Unlike `failure::humanize`, there is no second line to keep the
-/// raw code on — a marker is one line — so an unrecognized reason is capped
-/// instead of doubled.
+/// build recognizes; an unrecognized log token (`failure::looks_like_code`) is
+/// left off like a failure card's, and free text is truncated rather than
+/// shown unbounded.
 fn cancellation_text(reason: &str) -> String {
     if let Some(sentence) = crate::failure::reason_sentence(reason) {
         return sentence.to_owned();
+    }
+    if crate::failure::looks_like_code(reason) {
+        return "Turn cancelled".to_owned();
     }
     if reason.chars().count() > CANCEL_REASON_CAP {
         let truncated: String = reason.chars().take(CANCEL_REASON_CAP).collect();
@@ -3158,6 +3160,11 @@ mod tests {
     #[test]
     fn a_known_cancel_reason_becomes_its_sentence() {
         assert_eq!(cancellation_text("cancel:user"), "You cancelled the turn.");
+    }
+
+    #[test]
+    fn an_unknown_log_token_is_not_printed_on_the_marker() {
+        assert_eq!(cancellation_text("cancel:something_new"), "Turn cancelled");
     }
 
     #[test]

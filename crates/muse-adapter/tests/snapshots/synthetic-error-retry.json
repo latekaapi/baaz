@@ -27,7 +27,7 @@
             {
               "kind": "error",
               "title": "Model error",
-              "detail": "the provider closed the stream before the reply finished\nThe turn was orphaned when the session's process was lost.\nresume_reconcile:orphaned_by_process_loss",
+              "detail": "the provider closed the stream before the reply finished\nThe turn was orphaned when the session's process was lost.",
               "retryable": true
             }
           ],

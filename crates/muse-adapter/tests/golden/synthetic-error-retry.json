@@ -26,7 +26,7 @@
             {
               "kind": "error",
               "title": "Model error",
-              "detail": "the provider closed the stream before the reply finished\nThe turn was orphaned when the session's process was lost.\nresume_reconcile:orphaned_by_process_loss",
+              "detail": "the provider closed the stream before the reply finished\nThe turn was orphaned when the session's process was lost.",
               "retryable": true
             }
           ],
@@ -56,8 +56,8 @@
     "1:08f44b07b5901a25",
     "9:3887f2fbb4d0e5ae",
     "12:0c2b0876de92e96e",
-    "13:ffe2da87422c0394",
-    "16:2aa61c4bfabb9f7a"
+    "13:db628ffbbeed1f87",
+    "16:b9f319c8d0ce0d81"
   ],
   "abandon": [
     "1:08f44b07b5901a25",
@@ -72,10 +72,10 @@
     "10:3887f2fbb4d0e5ae",
     "11:3887f2fbb4d0e5ae",
     "12:0c2b0876de92e96e",
-    "13:ffe2da87422c0394",
-    "14:ffe2da87422c0394",
-    "15:ffe2da87422c0394",
-    "16:2aa61c4bfabb9f7a",
-    "17:2aa61c4bfabb9f7a"
+    "13:db628ffbbeed1f87",
+    "14:db628ffbbeed1f87",
+    "15:db628ffbbeed1f87",
+    "16:b9f319c8d0ce0d81",
+    "17:b9f319c8d0ce0d81"
   ]
 }
