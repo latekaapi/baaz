@@ -1802,11 +1802,14 @@ fn new_branch_action(root: &Path, primary: bool, busy: Option<GitBusy>, cx: &mut
     }
 }
 
-/// New branch…'s name field on the branch line: ⏎ creates the branch, Esc
-/// (or Cancel) closes it. The keys are caught before the input sees them.
+/// New branch…'s name field on the branch line: ⏎ or Create creates the
+/// branch, Esc (or Cancel) closes it. The keys are caught before the input sees them.
 fn branch_field_row(field: Entity<InputState>, root: &Path, busy: Option<GitBusy>, window: &mut Window, cx: &mut Context<RightPane>) -> AnyElement {
     let focused = gpui::Focusable::focus_handle(field.read(cx), cx).is_focused(window);
-    let (keys_root, cancel_root) = (root.to_path_buf(), root.to_path_buf());
+    let (keys_root, cancel_root, create_root) = (root.to_path_buf(), root.to_path_buf(), root.to_path_buf());
+    // Enter alone was the only way to create: a button that says what it does
+    // sits beside the field (disabled while empty or while git runs).
+    let empty = field.read(cx).value().trim().is_empty();
     let keys = cx.listener(move |this: &mut RightPane, e: &gpui::KeyDownEvent, _, cx| match e.keystroke.key.as_str() {
         "enter" => {
             cx.stop_propagation();
@@ -1823,6 +1826,11 @@ fn branch_field_row(field: Entity<InputState>, root: &Path, busy: Option<GitBusy
         .gap(px(scale::SP_2))
         .items_center()
         .child(div().id("right-new-branch").flex_1().min_w(px(0.0)).capture_key_down(keys).child(well_input(input, scale::SP_7, focused, cx)))
+        .child(
+            primary_action("right-new-branch-create", "Create", None, busy == Some(GitBusy::Branching), empty || busy.is_some(), cx)
+                .aria_label("Create the new branch")
+                .on_click(cx.listener(move |this, _, _, cx| this.create_new_branch(&create_root, cx))),
+        )
         .child(
             text_action("right-new-branch-cancel", if busy == Some(GitBusy::Branching) { "Creating…" } else { "Cancel" }, None, scale::H_SM, cx)
                 .aria_label("Cancel the new branch")
