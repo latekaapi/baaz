@@ -2279,6 +2279,29 @@ mod tests {
         b3c_teardown(&dir, guard, old);
     }
 
+    /// `project-menu` seats at the group row's tray `…`, which exists only
+    /// while the row is hovered. With no bounds the step used to return Ok and
+    /// draw nothing; it must fail, and open no menu.
+    #[gpui::test]
+    fn project_menu_fails_when_the_group_row_has_reported_no_bounds(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("project-menu-bounds");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                let root = dir.join("proj-menu");
+                std::fs::create_dir_all(&root).expect("temp root");
+                let name = h.session_list.update(cx, |list, _| list.projects.add(&root).name.clone());
+                let err = h.step_project_menu(&name, cx).expect_err("no tray bounds: no menu can seat");
+                assert!(err.contains("no `…` bounds"), "{err}");
+                assert!(h.overlays.read(cx).menu().is_none(), "nothing was opened");
+                assert!(h.step_project_menu("no such project", cx).expect_err("unknown").contains("no project named"));
+            })
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
     /// B3c, no active session: the staged boot loads splice rows above a
     /// top-parked list (a newly pinned row lifts a Pinned section over the
     /// date bucket the first batch painted), and gpui's splice carries the

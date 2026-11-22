@@ -338,9 +338,8 @@ impl Harness {
     /// No current project, or no project by that name, fails the step.
     pub(crate) fn step_project_menu(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
         let name = rest.trim();
-        if name.is_empty() {
-            let id = self.current_project_id().ok_or("no current project")?;
-            self.open_project_menu(Some(id), true, cx);
+        let (id, from_header) = if name.is_empty() {
+            (self.current_project_id().ok_or("no current project")?, true)
         } else {
             let id = self
                 .session_list.read(cx).projects
@@ -349,7 +348,19 @@ impl Harness {
                 .find(|p| p.name == name)
                 .map(|p| p.id.clone())
                 .ok_or_else(|| format!("no project named `{name}`"))?;
-            self.open_project_menu(Some(id), false, cx);
+            (id, false)
+        };
+        // The menu seats at the group row's tray `…`, which the library builds
+        // (and reports) only while that row is hovered: with no pointer there
+        // are no bounds and no menu would ever draw. Say so rather than
+        // report success over an empty frame.
+        if !self.sidebar_pane.read(cx).group_menu_bounds.contains_key(&id) {
+            return Err(format!("the group row of `{id}` has reported no `…` bounds (it does so only while hovered), so its menu cannot seat"));
+        }
+        // Idempotent: a second run leaves the open menu open (`open_project_menu` toggles).
+        let open = self.overlays.read(cx).menu().is_some_and(|m| m.kind == MenuKind::Project && m.project.as_deref() == Some(id.as_str()) && m.project_header == from_header);
+        if !open {
+            self.open_project_menu(Some(id), from_header, cx);
         }
         Ok(())
     }
