@@ -318,7 +318,7 @@ fn held_session_tab_clears_everywhere() {
             "{name} clears the held tab"
         );
     }
-    let row = fn_body(&browser, "activate_omnibox_target");
+    let row = fn_body(&browser, "activate_omnibox_target_with");
     assert!(row.contains("select_browse_sidebar_tab"), "a person-tab row selects (and clears)");
     assert!(row.contains("self.resume(session"), "a session-tab row opens its session");
     let open = source("app/sessions/open.rs");
