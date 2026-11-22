@@ -928,6 +928,7 @@ impl SidebarPane {
     /// "selected row prepainted" report is not wired through the sidebar
     /// screen (Stage 4.7 dropped the host's copy of it), so nothing else ever
     /// recorded these bounds and the pinned card could never draw.
+    #[cfg(any(test, feature = "probe"))]
     pub(crate) fn row_bounds(&self, id: &str) -> Option<Bounds<Pixels>> {
         let grouping = self.prev_grouping.as_ref()?;
         let ix = row_index_for_session(&self.prev_rows, grouping, &SharedString::from(id.to_owned()))?;
