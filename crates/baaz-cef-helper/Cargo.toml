@@ -15,7 +15,7 @@ name = "baaz-cef-helper"
 path = "src/main.rs"
 
 [dependencies]
-aui-cef = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.7.7" }
+aui-cef = { git = "https://github.com/latekaapi/agentic-ui", tag = "v0.7.8" }
 
 [profile.release]
 strip = true
