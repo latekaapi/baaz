@@ -76,7 +76,7 @@ use transcript_core::todo::todo_state;
 use transcript_core::{diff, is_terminal_tool, wall_ms_since, ToolEvent, TranscriptBuilder, Verbs};
 
 use crate::account::AccountSnapshot;
-use crate::frame::{approval_headline, ApprovalRequest, ContentBlock, Frame, ToolResult};
+use crate::frame::{approval_headline, ApprovalRequest, ContentBlock, Frame, StreamPiece, ToolResult};
 pub use transcript_core::{TERMINAL_RAN_VERB, TERMINAL_RUNNING_VERB};
 
 /// What a tool call was, so its result can complete its card (which the
@@ -463,6 +463,15 @@ struct AgentCard {
     flushed: bool,
 }
 
+/// A text block being streamed.
+#[derive(Clone, Debug)]
+struct StreamingText {
+    turn_id: String,
+    key: String,
+    index: usize,
+    text: String,
+}
+
 /// B12: the thinking block waiting on its duration (filed under
 /// [`THINKING_KEY`]): whose turn, and when it started — the line's
 /// `timestamp` on replay, the arrival clock live. The next frame resolves
@@ -499,6 +508,12 @@ pub struct ClaudeFold {
     /// first message's `TurnStarted` until the `result` frame (or the next
     /// prompt echo) finishes it. `None` between turns.
     assistant_turn: Option<String>,
+    /// Text blocks being streamed (`stream_event` deltas), oldest first: each
+    /// is replaced by the message's complete `assistant` text block, or
+    /// settled as written when the turn ends first (a Stop).
+    streaming: Vec<StreamingText>,
+    /// Counter for the streamed blocks' keys.
+    stream_seq: u64,
     tools: HashMap<String, ToolSite>,
     /// Echo uuids already rendered as user turns, so a replayed fixture
     /// never mints the same bubble twice.
@@ -1177,6 +1192,7 @@ impl ClaudeFold {
                 // not: one that never opened a turn (an error before any
                 // message) must not claim the next submission's turn.
                 self.close_answered();
+                self.settle_streaming();
                 let finishing = std::mem::take(&mut self.open);
                 let owner = self.assistant_turn.take().or_else(|| finishing.last().cloned());
                 for turn_id in finishing {
@@ -1220,6 +1236,7 @@ impl ClaudeFold {
             // A mode report renders nothing: [`step_line`] carries it out
             // as its own event.
             Frame::Ignored { note } if note == crate::frame::PROCESS_START_NOTE => self.note_new_process(),
+            Frame::Stream { parent_tool_use_id, piece, .. } if parent_tool_use_id.is_empty() => self.fold_stream(piece),
             Frame::Stream { .. } | Frame::Ignored { .. } | Frame::PermissionMode { .. } => {}
         }
     }
@@ -1233,6 +1250,39 @@ impl ClaudeFold {
     /// A message seen before with no turn open is a repeat after its turn
     /// closed: it addresses its old turn without announcing a second one,
     /// exactly as the per-message fold did.
+    /// Fold one streamed event: a message start opens the turn (so the view
+    /// is "working" from the first byte, not the first complete block), and a
+    /// text block's deltas grow a streaming block.
+    fn fold_stream(&mut self, piece: &StreamPiece) {
+        match piece {
+            StreamPiece::MessageStart { message_id } => {
+                let _ = self.assistant_turn_id(message_id);
+            }
+            StreamPiece::TextStart { index } => {
+                let Some(turn_id) = self.assistant_turn.clone() else { return };
+                self.stream_seq += 1;
+                let key = format!("stream-text-{}", self.stream_seq);
+                self.builder.add(&turn_id, Some(&key), Block::Text { text: String::new(), streaming: true });
+                self.streaming.push(StreamingText { turn_id, key, index: *index, text: String::new() });
+            }
+            StreamPiece::TextDelta { index, text } => {
+                let Some(held) = self.streaming.iter_mut().rev().find(|held| held.index == *index) else { return };
+                held.text.push_str(text);
+                let (key, so_far) = (held.key.clone(), held.text.clone());
+                self.builder.update(&key, Block::Text { text: so_far, streaming: true });
+            }
+            StreamPiece::Other => {}
+        }
+    }
+
+    /// End every streamed text block as written: the turn ended (a result, a
+    /// Stop, the next prompt) before its complete block arrived.
+    fn settle_streaming(&mut self) {
+        for held in std::mem::take(&mut self.streaming) {
+            self.builder.update(&held.key, Block::Text { text: held.text, streaming: false });
+        }
+    }
+
     fn assistant_turn_id(&mut self, message_id: &str) -> String {
         if let Some(open) = self.assistant_turn.clone() {
             return open;
@@ -1320,7 +1370,14 @@ impl ClaudeFold {
                     self.builder.add(turn_id, key, thinking);
                 }
                 ContentBlock::Text { text } => {
-                    self.builder.add(turn_id, None, Block::Text { text: text.clone(), streaming: false });
+                    // The complete block replaces the one streamed for it
+                    // (never both: the answer is rendered once).
+                    if let Some(at) = self.streaming.iter().position(|held| held.turn_id == turn_id) {
+                        let held = self.streaming.remove(at);
+                        self.builder.update(&held.key, Block::Text { text: text.clone(), streaming: false });
+                    } else {
+                        self.builder.add(turn_id, None, Block::Text { text: text.clone(), streaming: false });
+                    }
                 }
                 ContentBlock::ToolUse { id, name, input } => {
                     if is_todo_tool(name) {
@@ -1374,6 +1431,7 @@ impl ClaudeFold {
     /// Finish every open turn with its stored footer (or a default one),
     /// oldest first.
     fn finish_open_turns(&mut self) {
+        self.settle_streaming();
         self.assistant_turn = None;
         for turn_id in std::mem::take(&mut self.open) {
             let meta = self.stored_meta.remove(&turn_id).unwrap_or_default();
@@ -1582,6 +1640,7 @@ impl ClaudeFold {
         // reopen stacks the whole session into one turn (one footer, one
         // ledger row for many turns, keyed wrong). The stored footer
         // closes it, so a reopened view settles instead of hanging.
+        self.settle_streaming();
         if let Some(turn_id) = self.assistant_turn.take() {
             self.open.retain(|open| open != &turn_id);
             let meta = self.stored_meta.remove(&turn_id).unwrap_or_default();
@@ -3745,7 +3804,7 @@ mod tests {
     #[test]
     fn partial_and_basic_agree_modulo_streaming_granularity() {
         let partial = fixture_lines("partial.jsonl");
-        let (_, whole) = fold_lines(&partial);
+        let (whole_fold, whole) = fold_lines(&partial);
         let stripped: Vec<String> = partial
             .iter()
             .filter(|line| {
@@ -3763,10 +3822,21 @@ mod tests {
             stripped.len() < partial.len(),
             "partial.jsonl must actually contain stream_event lines"
         );
-        let (_, without_stream) = fold_lines(&stripped);
+        let (stripped_fold, _) = fold_lines(&stripped);
+        // The stream lane changes how the transcript GROWS (a text block is
+        // streamed, then replaced by its complete block), never what it ENDS as.
         assert_eq!(
-            whole, without_stream,
-            "the stream_event lane must not change the transcript"
+            serde_json::to_value(whole_fold.builder.session()).expect("session serializes"),
+            serde_json::to_value(stripped_fold.builder.session()).expect("session serializes"),
+            "the stream_event lane must not change the finished transcript"
+        );
+        assert!(
+            whole.iter().any(|delta| matches!(delta, Delta::BlockAdded { block: Block::Text { streaming: true, .. }, .. })),
+            "the answer's text is streamed while it is written"
+        );
+        assert!(
+            whole_fold.builder.session().turns.iter().flat_map(|turn| turn.blocks()).all(|block| !matches!(block, Block::Text { streaming: true, .. })),
+            "no block is left streaming once the turn ended"
         );
 
         let (_, basic) = fold_lines(&fixture_lines("basic.jsonl"));
@@ -3812,16 +3882,27 @@ mod tests {
             })
             .sum();
         let (_, deltas) = fold_lines(&partial);
-        let added = deltas.iter().filter(|d| matches!(d, Delta::BlockAdded { .. })).count();
+        // A streamed text block is added empty and grows; it is the SAME block
+        // the complete one replaces, so it is not an extra render.
+        let added = deltas
+            .iter()
+            .filter(|d| matches!(d, Delta::BlockAdded { .. }) && !matches!(d, Delta::BlockAdded { block: Block::Text { streaming: true, .. }, .. }))
+            .count();
+        let streamed = deltas.iter().filter(|d| matches!(d, Delta::BlockAdded { block: Block::Text { streaming: true, .. }, .. })).count();
         assert_eq!(
-            added, assistant_blocks,
-            "one rendered block per assistant content block — no lane doubles it"
+            added + streamed, assistant_blocks,
+            "one rendered block per assistant content block (a streamed text block IS its complete block) — no lane doubles it"
         );
+        let (final_fold, _) = fold_lines(&partial);
+        let finished_texts = final_fold.builder.session().turns.iter().flat_map(|turn| turn.blocks()).filter(|block| matches!(block, Block::Text { text, .. } if text == "DONE")).count();
+        assert_eq!(finished_texts, 1, "the DONE message is in the finished transcript once");
 
         let dones = deltas
             .iter()
             .filter(|delta| match delta {
-                Delta::BlockAdded { block: Block::Text { text, .. }, .. } => text == "DONE",
+                // Streamed first, then completed in place: one finished block.
+                Delta::BlockUpdated { block: Block::Text { text, streaming: false }, .. } => text == "DONE",
+                Delta::BlockAdded { block: Block::Text { text, streaming: false }, .. } => text == "DONE",
                 _ => false,
             })
             .count();

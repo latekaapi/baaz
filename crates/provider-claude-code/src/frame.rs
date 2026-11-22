@@ -237,6 +237,55 @@ pub fn decode_catalog_models(response: &Value) -> Vec<CatalogModel> {
         .unwrap_or_default()
 }
 
+/// What the fold takes from a `stream_event`: the message that opens the turn,
+/// and the answer's text blocks as they grow. Thinking, tool-input and
+/// bookkeeping events are [`StreamPiece::Other`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamPiece {
+    /// `message_start`: the message's id.
+    MessageStart {
+        /// The message id (the first of a turn names the turn).
+        message_id: String,
+    },
+    /// `content_block_start` of a `text` block.
+    TextStart {
+        /// The block's index within its message.
+        index: usize,
+    },
+    /// `content_block_delta` of a `text_delta`.
+    TextDelta {
+        /// The block's index within its message.
+        index: usize,
+        /// The text written since the last event.
+        text: String,
+    },
+    /// Anything else.
+    Other,
+}
+
+/// Decode a `stream_event`'s inner `event` into a [`StreamPiece`].
+fn decode_stream_piece(event: Option<&Value>) -> StreamPiece {
+    let Some(event) = event else { return StreamPiece::Other };
+    let index = || event.get("index").and_then(Value::as_u64).map(|i| i as usize);
+    match event.get("type").and_then(Value::as_str) {
+        Some("message_start") => event
+            .get("message")
+            .and_then(|message| message.get("id"))
+            .and_then(Value::as_str)
+            .map_or(StreamPiece::Other, |id| StreamPiece::MessageStart { message_id: id.to_owned() }),
+        Some("content_block_start") if event.get("content_block").and_then(|b| b.get("type")).and_then(Value::as_str) == Some("text") => {
+            index().map_or(StreamPiece::Other, |index| StreamPiece::TextStart { index })
+        }
+        Some("content_block_delta") if event.get("delta").and_then(|d| d.get("type")).and_then(Value::as_str) == Some("text_delta") => {
+            match (index(), event.get("delta").and_then(|d| d.get("text")).and_then(Value::as_str)) {
+                (Some(index), Some(text)) => StreamPiece::TextDelta { index, text: text.to_owned() },
+                _ => StreamPiece::Other,
+            }
+        }
+        _ => StreamPiece::Other,
+    }
+}
+
 /// One decoded CLI stdout line.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Frame {
@@ -308,15 +357,20 @@ pub enum Frame {
         /// The echoed image parts, in order.
         images: Vec<UserImage>,
     },
-    /// A `stream_event` frame (only with `--include-partial-messages`).
-    /// Carried minimally: the fold renders nothing from it (see the lane
-    /// choice in [`crate::fold`]), but decoding it proves the shape still
-    /// parses and keeps frame counts honest.
+    /// A `stream_event` frame (only with `--include-partial-messages`). The
+    /// fold streams the answer's **text** from it so a long answer shows as
+    /// it is written (a message start opens the turn, text deltas grow a
+    /// streaming block that the message's complete `assistant` block then
+    /// replaces — see [`crate::fold`]); every other kind is only decoded.
     Stream {
         /// Session this belongs to.
         session_id: String,
         /// The inner event type (`content_block_delta`, …).
         event_type: String,
+        /// The sub-agent tool use this event belongs to; empty for the turn's own.
+        parent_tool_use_id: String,
+        /// What the fold uses of it: only the answer's text is streamed.
+        piece: StreamPiece,
     },
     /// A `rate_limit_event` frame: the account meter (doc §5).
     RateLimit(crate::account::RateLimitInfo),
@@ -1226,6 +1280,8 @@ pub fn decode_line(line: &str) -> Result<Frame, DecodeError> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned(),
+            parent_tool_use_id: value.get("parent_tool_use_id").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            piece: decode_stream_piece(value.get("event")),
         }),
         "rate_limit_event" => value
             .get("rate_limit_info")

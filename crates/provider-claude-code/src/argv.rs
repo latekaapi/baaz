@@ -352,6 +352,9 @@ pub fn base_argv() -> Vec<String> {
         // bubble. History collisions are handled by uuid, not by dropping
         // the flag: see `ClaudeFold::mark_user_echo_seen`.
         "--replay-user-messages",
+        // The answer's text streams as it is written (`stream_event` deltas);
+        // without this a long single answer shows nothing until it is whole.
+        "--include-partial-messages",
     ]
     .into_iter()
     .map(str::to_owned)
