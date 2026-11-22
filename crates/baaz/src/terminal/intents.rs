@@ -77,7 +77,7 @@ pub fn build_ask_draft(command: &str, output: &str, existing: &str) -> String {
     draft
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

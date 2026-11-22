@@ -21,7 +21,7 @@ pub(super) fn checkpoint_folder(workspace: &str) -> Option<std::path::PathBuf> {
         return None;
     }
     let folder = std::path::PathBuf::from(workspace);
-    if cfg!(test) {
+    if cfg!(all(test, feature = "probe")) {
         let temp = std::env::temp_dir();
         let temp = temp.canonicalize().unwrap_or(temp);
         let real = folder.canonicalize().unwrap_or_else(|_| folder.clone());
@@ -77,14 +77,14 @@ impl SessionRuntime {
     }
 
     /// Whether no checkpoint is being taken or waits to be (tests).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn checkpoints_idle(&self) -> bool {
         self.checkpoints.idle()
     }
 
     /// Fold one provider event as the lane would (tests): a turn's start
     /// and end driven by hand, so a test can write files between them.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn test_provider_event(&mut self, event: provider::ProviderEvent, cx: &mut Context<Self>) {
         self.on_provider_event(event, cx);
     }

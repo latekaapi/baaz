@@ -18,7 +18,7 @@ pub use baaz_browser_core::adblock::*;
 pub fn start(prefs: &AdblockPrefs) {
     static STARTED: OnceLock<()> = OnceLock::new();
     apply(prefs);
-    if crate::runtime::browser_backend().in_memory() || cfg!(test) || STARTED.set(()).is_err() {
+    if crate::runtime::browser_backend().in_memory() || cfg!(all(test, feature = "probe")) || STARTED.set(()).is_err() {
         return;
     }
     std::thread::Builder::new()

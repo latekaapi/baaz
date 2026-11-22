@@ -928,7 +928,7 @@ pub fn effort_detail(effort: Option<ReasoningEffort>) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

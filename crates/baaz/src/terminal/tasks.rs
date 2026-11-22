@@ -231,7 +231,7 @@ impl TaskBook {
 
     /// `session`'s newest Run: `(id, state, preview)` — what the probe's
     /// `run-wait-preview` reads.
-    #[cfg(any(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
     pub fn latest_run(&self, session: &str) -> Option<(u64, TaskState, Preview)> {
         self.tasks.iter().rev().find(|task| task.session == session && task.run.is_some()).map(|task| (task.id, task.state, task.run.unwrap_or(Preview::None)))
     }
@@ -526,7 +526,7 @@ fn parse_lsof(out: &str) -> HashMap<i32, u16> {
     ports
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

@@ -183,7 +183,7 @@ pub fn right_drag_width(start_w: f32, grab_x: f32, x: f32) -> f32 {
     aui::shell::clamp_right_width(start_w - (x - grab_x))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
     use std::path::PathBuf;

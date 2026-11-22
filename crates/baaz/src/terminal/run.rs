@@ -54,7 +54,7 @@ impl TerminalDock {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use gpui::AppContext as _;
     use super::super::host::{pick_tab, TabState};

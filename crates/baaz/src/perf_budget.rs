@@ -28,7 +28,7 @@ use crate::search::{SessionRow, SyncRow};
 /// the render-cache and sidebar benches run as ignored tests —
 /// `cargo test -p baaz --release --bin baaz bench_ -- --ignored --nocapture
 /// --test-threads=1`. Short windows: they hold a line, they are not a lab.
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) fn bench_criterion() -> criterion::Criterion {
     criterion::Criterion::default()
         .warm_up_time(std::time::Duration::from_secs(1))

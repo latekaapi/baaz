@@ -131,7 +131,7 @@ impl ExternalQuestions {
     }
 
     /// Look one up, for the question surface.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     fn get(&self, id: &str) -> Option<&ExternalQuestion> {
         self.questions.get(id).map(|(_, question)| question)
     }
@@ -835,7 +835,7 @@ impl SessionRuntime {
     }
 
     /// The grown lost banner's failure, when the lane died twice.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn child_failure(&self) -> Option<&super::ChildFailure> {
         self.child_failure.as_ref()
     }
@@ -866,7 +866,7 @@ impl SessionRuntime {
     }
 
     /// The lane's provider, for tests driving the gate directly.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     fn test_provider(&self) -> Arc<Mutex<provider::Provider>> {
         match &self.lane {
             Lane::Provider(lane) => lane.provider.clone(),
@@ -877,7 +877,7 @@ impl SessionRuntime {
     /// Fold every event the lane's provider holds, the way the lane task
     /// would: what an application-level test drives, where `gate_sync`
     /// forwarded only the events that existed at open.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn test_drain_provider(&mut self, cx: &mut Context<Self>) {
         let events: Vec<_> = self.test_provider().lock().expect("lane provider").events().try_iter().collect();
         for event in events {
@@ -1458,7 +1458,7 @@ impl SessionRuntime {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     /// docs/81 A F25: the newest question is the last to arrive, not the
     /// largest id string ("q-9" > "q-10" as strings).

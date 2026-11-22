@@ -430,7 +430,7 @@ pub fn capture_and_quit(
     .detach();
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

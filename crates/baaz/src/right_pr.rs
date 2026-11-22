@@ -477,7 +477,7 @@ impl Harness {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
     use crate::git_ops::pr_fixture;

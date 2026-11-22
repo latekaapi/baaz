@@ -333,7 +333,7 @@ pub(crate) fn record_unrun_steps(steps: &[String]) {
 /// never reaches a table; it is the runners' own. Test-only: the runners
 /// classify by what a step needs (see `is_session_step`), not by whether
 /// its name exists, so an unrun or unrunnable step fails whatever it names.
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 fn is_known_step(step: &str) -> bool {
     if step.strip_prefix("wait:").is_some() {
         return true;
@@ -1519,7 +1519,7 @@ pub(crate) fn run_login_steps(this: &mut Harness, cx: &mut Context<Harness>) {
     this.wire_tasks().push(task);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::{all_window_steps, LOGIN_VERBS, SESSION_VERBS, WINDOW_VERBS};
     use crate::layout::LayoutGlobal as _;

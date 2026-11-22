@@ -45,7 +45,7 @@ use crate::provider_status::{Auth, ProviderStatus};
 
 /// The scrub-env lock ([`crate::skills::SCRUB_ENV_LOCK`]), where this
 /// module's tests and the PTY tests in [`crate::terminal::host`] take it.
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) use crate::skills::SCRUB_ENV_LOCK;
 
 // ------------------------------------------------------------ launch
@@ -70,7 +70,7 @@ pub fn decide_launch(first_run: bool) -> LaunchDecision {
 /// Whether the connect screen's Continue is enabled: any provider Connected.
 /// The component enforces this itself; this names the rule so the tests pin
 /// the same gating the captures show.
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub fn continue_enabled(statuses: &[ProviderStatus]) -> bool {
     statuses.iter().any(|status| status.headline() == crate::provider_status::Headline::Connected)
 }
@@ -1292,7 +1292,7 @@ impl Harness {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
 
     /// Cancel reaches a login blocked on a silent helper (the person is in

@@ -1292,7 +1292,7 @@ pub(crate) fn quoted_prompt(quotes: &[super::QuoteDraft], text: &str) -> String 
     out.trim_end().to_string()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     /// Live 2026-10-21: a quoted pair of lines reached the bubble but not
     /// the model. The prompt carries every quote ahead of the words.

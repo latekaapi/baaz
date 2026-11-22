@@ -104,7 +104,7 @@ const WAKE_GAP: Duration = Duration::from_secs(30);
 /// nothing is ever sent unless [`start`] ran.
 pub fn wake_channel() -> futures::channel::mpsc::UnboundedReceiver<()> {
     let (sender, receiver) = futures::channel::mpsc::unbounded();
-    if cfg!(test) {
+    if cfg!(all(test, feature = "probe")) {
         return receiver;
     }
     if let Ok(mut listeners) = WAKE_LISTENERS.lock() {
@@ -339,7 +339,7 @@ fn prune_samples(logs: &std::path::Path) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};

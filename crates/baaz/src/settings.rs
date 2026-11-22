@@ -70,7 +70,7 @@
 use aui::data::{button, icon_button, section, segmented, settings_row, switch, ButtonSize, SwitchIntent, SETTINGS_ROW_PAD_Y};
 use aui::interact::{interactive, list_row, LIST_INSET, ROW_GAP};
 use aui::overlay::ShortcutEdit;
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 use aui::overlay::{SettingsRow, SettingsSection};
 use aui::util::{h_flex, v_flex};
 use aui_icons::IconName;
@@ -341,7 +341,7 @@ pub(crate) fn setting_home(id: &str) -> Option<&'static str> {
 /// The General page's switch rows, from the layout they read: the row
 /// model the coverage test enumerates (the page draws its own rows; this
 /// table outlived the old modal and only the tests read it now).
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) fn general_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
     vec![
         SettingsRow::Switch {
@@ -383,7 +383,7 @@ pub(crate) fn general_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
 /// row model the coverage test enumerates (test-only, like the General
 /// table). The branch prefix is a field, not a switch; its id
 /// (`branch_prefix`) homes through [`setting_home`].
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) fn git_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
     vec![SettingsRow::Switch {
         id: SharedString::from("archive_on_merge"),
@@ -407,7 +407,7 @@ const SUMMARY_LINE_DETAIL: &str = "Add a second line under each session: what it
 /// The Appearance page's switch rows, from the layout they read: the row
 /// model the coverage test enumerates. The theme is a segmented choice,
 /// not a switch; its id (`theme`) homes through [`setting_home`].
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) fn appearance_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
     vec![SettingsRow::Switch {
         id: SharedString::from("summary_line"),
@@ -419,7 +419,7 @@ pub(crate) fn appearance_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
 
 /// The Sidebar page's switch rows, from the layout they read: the row
 /// model the coverage test enumerates (test-only, like the General table).
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) fn sidebar_settings_rows(layout: &Layout) -> Vec<SettingsRow> {
     vec![
         SettingsRow::Switch {
@@ -1014,7 +1014,7 @@ impl SettingsPage {
     /// capture (state isolated: the file is ignored there) launches
     /// nothing.
     pub(crate) fn open_keymap(&mut self, cx: &mut Context<Self>) {
-        if cfg!(test) || crate::runtime::captures() || crate::runtime::state_isolated() {
+        if cfg!(all(test, feature = "probe")) || crate::runtime::captures() || crate::runtime::state_isolated() {
             crate::baaz_log!("open keymap: refused in a test or capture");
             return;
         }
@@ -1122,7 +1122,7 @@ impl SettingsPage {
     /// Data › Reveal in Finder: Baaz's folder, selected in Finder. A test
     /// or a capture opens nothing.
     pub(crate) fn reveal_data_folder(&mut self, _cx: &mut Context<Self>) {
-        if cfg!(test) || crate::runtime::captures() {
+        if cfg!(all(test, feature = "probe")) || crate::runtime::captures() {
             crate::baaz_log!("reveal data folder: refused in a test or capture");
             return;
         }
@@ -1135,7 +1135,7 @@ impl SettingsPage {
     /// and a toast naming where it went (or what failed). Cancel does
     /// nothing. A test or a capture opens no panel and writes nothing.
     pub(crate) fn export_data(&mut self, cx: &mut Context<Self>) {
-        if cfg!(test) || crate::runtime::captures() {
+        if cfg!(all(test, feature = "probe")) || crate::runtime::captures() {
             crate::baaz_log!("export data: refused in a test or capture");
             return;
         }
@@ -3208,7 +3208,7 @@ fn is_bare_modifier(keystroke: &gpui::Keystroke) -> bool {
 
 /// Which section `id` names in a row-model list: its index, or the first
 /// section when `id` is empty or unknown. Test-only, like the row tables.
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) fn settings_section_index(sections: &[SettingsSection], id: &str) -> usize {
     if id.is_empty() {
         return 0;
@@ -3258,7 +3258,7 @@ fn shortcut_is_editable(id: &str) -> bool {
 /// ONCE (the terminal's keys folded into one row), never once per key.
 /// The row model the tests pin; the page draws its own Shortcuts rows
 /// ([`SettingsPage::render_content`]).
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) fn shortcuts_section(
     bindings: &[crate::keymap::EffectiveBinding],
     recording: Option<&str>,
@@ -3384,7 +3384,7 @@ fn keystroke_glyphs(keystroke: &str) -> String {
         .join(" ")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

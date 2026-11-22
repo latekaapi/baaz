@@ -68,7 +68,7 @@ pub fn provider_from_icon(provider: aui_icons::Provider) -> Option<ProviderId> {
     ProviderId::all().into_iter().find(|id| id.icon() == provider)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

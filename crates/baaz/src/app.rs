@@ -1123,10 +1123,10 @@ impl Harness {
         // fails later: one toast each (docs/81 A F8, F9). The wake channel
         // is closed in tests, like the status wake: those call
         // `raise_store_problems` themselves.
-        if !cfg!(test) {
+        if !cfg!(all(test, feature = "probe")) {
             this.raise_store_problems(cx);
         }
-        let mut store_wake = if cfg!(test) {
+        let mut store_wake = if cfg!(all(test, feature = "probe")) {
             futures::channel::mpsc::unbounded().1
         } else {
             crate::store::problem_wake()
@@ -1843,7 +1843,7 @@ impl Harness {
     /// state change (B11b), like [`Self::toggle_right`]. Prefer
     /// [`Self::select_right`]: this stays only for the menu-toggle behaviour
     /// its test pins, so it compiles into test builds only.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn show_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
         if self.settings_open(cx) {
             return;
@@ -2001,7 +2001,7 @@ impl Harness {
         if !crate::layout::Layout::get(cx).right_open || layout::right_kind(crate::layout::Layout::get(cx)) != layout::RightKind::Browser {
             return;
         }
-        if self.browser.read(cx).fake || cfg!(test) {
+        if self.browser.read(cx).fake || cfg!(all(test, feature = "probe")) {
             return;
         }
         if self.existing_browser(cx).is_some() {
@@ -2159,7 +2159,7 @@ impl Harness {
     /// D51 "Open terminal" on a terminal tool card
     /// ([`terminal::TerminalDock::open_tab`]); ignored while the Settings
     /// page stands open (B11b), like the dock toggle.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn open_terminal_tab(
         &mut self,
         tab: Option<String>,
@@ -2238,7 +2238,7 @@ impl Harness {
     /// The agent mark for a terminal tab whose origin is `origin`: the
     /// root's durable record first, then the dock's bridge map
     /// ([`terminal::TerminalDock::tab_provider`]).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn terminal_tab_provider(&self, origin: Option<&str>, cx: &App) -> Option<aui_icons::Provider> {
         let record = origin.and_then(|session| self.session_list.read(cx).provider_sessions.get(session)).map(|record| record.provider.as_str());
         self.terminal_dock.read(cx).tab_provider(origin, record)
@@ -5249,7 +5249,7 @@ impl Harness {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::find_docs_dir;
     use crate::layout::LayoutGlobal as _;

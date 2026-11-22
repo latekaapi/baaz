@@ -142,7 +142,7 @@ impl Notifier {
     }
 
     /// The badge last set, for tests.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn badge(cx: &App) -> Option<usize> {
         cx.try_global::<Notifier>().and_then(|n| n.badge)
     }
@@ -277,7 +277,7 @@ impl Harness {
 /// Whether Baaz is the frontmost app: a session "in front" is only being
 /// looked at while it is.
 fn app_is_active() -> bool {
-    if cfg!(test) || crate::runtime::captures() {
+    if cfg!(all(test, feature = "probe")) || crate::runtime::captures() {
         return false;
     }
     #[cfg(target_os = "macos")]
@@ -314,7 +314,7 @@ fn app_is_active() -> bool {
 /// Outside an app bundle `UNUserNotificationCenter` aborts the process
 /// (gpui guards the same way), so a bare binary — every capture — skips it.
 fn ask_permission() {
-    if cfg!(test) || crate::runtime::captures() {
+    if cfg!(all(test, feature = "probe")) || crate::runtime::captures() {
         return;
     }
     #[cfg(target_os = "macos")]
@@ -354,7 +354,7 @@ fn ask_permission() {
 }
 
 fn set_dock_badge(count: usize) {
-    if cfg!(test) || crate::runtime::captures() {
+    if cfg!(all(test, feature = "probe")) || crate::runtime::captures() {
         return;
     }
     #[cfg(target_os = "macos")]
@@ -385,7 +385,7 @@ fn set_dock_badge(count: usize) {
 
 /// The system's short notification sound, for Settings' sound switch.
 fn play_sound() {
-    if cfg!(test) || crate::runtime::captures() {
+    if cfg!(all(test, feature = "probe")) || crate::runtime::captures() {
         return;
     }
     #[cfg(target_os = "macos")]
@@ -404,7 +404,7 @@ fn play_sound() {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
     use crate::sidebar::tests::entry;

@@ -54,7 +54,7 @@ fn provider_open_work(
 ) -> Result<ProviderOpen, crate::app::OpenFailed> {
     let provider = factory.open(provider_id)?;
     let OpenExtras { model_provider, mode } = extras;
-    #[cfg(not(test))]
+    #[cfg(not(all(test, feature = "probe")))]
     let (provider, events) = conn::gate(provider);
     // `model: None` on purpose: the chip's display seed (env,
     // `claude` settings, the last reported model) never reaches
@@ -78,9 +78,9 @@ fn provider_open_work(
         .map_err(|error| crate::app::OpenFailed { error, stderr: provider.stderr_tail() })?;
     // Tests drain after the send, synchronously on the test
     // executor: no forwarding thread ever wakes the lane task.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     let (mut provider, events) = conn::gate_sync(provider);
-    #[cfg(not(test))]
+    #[cfg(not(all(test, feature = "probe")))]
     let mut provider = provider;
     // The app quit while this open was on the wire: its child would
     // outlive every view, so it is hung up here, on this thread.
@@ -1059,7 +1059,7 @@ impl Harness {
             let result = (|| -> Result<ProviderOpen, crate::app::OpenFailed> {
                 let provider = factory.open(provider_id)?;
                 crate::log::trace_mark("reopen adapter connected");
-                #[cfg(not(test))]
+                #[cfg(not(all(test, feature = "probe")))]
                 let (provider, events) = conn::gate(provider);
                 // Two refusals still land the lane (docs/70 §4), for any
                 // adapter that raises them: a stale history the resume
@@ -1092,7 +1092,7 @@ impl Harness {
                 // Tests drain after the resume, synchronously on the test
                 // executor: the replayed deltas are buffered before the lane
                 // starts, with no forwarding thread.
-                #[cfg(test)]
+                #[cfg(all(test, feature = "probe"))]
                 let (provider, events) = conn::gate_sync(provider);
                 Ok(ProviderOpen {
                     provider_id,
@@ -1287,7 +1287,7 @@ impl Harness {
         let registered = session_id.clone();
         let work = move || -> Result<ProviderOpen, provider::ProviderError> {
             let provider = factory.open(provider_id)?;
-            #[cfg(not(test))]
+            #[cfg(not(all(test, feature = "probe")))]
             let (provider, events) = conn::gate(provider);
             let ack = provider.send(provider::Command::ResumeSession {
                 request_id: provider::new_request_id(),
@@ -1300,7 +1300,7 @@ impl Harness {
             })?;
             // Tests drain after the resume, synchronously on the test
             // executor: no forwarding thread wakes the lane task.
-            #[cfg(test)]
+            #[cfg(all(test, feature = "probe"))]
             let (provider, events) = conn::gate_sync(provider);
             match ack {
                 provider::Ack::Session { session_id, title, .. } => Ok(ProviderOpen {

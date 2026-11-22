@@ -96,7 +96,7 @@ impl SessionRuntime {
     /// Remember the pack's texts when it submits, so the view can hide the
     /// destination's first user turn (the divider stands for it) live and
     /// after a replay, where the bubble shows the summary instead.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn note_handoff_pack(&mut self, pack: String, display: String, cx: &mut Context<Self>) {
         self.handoff_pack_full = Some(pack);
         self.handoff_pack_display = Some(display);

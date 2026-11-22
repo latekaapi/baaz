@@ -76,7 +76,7 @@ impl Harness {
     /// Not behind the `cef` feature alone: the delivery (hand-back plus
     /// deferred dispatch) is plain gpui, and the regression test drives it
     /// without a page. Only the blocked-command drain needs CEF.
-    #[cfg(any(test, feature = "cef"))]
+    #[cfg(any(all(test, feature = "probe"), feature = "cef"))]
     pub(crate) fn deliver_cef_keystroke(
         &mut self,
         keystroke: &str,

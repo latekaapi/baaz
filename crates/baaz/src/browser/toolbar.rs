@@ -544,7 +544,7 @@ pub(crate) fn append_draft_line(existing: &str, text: &str) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

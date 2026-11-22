@@ -304,12 +304,12 @@ impl Harness {
 /// The card. Tests never reach a real CLI: a test window that signs in, or
 /// a retry's timer under a test clock, lands on this refusal instead.
 fn run_probe(program: &str) -> Result<Tier, String> {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     {
         let _ = program;
         Err("tests never reach a real CLI".to_owned())
     }
-    #[cfg(not(test))]
+    #[cfg(not(all(test, feature = "probe")))]
     {
         tier::probe(program)
     }
@@ -348,7 +348,7 @@ fn payg_banner(send_anyway: bool, probing: bool) -> TierBanner {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

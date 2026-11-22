@@ -481,7 +481,7 @@ impl Harness {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
     use crate::provider_status::{Advisory, Auth};

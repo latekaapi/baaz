@@ -36,5 +36,5 @@ pub(crate) use open::evict_parked;
 #[cfg(feature = "probe")]
 pub(crate) use steps::drain_steps;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(in crate::app) mod tests;

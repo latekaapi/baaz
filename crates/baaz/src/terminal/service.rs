@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 
 use aui_terminal::{BlockAuthor, TextCursor};
 use aui_webview::WebviewState;
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 use base64::Engine as _;
 use gpui::{App, Entity};
 use serde_json::{Value, json};
@@ -192,7 +192,7 @@ pub(crate) fn next_isolated_pid() -> u32 {
 /// A unique short socket dir per test Harness (`/tmp/bh-<pid>-<counter>`):
 /// short so the socket always binds, unique so no two Harnesses in one test
 /// process share it.
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) fn test_socket_dir() -> PathBuf {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -625,7 +625,7 @@ impl TerminalService {
     /// The webview `browser_*` tools currently act on for `session`, if
     /// one is registered. Test-only: the tab switch test pins that the
     /// agent registration follows the active tab.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn test_browser_state(&self, session: &str) -> Option<Entity<WebviewState>> {
         self.shared.browsers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(session).cloned()
     }
@@ -673,7 +673,7 @@ impl TerminalService {
 
     /// How long a `browser_*` evaluation waits for the page. Tests shorten
     /// it so the timeout path does not take [`BROWSER_TIMEOUT`].
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn set_browser_timeout(&self, timeout: Duration) {
         *self.shared.browser_timeout.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = timeout;
     }
@@ -708,7 +708,7 @@ impl TerminalService {
 
     /// How many runs are still waiting on their blocks. Tests read this;
     /// the app never needs it.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn pending_runs(&self) -> usize {
         self.shared.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
     }
@@ -2031,7 +2031,7 @@ fn key_bytes_for(key: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
     use crate::layout::LayoutGlobal as _;

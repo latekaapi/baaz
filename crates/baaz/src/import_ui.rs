@@ -1443,7 +1443,7 @@ pub(crate) fn card_line_row(
     row.into_any_element()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
     use crate::import::{Folder, Tally};

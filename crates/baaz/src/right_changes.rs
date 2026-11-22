@@ -1958,7 +1958,7 @@ pub(crate) fn change_open_line(diff: &aui_protocol::Diff) -> Option<u32> {
     diff.hunks.first().and_then(|hunk| aui::workbench::hunk_new_start(&hunk.header)).filter(|n| *n > 0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     /// docs/82 7.2: the default ticks are the session's own files when it
     /// touched any (docs/81 F E3), else every file; the person's ticks

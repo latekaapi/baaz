@@ -2748,7 +2748,7 @@ pub fn empty_state(provider: crate::providers::ProviderId, display: &str, cx: &m
         .into_any_element()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

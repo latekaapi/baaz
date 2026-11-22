@@ -403,7 +403,7 @@ impl Harness {
         crate::layout::Layout::update(cx, |layout| layout.onboarding.default_browser = Once::Done);
         // Only a person's click changes the system default: never a test,
         // never a capture.
-        if make && !cfg!(test) && !crate::runtime::captures() {
+        if make && !cfg!(all(test, feature = "probe")) && !crate::runtime::captures() {
             if !crate::default_browser::make_baaz_default() {
                 crate::baaz_log!("Couldn't change the default browser (macOS refused the request)");
             }
@@ -439,7 +439,7 @@ impl Harness {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

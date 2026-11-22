@@ -897,7 +897,7 @@ fn page_chip() -> aui::composer::ComposerChip {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

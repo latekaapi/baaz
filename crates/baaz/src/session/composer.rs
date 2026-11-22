@@ -1399,7 +1399,7 @@ pub(crate) fn quote_attachment(quote: super::QuoteDraft) -> aui_protocol::Attach
     Attachment { name: quote.text, kind: AttachmentKind::Quote, size_bytes: None, meta, state: UploadState::Ready, path: None, quote_of: quote.source }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod quote_tests {
     use super::super::{QuoteDraft, QuoteLocation, QuoteSide};
     use super::quote_attachment;

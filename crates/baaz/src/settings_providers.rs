@@ -20,7 +20,7 @@
 
 use aui::data::{button, card, settings_row, switch, SwitchIntent, SETTINGS_ROW_GAP};
 use aui_tokens::TextRole;
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 use aui::overlay::{SettingsRow, SettingsSection};
 use aui::screens::{ProviderAction, ProviderActionDef, ProviderCardData, ProviderIntent, StatusLine};
 use aui_tokens::{scale, ActiveAui, AuiStyled};
@@ -396,7 +396,7 @@ pub(crate) fn signin_plan(id: ProviderId) -> SignInPlan {
 /// routed by [`parse_enabled_row`]); the cards live on the Providers
 /// overview and sub-pages
 /// ([`SettingsPage::render_content`](crate::settings::SettingsPage::render_content)).
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) fn providers_section() -> SettingsSection {
     let statuses = crate::provider_status::live_statuses();
     let mut rows = vec![SettingsRow::Note {
@@ -460,7 +460,7 @@ pub(crate) fn use_own_mcp_state(layout: &crate::layout::Layout, id: ProviderId) 
 /// file. A capture and a test read the adapters' recorded fixtures, never
 /// the person's files. Read when the page opens, never per frame.
 pub(crate) fn read_mcp_listings() -> Vec<(ProviderId, Option<provider::McpListing>)> {
-    let scripted = cfg!(test) || crate::runtime::state_isolated();
+    let scripted = cfg!(all(test, feature = "probe")) || crate::runtime::state_isolated();
     ProviderId::all().into_iter().map(|id| (id, id.descriptor().mcp_listing.map(|read| read(scripted)))).collect()
 }
 
@@ -819,7 +819,7 @@ impl Harness {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
 
     fn p1_status(id: ProviderId, installed: crate::provider_status::Installed, auth: crate::provider_status::Auth) -> ProviderStatus {

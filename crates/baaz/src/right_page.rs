@@ -255,7 +255,7 @@ pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

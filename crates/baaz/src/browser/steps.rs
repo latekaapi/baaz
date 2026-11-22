@@ -354,7 +354,7 @@ impl Harness {
     /// drops it for a real engine). On a real engine — a live `--steps`
     /// run — the verb would do nothing and report success, so it fails.
     fn scripted_page_only(&self, cx: &mut Context<Self>) -> crate::steps::StepResult {
-        if self.browser.read(cx).fake || cfg!(test) {
+        if self.browser.read(cx).fake || cfg!(all(test, feature = "probe")) {
             Ok(())
         } else {
             Err("only a capture's scripted page plays this; a real engine is showing".into())

@@ -99,7 +99,7 @@ pub fn card_details(status: &ProviderStatus, open: bool) -> CardDetails {
     CardDetails { open, rows, notice: api_key_notice(status), actions }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};

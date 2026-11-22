@@ -3175,7 +3175,7 @@ impl InlineProgress {
 }
 
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 
@@ -4533,16 +4533,16 @@ mod tests {
 /// Hand a path to the OS default app / Finder. Tests record it instead: the
 /// gpui test platform does not implement `open_with_system`.
 fn open_externally(path: &std::path::Path, cx: &mut gpui::App) {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     {
         OPENED_EXTERNALLY.with(|opened| opened.borrow_mut().push(path.to_path_buf()));
         let _ = cx;
     }
-    #[cfg(not(test))]
+    #[cfg(not(all(test, feature = "probe")))]
     cx.open_with_system(path);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 thread_local! {
     /// Paths a test asked the OS to open (see [`open_externally`]).
     pub(crate) static OPENED_EXTERNALLY: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };

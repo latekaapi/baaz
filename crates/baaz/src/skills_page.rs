@@ -2858,7 +2858,7 @@ fn skill_scope_chip(skill: &Skill) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
 
     /// The Skills page is offered only while the provider that manages

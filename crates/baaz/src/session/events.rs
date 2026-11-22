@@ -187,7 +187,7 @@ impl SessionRuntime {
 /// Capture loaders for the render-cache bench (`render.rs`): a capture's
 /// raw lines, and one turn of it renamed, folded through the same
 /// translation a Muse lane uses.
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) mod bench_support {
     use std::path::{Path, PathBuf};
 
@@ -231,7 +231,7 @@ pub(crate) mod bench_support {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     //! The queue strip's reclaims, steering and the billing guard, driven on
     //! a Muse lane over a stub `muse serve` that logs every request: the

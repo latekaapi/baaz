@@ -403,7 +403,7 @@ pub fn age_text(as_of: i64, now: i64) -> String {
     format!("{}d ago", hours / 24)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
 
     #[test]

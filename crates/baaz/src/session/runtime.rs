@@ -39,7 +39,7 @@ pub struct SessionRuntime {
     /// supplied catalog) stand in for asking.
     pub(super) read_only: bool,
     /// Tests: the wire translation [`Self::apply`] folds raw events through.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(super) test_wire: provider_muse::replay::Folder,
     /// A `--replay` session: the transcript is a file, and every command is
     /// refused rather than quietly dropped.
@@ -413,7 +413,7 @@ impl SessionRuntime {
         Self {
             store: session_store::SessionStore::new(&session_id, aui_protocol::Provider::Muse, workspace_key.clone()),
             read_only: false,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "probe"))]
             test_wire: provider_muse::replay::Folder::new(),
             session_id,
             replay: false,

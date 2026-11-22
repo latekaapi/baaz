@@ -74,10 +74,10 @@ mod page_actions;
 mod pages;
 mod parcels;
 mod tab_moves;
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) use tab_moves::page_draft;
 pub(crate) use parcels::{NotesParcel, Parcel};
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) use parcels::PendingParcel;
 mod permissions;
 pub(crate) use permissions::PermissionAnswer;
@@ -89,9 +89,9 @@ pub(crate) use baaz_browser_core::tabs;
 pub(crate) mod toolbar;
 
 pub(crate) use view::{BrowserEvent, BrowserView};
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) use occlusion::PageShow;
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 use occlusion::{browser_visible, centre_visibility, BrowserVisibility};
 pub(crate) use tabs::{Owner, TabId, Tabs};
 pub(crate) use toolbar::{OmniRow, OmniTarget, SuggestKind};
@@ -498,7 +498,7 @@ pub(crate) fn face_types(label: &str) -> bool {
     label.starts_with("typing") || label.starts_with("pressing")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use crate::layout::LayoutGlobal as _;
     use super::{

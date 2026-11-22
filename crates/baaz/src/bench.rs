@@ -940,7 +940,7 @@ pub fn run(handle: WindowHandle<Root>, seed: BenchSeed, opts: BenchOptions, comm
     .detach();
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

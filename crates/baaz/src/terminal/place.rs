@@ -134,7 +134,7 @@ impl Harness {
     /// Settle the lower pane's divider at `share` of the pane's height
     /// (held to its range), as a released drag does: written, and the
     /// session's record takes it.
-    #[cfg(any(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
     pub(crate) fn set_right_split(&mut self, share: f32, cx: &mut Context<Self>) {
         let share = crate::layout::clamp_split(share);
         crate::layout::Layout::update(cx, |layout| layout.right_split = Some(share));

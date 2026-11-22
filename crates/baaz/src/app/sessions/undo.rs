@@ -168,7 +168,7 @@ impl Harness {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     #[test]
     fn the_confirm_target_round_trips() {

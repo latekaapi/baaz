@@ -56,7 +56,7 @@ use crate::session::SessionView;
 use crate::layout::LayoutGlobal as _;
 use aui_tokens::ActiveAui as _;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 thread_local! {
     /// Render probe (tests): how many changed rows the pane's last render
     /// drew from its cache for the shown project, `None` before any data.
@@ -67,7 +67,7 @@ thread_local! {
 
 /// What the last render of the pane drew: the changed rows of the shown
 /// project (see [`DRAWN_CHANGES`]).
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub(crate) fn drawn_changes() -> Option<usize> {
     DRAWN_CHANGES.with(|drawn| drawn.get())
 }
@@ -392,7 +392,7 @@ impl RightPane {
         // Tests never start one either: its fsevents thread wakes the test
         // scheduler from outside, which the scheduler refuses as
         // nondeterministic (`right_watch` tests the watch itself).
-        if crate::runtime::captures() || cfg!(test) {
+        if crate::runtime::captures() || cfg!(all(test, feature = "probe")) {
             return;
         }
         if self.refresh.watch.as_ref().is_some_and(|(watch, _)| watch.root() == root) {
@@ -671,7 +671,7 @@ impl Render for RightPane {
         }
         let project = self.facts.project.clone();
         let width = self.resize.width;
-        #[cfg(test)]
+        #[cfg(all(test, feature = "probe"))]
         DRAWN_CHANGES.with(|drawn| {
             let rows = project.as_ref().and_then(|(root, _)| self.cache.git_for(root).flatten()).map(|tree| tree.files.len());
             drawn.set(rows);
@@ -1020,7 +1020,7 @@ impl Harness {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::lower_drag_share;
 

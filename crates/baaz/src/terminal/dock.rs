@@ -155,7 +155,7 @@ impl TerminalDock {
     }
 
     /// Whether the dock keyed a bridge provider under `session_id`.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn knows_provider(&self, session_id: &str) -> bool {
         self.providers.contains_key(session_id)
     }
@@ -643,7 +643,7 @@ impl Render for TerminalDock {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

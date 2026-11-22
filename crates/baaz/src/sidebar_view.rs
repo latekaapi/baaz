@@ -262,7 +262,7 @@ pub(crate) struct SidebarPane {
     _subscriptions: Vec<Subscription>,
     /// This pane's own renders, for the tests that prove what re-renders it
     /// (the process-wide counters above are shared across parallel tests).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) renders: u64,
 }
 
@@ -514,7 +514,7 @@ impl SidebarPane {
             hover_timer: None,
             reveal_poke: None,
             _subscriptions: subscriptions,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "probe"))]
             renders: 0,
         }
     }
@@ -928,7 +928,7 @@ impl SidebarPane {
     /// "selected row prepainted" report is not wired through the sidebar
     /// screen (Stage 4.7 dropped the host's copy of it), so nothing else ever
     /// recorded these bounds and the pinned card could never draw.
-    #[cfg(any(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
     pub(crate) fn row_bounds(&self, id: &str) -> Option<Bounds<Pixels>> {
         let grouping = self.prev_grouping.as_ref()?;
         let ix = row_index_for_session(&self.prev_rows, grouping, &SharedString::from(id.to_owned()))?;
@@ -1248,7 +1248,7 @@ impl Render for SidebarPane {
     /// `screen_item_count` otherwise.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         SIDEBAR_PANE_RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        #[cfg(test)]
+        #[cfg(all(test, feature = "probe"))]
         {
             self.renders += 1;
         }
@@ -1377,7 +1377,7 @@ pub(crate) fn browse_tab_id(key: &str) -> Option<crate::browser::TabId> {
     key.strip_prefix("tab-")?.parse().ok().map(crate::browser::TabId)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
     use gpui::point;
@@ -3714,7 +3714,7 @@ pub(crate) fn footer_identity(
     (name.to_owned(), String::new(), "?".to_owned(), String::new(), tile)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod footer_identity_tests {
     use super::footer_identity;
     use aui::screens::sidebar::AccountStatus;
@@ -3779,7 +3779,7 @@ pub(crate) fn task_face_for(waiting: bool, held: bool, running: bool, typing: bo
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod task_face_tests {
     use super::task_face_for;
     use aui::browse::TaskFace;

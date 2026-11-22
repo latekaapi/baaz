@@ -132,7 +132,7 @@ pub(crate) fn split_rects(centre: Bounds<Pixels>, ratio: f32) -> (Bounds<Pixels>
 impl Harness {
     /// A page that belongs to no tab (Peek): the engine the tabs use.
     fn loose_page(&mut self, url: &str, opener: TabId, window: &Window, cx: &mut Context<Self>) -> Entity<WebviewState> {
-        let fake = self.browser.read(cx).fake || cfg!(test);
+        let fake = self.browser.read(cx).fake || cfg!(all(test, feature = "probe"));
         let _ = window;
         #[cfg_attr(not(feature = "cef"), allow(unused_variables))]
         let profile = self.browser.read(cx).tab_profile(opener);
@@ -342,7 +342,7 @@ impl BrowserView {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::*;
 

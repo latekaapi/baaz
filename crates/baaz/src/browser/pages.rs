@@ -40,7 +40,7 @@ impl Harness {
         // Explicit boot flag, never environment sniffed in render: captures
         // and tests run the scripted page, the app runs WKWebView.
         self.browser.update(cx, |browser, _| browser.browser_builds += 1);
-        let fake = self.browser.read(cx).fake || cfg!(test);
+        let fake = self.browser.read(cx).fake || cfg!(all(test, feature = "probe"));
         let profile = self.browser.read(cx).tab_profile(id);
         let state = cx.new(|cx| {
             if fake {
@@ -128,7 +128,7 @@ impl Harness {
         {
             return;
         }
-        if !(self.browser.read(cx).fake || cfg!(test)) {
+        if !(self.browser.read(cx).fake || cfg!(all(test, feature = "probe"))) {
             return;
         }
         self.ensure_tabs_loaded(cx);
@@ -210,7 +210,7 @@ impl Harness {
         // A person's own open earns URL-field focus; a link never does —
         // undo the arm `open_right_on` owes the person.
         self.browser.update(cx, |browser, _| browser.browser_url_focus_armed = false);
-        if self.browser.read(cx).fake || cfg!(test) {
+        if self.browser.read(cx).fake || cfg!(all(test, feature = "probe")) {
             self.ensure_tabs_loaded(cx);
             let owner = self.shown_tab_owner(cx);
             let id = self.ensure_owner_tab(&owner, cx);
@@ -294,7 +294,7 @@ impl Harness {
             .unwrap_or_else(|| BLANK.to_owned());
         let initial = if url.is_empty() { BLANK } else { url.as_str() };
         self.browser.update(cx, |browser, _| browser.browser_builds += 1);
-        let fake = self.browser.read(cx).fake || cfg!(test);
+        let fake = self.browser.read(cx).fake || cfg!(all(test, feature = "probe"));
         // The `--steps` capture seam: queued scripts land on the fresh
         // scripted backend before it is boxed, then drain through the real
         // poll path. Production never queues, so this takes nothing.
@@ -513,7 +513,7 @@ impl BrowserView {
 
     /// Whether this session key has a live page: its active tab's state
     /// exists. The existing pane tests pin boot and switch on this.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn session_has_page(&self, session_id: &str) -> bool {
         self.session_page(session_id).is_some()
     }
@@ -522,7 +522,7 @@ impl BrowserView {
     /// The session's live page: its active tab's state, when built. The
     /// existing pane tests reach the session's page through this instead
     /// of the tab-keyed registry.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn session_page(&self, session_id: &str) -> Option<Entity<WebviewState>> {
         let owner = Owner::Session(session_id.to_owned());
         self.tabs.active_of(&owner, None).and_then(|id| self.states.get(&id).cloned())

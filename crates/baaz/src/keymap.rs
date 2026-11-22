@@ -572,7 +572,7 @@ pub(crate) fn refresh_claimed_from_disk() {
 ///
 /// Only built where something reads it: the `cef` router and the unit tests.
 /// Without either it would be dead code, and `-D warnings` says so loudly.
-#[cfg(any(test, feature = "cef"))]
+#[cfg(any(all(test, feature = "probe"), feature = "cef"))]
 pub(crate) fn claims_keystroke(keystroke: &str) -> bool {
     let Ok(incoming) = crate::keymap::parse_keystroke(keystroke) else {
         return false;
@@ -1094,7 +1094,7 @@ pub fn restore_defaults() -> bool {
 /// Unbind an action in a context: write `null` at its current effective
 /// keystroke. Refuses when that keystroke is [`RESERVED`] — ⌘Q stays bound —
 /// and is a no-op when the action has no binding there.
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 pub fn unbind_binding(action: &str, context: Option<&str>) -> Result<(), KeymapError> {
     if !known_action(action) || action == "NoAction" {
         return Err(KeymapError::UnknownAction(action.to_string()));
@@ -1221,7 +1221,7 @@ pub fn effective_binding(action: &str, context: Option<&str>) -> Option<Effectiv
     effective_bindings().into_iter().rfind(|row| row.action == action && row.context == context)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 mod tests {
     use super::{build_bindings, KEYMAP};
     use std::collections::HashSet;

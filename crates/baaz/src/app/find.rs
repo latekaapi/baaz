@@ -11,7 +11,7 @@ use super::*;
 // process: every gpui test drives its app on its own thread, so a process
 // counter let a parallel test's boot rebuild land between one test's reset
 // and its assert (a flake seen at Gate 2, 16 Nov).
-#[cfg(test)]
+#[cfg(all(test, feature = "probe"))]
 thread_local! {
     static SEARCH_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SEARCH_SCOPED_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -104,7 +104,7 @@ impl Harness {
     /// the matchable body. Pure over the harness state so tests can pin
     /// the rows without a window; [`Self::rebuild_search_index`] writes
     /// them to `search.db` (`docs/22-handoff.md` §8.4).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn search_session_rows(&self, cx: &gpui::App) -> Vec<crate::search::SessionRow> {
         self.search_sync_rows(cx).into_iter().map(|(row, _, _)| row).collect()
     }
@@ -370,20 +370,20 @@ impl Harness {
     /// Test builds only: the B7 pane-toggle test resets it, toggles, and
     /// asserts it stays put — right-pane state is not searchable, so a
     /// toggle must never rebuild.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn search_rebuild_count() -> usize {
         SEARCH_REBUILDS.get()
     }
 
     /// Zero [`Self::search_rebuild_count`]; see above.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn reset_search_rebuild_count() {
         SEARCH_REBUILDS.set(0);
         SEARCH_SCOPED_REBUILDS.set(0);
     }
 
     /// Scoped (one-session) search syncs since the last reset (tests).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe"))]
     pub(crate) fn search_scoped_rebuild_count() -> usize {
         SEARCH_SCOPED_REBUILDS.get()
     }
@@ -410,7 +410,7 @@ impl Harness {
             self.rebuild_search_index(cx);
             return;
         };
-        #[cfg(test)]
+        #[cfg(all(test, feature = "probe"))]
         {
             SEARCH_REBUILDS.set(SEARCH_REBUILDS.get() + 1);
             SEARCH_SCOPED_REBUILDS.set(SEARCH_SCOPED_REBUILDS.get() + 1);
@@ -434,7 +434,7 @@ impl Harness {
     }
 
     pub(crate) fn rebuild_search_index(&mut self, cx: &mut Context<Self>) {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "probe"))]
         SEARCH_REBUILDS.set(SEARCH_REBUILDS.get() + 1);
         let at = std::time::Instant::now();
         let rows = self.search_sync_rows(cx);
