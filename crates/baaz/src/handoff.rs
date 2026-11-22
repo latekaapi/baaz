@@ -4,14 +4,19 @@
 //! `crate::handoff::…` names both. Only the tests read these steps: the
 //! transcript re-derives them from the block's own fields.
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 use aui::transcript::{HandoffStep, HandoffStepState, default_handoff_steps};
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 use aui_protocol::HandoffState;
 
 pub use baaz_core::handoff::*;
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 /// The card's progress steps: the library's four defaults with this
 /// run's states marked (see [`handoff_steps`], the mapping the
 /// transcript shares from the block alone). The current step carries
@@ -39,7 +44,8 @@ pub fn run_steps(run: &HandoffRun) -> Vec<HandoffStep> {
 /// `elapsed_secs` details the one current step (`"n s"`), when the
 /// caller knows a basis for it. The failed step carries the reason;
 /// refused stays all pending (nothing started).
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn handoff_steps(
     state: &HandoffState,
@@ -124,7 +130,9 @@ pub fn handoff_steps(
     steps
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use aui_protocol::{Block, HandoffState, Session};
@@ -302,7 +310,9 @@ mod tests {
         assert!(matches!(run_steps(&landed)[1].state, HandoffStepState::Skipped));
     }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod cancelled_steps_tests {
     use super::*;
 

@@ -77,14 +77,16 @@ impl SessionRuntime {
     }
 
     /// Whether no checkpoint is being taken or waits to be (tests).
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn checkpoints_idle(&self) -> bool {
         self.checkpoints.idle()
     }
 
     /// Fold one provider event as the lane would (tests): a turn's start
     /// and end driven by hand, so a test can write files between them.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn test_provider_event(&mut self, event: provider::ProviderEvent, cx: &mut Context<Self>) {
         self.on_provider_event(event, cx);
     }

@@ -249,7 +249,9 @@ pub(crate) fn diff_target(root: &Path, path: &str) -> LineTarget {
     LineTarget::Diff { root: root.to_path_buf(), path: path.to_string() }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use aui::protocol::{DiffKind, DiffLine, Hunk};

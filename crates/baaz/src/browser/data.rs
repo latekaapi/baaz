@@ -269,7 +269,8 @@ impl BrowserData {
     }
 
     /// A store at `path` (tests: a temp state dir).
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn at(path: PathBuf, cx: &mut Context<Self>) -> Self {
         Self::with_opener(move || BrowserDb::open_at(&path).expect("the test browser.db opens"), cx)
     }
@@ -822,7 +823,9 @@ impl Worker {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use gpui::AppContext as _;

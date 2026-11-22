@@ -255,7 +255,8 @@ pub struct SessionHost {
 
 /// Tests: one Muse notification frame for `session_id`, as the wire spells
 /// it, for [`SessionRuntime::apply`].
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 pub(crate) fn wire_note(method: &str, session_id: &str, mut params: serde_json::Value) -> serde_json::Value {
     if let Some(map) = params.as_object_mut() {
         map.entry("sessionId").or_insert_with(|| session_id.into());
@@ -1342,7 +1343,8 @@ impl SessionRuntime {
     /// Tests: fold one Muse wire frame ([`wire_note`]) through the same
     /// translation a hub lane runs, then into this view, as a live Muse
     /// session would see it.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn apply(&mut self, frame: serde_json::Value, cx: &mut Context<Self>) {
         let events = self.test_wire.fold_line(&frame.to_string());
         self.fold_provider_events(events, cx);
@@ -1537,7 +1539,8 @@ impl SessionRuntime {
     }
 
     /// The folder this session runs in, for tests outside this module.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn workspace_for_tests(&self) -> &str {
         &self.workspace
     }
@@ -1693,7 +1696,8 @@ impl SessionRuntime {
     /// Seed this view's cached muse `model/list` catalog in tests: one row
     /// per id, so the muse start path's catalog check has rows to read
     /// without a wire child behind the view.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn seed_test_catalog(&mut self, ids: &[&str]) {
         self.models = ids
             .iter()
@@ -1963,7 +1967,8 @@ impl SessionRuntime {
     /// still open: after the `agentMessage` completes and `session/tokenUsage`
     /// arrives, Muse runs `reminderChild` items (memory reminders) for 30–70 s
     /// before `turn/completed`.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub fn reply_complete_for_running_turn(&self) -> bool {
         self.reply_complete_in_fold()
     }
@@ -2655,7 +2660,8 @@ impl SessionRuntime {
     }
 
     /// The banner's text, for tests that check what a failure said.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn banner_text(&self) -> Option<&str> {
         self.banner.as_deref()
     }
@@ -3369,7 +3375,9 @@ fn fork_time(meta: &aui_protocol::TurnMeta) -> String {
     aui::transcript::format_duration(meta.duration_ms).to_string()
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

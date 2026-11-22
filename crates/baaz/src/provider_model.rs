@@ -492,7 +492,9 @@ fn visible(statuses: &[ProviderStatus]) -> Vec<ProviderStatus> {
         .collect()
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::NewProvider;
     use crate::provider_status::{Auth, Installed, ProviderStatus};

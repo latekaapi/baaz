@@ -1843,7 +1843,8 @@ impl Harness {
     /// state change (B11b), like [`Self::toggle_right`]. Prefer
     /// [`Self::select_right`]: this stays only for the menu-toggle behaviour
     /// its test pins, so it compiles into test builds only.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn show_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
         if self.settings_open(cx) {
             return;
@@ -2159,7 +2160,8 @@ impl Harness {
     /// D51 "Open terminal" on a terminal tool card
     /// ([`terminal::TerminalDock::open_tab`]); ignored while the Settings
     /// page stands open (B11b), like the dock toggle.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn open_terminal_tab(
         &mut self,
         tab: Option<String>,
@@ -2238,7 +2240,8 @@ impl Harness {
     /// The agent mark for a terminal tab whose origin is `origin`: the
     /// root's durable record first, then the dock's bridge map
     /// ([`terminal::TerminalDock::tab_provider`]).
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn terminal_tab_provider(&self, origin: Option<&str>, cx: &App) -> Option<aui_icons::Provider> {
         let record = origin.and_then(|session| self.session_list.read(cx).provider_sessions.get(session)).map(|record| record.provider.as_str());
         self.terminal_dock.read(cx).tab_provider(origin, record)
@@ -5249,7 +5252,9 @@ impl Harness {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::find_docs_dir;
     use crate::layout::LayoutGlobal as _;

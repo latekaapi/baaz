@@ -129,7 +129,7 @@ fn browser_pane_renders_the_session_webview() {
 #[test]
 fn fake_backend_only_behind_the_boot_flag() {
     let browser = browser_source();
-    assert!(browser.contains("self.browser.read(cx).fake || cfg!(test)"), "fake is flag- or test-gated");
+    assert!(browser.contains("self.browser.read(cx).fake || cfg!(all(test, feature = \"probe\"))"), "fake is flag- or test-gated");
     assert!(browser.contains("WryBackend::new_at"), "production path builds WKWebView");
     assert!(browser.contains("set_obscured"), "the host hides the native view under overlays");
     assert!(browser.contains("browser_visible"), "visibility runs through the pure predicate");

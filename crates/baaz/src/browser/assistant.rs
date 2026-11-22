@@ -72,7 +72,9 @@ pub fn resolve(prefs: &AssistantPrefs, usable: impl Fn(ProviderId) -> bool, defa
     model_choices(provider).into_iter().next()
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

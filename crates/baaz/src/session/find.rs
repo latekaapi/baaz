@@ -578,7 +578,9 @@ impl SessionView {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use aui_protocol::TurnMeta;

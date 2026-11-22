@@ -150,7 +150,9 @@ pub trait ProviderCall: WireCall {
 /// deliberately no other way to send one.
 impl<T: WireCall> ProviderCall for T {}
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use provider::scripted::ScriptedProvider;

@@ -105,12 +105,15 @@ impl Login {
     }
 
     /// The state's log name and the key field, for tests outside this module.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn state_name(&self) -> &'static str {
         login_state_name(&self.state)
     }
 
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+
+    #[cfg(test)]
     pub(crate) fn api_key_field(&self) -> Entity<InputState> {
         self.api_key.clone()
     }

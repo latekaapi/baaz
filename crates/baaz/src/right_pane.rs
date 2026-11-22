@@ -56,7 +56,9 @@ use crate::session::SessionView;
 use crate::layout::LayoutGlobal as _;
 use aui_tokens::ActiveAui as _;
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 thread_local! {
     /// Render probe (tests): how many changed rows the pane's last render
     /// drew from its cache for the shown project, `None` before any data.
@@ -67,7 +69,8 @@ thread_local! {
 
 /// What the last render of the pane drew: the changed rows of the shown
 /// project (see [`DRAWN_CHANGES`]).
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 pub(crate) fn drawn_changes() -> Option<usize> {
     DRAWN_CHANGES.with(|drawn| drawn.get())
 }
@@ -671,7 +674,8 @@ impl Render for RightPane {
         }
         let project = self.facts.project.clone();
         let width = self.resize.width;
-        #[cfg(all(test, feature = "probe"))]
+        #[cfg(feature = "probe")]
+        #[cfg(test)]
         DRAWN_CHANGES.with(|drawn| {
             let rows = project.as_ref().and_then(|(root, _)| self.cache.git_for(root).flatten()).map(|tree| tree.files.len());
             drawn.set(rows);
@@ -1020,7 +1024,9 @@ impl Harness {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::lower_drag_share;
 

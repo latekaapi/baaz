@@ -20,7 +20,8 @@
 
 use aui::data::{button, card, settings_row, switch, SwitchIntent, SETTINGS_ROW_GAP};
 use aui_tokens::TextRole;
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 use aui::overlay::{SettingsRow, SettingsSection};
 use aui::screens::{ProviderAction, ProviderActionDef, ProviderCardData, ProviderIntent, StatusLine};
 use aui_tokens::{scale, ActiveAui, AuiStyled};
@@ -396,7 +397,8 @@ pub(crate) fn signin_plan(id: ProviderId) -> SignInPlan {
 /// routed by [`parse_enabled_row`]); the cards live on the Providers
 /// overview and sub-pages
 /// ([`SettingsPage::render_content`](crate::settings::SettingsPage::render_content)).
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 pub(crate) fn providers_section() -> SettingsSection {
     let statuses = crate::provider_status::live_statuses();
     let mut rows = vec![SettingsRow::Note {
@@ -819,7 +821,9 @@ impl Harness {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
 
     fn p1_status(id: ProviderId, installed: crate::provider_status::Installed, auth: crate::provider_status::Auth) -> ProviderStatus {

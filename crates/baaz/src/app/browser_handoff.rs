@@ -438,7 +438,9 @@ impl Harness {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn a_frozen_picker_ages_rows_from_its_newest_row_not_the_wall() {

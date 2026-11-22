@@ -78,7 +78,8 @@ fn provider_open_work(
         .map_err(|error| crate::app::OpenFailed { error, stderr: provider.stderr_tail() })?;
     // Tests drain after the send, synchronously on the test
     // executor: no forwarding thread ever wakes the lane task.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     let (mut provider, events) = conn::gate_sync(provider);
     #[cfg(not(all(test, feature = "probe")))]
     let mut provider = provider;
@@ -1092,7 +1093,8 @@ impl Harness {
                 // Tests drain after the resume, synchronously on the test
                 // executor: the replayed deltas are buffered before the lane
                 // starts, with no forwarding thread.
-                #[cfg(all(test, feature = "probe"))]
+                #[cfg(feature = "probe")]
+                #[cfg(test)]
                 let (provider, events) = conn::gate_sync(provider);
                 Ok(ProviderOpen {
                     provider_id,
@@ -1300,7 +1302,8 @@ impl Harness {
             })?;
             // Tests drain after the resume, synchronously on the test
             // executor: no forwarding thread wakes the lane task.
-            #[cfg(all(test, feature = "probe"))]
+            #[cfg(feature = "probe")]
+            #[cfg(test)]
             let (provider, events) = conn::gate_sync(provider);
             match ack {
                 provider::Ack::Session { session_id, title, .. } => Ok(ProviderOpen {

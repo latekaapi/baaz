@@ -474,7 +474,8 @@ impl OverlayStack {
     }
 
     /// The top entry's kind.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn top(&self) -> Option<LayerKind> {
         self.entries.last().map(Entry::kind)
     }
@@ -605,7 +606,9 @@ content!(chrome_import, chrome_import_mut, ChromeImport, crate::chrome_import_ui
 content!(renaming, renaming_mut, RenameSession, String);
 content!(renaming_project, renaming_project_mut, RenameProject, String);
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use aui::overlay::DialogKind;

@@ -252,7 +252,9 @@ fn mesh() -> RgbImage {
     image::imageops::blur(&picture, 2.0)
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

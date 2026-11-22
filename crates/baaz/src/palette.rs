@@ -169,7 +169,8 @@ fn command_matches(commands: &[Command], query: &str) -> Vec<usize> {
 
 /// The Commands palette's rows for `query` on `provider`'s sessions (every
 /// command with none open): [`command_matches`] over the offered commands.
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 pub(crate) fn filter_commands(query: &str, provider: Option<crate::providers::ProviderId>) -> Vec<Command> {
     let offered: Vec<Command> = Command::ALL.into_iter().filter(|command| provider.is_none_or(|id| command.offered_on(id))).collect();
     command_matches(&offered, query).into_iter().map(|at| offered[at]).collect()
@@ -563,7 +564,8 @@ impl Harness {
 
 
     /// The open palette's query field, once its first frame made it.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn palette_query(&self, cx: &App) -> Option<Entity<gpui_kit::base::input::TextareaState>> {
         self.palette_view(cx).and_then(|view| view.read(cx).field().cloned())
     }
@@ -571,7 +573,8 @@ impl Harness {
     /// The palette's rows on `kind` (id, label, detail) in the order the
     /// keyboard walks them: the open palette's, narrowed by its query, or
     /// what a palette opened now would list.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn palette_rows(&self, kind: PaletteKind, cx: &App) -> Vec<(SharedString, SharedString, SharedString)> {
         let open = self.palette_view(cx).filter(|view| view.read(cx).delegate.kind == kind);
         let rows = |delegate: &PaletteDelegate| {
@@ -584,13 +587,15 @@ impl Harness {
     }
 
     /// How many rows the palette on `kind` lists (see [`Self::palette_rows`]).
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn palette_rows_len_for(&self, kind: PaletteKind, cx: &App) -> usize {
         self.palette_rows(kind, cx).len()
     }
 
     /// The open palette's selection.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn palette_selected(&self, cx: &App) -> Option<usize> {
         self.palette_view(cx).map(|view| view.read(cx).selected())
     }
@@ -612,7 +617,9 @@ pub(crate) fn tilde_root(root: &str) -> String {
     root.to_owned()
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

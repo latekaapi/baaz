@@ -489,7 +489,8 @@ impl Harness {
         turns: &[(String, aui_protocol::TurnMeta)],
         cx: &mut Context<Self>,
     ) {
-        #[cfg(all(test, feature = "probe"))]
+        #[cfg(feature = "probe")]
+        #[cfg(test)]
         SETTLES.with(|settles| settles.set(settles.get() + 1));
         let session_id = session_id.to_owned();
         // Every provider's turn, Muse's included (docs/70): the
@@ -640,7 +641,9 @@ impl Harness {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 thread_local! {
     /// How many times [`Harness::settle_turns`] ran on this thread: what
     /// the F14 test counts (a reopen of N turns settles once).

@@ -185,13 +185,17 @@ impl SessionRuntime {
         }
     }
 
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+
+    #[cfg(test)]
     /// The banner's action, for the window's tests.
     pub(crate) fn banner_action_for_test(&self) -> Option<BannerAction> {
         self.banner_action.clone()
     }
 
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+
+    #[cfg(test)]
     /// Let the shared-folder warning show again (a test re-raises it).
     pub(crate) fn forget_shared_folder_warning(&mut self) {
         self.shared_folder_warned = false;

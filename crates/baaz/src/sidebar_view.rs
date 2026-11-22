@@ -262,7 +262,8 @@ pub(crate) struct SidebarPane {
     _subscriptions: Vec<Subscription>,
     /// This pane's own renders, for the tests that prove what re-renders it
     /// (the process-wide counters above are shared across parallel tests).
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) renders: u64,
 }
 
@@ -514,7 +515,8 @@ impl SidebarPane {
             hover_timer: None,
             reveal_poke: None,
             _subscriptions: subscriptions,
-            #[cfg(all(test, feature = "probe"))]
+            #[cfg(feature = "probe")]
+            #[cfg(test)]
             renders: 0,
         }
     }
@@ -1248,7 +1250,8 @@ impl Render for SidebarPane {
     /// `screen_item_count` otherwise.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         SIDEBAR_PANE_RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        #[cfg(all(test, feature = "probe"))]
+        #[cfg(feature = "probe")]
+        #[cfg(test)]
         {
             self.renders += 1;
         }
@@ -1377,7 +1380,9 @@ pub(crate) fn browse_tab_id(key: &str) -> Option<crate::browser::TabId> {
     key.strip_prefix("tab-")?.parse().ok().map(crate::browser::TabId)
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use gpui::point;
@@ -3744,7 +3749,9 @@ pub(crate) fn footer_identity(
     (name.to_owned(), String::new(), "?".to_owned(), String::new(), tile)
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod footer_identity_tests {
     use super::footer_identity;
     use aui::screens::sidebar::AccountStatus;
@@ -3809,7 +3816,9 @@ pub(crate) fn task_face_for(waiting: bool, held: bool, running: bool, typing: bo
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod task_face_tests {
     use super::task_face_for;
     use aui::browse::TaskFace;

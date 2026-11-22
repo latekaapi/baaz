@@ -142,7 +142,8 @@ impl Notifier {
     }
 
     /// The badge last set, for tests.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn badge(cx: &App) -> Option<usize> {
         cx.try_global::<Notifier>().and_then(|n| n.badge)
     }
@@ -404,7 +405,9 @@ fn play_sound() {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::sidebar::tests::entry;

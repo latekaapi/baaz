@@ -484,7 +484,9 @@ pub fn provider_mark(id: &str) -> Option<aui_icons::Provider> {
     crate::providers::ProviderId::parse_known(id).map(|provider| provider.row_mark())
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};

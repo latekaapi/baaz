@@ -1094,7 +1094,8 @@ pub fn restore_defaults() -> bool {
 /// Unbind an action in a context: write `null` at its current effective
 /// keystroke. Refuses when that keystroke is [`RESERVED`] — ⌘Q stays bound —
 /// and is a no-op when the action has no binding there.
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 pub fn unbind_binding(action: &str, context: Option<&str>) -> Result<(), KeymapError> {
     if !known_action(action) || action == "NoAction" {
         return Err(KeymapError::UnknownAction(action.to_string()));
@@ -1221,7 +1222,9 @@ pub fn effective_binding(action: &str, context: Option<&str>) -> Option<Effectiv
     effective_bindings().into_iter().rfind(|row| row.action == action && row.context == context)
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::{build_bindings, KEYMAP};
     use std::collections::HashSet;

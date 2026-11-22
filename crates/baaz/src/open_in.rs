@@ -60,12 +60,16 @@ fn spawn(argv: Vec<String>) {
     editors::spawn_detached(argv, |why| crate::baaz_log!("open in editor: could not start {why}"));
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 fn spawn(argv: Vec<String>) {
     OPENED.with(|opened| opened.borrow_mut().push(argv));
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 thread_local! {
     /// The argv each [`open_path`] would have run, for tests.
     pub(crate) static OPENED: std::cell::RefCell<Vec<Vec<String>>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -90,12 +94,16 @@ fn reveal(folder: PathBuf) {
     });
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 fn reveal(folder: PathBuf) {
     REVEALED.with(|revealed| revealed.borrow_mut().push(folder));
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 thread_local! {
     /// The folders [`reveal_folder`] would have shown, for tests.
     pub(crate) static REVEALED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -108,7 +116,9 @@ pub(crate) fn project_folder(workspace: &str) -> Option<PathBuf> {
     (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

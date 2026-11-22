@@ -51,7 +51,9 @@ pub(crate) const PREVIEW_MAX_BYTES: u64 = 1024 * 1024;
 /// 1 MB note must not turn into ten thousand elements.
 const PREVIEW_MD_BLOCKS_CAP: usize = 300;
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 thread_local! {
     // Directory listings served from [`DirListCache`] without a `read_dir`.
     // Per thread, like `render_io`'s count: parallel tests must not see
@@ -59,7 +61,9 @@ thread_local! {
     static DIR_CACHE_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 thread_local! {
     // Directory entries collected from `read_dir` before sorting, bounded by
     // the walk cap: the test hook that proves a huge directory is read bounded.
@@ -68,28 +72,32 @@ thread_local! {
 
 /// How many blocking reads [`run_git`] and the file walk have done on this
 /// thread since it started (or the last [`reset_io_count`]).
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 pub(crate) fn io_count() -> usize {
     crate::render_io::io_count()
 }
 
 /// How many directory listings came from [`DirListCache`] since process
 /// start (or the last [`reset_io_count`]).
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 pub(crate) fn cache_hit_count() -> usize {
     DIR_CACHE_HITS.with(std::cell::Cell::get)
 }
 
 /// How many directory entries the walk collected since process start (or
 /// the last [`reset_io_count`]).
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 pub(crate) fn walk_collected_count() -> usize {
     WALK_COLLECTED.with(std::cell::Cell::get)
 }
 
 /// Zero [`io_count`], [`cache_hit_count`] and [`walk_collected_count`]; the
 /// purity test drives [`render`] between the reset and the assert.
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 pub(crate) fn reset_io_count() {
     crate::render_io::reset_io_count();
     DIR_CACHE_HITS.with(|count| count.set(0));
@@ -102,7 +110,8 @@ use crate::layout::LayoutGlobal as _;
 /// Count one cache-served directory toward [`cache_hit_count`] in test
 /// builds; nothing in production.
 fn note_cache_hit() {
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     DIR_CACHE_HITS.with(|count| count.set(count.get() + 1));
 }
 
@@ -111,7 +120,8 @@ fn note_cache_hit() {
 /// Record how many entries one directory read holds at once (the most seen
 /// since the last reset): the bound the walk keeps however big the folder.
 fn note_collected(held: usize) {
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     WALK_COLLECTED.with(|count| count.set(count.get().max(held)));
     #[cfg(not(all(test, feature = "probe")))]
     let _ = held;
@@ -462,7 +472,8 @@ pub(crate) struct RightSnapshot {
 /// [`RightPane`](crate::right_pane::RightPane) refresh path runs it on the background
 /// executor (inline under `BAAZ_DETERMINISTIC`, where the git reads are
 /// fixtures and the walk is the only real I/O).
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 pub(crate) fn read_snapshot(root: &Path) -> RightSnapshot {
     read_snapshot_for(root, &HashSet::new())
 }
@@ -471,7 +482,8 @@ pub(crate) fn read_snapshot(root: &Path) -> RightSnapshot {
 /// walk one level deeper each, so a toggle survives the re-read that draws
 /// it. Blocking, like [`read_snapshot`]. Test builds only: production
 /// refreshes go through [`read_snapshot_for_cached`].
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 pub(crate) fn read_snapshot_for(root: &Path, expanded: &HashSet<String>) -> RightSnapshot {
     let mut cache = DirListCache::default();
     read_snapshot_for_cached(root, expanded, &mut cache)
@@ -1327,7 +1339,8 @@ fn file_type_for(name: &str) -> FileType {
 
 /// One level of `root`, sorted by name, skipping [`SKIP_DIRS`]. Returns the
 /// nodes and whether the [`FILE_WALK_CAP`] cut the listing short.
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 fn walk_root_capped(root: &Path, cap: usize) -> (Vec<FileNode>, bool) {
     walk_root_expanded(root, cap, &HashSet::new())
 }
@@ -1339,7 +1352,8 @@ fn walk_root_capped(root: &Path, cap: usize) -> (Vec<FileNode>, bool) {
 /// `expanded` arrive closed. Returns the nodes and whether `cap` cut the
 /// listing short. Test builds only: production walks go through
 /// [`walk_root_expanded_cached`].
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 fn walk_root_expanded(
     root: &Path,
     cap: usize,
@@ -1738,7 +1752,8 @@ pub(crate) fn close_file_preview(cache: &mut RightCache, root: &Path) -> bool {
 /// clears any preview; a missing, oversized or unreadable path opens the
 /// card straight away. Returns whether the caller must read the file off
 /// the render path and land it with [`complete_file_preview`].
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 pub(crate) fn begin_file_preview(cache: &mut RightCache, root: &Path, id: &str) -> bool {
     begin_file_preview_highlight(cache, root, id, None)
 }
@@ -2016,7 +2031,8 @@ pub(crate) fn preview_reload_for(root: &Path, preview: &FilePreview) -> Option<P
 /// The preview's shown text, if it shows any: the code for text files, the
 /// source for markdown — `None` for loading and card previews. The refresh
 /// tests read through this instead of destructuring [`PreviewContent`].
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+#[cfg(test)]
 pub(crate) fn preview_text_shown(preview: &FilePreview) -> Option<&str> {
     match &preview.content {
         PreviewContent::Text { code, .. } => Some(code),
@@ -2311,7 +2327,9 @@ fn browser_pane(
     column.child(pane).into_any_element()
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
 
     #[test]

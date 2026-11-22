@@ -139,7 +139,9 @@ pub fn clear_spans(held: &mut HashMap<String, HeldSpan>, sessions: &mut HashMap<
     had
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use aui::transcript::{SelectionEndpoint, SelectionKey};

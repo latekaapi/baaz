@@ -270,7 +270,9 @@ pub(crate) fn pushed_screen(screen: usize, view: &Pushed, window: &mut Window, c
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

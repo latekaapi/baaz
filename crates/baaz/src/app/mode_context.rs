@@ -220,7 +220,9 @@ fn last_session(id: String, title: String, entry: Option<&SessionEntry>) -> Last
     LastSession { id: id.into(), title: title.into(), state, unread }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::{pages_open, PagesOpen};
     use crate::browser::TabId;

@@ -88,7 +88,8 @@ impl SessionRegistry {
     }
 
     /// Whether `view` is parked, under any id.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn is_view_parked(&self, view: &Entity<SessionView>) -> bool {
         self.parked.iter().any(|parked| parked.view.as_ref() == Some(view))
     }
@@ -271,19 +272,22 @@ impl SessionRegistry {
     }
 
     /// How many subscriptions are live (a runtime's and a view's each).
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn subscription_count(&self) -> usize {
         self.subscriptions.len()
     }
 
     /// How many sessions are parked.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn parked_len(&self) -> usize {
         self.parked.len()
     }
 
     /// Empty the MRU, handing the views back (tests that drop them).
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn drain_parked(&mut self) -> Vec<Entity<SessionView>> {
         self.parked.drain(..).filter_map(|parked| parked.view).collect()
     }

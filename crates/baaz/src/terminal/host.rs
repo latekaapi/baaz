@@ -419,7 +419,8 @@ impl TerminalHost {
     /// every other open. Test-only: production opens go through
     /// [`open`](Self::open), [`open_with_cwd`](Self::open_with_cwd) or
     /// [`open_fake`](Self::open_fake).
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub fn open_session(
         &mut self,
         project_root: &Path,
@@ -435,7 +436,8 @@ impl TerminalHost {
     /// Open a tab over a real pty spawned from `config`: the task tests'
     /// route to a shell with no rc files of the owner's, whose foreground
     /// group a Stop can end. Test-only, like [`open_session`](Self::open_session).
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub fn open_config(
         &mut self,
         project_root: &Path,
@@ -736,7 +738,9 @@ impl TerminalBackend for ScriptBackend {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -241,7 +241,9 @@ pub(crate) fn make_baaz_default() -> bool {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

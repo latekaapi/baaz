@@ -77,7 +77,9 @@ pub fn bring_forward(pid: i32) -> bool {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

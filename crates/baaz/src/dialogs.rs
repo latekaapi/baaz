@@ -315,7 +315,8 @@ impl Harness {
     /// counts the running commands past the named one, so a second tab is
     /// not a surprise after the first is confirmed. Pure, so the naming
     /// has a test without a window. Tests only; the window asks through [`Self::quit_dialog`].
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn quit_terminal_dialog(command: &str, others: usize) -> Dialog {
         Self::quit_dialog(&[], Some((command, others))).expect("a running command asks")
     }
@@ -588,7 +589,8 @@ impl Harness {
 
     /// The tests' way into [`Self::run_palette_row`]: run one palette row
     /// by its id, exactly as a click or ↩ would.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn run_palette_row_for_test(
         &mut self,
         kind: PaletteKind,
@@ -1198,7 +1200,9 @@ impl Harness {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use crate::layout::LayoutGlobal as _;
 

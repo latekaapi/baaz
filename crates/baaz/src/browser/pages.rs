@@ -513,7 +513,8 @@ impl BrowserView {
 
     /// Whether this session key has a live page: its active tab's state
     /// exists. The existing pane tests pin boot and switch on this.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn session_has_page(&self, session_id: &str) -> bool {
         self.session_page(session_id).is_some()
     }
@@ -522,7 +523,8 @@ impl BrowserView {
     /// The session's live page: its active tab's state, when built. The
     /// existing pane tests reach the session's page through this instead
     /// of the tab-keyed registry.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn session_page(&self, session_id: &str) -> Option<Entity<WebviewState>> {
         let owner = Owner::Session(session_id.to_owned());
         self.tabs.active_of(&owner, None).and_then(|id| self.states.get(&id).cloned())

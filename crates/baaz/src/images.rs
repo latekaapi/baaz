@@ -167,7 +167,9 @@ pub fn from_path(id: impl Into<String>, path: &Path) -> Result<Image, String> {
 impl Image {
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

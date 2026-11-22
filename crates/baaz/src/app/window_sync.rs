@@ -432,7 +432,9 @@ impl Harness {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::sessions::tests::support::{lane_args, lane_restore, lane_state};

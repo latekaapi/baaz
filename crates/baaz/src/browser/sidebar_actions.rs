@@ -432,7 +432,9 @@ impl BrowserView {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod page_menu_tests {
     use super::*;
     use std::time::Duration;

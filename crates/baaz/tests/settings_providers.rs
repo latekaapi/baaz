@@ -166,7 +166,7 @@ fn own_mcp_switch_rides_under_both_cards_and_reaches_argv() {
     pin(&module, "own_mcp_note", "detail read from the descriptor");
     pin(&module, "fn settings_mcp_page", "the MCP page lists beside the switch");
     pin(&module, "mcp_listing.map(|read| read(scripted))", "listing read through each adapter's declaration");
-    pin(&module, "cfg!(test) || crate::runtime::state_isolated()", "tests and captures read fixtures, never the person's files");
+    pin(&module, "cfg!(all(test, feature = \"probe\")) || crate::runtime::state_isolated()", "tests and captures read fixtures, never the person's files");
     let codex_registry = read_repo("crates/provider-codex/src/registry.rs");
     pin(&codex_registry, "servers and plugins load too", "codex detail");
     let claude_registry = read_repo("crates/provider-claude-code/src/registry.rs");

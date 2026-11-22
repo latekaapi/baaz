@@ -297,7 +297,8 @@ pub(crate) struct Overlay {
 
 impl Overlay {
     /// What the slot is for.
-    #[cfg(all(test, feature = "probe"))]
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
     pub(crate) fn kind(&self) -> OverlayKind {
         self.kind
     }
@@ -1694,7 +1695,9 @@ impl Harness {
     }
 }
 
-#[cfg(all(test, feature = "probe"))]
+#[cfg(feature = "probe")]
+
+#[cfg(test)]
 mod field_order_tests {
     use super::field_display_order;
     use aui::browse::field::{FieldRow, FieldRowKind};
