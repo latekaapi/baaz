@@ -3520,16 +3520,32 @@ mod tests {
             assert!(Instant::now() < deadline, "the command never took the foreground: {rows:?}");
             std::thread::sleep(Duration::from_millis(50));
         };
-        // Both sleeps and the sh are in the group.
-        let members = std::process::Command::new("pgrep").args(["-g", &group.to_string()]).output().expect("pgrep");
-        assert!(String::from_utf8_lossy(&members.stdout).lines().count() >= 2, "the group holds the background sleep too");
+        // Both sleeps and the sh are in the group — once the shell has forked
+        // the background `sleep` (the foreground group exists a moment before
+        // it does, so a single `pgrep` raced it).
+        let members_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let members = std::process::Command::new("pgrep").args(["-g", &group.to_string()]).output().expect("pgrep");
+            if String::from_utf8_lossy(&members.stdout).lines().count() >= 2 {
+                break;
+            }
+            assert!(Instant::now() < members_deadline, "the group never held the background sleep too");
+            std::thread::sleep(Duration::from_millis(50));
+        }
         let started = Instant::now();
         let stopped = cx.update(|cx| fx.host.update(cx, |host, cx| host.stop_task(id, cx)));
         assert_eq!(stopped, Ok(group));
         cx.run_until_parked();
         assert!(started.elapsed() >= super::super::tasks::STOP_GRACE, "SIGTERM was ignored, so SIGKILL ended it after the grace");
+        // No process of the group survives. Killed members stay visible to
+        // `kill(-group, 0)` as zombies until their parent reaps them, so the
+        // check polls (a single read right after SIGKILL raced the reaping).
+        let gone_deadline = Instant::now() + Duration::from_secs(10);
         // SAFETY: signal 0 only asks.
-        assert_ne!(unsafe { libc::kill(-group, 0) }, 0, "no process of the group survives");
+        while unsafe { libc::kill(-group, 0) } == 0 {
+            assert!(Instant::now() < gone_deadline, "a process of the group survives");
+            std::thread::sleep(Duration::from_millis(50));
+        }
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             cx.update(|cx| fx.service.drain(cx));
