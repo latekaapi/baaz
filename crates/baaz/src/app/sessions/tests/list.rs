@@ -199,6 +199,12 @@ fn the_sidebar_paints_boot_rows_before_the_list_reply(cx: &mut gpui::TestAppCont
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             harness.session_list.update(cx, |list, _| list.sessions.retain(|e| e.local));
+            // An offline window settles its sidebar at once; this test is about
+            // the boot, before anything has landed.
+            harness.session_list.update(cx, |list, _| {
+                list.sessions_loaded = false;
+                list.index_loaded = false;
+            });
             assert!(harness.session_list.read(cx).loading(), "nothing has landed");
             harness.session_list.update(cx, |list, _| list.index_loaded = true);
             assert!(harness.session_list.read(cx).loading(), "the index landed empty: still nothing to paint");

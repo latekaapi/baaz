@@ -2479,6 +2479,12 @@ mod tests {
         let g1 = Rc::new(g1);
         vc.update(|_, cx| {
             pane.update(cx, |h, cx| {
+                // An offline window settles its sidebar at once (no list is
+                // coming); this test is about the boot, where it has not landed.
+                h.list.update(cx, |list, _| {
+                    list.sessions_loaded = false;
+                    list.index_loaded = false;
+                });
                 assert!(!h.list.read(cx).sessions_loaded, "the wire list has not landed yet");
                 h.sync_list(&rows1, &g1, cx);
                 assert_eq!(h.list_state.item_count(), rows1.len());
