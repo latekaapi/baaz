@@ -260,6 +260,10 @@ pub(crate) struct OmniRow {
     pub target: OmniTarget,
 }
 
+/// The Search row's keys: Enter opens in the shown tab, ⇧↵ in a Peek over it and
+/// ⌥↵ in a Split beside it (the keyboard twins of ⇧-click and ⌥-click).
+pub(crate) const SEARCH_ROW_HINT: &str = "↵  ⇧↵ Peek  ⌥↵ Split";
+
 const MAX_TAB_SUGGESTIONS: usize = 5;
 const MAX_SESSION_SUGGESTIONS: usize = 5;
 const MAX_COMMAND_SUGGESTIONS: usize = 3;
@@ -472,7 +476,7 @@ pub(crate) fn rank_omnibox(
         suggestion: Suggestion {
             kind: SuggestKind::Search,
             title: format!("Search with {} for {q}", engine.name()),
-            hint: "↵".to_owned(),
+            hint: SEARCH_ROW_HINT.to_owned(),
             complete: None,
             detail: None,
         },
@@ -769,6 +773,13 @@ mod tests {
             let row = rows.iter().find(|row| row.suggestion.kind == kind).expect("the row");
             assert_eq!(row.suggestion.complete, None, "{kind:?} rows are not completable");
         }
+    }
+
+    #[test]
+    fn the_search_row_names_its_peek_and_split_keys() {
+        let rows = rank_omnibox("ledger", &[], &[], &[], &[], &[], SearchEngine::Google);
+        let search = rows.iter().find(|row| row.suggestion.kind == SuggestKind::Search).expect("a search row");
+        assert!(search.suggestion.hint.contains("⇧↵ Peek") && search.suggestion.hint.contains("⌥↵ Split"), "{}", search.suggestion.hint);
     }
 
     #[test]

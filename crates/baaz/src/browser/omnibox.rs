@@ -3,6 +3,7 @@
 //! commands), the Ask row and the new tab's Pick up list.
 
 use super::*;
+use aui_webview::LinkGesture;
 use crate::layout::LayoutGlobal as _;
 
 impl Harness {
@@ -183,11 +184,14 @@ impl Harness {
     /// the default engine — and empty restores the field, never navigating.
     /// Runs on the input's enter.
     pub(crate) fn commit_browse_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // ⇧⏎ and ⌥⏎ are the click modifiers' keyboard twins: the address opens
+        // in a Peek over the page, or in a Split beside it (docs/27 §5).
+        let gesture = field_gesture(window);
         // A Tab completion remembers its ROW: Enter opens that row even
         // after the ranking moved under it — never an index into the
         // re-ranked list.
         if let Some(target) = self.browser.read(cx).browse_completed.clone() {
-            return self.activate_omnibox_target(target, window, cx);
+            return self.activate_omnibox_target_with(target, gesture, window, cx);
         }
         if self.browser.read(cx).browse_omnibox_moved {
             let rows = self.browse_suggestions(cx);
@@ -195,7 +199,9 @@ impl Harness {
                 return;
             }
             let index = self.browser.read(cx).browse_omnibox_selected.min(rows.len().saturating_sub(1));
-            return self.activate_omnibox_row(index, window, cx);
+            let index = index.min(rows.len().saturating_sub(1));
+            let Some(row) = rows.get(index).cloned() else { return };
+            return self.activate_omnibox_target_with(row.target, gesture, window, cx);
         }
         let typed = self.browser.read(cx).browse_address_text(cx);
         self.leave_browse_address(window, cx);
@@ -204,10 +210,10 @@ impl Harness {
             return;
         };
         match toolbar::classify_address_input_with(&typed, crate::layout::Layout::get(cx).search_engine) {
-            toolbar::NavTarget::Url(url) => self.navigate_browse_tab(id, &url, window, cx),
+            toolbar::NavTarget::Url(url) => self.open_field_url(id, &url, gesture, window, cx),
             toolbar::NavTarget::Search(url) => {
                 if !url.is_empty() {
-                    self.navigate_browse_tab(id, &url, window, cx);
+                    self.open_field_url(id, &url, gesture, window, cx);
                 } else {
                     cx.notify();
                 }
@@ -365,6 +371,19 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.activate_omnibox_target_with(target, None, window, cx);
+    }
+
+    /// [`Self::activate_omnibox_target`] with the Enter's modifier: a history
+    /// or search row opens in a Peek (⇧⏎) or a Split (⌥⏎) instead of loading
+    /// in the shown tab; every other row ignores it.
+    pub(crate) fn activate_omnibox_target_with(
+        &mut self,
+        target: OmniTarget,
+        gesture: Option<LinkGesture>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match target {
             OmniTarget::Ask(query) => self.browse_ask(&query, window, cx),
             OmniTarget::Command(id) => {
@@ -375,6 +394,9 @@ impl Harness {
                     Some(FieldAction::ClearHistory) => self.ask_clear_history(cx),
                     Some(FieldAction::Bookmark) => self.bookmark_shown_page(window, cx),
                     Some(FieldAction::AdsHere) => self.toggle_ads_here(window, cx),
+                    Some(FieldAction::AgentLine) => self.toggle_agent_line(window, cx),
+                    Some(FieldAction::AgentCard) => self.toggle_agent_card(cx),
+                    Some(FieldAction::AgentColumn) => self.toggle_agent_column(cx),
                     None => {}
                 }
             }
@@ -407,9 +429,20 @@ impl Harness {
                 self.leave_browse_address(window, cx);
                 self.ensure_tabs_loaded(cx);
                 if let Some(id) = self.browser.read(cx).browse_centre_shown(cx) {
-                    self.navigate_browse_tab(id, &url, window, cx);
+                    self.open_field_url(id, &url, gesture, window, cx);
                 }
             }
+        }
+    }
+
+    /// Open `url` from the Field: in the shown tab, or — with ⇧ — in a Peek
+    /// over it, or — with ⌥ — in a Split beside it. A URL that is not a web
+    /// page (a `baaz:` page, `about:`) only ever loads in the shown tab.
+    pub(crate) fn open_field_url(&mut self, opener: TabId, url: &str, gesture: Option<LinkGesture>, window: &mut Window, cx: &mut Context<Self>) {
+        match gesture {
+            Some(LinkGesture::Peek) if super::history::recordable(url) => self.open_peek(opener, url, window, cx),
+            Some(LinkGesture::Split) if super::history::recordable(url) => self.open_split(opener, url, cx),
+            _ => self.navigate_browse_tab(opener, url, window, cx),
         }
     }
 
@@ -609,5 +642,44 @@ impl BrowserView {
             .as_ref()
             .map(|input| input.read(cx).value().to_string())
             .unwrap_or_default()
+    }
+}
+
+/// The Field's Enter modifier: ⇧ is a Peek, ⌥ a Split, neither a plain open.
+pub(crate) fn field_gesture(window: &Window) -> Option<LinkGesture> {
+    let modifiers = window.modifiers();
+    gesture_for(modifiers.shift, modifiers.alt)
+}
+
+/// [`field_gesture`]'s mapping, pure (⇧ wins when both are held).
+pub(crate) fn gesture_for(shift: bool, alt: bool) -> Option<LinkGesture> {
+    if shift {
+        Some(LinkGesture::Peek)
+    } else if alt {
+        Some(LinkGesture::Split)
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "probe")]
+#[cfg(test)]
+mod gesture_tests {
+    use super::*;
+
+    #[test]
+    fn shift_enter_peeks_and_alt_enter_splits() {
+        assert_eq!(gesture_for(true, false), Some(LinkGesture::Peek));
+        assert_eq!(gesture_for(false, true), Some(LinkGesture::Split));
+        assert_eq!(gesture_for(true, true), Some(LinkGesture::Peek));
+        assert_eq!(gesture_for(false, false), None);
+    }
+
+    #[test]
+    fn the_agent_windows_three_sizes_are_findable_by_name() {
+        for (id, action) in [("agent-line", FieldAction::AgentLine), ("agent-card", FieldAction::AgentCard), ("agent-column", FieldAction::AgentColumn)] {
+            let found = FIELD_COMMANDS.iter().find(|(command, _, _)| *command == id).expect("a Field command");
+            assert_eq!(found.2, action);
+        }
     }
 }
