@@ -1188,14 +1188,16 @@ impl Harness {
             this.auth = Auth::SignedOut;
             this.wire = Wire::Down("not connected".into());
             this.apply_login_sample(window, cx);
-            // A scripted sidebar draws without a list reply — but only when
-            // one was asked for, so the login captures draw as they did.
+            // No list reply will ever come: the lanes are scripted, so the
+            // sidebar settles on what it has (a scripted fixture, or nothing)
+            // instead of drawing skeleton rows for a listing that never lands
+            // — the same settling `muse_unavailable` does when the wire dies.
             if this.args.sidebar_fixture.is_some() {
                 this.apply_sidebar_fixture(cx);
-                this.session_list.update(cx, |list, _| list.sessions_loaded = true);
-                this.session_list.update(cx, |list, _| list.index_loaded = true);
-                this.invalidate_list(cx);
             }
+            this.session_list.update(cx, |list, _| list.sessions_loaded = true);
+            this.session_list.update(cx, |list, _| list.index_loaded = true);
+            this.invalidate_list(cx);
             return this;
         }
         // The launch decision from stored facts only: a first run shows the

@@ -2226,6 +2226,22 @@ mod tests {
         vc.run_until_parked();
     }
 
+    /// An offline window (`--no-connect`) has no wire: no list will ever
+    /// land, so the sidebar must settle on what it has instead of drawing
+    /// skeleton rows for ever.
+    #[gpui::test]
+    fn an_offline_window_with_no_list_does_not_show_skeleton_rows(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("offline-settles");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| {
+            let list = baaz.read(cx).session_list.clone();
+            assert!(!list.read(cx).loading(), "no listing is coming; skeleton rows would never leave");
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
     /// B3c, no active session: the staged boot loads splice rows above a
     /// top-parked list (a newly pinned row lifts a Pinned section over the
     /// date bucket the first batch painted), and gpui's splice carries the
