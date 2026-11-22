@@ -510,7 +510,17 @@ mod tests {
                 h.apply_login_sample(window, cx);
             })
         });
+        // The queued URLs open through the browser's tab store, which loads on a
+        // worker thread: under a loaded machine one `run_until_parked` can return
+        // before it lands (the suite failed this test once that way), so wait
+        // in real time, up to 10 s, for the queue to drain.
+        let drained = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| baaz.read(cx).browser.read(cx).pending_external_urls.is_empty());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         vc.run_until_parked();
+        while !drained(vc) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            vc.run_until_parked();
+        }
         vc.update(|_, cx| {
             let h = baaz.read(cx);
             assert!(h.browser.read(cx).pending_external_urls.is_empty(), "the connect screen's Finish drains the queue");
