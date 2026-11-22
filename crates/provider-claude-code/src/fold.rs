@@ -1,25 +1,27 @@
-//! Decoded frames into render-ready deltas: one lane, and the reason.
+//! Decoded frames into render-ready deltas: the `assistant` lane renders, the
+//! `stream_event` lane only streams the answer's text.
 //!
-//! RENDERING LANE: **`assistant` frames only.** `stream_event` frames are
-//! decoded (so a shape change still parses) and then ignored for transcript
-//! purposes; they emit no deltas.
+//! RENDERING LANE: **`assistant` frames** — complete blocks, the only source of
+//! cards and the only source of a block's final content. `stream_event` frames
+//! (the lane runs with `--include-partial-messages`) add one thing: the answer's
+//! **text** as it is written. A `message_start` opens the turn, a `text` block's
+//! deltas grow one `streaming: true` [`Block::Text`], and the message's complete
+//! `assistant` text block *replaces that same block* in place (22 Nov 2026: before
+//! this a long single answer showed nothing, and no Stop, for minutes). A turn
+//! that ends first settles the block as written.
 //!
-//! Why the `assistant` lane won:
+//! Why the `assistant` lane is still the one that decides content:
 //!
 //! * `basic.jsonl` — a turn run *without* `--include-partial-messages` —
-//!   contains zero `stream_event` frames. The deltas lane is absent from a
-//!   turn the CLI demonstrably produces, so a deltas-only renderer prints
-//!   nothing for it. The `assistant` lane is the only lane present in all
-//!   five fixtures.
+//!   contains zero `stream_event` frames, and so does every stored history. A
+//!   deltas-only renderer prints nothing for them; the `assistant` lane is the
+//!   only lane present in all fixtures.
 //! * `assistant` frames carry completed blocks (whole text, whole tool
-//!   input), so the fold needs no cross-frame assembly state: no partial
-//!   JSON stitching, no chunk bookkeeping, nothing to disagree about.
-//! * The trap this task exists to avoid is folding both lanes and
-//!   double-rendering every message. Ignoring one lane entirely — rather
-//!   than "deduplicating" two lanes with a heuristic — leaves no seam where
-//!   the two paths can disagree. The agreement test proves it: folding
-//!   `partial.jsonl` with its `stream_event` lines stripped yields deltas
-//!   identical to folding it whole.
+//!   input), so cards need no cross-frame assembly: no partial JSON stitching.
+//! * The trap is folding both lanes and double-rendering every message. The
+//!   streamed block is therefore *replaced*, never accompanied: the agreement
+//!   test proves the finished transcript is identical with and without the
+//!   `stream_event` lines.
 //!
 //! What the fold emits, per frame (every block through the shared
 //! [`TranscriptBuilder`], which owns positions: a card is addressed by its
