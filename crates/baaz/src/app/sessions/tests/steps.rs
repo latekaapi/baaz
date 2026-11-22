@@ -152,3 +152,13 @@ fn the_second_drain_finds_nothing_to_do() {
     assert!(holder.is_empty());
     assert!(drain_steps(&mut holder).is_empty());
 }
+
+/// An online script waits for the open session's own lane, not for the shared
+/// Muse child a Claude Code or Codex session never uses.
+#[test]
+fn a_provider_off_the_shared_child_does_not_wait_for_it() {
+    use crate::app::sessions::steps::session_lane_up;
+    assert!(session_lane_up(false, false), "a Claude Code / Codex lane needs no Muse child");
+    assert!(!session_lane_up(true, false), "a Muse session waits for its child");
+    assert!(session_lane_up(true, true));
+}

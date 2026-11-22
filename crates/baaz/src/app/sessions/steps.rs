@@ -58,6 +58,12 @@ pub(crate) fn steps_ready_for(
     connected && session_open
 }
 
+/// Whether the open session's lane is up for a script: a session that rides the
+/// shared child needs it ready; every other provider's lane opens on its own.
+pub(crate) fn session_lane_up(rides_shared_child: bool, shared_ready: bool) -> bool {
+    !rides_shared_child || shared_ready
+}
+
 /// Take a scripted list out of its holder, so a later pass finds nothing to
 /// do: the drain-once rule behind `--steps` and `--login-steps`. Both
 /// runners take through here, so the second caller — a later frame, a later
@@ -102,12 +108,20 @@ impl Harness {
     /// script on the list hung every scripted run behind a `session/list`
     /// that never answered, while the capture mistook the stalled boot for
     /// a finished script.
-    pub(crate) fn steps_ready(&self) -> bool {
+    pub(crate) fn steps_ready(&self, cx: &gpui::App) -> bool {
+        // The wire an online script waits for is the open session's own lane:
+        // a Claude Code or Codex session does not ride the shared Muse child,
+        // so a Muse that is down or still signing in must not hold its script
+        // for ever ("never became ready", Stage 5).
+        let lane_up = match self.active.as_ref() {
+            Some(view) => session_lane_up(view.read(cx).rt(cx).provider_kind().has(provider::ProviderTrait::SharedChild), self.providers.shared_ready()),
+            None => self.providers.shared_ready(),
+        };
         steps_ready_for(
             !self.args.steps.is_empty(),
             self.args.replay.is_some(),
             self.args.offline,
-            self.providers.shared_ready(),
+            lane_up,
             self.active.is_some(),
             // A mixed script headed by a window verb can start: `new`
             // opens the session the later verbs need, so holding the whole
@@ -145,7 +159,7 @@ impl Harness {
     /// there raced the boot it was meant to follow.
     pub(in crate::app) fn maybe_run_steps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let _ = window;
-        if !self.steps_ready() {
+        if !self.steps_ready(cx) {
             return;
         }
         self.capture.set_steps_ready(true);
