@@ -455,7 +455,7 @@ impl BrowserView {
     /// a write queued to the `browser.db` worker ([`super::data`]) only when
     /// a page or title changed — never a SQLite call here.
     fn record_history(&mut self, live: &[(TabId, String, String, Option<String>)], cx: &mut Context<Self>) {
-        let now = tabs::now_ms();
+        let now = tabs::history_now_ms();
         let front = self.last_centre_shown;
         let mut changed = false;
         let mut want: Vec<(TabId, String, String)> = Vec::new();

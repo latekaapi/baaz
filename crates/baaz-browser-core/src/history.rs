@@ -163,7 +163,7 @@ impl BrowserDb {
         let _ = conn.busy_timeout(std::time::Duration::from_secs(2));
         super::bookmarks::ensure_schema(&conn)?;
         let db = Self { conn };
-        db.prune(crate::tabs::now_ms());
+        db.prune(crate::tabs::history_now_ms());
         Ok(db)
     }
 

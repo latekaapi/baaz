@@ -897,10 +897,22 @@ fn forget_devtools_pages(tabs: &mut Tabs) {
     tabs.closed.retain(|tab| !tab.url.starts_with("devtools:"));
 }
 
-/// Now, as ms since the epoch: the clock behind `last_shown` and browser
-/// history. A capture's is frozen (`baaz_core::clock::now_ms`), so the History
-/// page does not change with the day it is shot.
+/// Now, as ms since the epoch: the clock behind `last_shown`, download rates
+/// and the discard timeout — always the wall clock (a rate read off a frozen
+/// clock divides by nothing).
 pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+/// Now, for what the History page and the stored visits say: the wall clock,
+/// frozen to a fixed day under a capture (`baaz_core::clock::now_ms`), so the
+/// page's headings do not change with the day it is shot. Use this for visit
+/// times, their pruning and the page's "today"; [`now_ms`] for everything
+/// that measures elapsed time.
+pub fn history_now_ms() -> u64 {
     baaz_core::clock::now_ms()
 }
 
@@ -1613,4 +1625,16 @@ mod tests {
         assert_eq!(old.tabs[0].folder, None);
     }
 
+
+    #[test]
+    fn elapsed_time_reads_the_wall_clock_while_history_may_be_frozen() {
+        // Download rates and tab discards divide by `now_ms()` differences; the
+        // History page's frozen capture clock must never leak into them (it
+        // did, and the downloads popover lost "4.2 of 10.0 MB · 2 s left").
+        let a = now_ms();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let b = now_ms();
+        assert!(b - a >= 20, "wall time moved {} ms", b - a);
+        assert!(history_now_ms() >= 1_700_000_000_000, "an epoch-ms clock either way");
+    }
 }

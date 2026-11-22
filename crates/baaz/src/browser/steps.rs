@@ -194,7 +194,7 @@ impl Harness {
             Some(days) => days.parse().map_err(|_| format!("`{days}` is not a day count"))?,
         };
         let words = parts.next().unwrap_or("").trim().to_owned();
-        let when = tabs::now_ms().saturating_sub(days * 86_400_000);
+        let when = tabs::history_now_ms().saturating_sub(days * 86_400_000);
         // What `record_visit` refuses, refused here (the write itself runs
         // in the `BrowserData` worker; a failed write is logged there).
         if !history::recordable(&url) || self.browser.read(cx).data.read(cx).is_excluded(&url) {

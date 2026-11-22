@@ -512,7 +512,7 @@ impl BrowserData {
             *self.asked.borrow_mut() = Some(query.to_owned());
             self.send(Op::SearchHistory { query: query.to_owned() });
         }
-        let now = super::tabs::now_ms();
+        let now = super::tabs::history_now_ms();
         self.hits
             .borrow()
             .as_ref()
