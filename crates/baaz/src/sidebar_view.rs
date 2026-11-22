@@ -168,7 +168,8 @@ pub(crate) struct RowDetail {
     /// Capture aid (`row-detail:<id>`): pins the hover card open for one
     /// row, seated at the selected row's bounds — free, no pointer.
     pub(crate) forced: Option<String>,
-    /// The selected row's window bounds: what the pinned card seats at.
+    /// The pinned row's window bounds, recorded by `row-detail:` / `hover:`
+    /// from [`SidebarPane::row_bounds`]: what the pinned card seats at.
     pub(crate) selected_row_bounds: Option<(String, Bounds<Pixels>)>,
     /// Hover-trace state (`BAAZ_HOVER_TRACE=1`, diagnosis only): the last
     /// card result the root drew, so the trace logs only on change.
@@ -921,6 +922,18 @@ impl SidebarPane {
     /// text-only height change (same rows, new grouping pointer). A mismatch
     /// never panics in the list — it paints blanks past the model — so the
     /// debug assertion below is the contract, not a guardrail.
+    /// The window bounds of the row for session `id`, while that row is laid
+    /// out (a scrolled-out row has none). The capture aids that pin or fire
+    /// the hover card (`row-detail:`, `hover:`) seat it here: the library's
+    /// "selected row prepainted" report is not wired through the sidebar
+    /// screen (Stage 4.7 dropped the host's copy of it), so nothing else ever
+    /// recorded these bounds and the pinned card could never draw.
+    pub(crate) fn row_bounds(&self, id: &str) -> Option<Bounds<Pixels>> {
+        let grouping = self.prev_grouping.as_ref()?;
+        let ix = row_index_for_session(&self.prev_rows, grouping, &SharedString::from(id.to_owned()))?;
+        self.list_state.bounds_for_item(ix)
+    }
+
     pub(crate) fn sync_list(&mut self, rows: &[SidebarRow], grouping: &Rc<Grouping>, cx: &gpui::App) {
         // The splice below tracks the top item by index, so rows inserted
         // above carry a steered or parked top away from its row; repaired
@@ -2238,6 +2251,30 @@ mod tests {
         vc.update(|_, cx| {
             let list = baaz.read(cx).session_list.clone();
             assert!(!list.read(cx).loading(), "no listing is coming; skeleton rows would never leave");
+        });
+        b3c_teardown(&dir, guard, old);
+    }
+
+    /// `row-detail:` pins the hover card at the row's laid-out bounds. A row
+    /// that exists but is not laid out would pin a card that can never draw, so
+    /// the step fails rather than reporting success (a capture verb that does
+    /// nothing must say so).
+    #[gpui::test]
+    fn row_detail_fails_for_a_row_that_is_not_laid_out(cx: &mut TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let (dir, guard, old, args) = b3c_state("row-detail-bounds");
+        let vc = cx.add_empty_window();
+        let baaz = b3c_window(vc, args);
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.session_list.update(cx, |list, _| list.sessions.push(scroll_entry("s-known", "p")));
+                let pane = h.sidebar_pane.read(cx);
+                assert!(pane.row_bounds("s-known").is_none(), "no frame has laid the sidebar out");
+                let err = h.step_row_detail("s-known", cx).expect_err("a card cannot seat at a row with no bounds");
+                assert!(err.contains("not laid out"), "{err}");
+                assert!(h.sidebar_pane.read(cx).detail.forced.is_none(), "nothing was pinned");
+                assert!(h.step_row_detail("", cx).is_ok(), "empty clears the pin");
+            })
         });
         b3c_teardown(&dir, guard, old);
     }

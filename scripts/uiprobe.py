@@ -1246,7 +1246,7 @@ ENTRIES.update({
     # The row: p-int-2 (Audit log export) sits on fix-checkout in
     # acme-internal, the pane's project; its summary line and hover card
     # carry the PR after the branch.
-    "sidebar-pr":              _with_sidebar(_populated("settings-set:summary-line=on;pr-fixture:failing;row-detail:p-int-2", replay=True), "pr.json"),
+    "sidebar-pr":              _with_sidebar(_populated("settings-set:summary-line=on;pr-fixture:failing;click:p-int-2;wait:400;row-detail:p-int-2;wait:400", replay=True), "pr.json"),
     "right-page":              _populated("right-width:440;right:browser;browse:https://example.com", replay=True),
     "terminal-dock":           _populated("terminal-dock:zsh", replay=True),
     # docs/82 8.1, the pane as the session's workspace. The same FakePty

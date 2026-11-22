@@ -473,7 +473,24 @@ impl Harness {
             return Err(format!("no sidebar row `{id}`"));
         }
         let forced = if id.is_empty() { None } else { Some(id.to_owned()) };
-        self.sidebar_pane.update(cx, |pane, _| pane.detail.forced = forced);
+        // The pinned card seats at the row's laid-out bounds. A row that is not
+        // laid out (scrolled away, a collapsed group, no frame yet) would pin a
+        // card that can never draw: fail the step instead of reporting success.
+        let seated = match forced.as_deref() {
+            None => None,
+            Some(id) => Some(
+                self.sidebar_pane
+                    .read(cx)
+                    .row_bounds(id)
+                    .ok_or_else(|| format!("sidebar row `{id}` is not laid out, so no card can seat at it (`wait:` after `click:`?)"))?,
+            ),
+        };
+        self.sidebar_pane.update(cx, |pane, _| {
+            if let (Some(id), Some(bounds)) = (forced.clone(), seated) {
+                pane.detail.selected_row_bounds = Some((id, bounds));
+            }
+            pane.detail.forced = forced;
+        });
         cx.notify();
         Ok(())
     }
@@ -494,13 +511,14 @@ impl Harness {
     /// turn, no wire.
     pub(crate) fn step_hover(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let id = rest.trim();
-        let (known, bounds) = self
-            .sidebar_pane
-            .read(cx)
-            .detail
-            .selected_row_bounds
-            .clone()
-            .ok_or("no selected row bounds yet (pair with `click:` and a `wait:`)")?;
+        let (known, bounds) = {
+            let pane = self.sidebar_pane.read(cx);
+            pane.detail
+                .selected_row_bounds
+                .clone()
+                .or_else(|| (!id.is_empty()).then(|| pane.row_bounds(id).map(|bounds| (id.to_owned(), bounds))).flatten())
+                .ok_or("no row bounds yet (name a laid-out row; pair with `click:` and a `wait:`)")?
+        };
         if !id.is_empty() && known != id {
             return Err(format!("`{id}` is not the selected row (`{known}`); pair with `click:{id}` first"));
         }
