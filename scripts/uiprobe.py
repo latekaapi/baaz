@@ -1248,6 +1248,9 @@ ENTRIES.update({
     # carry the PR after the branch.
     "sidebar-pr":              _with_sidebar(_populated("settings-set:summary-line=on;pr-fixture:failing;click:p-int-2;wait:400;row-detail:p-int-2;wait:400", replay=True), "pr.json"),
     "right-page":              _populated("right-width:440;right:browser;browse:https://example.com", replay=True),
+    # The Page at the narrowest the pane goes (docs: under 300 px back / forward
+    # leave the nav row): the address must still read the host.
+    "right-page-narrow":       _populated("right-width:280;right:browser;browse:https://example.com", replay=True),
     "terminal-dock":           _populated("terminal-dock:zsh", replay=True),
     # docs/82 8.1, the pane as the session's workspace. The same FakePty
     # tab as `terminal-dock`, moved into the pane through the header
