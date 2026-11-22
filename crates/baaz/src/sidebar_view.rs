@@ -2210,6 +2210,7 @@ mod tests {
             Some(value) => std::env::set_var("BAAZ_STATE_DIR", value),
             None => std::env::remove_var("BAAZ_STATE_DIR"),
         }
+        let _ = std::fs::remove_dir_all(dir);
         drop(guard);
         let _ = std::fs::remove_dir_all(dir);
     }

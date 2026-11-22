@@ -196,6 +196,8 @@ impl StateDir {
             // `sidebar::a_session_another_client_made_is_not_listed` failed
             // under a loaded workspace run.
             let _ = std::fs::create_dir_all(&path);
+            #[cfg(any(test, feature = "test-support"))]
+            sweep_dead_test_dirs(&std::env::temp_dir());
             return Self { path, isolated: capture, throwaway: false };
         }
         // The same rule for a capture (the visual probe): an entry that
@@ -207,6 +209,58 @@ impl StateDir {
             return Self { path: capture_state_dir(), isolated: true, throwaway: true };
         }
         Self { path: crate::store::default_support_dir(), isolated: false, throwaway: false }
+    }
+}
+
+/// The per-process scratch folders the app's own tests make in the temp dir:
+/// `baaz-test-state-<pid>`, `baaz-palette-<name>-<pid>`, `baaz-b3c-<name>-<pid>`.
+/// A test process cannot clean the state it still needs at exit, so each run
+/// removes the ones whose process is gone (22 Nov: ~6 GB of them).
+#[cfg(any(test, feature = "test-support"))]
+const TEST_DIR_PREFIXES: [&str; 3] = ["baaz-test-state-", "baaz-palette-", "baaz-b3c-"];
+
+/// Remove the [`TEST_DIR_PREFIXES`] folders in `tmp` whose trailing pid names a
+/// process that no longer exists. A live pid (this run's, a parallel run's) and
+/// every other name are left alone.
+#[cfg(any(test, feature = "test-support"))]
+pub fn sweep_dead_test_dirs(tmp: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(tmp) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !TEST_DIR_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
+            continue;
+        }
+        let Some(pid) = name.rsplit('-').next().and_then(|tail| tail.parse::<i32>().ok()).filter(|pid| *pid > 1) else { continue };
+        // SAFETY: signal 0 only asks whether the process exists.
+        let alive = unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        if !alive {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::sweep_dead_test_dirs;
+
+    #[test]
+    fn a_dead_process_scratch_folder_is_swept_and_live_and_foreign_ones_are_not() {
+        let tmp = std::env::temp_dir().join(format!("baaz-sweep-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let dead = tmp.join("baaz-palette-x-2147483000");
+        let live = tmp.join(format!("baaz-palette-x-{}", std::process::id()));
+        let foreign = tmp.join("baaz-other-2147483000");
+        let state = tmp.join("baaz-test-state-2147483001");
+        for dir in [&dead, &live, &foreign, &state] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        sweep_dead_test_dirs(&tmp);
+        assert!(!dead.exists() && !state.exists(), "dead-pid folders are gone");
+        assert!(live.exists(), "this process's folder stays");
+        assert!(foreign.exists(), "a name outside the families stays");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 
