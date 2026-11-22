@@ -191,6 +191,16 @@ impl HandoffTarget {
     }
 }
 
+/// "Now" for the picker's ages: the wall clock, or under a frozen (capture)
+/// clock the newest row's own time, so a capture's `Tue` / `yesterday` words do
+/// not change with the day it is shot (the sidebar's `grouping_now` rule).
+pub(crate) fn picker_now(frozen: bool, newest: Option<chrono::DateTime<chrono::Local>>) -> chrono::DateTime<chrono::Local> {
+    match (frozen, newest) {
+        (true, Some(newest)) => newest,
+        _ => chrono::Local::now(),
+    }
+}
+
 /// `2 h`, `yesterday`, `Tue`, `3 Nov`: how long ago, for the picker's meta.
 pub(crate) fn when_label(then: chrono::DateTime<chrono::Local>, now: chrono::DateTime<chrono::Local>) -> String {
     let age = now.signed_duration_since(then);
@@ -235,13 +245,13 @@ impl Harness {
     /// query matches. The picker narrows them ([`HandoffDelegate`]).
     fn handoff_candidates(&self, cx: &gpui::App) -> HandoffCandidates {
         use aui::browse::handoff::HandoffRow;
-        let now = chrono::Local::now();
         let mut entries: Vec<&crate::sidebar::SessionEntry> = self
             .session_list.read(cx).sessions
             .iter()
             .filter(|e| !e.hidden && !e.archived && !e.side_marker && !self.is_browser_chat(&e.id, cx))
             .collect();
         entries.sort_by_key(|e| std::cmp::Reverse(e.updated));
+        let now = picker_now(crate::runtime::clock().is_frozen(), entries.first().map(|e| e.updated));
         let sessions = entries
             .into_iter()
             .map(|e| {
@@ -430,6 +440,17 @@ impl Harness {
 
 #[cfg(all(test, feature = "probe"))]
 mod tests {
+    #[test]
+    fn a_frozen_picker_ages_rows_from_its_newest_row_not_the_wall() {
+        use chrono::TimeZone as _;
+        let newest = chrono::Local.with_ymd_and_hms(2026, 9, 9, 9, 0, 0).unwrap();
+        let old = newest - chrono::Duration::days(3);
+        assert_eq!(super::picker_now(true, Some(newest)), newest);
+        // Three days before the newest row reads as its weekday whatever today is.
+        assert_eq!(super::when_label(old, super::picker_now(true, Some(newest))), old.format("%a").to_string());
+        assert!(super::picker_now(false, Some(newest)) > newest, "a live picker reads the wall clock");
+    }
+
     use super::*;
 
     #[test]
