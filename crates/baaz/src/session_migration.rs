@@ -31,6 +31,12 @@ impl BaazHarness {
         if self.session_list.read(cx).migration.refresh_in_flight {
             return;
         }
+        // An isolated run plans nothing from the person's real homes (the
+        // import scan's rule): a capture must not list this machine's
+        // sessions as "to move".
+        if crate::runtime::state_isolated() && std::env::var_os("BAAZ_MIGRATION_OWNER_HOME").is_none_or(|dir| dir.is_empty()) {
+            return;
+        }
         self.session_list.update(cx, |list, _| list.migration.refresh_in_flight = true);
         let owner = owner_home();
         let state = crate::store::support_dir();

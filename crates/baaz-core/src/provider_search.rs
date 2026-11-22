@@ -43,7 +43,10 @@ impl Homes {
         let state = provider::child_env::state_dir();
         // The owner's homes as the import reads them (docs/72): the real
         // `HOME`, or the probe's fixture under `BAAZ_IMPORT_OWNER_HOME`.
-        let owner = Some(crate::import::owner_home());
+        // An isolated run (a capture, a test state dir) never reads the
+        // person's real `~/.claude` / `~/.codex`: only a probe's fixture home
+        // (`BAAZ_IMPORT_OWNER_HOME`) counts as an owner there.
+        let owner = crate::import::scan_allowed().then(crate::import::owner_home);
         let mut claude = vec![state.join("claude-home")];
         let mut codex = vec![provider_codex::home::home_dir(&state)];
         if let Some(owner) = owner {

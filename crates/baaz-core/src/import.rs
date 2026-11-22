@@ -76,7 +76,26 @@ pub fn owner_home() -> PathBuf {
 /// `BAAZ_DETERMINISTIC=1` only with a fixture owner home, so a capture never
 /// reads (or paints) the real `~/.claude` and `~/.codex`.
 pub fn scan_allowed() -> bool {
-    !crate::runtime::state_isolated() || std::env::var_os("BAAZ_IMPORT_OWNER_HOME").is_some_and(|dir| !dir.is_empty())
+    scan_allowed_for(crate::runtime::state_isolated(), std::env::var_os("BAAZ_IMPORT_OWNER_HOME").is_some_and(|dir| !dir.is_empty()))
+}
+
+/// [`scan_allowed`]'s rule, pure: an isolated run reads the owner's homes only
+/// through a fixture home. The session search and the migration plan follow
+/// the same rule (an isolated state dir listed this machine's real sessions).
+pub fn scan_allowed_for(isolated: bool, fixture_home: bool) -> bool {
+    !isolated || fixture_home
+}
+
+#[cfg(test)]
+mod scan_rule_tests {
+    use super::scan_allowed_for;
+
+    #[test]
+    fn an_isolated_run_reads_no_real_home_but_a_live_run_and_a_fixture_do() {
+        assert!(!scan_allowed_for(true, false), "isolated, no fixture: the machine's sessions stay unread");
+        assert!(scan_allowed_for(true, true), "a probe's fixture home is fine");
+        assert!(scan_allowed_for(false, false), "a live run reads the real homes");
+    }
 }
 
 // ------------------------------------------------------------------- scan
