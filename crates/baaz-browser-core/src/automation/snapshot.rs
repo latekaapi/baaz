@@ -429,7 +429,7 @@ mod tests {
             next
         };
         let mut kids_of_root = Vec::new();
-        let mut push = |nodes: &mut Vec<Value>, n: i64, role: &str, name: &str, kids: Vec<i64>, parent: i64, props: Option<Value>| {
+        let push = |nodes: &mut Vec<Value>, n: i64, role: &str, name: &str, kids: Vec<i64>, parent: i64, props: Option<Value>| {
             let kids: Vec<String> = kids.iter().map(|k| k.to_string()).collect();
             let kid_refs: Vec<&str> = kids.iter().map(String::as_str).collect();
             let parent = parent.to_string();

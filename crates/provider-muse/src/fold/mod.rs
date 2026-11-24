@@ -37,6 +37,9 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod failure;
+// The fold itself, kept under its old file name when the crate became this
+// module (docs/85 10.9).
+#[allow(clippy::module_inception)]
 mod fold;
 pub mod mirror;
 mod side;

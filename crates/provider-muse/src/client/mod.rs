@@ -49,6 +49,9 @@
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+// The client itself, kept under its old file name when the crate became this
+// module (docs/85 10.9).
+#[allow(clippy::module_inception)]
 mod client;
 mod error;
 mod program;
