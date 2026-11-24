@@ -544,9 +544,10 @@ impl Harness {
         // a replayed turn a no-op insert rather than a duplicate, and a
         // batch is one write.
         self.wire_call(cx, move || crate::usage::record_backfilled(&rows), |_this, (), _cx| {});
+        // A compaction alone: the row re-reads (and repaints) through its
+        // own sync; nothing else moves.
         if turns.iter().all(|(turn_id, _)| compactions.contains(turn_id)) {
             self.sync_row_live(&session_id, false, cx);
-            cx.notify();
             return;
         }
         // Count exchanges, as muse rows do: the folded assistant
