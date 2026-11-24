@@ -122,6 +122,36 @@ pub fn open() -> Result<Connection, rusqlite::Error> {
     open_at(&db_path())
 }
 
+/// Two long-lived connections to [`db_path`] (docs/85 10.8): one the
+/// palette reads through, one the syncs and file records write through.
+/// Each is opened once and kept — a palette keystroke no longer opens the
+/// file — and opened again only when the state dir moved or the file went.
+/// Under WAL the reader never waits on the writer.
+static READER: std::sync::Mutex<Option<(PathBuf, Connection)>> = std::sync::Mutex::new(None);
+static WRITER: std::sync::Mutex<Option<(PathBuf, Connection)>> = std::sync::Mutex::new(None);
+
+fn with_kept<R>(slot: &std::sync::Mutex<Option<(PathBuf, Connection)>>, work: impl FnOnce(&mut Connection) -> R) -> Result<R, rusqlite::Error> {
+    let path = db_path();
+    let mut kept = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fresh = kept.as_ref().is_some_and(|(at, _)| *at == path && path.exists());
+    if !fresh {
+        *kept = None;
+        *kept = Some((path.clone(), open_at(&path)?));
+    }
+    let (_, connection) = kept.as_mut().expect("just kept");
+    Ok(work(connection))
+}
+
+/// Run `work` on the kept reading connection.
+pub fn with_reader<R>(work: impl FnOnce(&mut Connection) -> R) -> Result<R, rusqlite::Error> {
+    with_kept(&READER, work)
+}
+
+/// Run `work` on the kept writing connection.
+pub fn with_writer<R>(work: impl FnOnce(&mut Connection) -> R) -> Result<R, rusqlite::Error> {
+    with_kept(&WRITER, work)
+}
+
 /// [`open`] against an explicit path, which is what the tests use
 /// (`:memory:` included).
 pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
@@ -532,8 +562,11 @@ pub fn record_files(connection: &Connection, records: &[FileRecord]) -> Result<(
 /// Sessions matching `query`, best first (bm25), at most `limit`.
 pub fn query_sessions(connection: &Connection, query: &str, limit: usize) -> Vec<SessionHit> {
     let Some(matched) = fts_query(query) else { return Vec::new() };
-    let mut statement = match connection.prepare(
-        "SELECT session_id, label, body, workspace FROM sessions_fts WHERE sessions_fts MATCH ?1 ORDER BY bm25(sessions_fts) LIMIT ?2",
+    // The snippet comes from FTS5 itself (docs/85 10.8): a window of words
+    // around the match, never the whole transcript body pulled per hit.
+    let mut statement = match connection.prepare_cached(
+        "SELECT session_id, label, snippet(sessions_fts, 4, '', '', ' … ', 48), workspace FROM sessions_fts
+         WHERE sessions_fts MATCH ?1 ORDER BY bm25(sessions_fts) LIMIT ?2",
     ) {
         Ok(statement) => statement,
         Err(_) => return Vec::new(),
@@ -565,7 +598,7 @@ pub fn query_sessions(connection: &Connection, query: &str, limit: usize) -> Vec
 /// state shows recent work rather than nothing.
 pub fn query_files(connection: &Connection, query: &str, limit: usize) -> Vec<FileHit> {
     if query.trim().is_empty() {
-        let mut statement = match connection.prepare(
+        let mut statement = match connection.prepare_cached(
             "SELECT path, session_id, workspace FROM files_fts ORDER BY rowid DESC LIMIT ?1",
         ) {
             Ok(statement) => statement,
@@ -578,7 +611,7 @@ pub fn query_files(connection: &Connection, query: &str, limit: usize) -> Vec<Fi
         return rows.filter_map(Result::ok).collect();
     }
     let Some(matched) = fts_query(query) else { return Vec::new() };
-    let mut statement = match connection.prepare(
+    let mut statement = match connection.prepare_cached(
         "SELECT path, session_id, workspace FROM files_fts WHERE files_fts MATCH ?1 ORDER BY bm25(files_fts) LIMIT ?2",
     ) {
         Ok(statement) => statement,

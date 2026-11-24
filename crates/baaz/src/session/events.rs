@@ -48,9 +48,7 @@ impl SessionRuntime {
             return;
         }
         let work = move || {
-            if let Ok(connection) = search::open() {
-                let _ = search::record_files(&connection, &records);
-            }
+            let _ = search::with_writer(|connection| search::record_files(connection, &records));
         };
         self.wire_call(cx, work, |_this, (), _cx| {});
     }

@@ -62,18 +62,20 @@ impl Harness {
         } else {
             self.current_project(cx).map(|p| p.root.to_string_lossy().into_owned())
         };
-        let work = move || match crate::search::open() {
-            Ok(connection) => {
-                let sessions: Vec<crate::search::SessionHit> =
-                    crate::search::query_sessions(&connection, &query, crate::search::LIMIT)
-                        .into_iter()
-                        .filter(|hit| crate::search::matches_scope(hit.workspace.as_deref(), scope.as_deref()))
-                        .collect();
-                let files: Vec<crate::search::FileHit> =
-                    crate::search::query_files(&connection, &query, crate::search::LIMIT)
-                        .into_iter()
-                        .filter(|hit| crate::search::matches_scope(hit.workspace.as_deref(), scope.as_deref()))
-                        .collect();
+        let work = move || match crate::search::with_reader(|connection| {
+            let sessions: Vec<crate::search::SessionHit> =
+                crate::search::query_sessions(connection, &query, crate::search::LIMIT)
+                    .into_iter()
+                    .filter(|hit| crate::search::matches_scope(hit.workspace.as_deref(), scope.as_deref()))
+                    .collect();
+            let files: Vec<crate::search::FileHit> =
+                crate::search::query_files(connection, &query, crate::search::LIMIT)
+                    .into_iter()
+                    .filter(|hit| crate::search::matches_scope(hit.workspace.as_deref(), scope.as_deref()))
+                    .collect();
+            (sessions, files)
+        }) {
+            Ok((sessions, files)) => {
                 crate::log::boot_mark(&format!(
                     "search q={query:?} scope={scope:?} sessions={} files={}",
                     sessions.len(),
@@ -425,13 +427,12 @@ impl Harness {
         let provider_of = self.search_body_owners(cx);
         let work = move || {
             let _turn = SEARCH_REBUILD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Ok(mut connection) = crate::search::open() else { return };
             let synced: Vec<crate::search::SyncRow<'_>> = rows
                 .iter()
                 .map(|(row, body_ids, fingerprint)| crate::search::SyncRow { row, body_ids, fingerprint: *fingerprint })
                 .collect();
-            let _ = crate::search::upsert_sessions(&mut connection, &synced, &|ids| {
-                search_bodies(&index_path, &provider_of, ids)
+            let _ = crate::search::with_writer(|connection| {
+                crate::search::upsert_sessions(connection, &synced, &|ids| search_bodies(&index_path, &provider_of, ids))
             });
         };
         self.wire_call(cx, work, |this: &mut Self, (), cx| {
@@ -454,10 +455,6 @@ impl Harness {
             // the first's fingerprint and writes nothing.
             let _turn = SEARCH_REBUILD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let at = std::time::Instant::now();
-            let mut connection = match crate::search::open() {
-                Ok(connection) => connection,
-                Err(_) => return,
-            };
             let synced: Vec<crate::search::SyncRow<'_>> = rows
                 .iter()
                 .map(|(row, body_ids, fingerprint)| crate::search::SyncRow {
@@ -466,9 +463,11 @@ impl Harness {
                     fingerprint: *fingerprint,
                 })
                 .collect();
-            let stats = crate::search::sync_sessions(&mut connection, &synced, &|ids| {
-                search_bodies(&index_path, &provider_of, ids)
-            });
+            let Ok(stats) = crate::search::with_writer(|connection| {
+                crate::search::sync_sessions(connection, &synced, &|ids| search_bodies(&index_path, &provider_of, ids))
+            }) else {
+                return;
+            };
             crate::log::boot_mark(&format!(
                 "search-sync-done rows={} {stats:?} in={}ms",
                 rows.len(),
