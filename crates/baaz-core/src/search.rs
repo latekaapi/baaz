@@ -130,7 +130,17 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
             let _ = std::fs::create_dir_all(parent);
         }
     }
+    // A file made before 10.7 never gives space back (`auto_vacuum` 0): it
+    // is rebuilt once into a fresh one that does (docs/85 10.7).
+    if !is_memory(path) && path.exists() && !reclaims_space(path) {
+        rebuild_compact(path)?;
+    }
     let connection = Connection::open(path)?;
+    // Space comes back: `auto_vacuum` takes effect only on a file with no
+    // tables yet (a new one), which `rebuild_compact` guarantees for old
+    // ones; `journal_size_limit` keeps the WAL from staying huge after a
+    // big sync.
+    connection.execute_batch(&format!("PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_size_limit={JOURNAL_SIZE_LIMIT};"))?;
     // WAL: readers (the palette) never wait on a writer (a sync), and a
     // commit is one append instead of a rollback journal of every page it
     // touched — the old full rebuild journalled ~1 GB (measured 2026-10-16).
@@ -203,6 +213,96 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
     )?;
     Ok(connection)
 }
+
+/// `search.db` and its WAL under `support_dir`, in bytes.
+pub fn index_bytes(support_dir: &std::path::Path) -> u64 {
+    ["search.db", "search.db-wal"].iter().map(|name| std::fs::metadata(support_dir.join(name)).map(|m| m.len()).unwrap_or(0)).sum()
+}
+
+/// The WAL is cut back to this after a checkpoint (bytes).
+pub const JOURNAL_SIZE_LIMIT: i64 = 8 * 1024 * 1024;
+
+fn is_memory(path: &std::path::Path) -> bool {
+    path.as_os_str() == ":memory:"
+}
+
+/// Whether the file at `path` gives freed pages back (`auto_vacuum` 2,
+/// incremental). A file that cannot be read counts as yes: it is not this
+/// function's to replace.
+fn reclaims_space(path: &std::path::Path) -> bool {
+    let Ok(connection) = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else { return true };
+    connection.query_row("PRAGMA auto_vacuum", [], |row| row.get::<_, i64>(0)).map_or(true, |mode| mode == 2)
+}
+
+/// Replace the index at `path` with a fresh, compact file (docs/85 10.7):
+/// a new file with `auto_vacuum=INCREMENTAL` and the current schema takes
+/// the created-files rows (which nothing else can rebuild), then replaces
+/// the old file, which is deleted. Session rows are not copied: their sync
+/// state starts empty, so the next sync writes every row fresh. No
+/// `VACUUM`: the old file is never rewritten in place, and the new one holds
+/// only live rows.
+pub fn rebuild_compact(path: &std::path::Path) -> Result<(), rusqlite::Error> {
+    let fresh = path.with_extension("db.new");
+    for leftover in [fresh.clone(), fresh.with_extension("new-wal"), fresh.with_extension("new-shm")] {
+        let _ = std::fs::remove_file(leftover);
+    }
+    {
+        let connection = Connection::open(&fresh)?;
+        connection.execute_batch(&format!(
+            "PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_size_limit={JOURNAL_SIZE_LIMIT};
+             CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
+             CREATE VIRTUAL TABLE sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, project, workspace UNINDEXED);
+             CREATE VIRTUAL TABLE files_fts USING fts5(path, session_id UNINDEXED, kind, project, workspace UNINDEXED);
+             CREATE TABLE files_seen (path TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY (path, session_id)) WITHOUT ROWID;
+             CREATE TABLE sessions_state (session_id TEXT PRIMARY KEY, fts_rowid INTEGER NOT NULL, fingerprint INTEGER NOT NULL) WITHOUT ROWID;
+             INSERT INTO sessions_fts(sessions_fts, rank) VALUES ('automerge', 8);
+             INSERT INTO files_fts(files_fts, rank) VALUES ('automerge', 8);"
+        ))?;
+        connection.execute(
+            "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)",
+            params![SCHEMA_VERSION.to_string()],
+        )?;
+        // The created files, when the old file holds them in this schema.
+        let old = path.to_string_lossy().replace('\'', "''");
+        if connection.execute_batch(&format!("ATTACH DATABASE '{old}' AS old")).is_ok() {
+            let same_schema = connection
+                .query_row("SELECT value FROM old.meta WHERE key = 'schema_version'", [], |row| row.get::<_, String>(0))
+                .ok()
+                .is_some_and(|version| version == SCHEMA_VERSION.to_string());
+            if same_schema {
+                let _ = connection.execute_batch(
+                    "INSERT INTO files_fts(path, session_id, kind, project, workspace) SELECT path, session_id, kind, project, workspace FROM old.files_fts;
+                     INSERT OR IGNORE INTO files_seen(path, session_id) SELECT path, session_id FROM old.files_seen;",
+                );
+            }
+            let _ = connection.execute_batch("DETACH DATABASE old");
+        }
+        let _ = connection.query_row("PRAGMA journal_mode=DELETE", [], |_| Ok(()));
+    }
+    std::fs::rename(&fresh, path).map_err(|error| {
+        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN), Some(format!("swap failed: {error}")))
+    })?;
+    // The old file's WAL and shared memory describe the file just replaced.
+    for side in ["db-wal", "db-shm"] {
+        let _ = std::fs::remove_file(path.with_extension(side));
+    }
+    crate::baaz_log!("search.db: rebuilt compact ({} bytes now)", std::fs::metadata(path).map(|m| m.len()).unwrap_or(0));
+    Ok(())
+}
+
+/// After a sync (docs/85 10.7): after a big one, merge the FTS segments
+/// into one (`optimize`); after any, give freed pages back to the disk
+/// (`incremental_vacuum`). Best-effort: a failure leaves the index as it
+/// was, only larger.
+pub fn tidy_after_sync(connection: &Connection, written: usize) {
+    if written >= OPTIMIZE_AFTER {
+        let _ = connection.execute_batch("INSERT INTO sessions_fts(sessions_fts) VALUES ('optimize');");
+    }
+    let _ = connection.execute_batch("PRAGMA incremental_vacuum;");
+}
+
+/// How many rows a sync must write before its FTS segments are merged.
+pub const OPTIMIZE_AFTER: usize = 20;
 
 /// Whether this process's SQLite has FTS5, proven once on a scratch
 /// in-memory connection.
@@ -380,6 +480,7 @@ fn sync_sessions_inner(
         }
     }
     transaction.commit()?;
+    tidy_after_sync(connection, stats.written + stats.removed);
     Ok(stats)
 }
 
@@ -676,6 +777,131 @@ pub fn relativize(root: &str, target: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// docs/85 10.7 on real data: `BAAZ_SEARCH_DB_COPY` names a COPY of an
+    /// owner's search.db; opening it rebuilds it compact. Run by hand:
+    /// `BAAZ_SEARCH_DB_COPY=/scratch/search.db cargo test -p baaz-core rebuilds_a_real_copy -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn rebuilds_a_real_copy() {
+        let path = std::path::PathBuf::from(std::env::var("BAAZ_SEARCH_DB_COPY").expect("BAAZ_SEARCH_DB_COPY"));
+        assert!(!path.starts_with(crate::store::default_support_dir()), "a copy, never the real file");
+        let before = std::fs::metadata(&path).expect("the copy").len();
+        let at = std::time::Instant::now();
+        let connection = open_at(&path).expect("opens");
+        let files: i64 = connection.query_row("SELECT count(*) FROM files_fts", [], |row| row.get(0)).expect("count");
+        let after = std::fs::metadata(&path).expect("rebuilt").len();
+        eprintln!("real copy: {before} -> {after} bytes in {:?}; {files} created-file rows kept", at.elapsed());
+    }
+
+    /// A transcript-sized body: ~20 KB of varied words, so pages and FTS
+    /// segments look like the owner's.
+    fn body_for(session: usize, version: usize) -> String {
+        (0..2_500).map(|n| format!("w{}x{} ", (n * 7919 + session * 31 + version * 17) % 4093, n % 13)).collect()
+    }
+
+    fn file_size(path: &std::path::Path) -> u64 {
+        let side = |ext: &str| std::fs::metadata(path.with_extension(ext)).map(|m| m.len()).unwrap_or(0);
+        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) + side("db-wal")
+    }
+
+    /// docs/85 10.7 size budget: 50 syncs of a 24-session list, each
+    /// changing one session's body, leave search.db under 1.5x its size
+    /// after the first sync. Before 10.7 the file only grew: every changed
+    /// row left its old pages and segments behind.
+    #[test]
+    fn fifty_one_row_syncs_keep_the_file_within_its_budget() {
+        let dir = std::env::temp_dir().join(format!("baaz-search-budget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("search.db");
+        let mut connection = open_at(&path).expect("opens");
+        let mut versions = vec![0usize; 24];
+        let rows_for = |versions: &[usize]| -> Vec<SessionRow> {
+            versions
+                .iter()
+                .enumerate()
+                .map(|(n, version)| SessionRow {
+                    session_id: format!("s-{n}"),
+                    label: format!("Session {n}"),
+                    title: String::new(),
+                    first_prompt: String::new(),
+                    body: body_for(n, *version),
+                    project: "harness".into(),
+                    workspace: None,
+                })
+                .collect()
+        };
+        let sync = |connection: &mut Connection, versions: &[usize]| {
+            let rows = rows_for(versions);
+            let syncs: Vec<SyncRow<'_>> = rows
+                .iter()
+                .zip(versions)
+                .map(|(row, version)| SyncRow { row, body_ids: &[], fingerprint: 1 + *version as i64 })
+                .collect();
+            sync_sessions(connection, &syncs, &|_| std::collections::HashMap::new()).expect("syncs");
+            let _ = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        };
+        sync(&mut connection, &versions);
+        let first = file_size(&path);
+        for round in 0..50 {
+            versions[round % 24] += 1;
+            sync(&mut connection, &versions);
+        }
+        let after = file_size(&path);
+        eprintln!("search.db budget: {first} bytes after the first sync, {after} after 50 more");
+        assert!(after * 2 <= first * 3, "{after} bytes is over 1.5x {first}");
+        let hits = query_sessions(&connection, "w17x4", 30);
+        assert!(!hits.is_empty(), "the index still finds words");
+        drop(connection);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// docs/85 10.7: a file made before 10.7 (no `auto_vacuum`) is rebuilt
+    /// once into a compact one that keeps its created-files rows and gives
+    /// space back from then on; its sessions are written again by the next
+    /// sync.
+    #[test]
+    fn an_old_file_is_rebuilt_compact_and_keeps_its_files() {
+        let dir = std::env::temp_dir().join(format!("baaz-search-rebuild-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("search.db");
+        {
+            // The pre-10.7 shape: the same schema, auto_vacuum 0.
+            let connection = Connection::open(&path).expect("old");
+            connection
+                .execute_batch(&format!(
+                    "PRAGMA auto_vacuum=NONE;
+                     CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
+                     INSERT INTO meta VALUES ('schema_version', '{SCHEMA_VERSION}');
+                     CREATE VIRTUAL TABLE sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, project, workspace UNINDEXED);
+                     CREATE VIRTUAL TABLE files_fts USING fts5(path, session_id UNINDEXED, kind, project, workspace UNINDEXED);
+                     CREATE TABLE files_seen (path TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY (path, session_id)) WITHOUT ROWID;
+                     INSERT INTO files_fts VALUES ('src/main.rs', 's1', 'write', 'harness', '/w');
+                     INSERT INTO files_seen VALUES ('src/main.rs', 's1');"
+                ))
+                .expect("old schema");
+            for n in 0..200 {
+                connection
+                    .execute("INSERT INTO sessions_fts(session_id, body) VALUES (?1, ?2)", params![format!("s{n}"), body_for(n, 0)])
+                    .expect("rows");
+            }
+            connection.execute("DELETE FROM sessions_fts", []).expect("churn");
+        }
+        let before = std::fs::metadata(&path).expect("old file").len();
+        let connection = open_at(&path).expect("reopens");
+        let mode: i64 = connection.query_row("PRAGMA auto_vacuum", [], |row| row.get(0)).expect("pragma");
+        assert_eq!(mode, 2, "incremental from now on");
+        let files = query_files(&connection, "main", 5);
+        assert_eq!(files.len(), 1, "the created file is still found");
+        let after = std::fs::metadata(&path).expect("new file").len();
+        eprintln!("search.db rebuild: {before} -> {after} bytes");
+        assert!(after * 4 < before, "the dead pages are gone: {before} -> {after}");
+        assert!(!path.with_extension("db.new").exists());
+        drop(connection);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn memory() -> Connection {
         open_at(std::path::Path::new(":memory:")).expect("in-memory search db")
