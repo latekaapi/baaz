@@ -83,6 +83,9 @@ pub enum Sent {
     Answer(String),
     Interrupt,
     ListPending,
+    /// A compact-now (docs/85 10.4): acked `Accepted`, its turn the
+    /// provider's own — no submission admits it.
+    Compact,
 }
 
 /// One thing that happened, in the order the driver saw it. Events drained
@@ -173,8 +176,8 @@ struct TurnLife {
     /// replayed, a host turn for a session-level card) never ran, so
     /// nothing has to end it.
     ran: bool,
-    /// It opened after the driver's first submit: its usage is the live
-    /// child's, which the wire's own total covers.
+    /// It opened after the driver's first submit (or compaction): its usage
+    /// is the live child's, which the wire's own total covers.
     live: bool,
     running_at: Option<usize>,
     content_at: Option<usize>,
@@ -842,7 +845,9 @@ pub fn check(trace: &Trace, expect: &Expect) -> Vec<Violation> {
         match entry {
             Entry::Sent(sent) => {
                 checker.last_sent = Some(at);
-                if *sent == Sent::Submit {
+                // A compaction is live work on the child too (docs/85
+                // 10.4): its turn's usage is in the wire's total.
+                if matches!(sent, Sent::Submit | Sent::Compact) {
                     checker.first_submit.get_or_insert(at);
                 }
             }

@@ -71,6 +71,9 @@ pub enum Step {
     Submit,
     /// Interrupt the turn the previous submit started, once it runs.
     Interrupt,
+    /// Compact now (docs/85 10.4): the recorded `/compact` or
+    /// `thread/compact/start`.
+    Compact,
 }
 
 /// One fixture, as one adapter plays it.
@@ -142,7 +145,19 @@ pub fn claude_case(path: &Path) -> Case {
     } else {
         Start::Open
     };
-    let steps = if stored_only { Vec::new() } else { vec![Step::Submit; results.len()] };
+    // A recorded `/compact` (a manual `compact_boundary`) answers with a
+    // result of its own: that result is the compaction's, not a turn's.
+    let compactions = frames
+        .iter()
+        .filter(|frame| frame["subtype"] == "compact_boundary" && frame["compact_metadata"]["trigger"] == "manual")
+        .count();
+    let steps = if stored_only {
+        Vec::new()
+    } else {
+        let mut steps = vec![Step::Submit; results.len().saturating_sub(compactions)];
+        steps.extend(std::iter::repeat_n(Step::Compact, compactions));
+        steps
+    };
     let choice = frames
         .iter()
         .filter(|frame| frame["_dir"] == "host->cli")
@@ -230,6 +245,7 @@ pub fn codex_cases_in(path: &Path) -> Vec<Case> {
                     }
                     Some("turn/start") => steps.push(Step::Submit),
                     Some("turn/interrupt") => steps.push(Step::Interrupt),
+                    Some("thread/compact/start") => steps.push(Step::Compact),
                     None => {
                         if let Some(decision) = body["result"]["decision"].as_str() {
                             choice = decision.to_owned();
@@ -619,6 +635,19 @@ impl Driver {
         }
     }
 
+    /// Compact now, and let the compaction's own turn play out.
+    fn compact(&mut self) {
+        let command = Command::CompactSession {
+            request_id: provider::new_request_id(),
+            session_id: self.session.clone(),
+            through_turn: None,
+        };
+        match self.send(Sent::Compact, command) {
+            Ok(Ack::Accepted) => self.settle(),
+            other => panic!("{:?}: the compaction was refused: {other:?}", self.agent),
+        }
+    }
+
     /// The tail: whatever is still in flight, answered.
     fn settle(&mut self) {
         let deadline = Instant::now() + TURN_WAIT;
@@ -706,9 +735,13 @@ pub fn run(agent: Agent, case: &Case) -> (Trace, Vec<Violation>) {
     }
     let mut steps = case.steps.iter().peekable();
     while let Some(step) = steps.next() {
-        if *step == Step::Submit {
-            let interrupt = steps.peek() == Some(&&Step::Interrupt);
-            driver.submit(interrupt);
+        match step {
+            Step::Submit => {
+                let interrupt = steps.peek() == Some(&&Step::Interrupt);
+                driver.submit(interrupt);
+            }
+            Step::Compact => driver.compact(),
+            Step::Interrupt => {}
         }
     }
     driver.settle();
