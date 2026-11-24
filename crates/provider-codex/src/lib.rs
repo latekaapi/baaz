@@ -221,7 +221,17 @@ impl CodexAdapter {
     /// The note `session_id` was opened with, else this build's — stored
     /// now, so every later resume sends the same bytes.
     fn note_for(&self, session_id: &str) -> String {
-        provider::note::for_session(&self.resolved_state_dir(), session_id, || self.compose_note())
+        provider::note::for_session(&self.note_state_dir(), session_id, || self.compose_note())
+    }
+
+    /// Where notes are stored: the state dir. A unit test that pinned none
+    /// stores them in a temp folder, never the real state dir.
+    fn note_state_dir(&self) -> std::path::PathBuf {
+        #[cfg(test)]
+        if self.state_override.lock().expect("state mutex").is_none() {
+            return std::env::temp_dir().join(format!("baaz-test-notes-{}", std::process::id()));
+        }
+        self.resolved_state_dir()
     }
 
     /// The Baaz-owned Codex home this adapter spawns children with.
@@ -409,7 +419,7 @@ impl CodexAdapter {
             thread_ids(&started).ok_or_else(|| ProviderError::Unavailable {
                 reason: "thread/start answered without thread ids".into(),
             })?;
-        provider::note::store(&self.resolved_state_dir(), &session_id, &note);
+        provider::note::store(&self.note_state_dir(), &session_id, &note);
         self.announce_mode(&session_id, child::reported_mode(&started).or(mode));
         *self.session_id.lock().expect("session mutex") = Some(session_id.clone());
         *self.thread_id.lock().expect("thread mutex") = Some(thread_id);

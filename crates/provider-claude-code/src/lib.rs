@@ -1115,9 +1115,19 @@ impl ClaudeCodeAdapter {
     /// (`<state>/notes/`) — else this build's, stored now: every resume,
     /// fork and relaunch of the session sends the same bytes.
     fn note_for(&self, session_id: &str) -> String {
+        provider::note::for_session(&self.note_state_dir(), session_id, || self.compose_note())
+    }
+
+    /// Where notes are stored: beside the Baaz home. A unit test that
+    /// pinned no home stores them in a temp folder, never the real state
+    /// dir (one did, 25 Nov 2026).
+    fn note_state_dir(&self) -> PathBuf {
+        #[cfg(test)]
+        if self.config_override.lock().expect("config mutex").is_none() && self.home_override.is_none() {
+            return std::env::temp_dir().join(format!("baaz-test-notes-{}", std::process::id()));
+        }
         let home = self.resolved_config_dir();
-        let state = home.parent().map(PathBuf::from).unwrap_or(home);
-        provider::note::for_session(&state, session_id, || self.compose_note())
+        home.parent().map(PathBuf::from).unwrap_or(home)
     }
 
     /// A resume launch run in its session's own folder: the cwd the
