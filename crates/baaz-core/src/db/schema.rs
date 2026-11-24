@@ -56,7 +56,7 @@
 use rusqlite::{params, Connection, Transaction};
 
 /// The schema this build writes.
-pub const VERSION: i32 = 3;
+pub const VERSION: i32 = 4;
 
 /// Step 1: every table.
 const V1: &str = "
@@ -201,6 +201,35 @@ ALTER TABLE worktree ADD COLUMN preserved_ref TEXT;
 ALTER TABLE worktree ADD COLUMN preserved_head TEXT;
 ";
 
+/// Version 4 (docs/85 10.8): the ledger's reads by time — the usage page,
+/// "this week" — get their indexes. The legacy `usage_turns` copy goes too,
+/// but only when every row of it is already in `turn` ([`drop_copied_ledger`]):
+/// a ledger this build could not read was never copied and stays.
+const V4: &str = "
+CREATE INDEX IF NOT EXISTS turn_finished ON turn(finished_at);
+CREATE INDEX IF NOT EXISTS turn_provider_finished ON turn(provider, finished_at);
+";
+
+/// Drop the legacy `usage_turns` when nothing in it is missing from `turn`.
+/// A table of an unknown shape fails the check and is kept.
+fn drop_copied_ledger(tx: &Transaction) -> rusqlite::Result<()> {
+    let exists = tx.query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'usage_turns'", [], |_| Ok(())).is_ok();
+    if !exists {
+        return Ok(());
+    }
+    let missing = tx.query_row(
+        "SELECT count(*) FROM usage_turns u WHERE NOT EXISTS (
+             SELECT 1 FROM turn t JOIN session s ON s.id = t.session_id
+             WHERE s.provider_session_id = u.session_id AND t.turn_id = u.turn_id)",
+        [],
+        |row| row.get::<_, i64>(0),
+    );
+    if missing == Ok(0) {
+        tx.execute_batch("DROP TABLE usage_turns;")?;
+    }
+    Ok(())
+}
+
 /// Bring `conn` to [`VERSION`]: the ledger's own versions first, then every
 /// step this file has not run, each in its own transaction.
 pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
@@ -237,6 +266,13 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V3)?;
         tx.pragma_update(None, "user_version", 3)?;
+        tx.commit()?;
+    }
+    if version < 4 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V4)?;
+        drop_copied_ledger(&tx)?;
+        tx.pragma_update(None, "user_version", 4)?;
         tx.commit()?;
     }
     Ok(())

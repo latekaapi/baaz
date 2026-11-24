@@ -38,13 +38,14 @@ pub fn append(workspace: &str, text: &str) -> Vec<String> {
     let (workspace, text) = (workspace.to_owned(), text.to_owned());
     crate::db::call(crate::db::path(), move |db| {
         let mut entries = crate::db::history::read(&db.conn, &workspace).unwrap_or_default();
-        let before = entries.clone();
-        appended(&mut entries, &text);
-        if entries != before {
-            if let Err(error) = crate::db::history::replace(&mut db.conn, &workspace, &entries) {
+        // One row written, not the list again (docs/85 10.8); a repeat of a
+        // recent prompt writes nothing.
+        if !is_recent_duplicate(&entries, &text) {
+            if let Err(error) = crate::db::history::append_one(&mut db.conn, &workspace, &text, CAP) {
                 crate::baaz_log!("db: prompt history not saved ({error})");
             }
         }
+        appended(&mut entries, &text);
         entries
     })
     .unwrap_or_default()

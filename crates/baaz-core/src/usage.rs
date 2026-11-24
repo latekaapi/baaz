@@ -1522,7 +1522,10 @@ mod tests {
         assert_eq!(kept.tokens_in, 200);
         let total: i64 = connection
             .query_row(
-                "SELECT SUM(tokens_in) FROM usage_turns WHERE session_id = 's-1'",
+                // The legacy table is copied into `turn` and, fully
+                // copied, dropped at baaz.db version 4 (docs/85 10.8).
+                "SELECT SUM(t.tokens_in) FROM turn t JOIN session s ON s.id = t.session_id
+                 WHERE s.provider_session_id = 's-1' AND t.role = 'assistant'",
                 [],
                 |row| row.get(0),
             )

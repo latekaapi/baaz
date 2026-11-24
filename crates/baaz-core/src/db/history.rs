@@ -20,6 +20,24 @@ pub fn replace(conn: &mut Connection, workspace: &str, entries: &[String]) -> ru
     tx.commit()
 }
 
+/// Add one prompt to `workspace`'s history and drop what falls past `cap`
+/// (docs/85 10.8): one row written, never the whole list again. Ordinals
+/// only grow; reads order by them.
+pub fn append_one(conn: &mut Connection, workspace: &str, text: &str, cap: usize) -> rusqlite::Result<()> {
+    super::check_writer("append prompt history");
+    let tx = conn.transaction()?;
+    let next: i64 = tx
+        .prepare_cached("SELECT COALESCE(MAX(ordinal) + 1, 0) FROM prompt_history WHERE workspace_path = ?1")?
+        .query_row(params![workspace], |row| row.get(0))?;
+    super::exec(&tx, "INSERT INTO prompt_history(workspace_path, ordinal, text) VALUES (?1, ?2, ?3)", params![workspace, next, text])?;
+    super::exec(
+        &tx,
+        "DELETE FROM prompt_history WHERE workspace_path = ?1 AND ordinal <= ?2",
+        params![workspace, next - cap as i64],
+    )?;
+    tx.commit()
+}
+
 /// Forget every workspace's prompts (Settings › Data › Prompt history,
 /// docs/82 8.8). Returns how many were removed.
 pub fn clear_all(conn: &Connection) -> rusqlite::Result<usize> {

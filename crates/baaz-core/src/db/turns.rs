@@ -34,6 +34,12 @@ fn cost_of(row: &UsageRow) -> (Option<f64>, &'static str) {
 pub fn record_ledger_row(conn: &Connection, row: &UsageRow) -> rusqlite::Result<bool> {
     super::check_writer("record turn");
     let uuid = super::sessions::ensure_session(conn, &row.provider, &row.session_id, super::sessions::ORIGIN_LISTED)?;
+    record_ledger_row_under(conn, &uuid, row)
+}
+
+/// [`record_ledger_row`] under a session row already resolved (`uuid`):
+/// a batch resolves each session once, not once per turn (docs/85 10.8).
+fn record_ledger_row_under(conn: &Connection, uuid: &str, row: &UsageRow) -> rusqlite::Result<bool> {
     let (cost, source) = cost_of(row);
     let changed = super::exec(conn, 
         "INSERT INTO turn(session_id, turn_id, role, view_cursor, finished_at, model, duration_ms, tokens_in,
@@ -66,8 +72,18 @@ pub fn record_ledger_row(conn: &Connection, row: &UsageRow) -> rusqlite::Result<
 pub fn record_ledger(conn: &mut Connection, rows: &[UsageRow]) -> rusqlite::Result<usize> {
     let tx = conn.transaction()?;
     let mut added = 0;
+    let mut sessions: HashMap<(&str, &str), String> = HashMap::new();
     for row in rows {
-        added += usize::from(record_ledger_row(&tx, row)?);
+        let key = (row.provider.as_str(), row.session_id.as_str());
+        let uuid = match sessions.get(&key) {
+            Some(uuid) => uuid.clone(),
+            None => {
+                let uuid = super::sessions::ensure_session(&tx, &row.provider, &row.session_id, super::sessions::ORIGIN_LISTED)?;
+                sessions.insert(key, uuid.clone());
+                uuid
+            }
+        };
+        added += usize::from(record_ledger_row_under(&tx, &uuid, row)?);
     }
     tx.commit()?;
     Ok(added)

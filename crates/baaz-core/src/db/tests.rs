@@ -355,6 +355,46 @@ fn an_unknown_cost_is_null_not_zero() {
     assert_eq!(super::turns::cost(&conn, "s-a", "t-1"), Some((Some(0.0), "reported".to_owned())));
 }
 
+/// docs/85 10.8 migration, from real-shaped data: a version-3 file that
+/// still holds the legacy `usage_turns` copy reaches version 4 with the
+/// ledger's time indexes, without the legacy table, and with every turn row
+/// and session as they were; a batch of ledger rows still lands under one
+/// session row each.
+#[test]
+fn version_four_indexes_the_ledger_and_drops_the_legacy_copy() {
+    let dir = temp("v4");
+    real_shaped_stores(&dir);
+    let path = super::path_in(&dir);
+    let meta = aui_protocol::TurnMeta { model: "m".into(), tokens_in: 10, ..aui_protocol::TurnMeta::default() };
+    let (turns_before, sessions_before) = super::as_writer(|| {
+        let mut conn = super::open_at(&path).expect("opens");
+        let rows: Vec<_> = (0..5).map(|n| crate::usage::row_from_finished("s-v4", "v", &format!("t-{n}"), n, &meta).with_provider("codex")).collect();
+        super::turns::record_ledger(&mut conn, &rows).expect("ledger");
+        conn.execute_batch(
+            "CREATE TABLE usage_turns(session_id TEXT, turn_id TEXT, PRIMARY KEY(session_id, turn_id));
+             INSERT INTO usage_turns VALUES ('s-v4', 't-0');
+             DROP INDEX turn_finished; DROP INDEX turn_provider_finished;
+             PRAGMA user_version = 3;",
+        )
+        .expect("back to the version-3 shape");
+        (count(&conn, "turn"), count(&conn, "session"))
+    });
+    super::close(path.clone());
+    super::as_writer(|| {
+        let conn = super::open_at(&path).expect("reopens");
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(version, 4);
+        let index = |name: &str| conn.query_row("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1", [name], |_| Ok(())).is_ok();
+        assert!(index("turn_finished") && index("turn_provider_finished"), "the ledger's time indexes");
+        assert!(conn.query_row("SELECT 1 FROM sqlite_master WHERE name = 'usage_turns'", [], |_| Ok(())).is_err(), "the legacy copy, fully copied, is gone");
+        assert_eq!((count(&conn, "turn"), count(&conn, "session")), (turns_before, sessions_before), "nothing else moved");
+        let plan: String = conn
+            .query_row("EXPLAIN QUERY PLAN SELECT * FROM turn WHERE provider = 'codex' AND finished_at > 2", [], |row| row.get(3))
+            .unwrap();
+        assert!(plan.contains("turn_provider_finished"), "{plan}");
+    });
+}
+
 /// docs/85 10.4: a compaction's ledger row is marked `role = 'compaction'`:
 /// its cost is on the ledger, and the per-turn reader (`find_ledger`, which
 /// asks for assistant turns) leaves it out.
