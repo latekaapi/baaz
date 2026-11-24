@@ -55,13 +55,13 @@ pub fn ensure_session(conn: &Connection, provider: &str, id: &str, origin: &str)
             return Ok(uuid);
         }
         if let Some(uuid) = exact_row(conn, "", id)? {
-            conn.execute("UPDATE session SET provider_key = ?1 WHERE id = ?2", params![provider, uuid])?;
+            super::exec(conn, "UPDATE session SET provider_key = ?1 WHERE id = ?2", params![provider, uuid])?;
             return Ok(uuid);
         }
     }
     let uuid = uuid::Uuid::new_v4().to_string();
     let now = super::now_ms();
-    conn.execute(
+    super::exec(conn, 
         "INSERT INTO session(provider_key, provider_session_id, id, origin, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
         params![provider, id, uuid, origin, now],
@@ -107,7 +107,7 @@ fn absorb(conn: &Connection, from: &str, into: &str) -> rusqlite::Result<()> {
     if from == into {
         return Ok(());
     }
-    conn.execute(
+    super::exec(conn, 
         "UPDATE session SET worktree_id = (SELECT worktree_id FROM session WHERE id = ?2)
          WHERE id = ?1 AND worktree_id IS NULL",
         params![into, from],
@@ -119,17 +119,17 @@ fn absorb(conn: &Connection, from: &str, into: &str) -> rusqlite::Result<()> {
             write_meta(conn, into, Some(&meta))?;
         }
     }
-    conn.execute("UPDATE OR IGNORE turn SET session_id = ?1 WHERE session_id = ?2", params![into, from])?;
+    super::exec(conn, "UPDATE OR IGNORE turn SET session_id = ?1 WHERE session_id = ?2", params![into, from])?;
     let next: i64 = conn.query_row(
         "SELECT COALESCE(MAX(ordinal) + 1, 0) FROM attachment WHERE session_id = ?1",
         params![into],
         |row| row.get(0),
     )?;
-    conn.execute(
+    super::exec(conn, 
         "UPDATE attachment SET session_id = ?1, ordinal = ordinal + ?2 WHERE session_id = ?3",
         params![into, next, from],
     )?;
-    conn.execute("DELETE FROM session WHERE id = ?1", params![from])?;
+    super::exec(conn, "DELETE FROM session WHERE id = ?1", params![from])?;
     Ok(())
 }
 
@@ -158,7 +158,7 @@ fn owned_row(
                         return Ok(existing);
                     }
                     None => {
-                        conn.execute("UPDATE session SET provider_key = ?1 WHERE id = ?2", params![provider, uuid])?;
+                        super::exec(conn, "UPDATE session SET provider_key = ?1 WHERE id = ?2", params![provider, uuid])?;
                         return Ok(uuid);
                     }
                 }
@@ -172,7 +172,7 @@ fn owned_row(
                 if let Some(meta) = read_meta(conn, &uuid)? {
                     write_meta(conn, &target, Some(&meta))?;
                 }
-                conn.execute("UPDATE session SET has_meta = 0, has_record = 0 WHERE id = ?1", params![uuid])?;
+                super::exec(conn, "UPDATE session SET has_meta = 0, has_record = 0 WHERE id = ?1", params![uuid])?;
                 owned.insert(id.to_owned(), target.clone());
                 return Ok(target);
             }
@@ -189,7 +189,7 @@ fn owned_row(
 /// Write (or clear, with `None`) the window's facts on a row.
 pub(crate) fn write_meta(conn: &Connection, uuid: &str, meta: Option<&SessionMeta>) -> rusqlite::Result<()> {
     let Some(m) = meta else {
-        conn.execute(
+        super::exec(conn, 
             "UPDATE session SET has_meta = 0, name = NULL, handoff_title = NULL, generated_title = NULL,
                 provider_title = NULL, first_prompt = NULL, derived_title = NULL, title_attempted = 0, pinned = 0,
                 archived = 0, hidden = 0, side_session = 0, browser_chat = 0, unread = 0, handoff_to = NULL,
@@ -201,7 +201,7 @@ pub(crate) fn write_meta(conn: &Connection, uuid: &str, meta: Option<&SessionMet
         return Ok(());
     };
     let right = m.right.as_ref().and_then(|right| serde_json::to_string(right).ok());
-    conn.execute(
+    super::exec(conn, 
         "UPDATE session SET has_meta = 1, name = ?2, handoff_title = ?3, generated_title = ?4, provider_title = ?5,
             first_prompt = ?6, derived_title = ?7, title_attempted = ?8, pinned = ?9, archived = ?10, hidden = ?11,
             side_session = ?12, browser_chat = ?13, unread = ?14, handoff_to = ?15, handoff_from = ?16,
@@ -239,10 +239,10 @@ pub(crate) fn write_meta(conn: &Connection, uuid: &str, meta: Option<&SessionMet
 /// Write (or clear, with `None`) the window's record of a row.
 pub(crate) fn write_record(conn: &Connection, uuid: &str, record: Option<&ProviderSessionRecord>) -> rusqlite::Result<()> {
     let Some(r) = record else {
-        conn.execute("UPDATE session SET has_record = 0 WHERE id = ?1", params![uuid])?;
+        super::exec(conn, "UPDATE session SET has_record = 0 WHERE id = ?1", params![uuid])?;
         return Ok(());
     };
-    conn.execute(
+    super::exec(conn, 
         "UPDATE session SET has_record = 1, workspace_path = ?2, created_at = ?3, updated_at = ?4, turns = ?5,
             origin = ?6
          WHERE id = ?1",
@@ -311,7 +311,7 @@ fn read_meta(conn: &Connection, uuid: &str) -> rusqlite::Result<Option<SessionMe
 /// next saves diff against.
 pub(crate) fn load_front(conn: &Connection, front: &mut FrontState) -> rusqlite::Result<(Overrides, ProviderSessionStore)> {
     super::check_writer("load sessions");
-    let mut statement = conn.prepare(&format!(
+    let mut statement = conn.prepare_cached(&format!(
         "SELECT id, provider_key, provider_session_id, has_meta, has_record, workspace_path, created_at, updated_at,
                 turns, origin, {META_COLUMNS}
          FROM session WHERE has_meta = 1 OR has_record = 1
@@ -439,7 +439,7 @@ fn prune(conn: &Connection, owned: &mut HashMap<String, String>, id: &str, uuid:
         return Ok(());
     }
     owned.remove(id);
-    conn.execute(
+    super::exec(conn, 
         "DELETE FROM session WHERE id = ?1
            AND NOT EXISTS (SELECT 1 FROM turn WHERE session_id = ?1)
            AND NOT EXISTS (SELECT 1 FROM attachment WHERE session_id = ?1)",
@@ -462,7 +462,7 @@ pub(crate) fn forget(conn: &mut Connection, front: &mut FrontState, provider: &s
     }
     rows.extend(front.owned.get(id).cloned());
     for uuid in rows {
-        if !gone.contains(&uuid) && tx.execute("DELETE FROM session WHERE id = ?1", params![uuid])? > 0 {
+        if !gone.contains(&uuid) && super::exec(&tx, "DELETE FROM session WHERE id = ?1", params![uuid])? > 0 {
             gone.push(uuid);
         }
     }

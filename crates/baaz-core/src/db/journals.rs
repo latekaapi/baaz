@@ -10,10 +10,10 @@ use crate::import::{Journal, JournalRun, JournalSession};
 pub fn read_import(conn: &Connection) -> rusqlite::Result<Journal> {
     super::check_writer("read import journal");
     let mut runs: Vec<JournalRun> = conn
-        .prepare("SELECT id, started_at FROM import_job ORDER BY started_at, rowid")?
+        .prepare_cached("SELECT id, started_at FROM import_job ORDER BY started_at, rowid")?
         .query_map([], |row| Ok(JournalRun { id: row.get(0)?, at_ms: row.get(1)?, sessions: Vec::new() }))?
         .collect::<rusqlite::Result<_>>()?;
-    let mut items = conn.prepare(
+    let mut items = conn.prepare_cached(
         "SELECT provider_key, provider_session_id FROM import_item WHERE job_id = ?1 ORDER BY ordinal",
     )?;
     for run in &mut runs {
@@ -34,15 +34,15 @@ pub fn write_import(conn: &mut Connection, journal: &Journal) -> rusqlite::Resul
 
 /// [`write_import`] inside a caller's transaction (the importer's).
 pub(crate) fn put_import(conn: &Connection, journal: &Journal) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM import_item", [])?;
-    conn.execute("DELETE FROM import_job", [])?;
+    super::exec(conn, "DELETE FROM import_item", [])?;
+    super::exec(conn, "DELETE FROM import_job", [])?;
     for run in &journal.runs {
-        conn.execute(
+        super::exec(conn, 
             "INSERT OR REPLACE INTO import_job(id, started_at) VALUES (?1, ?2)",
             params![run.id, run.at_ms],
         )?;
         for (ordinal, session) in run.sessions.iter().enumerate() {
-            conn.execute(
+            super::exec(conn, 
                 "INSERT OR REPLACE INTO import_item(job_id, ordinal, provider_key, provider_session_id)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![run.id, ordinal as i64, session.provider, session.session_id],
@@ -65,7 +65,7 @@ pub fn read_migration(conn: &Connection) -> rusqlite::Result<(Vec<Done>, Vec<Liv
     super::check_writer("read migration journal");
     let mut done = Vec::new();
     let mut live = Vec::new();
-    let mut statement = conn.prepare("SELECT key, state, at, outcome FROM migration_journal ORDER BY key")?;
+    let mut statement = conn.prepare_cached("SELECT key, state, at, outcome FROM migration_journal ORDER BY key")?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
         let key: String = row.get(0)?;
@@ -91,16 +91,16 @@ pub fn write_migration(conn: &mut Connection, done: &[Done], live: &[Live]) -> r
 
 /// [`write_migration`] inside a caller's transaction (the importer's).
 pub(crate) fn put_migration(conn: &Connection, done: &[Done], live: &[Live]) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM migration_journal", [])?;
+    super::exec(conn, "DELETE FROM migration_journal", [])?;
     for (key, at, outcome) in done {
-        conn.execute(
+        super::exec(conn, 
             "INSERT OR REPLACE INTO migration_journal(key, state, at, outcome) VALUES (?1, ?2, ?3, ?4)",
             params![key, DONE, *at as i64, outcome],
         )?;
     }
     for (key, at) in live {
         // A finished move never goes back to in flight.
-        conn.execute(
+        super::exec(conn, 
             "INSERT OR IGNORE INTO migration_journal(key, state, at) VALUES (?1, ?2, ?3)",
             params![key, LIVE, *at as i64],
         )?;

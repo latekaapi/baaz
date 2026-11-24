@@ -35,7 +35,7 @@ pub fn record_ledger_row(conn: &Connection, row: &UsageRow) -> rusqlite::Result<
     super::check_writer("record turn");
     let uuid = super::sessions::ensure_session(conn, &row.provider, &row.session_id, super::sessions::ORIGIN_LISTED)?;
     let (cost, source) = cost_of(row);
-    let changed = conn.execute(
+    let changed = super::exec(conn, 
         "INSERT INTO turn(session_id, turn_id, role, view_cursor, finished_at, model, duration_ms, tokens_in,
             tokens_out, reasoning, cache_read, cache_write, cached_tokens, cost_usd, cost_source, provider)
          VALUES (?1, ?2, ?16, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
@@ -154,7 +154,7 @@ pub fn note_display(
 ) -> rusqlite::Result<()> {
     super::check_writer("note display text");
     let uuid = super::sessions::ensure_session(conn, provider, session_id, super::sessions::ORIGIN_LISTED)?;
-    conn.execute(
+    super::exec(conn, 
         "INSERT INTO turn(session_id, turn_id, role, input_text, display_text, finished_at)
          VALUES (?1, ?2, 'user', ?3, ?4, ?5)
          ON CONFLICT(session_id, turn_id) DO UPDATE SET input_text = excluded.input_text,
@@ -169,7 +169,7 @@ pub fn displays(conn: &Connection, provider: &str, session_id: &str) -> rusqlite
     super::check_writer("read display texts");
     let mut out = Displays::default();
     let Some(uuid) = super::sessions::read_row(conn, provider, session_id)? else { return Ok(out) };
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT turn_id, input_text, display_text FROM turn
          WHERE session_id = ?1 AND role = 'user' AND display_text IS NOT NULL",
     )?;

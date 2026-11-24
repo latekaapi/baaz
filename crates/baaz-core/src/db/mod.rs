@@ -90,6 +90,25 @@ pub struct Opened {
     last_used: u64,
 }
 
+/// A database the writer lets go of runs `PRAGMA optimize` first (docs/85
+/// 10.8): SQLite's own advice, cheap, and the statistics help the planner
+/// next time.
+impl Drop for Opened {
+    fn drop(&mut self) {
+        let _ = self.conn.execute_batch("PRAGMA optimize;");
+    }
+}
+
+/// One statement through the connection's statement cache (docs/85 10.8):
+/// the same SQL is parsed once per connection, not on every call.
+pub(crate) fn exec<P: rusqlite::Params>(conn: &Connection, sql: &str, params: P) -> rusqlite::Result<usize> {
+    conn.prepare_cached(sql)?.execute(params)
+}
+
+/// The writer checkpoints and truncates a database's WAL every this many
+/// uses (docs/85 10.8), so the WAL never grows between quits.
+const CHECKPOINT_EVERY: u64 = 500;
+
 /// The writer thread's state: the databases it holds open.
 #[derive(Default)]
 struct Worker {
@@ -141,6 +160,9 @@ impl Worker {
         let clock = self.clock;
         let opened = self.open.get_mut(path)?;
         opened.last_used = clock;
+        if clock % CHECKPOINT_EVERY == 0 {
+            let _ = opened.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        }
         Some(opened)
     }
 }
@@ -276,7 +298,11 @@ pub fn open_at(path: &Path) -> rusqlite::Result<Connection> {
     let mut conn = Connection::open(path)?;
     let _ = conn.busy_timeout(BUSY_TIMEOUT);
     let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
-    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    // docs/85 10.8: WAL makes NORMAL durable across a crash of the app (only
+    // a power loss can drop the last commits); temporary b-trees stay in
+    // memory; the statement cache holds every statement the jobs reuse.
+    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY;")?;
+    conn.set_prepared_statement_cache_capacity(64);
     schema::migrate(&mut conn)?;
     if let Some(state_dir) = path.parent() {
         json_import::run_once(&mut conn, state_dir)?;

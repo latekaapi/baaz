@@ -22,7 +22,7 @@ use crate::worktrees::{Snapshot, Worktree, PORT_BASE, PORT_BLOCK, PORT_BLOCKS};
 /// and return that block's first port. `None` when every block is taken.
 pub fn reserve(conn: &Connection, worktree: &Worktree) -> rusqlite::Result<Option<u16>> {
     super::check_writer("reserve worktree");
-    let mut taken = conn.prepare("SELECT port FROM worktree WHERE port IS NOT NULL")?;
+    let mut taken = conn.prepare_cached("SELECT port FROM worktree WHERE port IS NOT NULL")?;
     let taken: std::collections::HashSet<i64> =
         taken.query_map([], |row| row.get::<_, i64>(0))?.collect::<rusqlite::Result<_>>()?;
     let Some(port) = (0..PORT_BLOCKS)
@@ -31,7 +31,7 @@ pub fn reserve(conn: &Connection, worktree: &Worktree) -> rusqlite::Result<Optio
     else {
         return Ok(None);
     };
-    conn.execute(
+    super::exec(conn, 
         "INSERT INTO worktree(id, project_id, path, branch, created_by_session, project_root, base, port, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
@@ -52,15 +52,15 @@ pub fn reserve(conn: &Connection, worktree: &Worktree) -> rusqlite::Result<Optio
 /// Delete the row `id`, first clearing every session row that points at it.
 pub fn delete(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     super::check_writer("delete worktree");
-    conn.execute("UPDATE session SET worktree_id = NULL WHERE worktree_id = ?1", params![id])?;
-    conn.execute("DELETE FROM worktree WHERE id = ?1", params![id])?;
+    super::exec(conn, "UPDATE session SET worktree_id = NULL WHERE worktree_id = ?1", params![id])?;
+    super::exec(conn, "DELETE FROM worktree WHERE id = ?1", params![id])?;
     Ok(())
 }
 
 /// Stamp the row's setup as run: [`setup_ran`] reads it.
 pub fn mark_setup(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     super::check_writer("mark worktree setup");
-    conn.execute("UPDATE worktree SET setup_at = ?2 WHERE id = ?1", params![id, super::now_ms()])?;
+    super::exec(conn, "UPDATE worktree SET setup_at = ?2 WHERE id = ?1", params![id, super::now_ms()])?;
     Ok(())
 }
 
@@ -77,7 +77,7 @@ pub fn setup_ran(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
 /// between the two never loses where the work went.
 pub fn mark_archived(conn: &Connection, id: &str, snapshot: &Snapshot) -> rusqlite::Result<()> {
     super::check_writer("archive worktree");
-    let changed = conn.execute(
+    let changed = super::exec(conn, 
         "UPDATE worktree SET archived_at = ?2, preserved_ref = ?3, preserved_head = ?4 WHERE id = ?1",
         params![id, super::now_ms(), snapshot.reference, snapshot.head],
     )?;
@@ -91,7 +91,7 @@ pub fn mark_archived(conn: &Connection, id: &str, snapshot: &Snapshot) -> rusqli
 /// fresh one when that was taken): the snapshot columns clear.
 pub fn mark_restored(conn: &Connection, id: &str, path: &Path) -> rusqlite::Result<()> {
     super::check_writer("restore worktree");
-    conn.execute(
+    super::exec(conn, 
         "UPDATE worktree SET archived_at = NULL, preserved_ref = NULL, preserved_head = NULL, path = ?2 WHERE id = ?1",
         params![id, path.to_string_lossy()],
     )?;
@@ -113,8 +113,8 @@ pub fn link_session(conn: &Connection, provider: &str, session_id: &str, path: &
     super::check_writer("link worktree");
     let Some(worktree) = by_path(conn, path)? else { return Ok(false) };
     let Some(uuid) = super::sessions::read_row(conn, provider, session_id)? else { return Ok(false) };
-    conn.execute("UPDATE session SET worktree_id = ?2 WHERE id = ?1", params![uuid, worktree.id])?;
-    conn.execute(
+    super::exec(conn, "UPDATE session SET worktree_id = ?2 WHERE id = ?1", params![uuid, worktree.id])?;
+    super::exec(conn, 
         "UPDATE worktree SET created_by_session = COALESCE(created_by_session, ?2) WHERE id = ?1",
         params![worktree.id, session_id],
     )?;
@@ -175,7 +175,7 @@ pub fn by_session(conn: &Connection, provider: &str, session_id: &str) -> rusqli
 /// Every worktree row, oldest first.
 pub fn list(conn: &Connection) -> rusqlite::Result<Vec<Worktree>> {
     super::check_writer("list worktrees");
-    let mut statement = conn.prepare(&format!("SELECT {COLUMNS} FROM worktree ORDER BY created_at, id"))?;
+    let mut statement = conn.prepare_cached(&format!("SELECT {COLUMNS} FROM worktree ORDER BY created_at, id"))?;
     let rows = statement.query_map([], from_row)?.collect();
     rows
 }

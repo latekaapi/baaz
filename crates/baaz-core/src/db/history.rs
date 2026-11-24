@@ -7,7 +7,7 @@ use rusqlite::{params, Connection};
 pub fn read(conn: &Connection, workspace: &str) -> rusqlite::Result<Vec<String>> {
     super::check_writer("read prompt history");
     let mut statement =
-        conn.prepare("SELECT text FROM prompt_history WHERE workspace_path = ?1 ORDER BY ordinal")?;
+        conn.prepare_cached("SELECT text FROM prompt_history WHERE workspace_path = ?1 ORDER BY ordinal")?;
     let rows = statement.query_map(params![workspace], |row| row.get(0))?;
     rows.collect()
 }
@@ -24,14 +24,14 @@ pub fn replace(conn: &mut Connection, workspace: &str, entries: &[String]) -> ru
 /// docs/82 8.8). Returns how many were removed.
 pub fn clear_all(conn: &Connection) -> rusqlite::Result<usize> {
     super::check_writer("clear prompt history");
-    conn.execute("DELETE FROM prompt_history", [])
+    super::exec(conn, "DELETE FROM prompt_history", [])
 }
 
 /// [`replace`] inside a caller's transaction (the importer's).
 pub(crate) fn write(conn: &Connection, workspace: &str, entries: &[String]) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM prompt_history WHERE workspace_path = ?1", params![workspace])?;
+    super::exec(conn, "DELETE FROM prompt_history WHERE workspace_path = ?1", params![workspace])?;
     let mut insert =
-        conn.prepare("INSERT INTO prompt_history(workspace_path, ordinal, text) VALUES (?1, ?2, ?3)")?;
+        conn.prepare_cached("INSERT INTO prompt_history(workspace_path, ordinal, text) VALUES (?1, ?2, ?3)")?;
     for (ordinal, text) in entries.iter().enumerate() {
         insert.execute(params![workspace, ordinal as i64, text])?;
     }

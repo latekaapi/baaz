@@ -39,7 +39,7 @@ pub(crate) fn insert_item(
     let mut position = 0i64;
     for attachment in &item.attachments {
         let body = serde_json::to_string(attachment).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        conn.execute(
+        super::exec(conn, 
             "INSERT INTO attachment(id, session_id, turn_id, ordinal, position, sent_text, kind, file_rel_path, body)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
@@ -58,7 +58,7 @@ pub(crate) fn insert_item(
     }
     if let Some(annotations) = &item.annotations {
         let body = serde_json::to_string(annotations).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        conn.execute(
+        super::exec(conn, 
             "INSERT INTO attachment(id, session_id, turn_id, ordinal, position, sent_text, kind, file_rel_path, body)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
@@ -106,7 +106,7 @@ pub fn append(
 pub fn load(conn: &Connection, provider: &str, session_id: &str) -> rusqlite::Result<Vec<SentItem>> {
     super::check_writer("read sent turns");
     let Some(uuid) = super::sessions::read_row(conn, provider, session_id)? else { return Ok(Vec::new()) };
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT ordinal, turn_id, sent_text, kind, body FROM attachment WHERE session_id = ?1
          ORDER BY ordinal, position",
     )?;
@@ -136,7 +136,7 @@ pub fn load(conn: &Connection, provider: &str, session_id: &str) -> rusqlite::Re
 pub fn bind_turn(conn: &Connection, provider: &str, session_id: &str, from: &str, to: &str) -> rusqlite::Result<usize> {
     super::check_writer("bind sent turn");
     let Some(uuid) = super::sessions::read_row(conn, provider, session_id)? else { return Ok(0) };
-    conn.execute(
+    super::exec(conn, 
         "UPDATE attachment SET turn_id = ?1 WHERE session_id = ?2 AND turn_id = ?3",
         params![to, uuid, from],
     )
@@ -151,7 +151,7 @@ pub fn rekey(conn: &mut Connection, provider: &str, old: &str, new: &str) -> rus
         let into = super::sessions::ensure_session(&tx, provider, new, super::sessions::ORIGIN_BAAZ)?;
         if from != into {
             let next = next_ordinal(&tx, &into)?;
-            tx.execute(
+            super::exec(&tx, 
                 "UPDATE attachment SET session_id = ?1, ordinal = ordinal + ?2 WHERE session_id = ?3",
                 params![into, next, from],
             )?;
