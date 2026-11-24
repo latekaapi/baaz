@@ -325,9 +325,31 @@ pub fn load_cache(path: &std::path::Path) -> HashMap<String, IndexEntry> {
 }
 
 /// Save a read for the next boot. Blocking; call it off the UI thread.
-pub fn save_cache(path: &std::path::Path, index: &HashMap<String, IndexEntry>) {
-    if let Ok(bytes) = serde_json::to_vec(index) {
-        let _ = crate::store::write_atomic(path, &bytes);
+///
+/// Written only when the bytes changed since this process last wrote
+/// them (docs/85 10.7): it is ~10 MB on a busy machine and used to be
+/// rewritten on every refresh. Returns whether it wrote.
+pub fn save_cache(path: &std::path::Path, index: &HashMap<String, IndexEntry>) -> bool {
+    static LAST: std::sync::Mutex<Option<(PathBuf, u64)>> = std::sync::Mutex::new(None);
+    // `HashMap` serializes in no fixed order: sort first, so equal maps
+    // make equal bytes.
+    let sorted: std::collections::BTreeMap<&String, &IndexEntry> = index.iter().collect();
+    let Ok(bytes) = serde_json::to_vec(&sorted) else { return false };
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        hasher.finish()
+    };
+    let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last.as_ref().is_some_and(|(at, seen)| at == path && *seen == hash) && path.exists() {
+        return false;
+    }
+    if crate::store::write_atomic(path, &bytes).is_ok() {
+        *last = Some((path.to_path_buf(), hash));
+        true
+    } else {
+        false
     }
 }
 
@@ -559,5 +581,22 @@ mod tests {
         eprintln!("PERF load cache rows={} in={:?}", loaded.len(), at.elapsed());
         assert_eq!(cold, full, "the changed read with no cache equals the full read");
         assert_eq!(warm, full);
+    }
+
+    /// docs/85 10.7: the cache is written when its content changed, and
+    /// not again for the same content.
+    #[test]
+    fn the_cache_is_rewritten_only_when_it_changed() {
+        let path = std::env::temp_dir().join(format!("baaz-index-cache-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut index = HashMap::new();
+        assert!(save_cache(&path, &index), "the first save writes");
+        assert!(!save_cache(&path, &index), "the same content writes nothing");
+        index.insert("s-1".to_owned(), IndexEntry::default());
+        assert!(save_cache(&path, &index), "a change writes");
+        assert!(!save_cache(&path, &index));
+        let _ = std::fs::remove_file(&path);
+        assert!(save_cache(&path, &index), "a missing file is written again");
+        let _ = std::fs::remove_file(&path);
     }
 }
