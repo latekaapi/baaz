@@ -604,6 +604,8 @@ pub(crate) struct SettingsFacts {
     pub default_browser_pending: bool,
     /// Data › History: how many pages browsing history holds.
     pub history_pages: u64,
+    /// Data: what the Baaz folder holds on disk, once measured.
+    pub storage: Option<baaz_core::store::StorageSize>,
     /// Browser › Your data: the sites history never records.
     pub excluded_sites: Vec<String>,
     /// Browser › Site permissions and a site's page: every site's kept
@@ -2133,8 +2135,19 @@ impl SettingsPage {
     /// what goes.
     fn settings_data_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let reveal = cx.listener(|this: &mut Self, _: &gpui::ClickEvent, _, cx| this.reveal_data_folder(cx));
+        // The size, as plain text (docs/85 10.7): Baaz keeps it small by
+        // itself, so there is nothing to press.
+        let place_text = match self.facts.storage {
+            Some(size) => format!(
+                "{} · uses {}, of which the search index {}",
+                data_folder_label(),
+                baaz_core::store::human_bytes(size.total),
+                baaz_core::store::human_bytes(size.search)
+            ),
+            None => data_folder_label(),
+        };
         let place = settings_row("Baaz folder")
-            .description(data_folder_label())
+            .description(place_text)
             .control(
                 button("settings-data-reveal", "Reveal in Finder")
                     .accessibility_label("Reveal the Baaz folder in Finder")
@@ -2942,6 +2955,7 @@ impl Harness {
             }
             "data" => {
                 facts.history_pages = self.browser.read(cx).data.read(cx).history_len();
+                facts.storage = baaz_core::store::storage_size_cached();
             }
             "browser" => {
                 facts.default_browser = self.default_browser_handler(cx).map(str::to_owned);

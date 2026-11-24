@@ -41,6 +41,66 @@ pub fn support_dir() -> PathBuf {
     crate::runtime::state_dir().path
 }
 
+/// How much the Baaz folder holds on disk, and of it the search index
+/// (docs/85 10.7, Settings › Data). Measured off the caller's thread at most
+/// once a minute; `None` until the first measure lands, and always in a
+/// capture (a capture's folder is throwaway and its size would change every
+/// shot).
+pub fn storage_size_cached() -> Option<StorageSize> {
+    static CACHE: std::sync::Mutex<(Option<StorageSize>, Option<std::time::Instant>)> = std::sync::Mutex::new((None, None));
+    if crate::runtime::captures() {
+        return None;
+    }
+    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stale = cache.1.is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(60));
+    if stale {
+        cache.1 = Some(std::time::Instant::now());
+        let dir = support_dir();
+        std::thread::spawn(move || {
+            let measured = StorageSize { total: folder_bytes(&dir), search: crate::search::index_bytes(&dir) };
+            CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).0 = Some(measured);
+        });
+    }
+    cache.0
+}
+
+/// What [`storage_size_cached`] measured, in bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StorageSize {
+    /// Everything under the Baaz folder.
+    pub total: u64,
+    /// `search.db` with its WAL.
+    pub search: u64,
+}
+
+/// The bytes under `dir`, links not followed.
+pub fn folder_bytes(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => folder_bytes(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// `bytes` as a person reads a size: "982 MB", "1.2 GB", "40 KB".
+pub fn human_bytes(bytes: u64) -> String {
+    const KB: f64 = 1000.0;
+    let b = bytes as f64;
+    if b >= KB * KB * KB {
+        format!("{:.1} GB", b / (KB * KB * KB))
+    } else if b >= KB * KB {
+        format!("{:.0} MB", b / (KB * KB))
+    } else if b >= KB {
+        format!("{:.0} KB", b / KB)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
 /// Removes this capture's throwaway store as the capture ends. Tier V makes one
 /// per shot, and 1,079 had piled up before this. Only ever the capture dir:
 /// a capture with its own `BAAZ_STATE_DIR` and every real run are untouched.
