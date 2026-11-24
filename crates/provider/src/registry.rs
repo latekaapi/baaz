@@ -354,12 +354,16 @@ pub struct SessionSpawn {
     pub mcp_servers: Vec<McpServer>,
     /// Whether the person opted in to the CLI's own configured MCP servers.
     pub inherit_owner_mcp: bool,
+    /// The account bills by API key, as the last sign-in probe read it
+    /// (docs/85 10.6): such an account's prompt cache defaults to five
+    /// minutes, so an adapter may ask for longer. `false` when unknown.
+    pub bills_by_key: bool,
 }
 
 impl SessionSpawn {
     /// A spawn as `client` under `state_dir`, with nothing else set.
     pub fn new(client: ConnectInfo, state_dir: PathBuf) -> Self {
-        Self { client, program: None, state_dir, owner_home: None, mcp_servers: Vec::new(), inherit_owner_mcp: false }
+        Self { client, program: None, state_dir, owner_home: None, mcp_servers: Vec::new(), inherit_owner_mcp: false, bills_by_key: false }
     }
 }
 

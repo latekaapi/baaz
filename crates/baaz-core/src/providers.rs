@@ -583,6 +583,10 @@ impl Registry {
             owner_home: std::env::var_os("HOME").map(PathBuf::from),
             mcp_servers: vec![terminal_relay(&self.socket)],
             inherit_owner_mcp: use_own.inherits(id),
+            bills_by_key: crate::provider_status::live_statuses()
+                .iter()
+                .find(|status| status.provider == id)
+                .is_some_and(|status| status.auth.bills_by_key()),
         };
         factory.open(&spawn)
     }

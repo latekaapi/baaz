@@ -92,6 +92,24 @@ pub enum Auth {
     Unknown,
 }
 
+impl Auth {
+    /// A login that bills by API key (`api-key`, `apiKey`, or a reported key
+    /// source), as opposed to a subscription (docs/85 10.6). Unknown reads
+    /// as no.
+    pub fn bills_by_key(&self) -> bool {
+        match self {
+            Auth::SignedIn { method, source, .. } => {
+                source.is_some()
+                    || method.as_deref().is_some_and(|method| {
+                        let method = method.to_ascii_lowercase().replace(['-', '_'], "");
+                        method == "apikey"
+                    })
+            }
+            _ => false,
+        }
+    }
+}
+
 /// What the person should know beyond the headline.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Advisory {
@@ -2066,6 +2084,23 @@ pub fn boot() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// docs/85 10.6: which logins bill by API key.
+    #[test]
+    fn an_api_key_login_bills_by_key() {
+        let signed = |method: Option<&str>, source: Option<&str>| Auth::SignedIn {
+            email: None,
+            plan: None,
+            method: method.map(str::to_owned),
+            source: source.map(str::to_owned),
+        };
+        assert!(signed(Some("api-key"), None).bills_by_key());
+        assert!(signed(Some("apiKey"), None).bills_by_key());
+        assert!(signed(None, Some("ANTHROPIC_API_KEY")).bills_by_key());
+        assert!(!signed(Some("oauth"), None).bills_by_key());
+        assert!(!signed(Some("chatgpt"), None).bills_by_key());
+        assert!(!Auth::Unknown.bills_by_key());
+    }
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::{Duration, Instant};

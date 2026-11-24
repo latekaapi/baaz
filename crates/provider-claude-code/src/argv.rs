@@ -371,6 +371,38 @@ pub fn with_appended_note(mut launch: SessionLaunch, note: &str) -> SessionLaunc
     launch
 }
 
+/// Where the inline Bash output stops (docs/85 10.6): the CLI's own default
+/// is ~30k characters, the setting takes 4,000–128,000; longer output is
+/// saved to a file with a preview, which the agent reads on demand.
+pub const BASH_OUTPUT_MAX_CHARS: u64 = 12_000;
+
+/// The settings every child carries to spend fewer tokens on tool output
+/// (docs/85 10.6). Rides the launch's one `--settings` layer.
+pub fn token_settings() -> serde_json::Map<String, serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    map.insert("bashOutputMaxChars".into(), serde_json::Value::from(BASH_OUTPUT_MAX_CHARS));
+    map
+}
+
+/// Built-in tools Baaz leaves out (docs/85 10.6): `NotebookEdit`, whose
+/// definition costs tokens every turn and which Baaz's sessions never need.
+/// WebFetch and WebSearch stay until the bench (17.2) decides.
+pub const DISALLOWED_TOOLS: &[&str] = &["NotebookEdit"];
+
+/// `--disallowedTools <tools>` on the launch, once.
+pub fn with_token_flags(mut launch: SessionLaunch) -> SessionLaunch {
+    if let Some(at) = launch.argv.iter().position(|arg| arg == "--disallowedTools") {
+        launch.argv.drain(at..(at + 2).min(launch.argv.len()));
+    }
+    launch.argv.push("--disallowedTools".into());
+    launch.argv.push(DISALLOWED_TOOLS.join(","));
+    launch
+}
+
+/// The env that asks for the one-hour prompt cache: set only for an account
+/// that bills by API key (a subscription's main conversation has it already).
+pub const PROMPT_CACHE_TTL_ENV: &str = "CLAUDE_CODE_PROMPT_CACHE_TTL";
+
 /// The first CLI version that reads AGENTS.md through its built-in plugin
 /// (docs/85 10.2).
 pub const AGENTS_MD_VERSION: &str = "2.1.277";

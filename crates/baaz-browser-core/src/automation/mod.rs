@@ -41,6 +41,11 @@ pub struct TabAgent {
     pub domains_on: bool,
     /// The last screenshot's hash, for `if_changed`.
     pub last_shot: Option<u64>,
+    /// Page CSS pixels per pixel of the last viewport screenshot (docs/85
+    /// 10.6): `browser_act`'s `x`, `y` are read in that picture's pixels
+    /// and scaled back by this. `None` until a viewport shot is taken (a
+    /// full-page or element shot is not the viewport and leaves it).
+    pub shot_scale: Option<f64>,
     /// Which document [`Self::refs`] belongs to ([`PageLog::documents`]).
     pub refs_document: u64,
     /// Whether this tab is one of the person's own, used by the agent

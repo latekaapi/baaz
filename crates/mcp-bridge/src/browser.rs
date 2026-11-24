@@ -89,7 +89,8 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
             with_tab(json!({"type": "object", "required": ["action"], "properties": {
                 "action": {"type": "string", "enum": ["click", "type", "fill", "press", "hover", "select", "scroll", "drag"]},
                 "ref": {"type": "string", "description": "A ref from browser_snapshot, such as e12."},
-                "x": {"type": "number"}, "y": {"type": "number"},
+                "x": {"type": "number", "description": "In the pixels of your last browser_screenshot of the viewport."},
+                "y": {"type": "number", "description": "In the pixels of your last browser_screenshot of the viewport."},
                 "text": {"type": "string", "description": "For type and fill. Fill replaces what is there."},
                 "key": {"type": "string", "description": "For press: Enter, Tab, Escape, Backspace, an arrow, or a character."},
                 "value": {"type": "string", "description": "For select."},

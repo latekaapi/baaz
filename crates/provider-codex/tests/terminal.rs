@@ -79,7 +79,7 @@ fn with_the_switch_on_no_disables_but_the_bridge() {
     adapter.set_terminal_relay(relay());
     adapter.set_use_own_mcp(true);
     let extra = adapter.spawn_args_for("cmd-open");
-    assert_eq!(extra.len(), 8, "bridge only (command, args, token env) plus the CLAUDE.md fallback: {extra:?}");
+    assert_eq!(extra.len(), 10, "bridge only (command, args, token env) plus the CLAUDE.md fallback and the tool-output limit: {extra:?}");
     assert!(extra[1].starts_with("mcp_servers.baaz.command="));
     assert!(extra[3].contains("\"--session\",\"cmd-open\""));
     assert!(
@@ -90,5 +90,9 @@ fn with_the_switch_on_no_disables_but_the_bridge() {
     // CLAUDE.md fallback (docs/85 10.2), which every child carries.
     let bare = CodexAdapter::new("codex-must-never-spawn");
     bare.set_use_own_mcp(true);
-    assert_eq!(bare.spawn_args_for("cmd-open"), provider_codex::claude_md_fallback(), "opted in, no relay: bare");
+    assert_eq!(
+        bare.spawn_args_for("cmd-open"),
+        [provider_codex::claude_md_fallback(), provider_codex::tool_output_limit()].concat(),
+        "opted in, no relay: bare"
+    );
 }

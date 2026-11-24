@@ -165,6 +165,9 @@ pub struct ClaudeCodeAdapter {
     /// servers ride beside it ([`Self::set_owner_mcp_source`]). Applies to
     /// sessions started after the change.
     use_own_mcp: Mutex<bool>,
+    /// The account bills by API key (docs/85 10.6): its children ask for
+    /// the one-hour prompt cache a subscription already has.
+    bills_by_key: Mutex<bool>,
     /// The person's `~/.claude.json`, read (never written) at each launch
     /// while [`Self::use_own_mcp`] is on: Claude Code runs under Baaz's own
     /// `CLAUDE_CONFIG_DIR`, whose `.claude.json` is not that file, so the
@@ -372,6 +375,7 @@ impl ClaudeCodeAdapter {
             version: Mutex::new(None),
             terminal: Mutex::new(None),
             use_own_mcp: Mutex::new(false),
+            bills_by_key: Mutex::new(false),
             owner_mcp_source: Mutex::new(None),
             interrupt_grace: INTERRUPT_GRACE,
         }
@@ -385,6 +389,12 @@ impl ClaudeCodeAdapter {
     /// owner's own servers).
     pub fn set_terminal_relay(&self, relay: TerminalRelay) {
         *self.terminal.lock().expect("terminal mutex") = Some(relay);
+    }
+
+    /// Whether the account bills by API key, as the app's last sign-in
+    /// probe read it (docs/85 10.6).
+    pub fn set_bills_by_key(&self, bills_by_key: bool) {
+        *self.bills_by_key.lock().expect("bills mutex") = bills_by_key;
     }
 
     /// Let the session inherit the owner's own MCP servers and
@@ -1101,7 +1111,12 @@ impl ClaudeCodeAdapter {
         if reads_agents_md {
             extra.extend(argv::agents_md_settings());
         }
-        let launch = argv::with_settings(launch, extra);
+        extra.extend(argv::token_settings());
+        let mut launch = argv::with_token_flags(argv::with_settings(launch, extra));
+        if *self.bills_by_key.lock().expect("bills mutex") {
+            launch.env.retain(|(key, _)| key != argv::PROMPT_CACHE_TTL_ENV);
+            launch.env.push((argv::PROMPT_CACHE_TTL_ENV.to_owned(), "1h".to_owned()));
+        }
         let note = self.note_for(&launch.session_id, cwd.as_deref().filter(|_| !reads_agents_md));
         argv::with_appended_note(launch, &note)
     }
@@ -3271,6 +3286,32 @@ mod tests {
         assert!(!note_of(&spawned).contains("make check"));
         std::fs::remove_file(repo.join("CLAUDE.md")).expect("rm");
         assert_eq!(listing(&repo), before, "nothing is written in the repo");
+    }
+
+    /// docs/85 10.6: every spawn carries the token settings — Bash output
+    /// cut inline at 12,000 characters, NotebookEdit left out — and only an
+    /// account that bills by API key asks for the one-hour prompt cache.
+    #[test]
+    fn every_spawn_carries_the_token_settings() {
+        let root = scratch_dir("token-settings");
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn").with_config_dir(root.join("home"));
+        let launch = || argv::argv_for_resume("sess-tokens", None, None, None);
+        let spawned = adapter.with_session_settings(launch());
+        let settings = argv::settings_on(&spawned).expect("a settings layer");
+        assert_eq!(settings["bashOutputMaxChars"], serde_json::json!(12_000));
+        let at = spawned.argv.iter().position(|arg| arg == "--disallowedTools").expect("--disallowedTools");
+        assert_eq!(spawned.argv[at + 1], "NotebookEdit");
+        assert_eq!(spawned.argv.iter().filter(|arg| *arg == "--disallowedTools").count(), 1);
+        assert!(!spawned.env.iter().any(|(key, _)| key == argv::PROMPT_CACHE_TTL_ENV), "a subscription has it already");
+        adapter.set_bills_by_key(true);
+        let spawned = adapter.with_session_settings(adapter.with_session_settings(launch()));
+        assert_eq!(
+            spawned.env.iter().filter(|(key, value)| key == argv::PROMPT_CACHE_TTL_ENV && value == "1h").count(),
+            1,
+            "{:?}",
+            spawned.env
+        );
+        assert_eq!(spawned.argv.iter().filter(|arg| *arg == "--disallowedTools").count(), 1, "once, however often built");
     }
 
     /// docs/82 6.2: `ResumeSession.env` reaches the resumed child too — a

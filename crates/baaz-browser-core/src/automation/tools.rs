@@ -183,8 +183,11 @@ async fn point_of(ctx: &Ctx, node: Option<i64>, params: &Value) -> Result<(f64, 
         let y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4.0;
         return Ok((x, y));
     }
+    // x, y are read off the last viewport screenshot, which was shrunk:
+    // scaled back to the page's own pixels (docs/85 10.6).
+    let scale = ctx.tab.borrow().shot_scale.unwrap_or(1.0);
     match (params.get("x").and_then(Value::as_f64), params.get("y").and_then(Value::as_f64)) {
-        (Some(x), Some(y)) => Ok((x, y)),
+        (Some(x), Some(y)) => Ok((x * scale, y * scale)),
         _ => Err(String::from("this action needs a ref, or x and y")),
     }
 }
@@ -506,10 +509,26 @@ pub async fn screenshot(ctx: Ctx, params: Value) -> Result<Value, String> {
         let size = metrics.get("cssContentSize").cloned().unwrap_or(Value::Null);
         request["clip"] = json!({"x": 0, "y": 0, "width": size["width"], "height": size["height"], "scale": 1});
     }
+    let viewport = request.get("clip").is_none();
     let answer = ctx.call("Page.captureScreenshot", request).await?;
-    let data = answer.get("data").and_then(Value::as_str).unwrap_or_default();
-    if data.is_empty() {
+    let captured = answer.get("data").and_then(Value::as_str).unwrap_or_default();
+    if captured.is_empty() {
         return Err(String::from("the page returned no image"));
+    }
+    // Downscaled to SHOT_LONG_EDGE (docs/85 10.6): a Retina viewport is
+    // ~2,560 px across and costs the model several times the tokens for
+    // detail it does not use.
+    let (data, width) = match downscale_png(captured, SHOT_LONG_EDGE) {
+        Some((data, width)) => (data, Some(width)),
+        None => (captured.to_owned(), png_width(captured)),
+    };
+    let data = data.as_str();
+    if viewport {
+        let css_width = evaluate(&ctx, "return window.innerWidth").await.ok().and_then(|value| value.as_f64());
+        ctx.tab.borrow_mut().shot_scale = match (css_width, width) {
+            (Some(css), Some(px)) if css > 0.0 && px > 0 => Some(css / px as f64),
+            _ => None,
+        };
     }
     let hash = {
         use std::hash::{Hash, Hasher};
@@ -548,6 +567,35 @@ pub fn file_url(path: &std::path::Path) -> String {
         }
     }
     url
+}
+
+/// The longest edge an agent screenshot keeps, in pixels (docs/85 10.6).
+pub const SHOT_LONG_EDGE: u32 = 1400;
+
+/// A base64 PNG shrunk so its longest edge is at most `long_edge`, and its
+/// new width. `None` when it is already small enough or does not decode.
+pub fn downscale_png(data: &str, long_edge: u32) -> Option<(String, u32)> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+    let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).ok()?;
+    let (width, height) = (image.width(), image.height());
+    if width.max(height) <= long_edge {
+        return None;
+    }
+    let scale = f64::from(long_edge) / f64::from(width.max(height));
+    let (new_w, new_h) = (((f64::from(width) * scale).round() as u32).max(1), ((f64::from(height) * scale).round() as u32).max(1));
+    let small = image.resize_exact(new_w, new_h, image::imageops::FilterType::Triangle);
+    let mut out = std::io::Cursor::new(Vec::new());
+    small.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    Some((base64::engine::general_purpose::STANDARD.encode(out.into_inner()), new_w))
+}
+
+/// A base64 PNG's width, from its header: the first 24 bytes are the first
+/// 32 base64 characters, and the width is bytes 16..20 (big-endian).
+fn png_width(data: &str) -> Option<u32> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data.get(..32)?).ok()?;
+    (&bytes[1..4] == b"PNG").then(|| u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]))
 }
 
 /// Where agent screenshots are kept, under the support dir. Not the
@@ -1043,6 +1091,38 @@ mod tests {
         assert_eq!(second.unwrap()["unchanged"], true);
         let (_, third) = run_job(Job::new(agent, |ctx| screenshot(ctx, json!({}))), image);
         assert_eq!(third.unwrap()["image_base64"], "QUJD");
+    }
+
+    /// docs/85 10.6: a Retina-sized viewport shot comes back with its long
+    /// edge at 1,400 px, and a click at a point read off that picture lands
+    /// on the page where the picture showed it: a button drawn at
+    /// (700, 400) in a 1,400-px-wide shot of a 1,280-CSS-px page is at
+    /// (640, 365.7) on the page.
+    #[test]
+    fn a_shot_is_downscaled_and_a_click_on_it_lands_where_it_showed() {
+        use base64::Engine as _;
+        let big = image::DynamicImage::new_rgb8(2560, 1600);
+        let mut png = std::io::Cursor::new(Vec::new());
+        big.write_to(&mut png, image::ImageFormat::Png).expect("png");
+        let data = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
+        let agent = tab();
+        let viewport = move |method: &str, params: &Value| match method {
+            "Page.captureScreenshot" => Ok(json!({"data": data.clone()})),
+            "Runtime.evaluate" => Ok(json!({"result": {"value": 1280}})),
+            _ => page(method, params),
+        };
+        let (_, shot) = run_job(Job::new(agent.clone(), |ctx| screenshot(ctx, json!({}))), viewport);
+        let shot = shot.expect("a shot");
+        let bytes = base64::engine::general_purpose::STANDARD.decode(shot["image_base64"].as_str().unwrap()).unwrap();
+        let small = image::load_from_memory(&bytes).expect("decodes");
+        assert_eq!((small.width(), small.height()), (1400, 875), "the long edge is 1,400 px");
+        let (calls, _) = run_job(Job::new(agent, |ctx| act(ctx, json!({"action": "click", "x": 700.0, "y": 400.0}))), page);
+        let pressed = calls
+            .iter()
+            .find(|(method, params)| method == "Input.dispatchMouseEvent" && params["type"] == "mousePressed")
+            .expect("a press");
+        assert!((pressed.1["x"].as_f64().unwrap() - 640.0).abs() < 1e-9, "{:?}", pressed.1);
+        assert!((pressed.1["y"].as_f64().unwrap() - 400.0 * 1280.0 / 1400.0).abs() < 1e-9, "{:?}", pressed.1);
     }
 
     #[test]

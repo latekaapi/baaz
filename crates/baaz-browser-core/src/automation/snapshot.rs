@@ -94,7 +94,9 @@ fn states_of(node: &Value) -> Vec<String> {
         let name = property.get("name").and_then(Value::as_str).unwrap_or("");
         let value = property.pointer("/value/value");
         match name {
-            "disabled" | "checked" | "expanded" | "selected" | "pressed" | "required" | "invalid" | "focused" => {
+            // What changes what an action does. Not `focused`: a hint the
+            // agent never acts on (docs/85 10.6).
+            "disabled" | "checked" | "expanded" | "selected" | "pressed" | "required" | "invalid" => {
                 let on = match value {
                     Some(Value::Bool(on)) => *on,
                     Some(Value::String(word)) => word != "false",
@@ -170,7 +172,22 @@ impl<'a> Walk<'a, '_> {
         let inside = in_scope || scope.is_none() || (node.backend.is_some() && node.backend == scope);
         let role = node.role;
         let actionable = INTERACTIVE.contains(&role);
-        let invisible = node.ignored || TRANSPARENT.contains(&role);
+        // A container with no name says nothing of its own (a list, a list
+        // item, `main`, a form): its children take its place (docs/85 10.6).
+        let nameless_container = !actionable && role != "StaticText" && node.name.trim().is_empty() && node.value.is_none();
+        let invisible = node.ignored || TRANSPARENT.contains(&role) || nameless_container;
+        // A table row is one line: its cells' words joined by `|`, with any
+        // control in it inline (docs/85 10.6).
+        if inside && !invisible && role == "row" && !self.interactive {
+            let mut cells = Vec::new();
+            for child in &node.children {
+                let mut words = Vec::new();
+                self.inline(child, map, &mut words);
+                cells.push(words.join(" "));
+            }
+            self.out.push(format!("{}- row: {}", "  ".repeat(depth), cells.join(" | ")));
+            return;
+        }
         // A label's own text repeats its name: the same words twice cost tokens.
         let is_text = role == "StaticText";
         let repeats_parent = is_text && node.name.trim() == parent_name.trim();
@@ -178,7 +195,8 @@ impl<'a> Walk<'a, '_> {
         if inside && !invisible {
             let show = if self.interactive { actionable } else { !repeats_parent && (!is_text || !node.name.trim().is_empty()) };
             if show && (actionable || !node.name.trim().is_empty() || !is_text) {
-                let mut line = format!("{}- {role}", "  ".repeat(depth));
+                // Text is just its words; anything else says its role.
+                let mut line = if is_text { format!("{}-", "  ".repeat(depth)) } else { format!("{}- {role}", "  ".repeat(depth)) };
                 let name = one_line(node.name, 200);
                 if !name.is_empty() {
                     line.push_str(&format!(" {}", serde_json::Value::String(name)));
@@ -189,7 +207,8 @@ impl<'a> Walk<'a, '_> {
                 for state in &node.states {
                     line.push_str(&format!(" [{state}]"));
                 }
-                if let Some(backend) = node.backend.filter(|_| !is_text) {
+                // Refs only where the agent can act (docs/85 10.6).
+                if let Some(backend) = node.backend.filter(|_| actionable) {
                     line.push_str(&format!(" [ref={}]", self.refs.ref_for(backend)));
                 }
                 self.out.push(line);
@@ -212,6 +231,39 @@ impl<'a> Walk<'a, '_> {
         let children = node.children.clone();
         for child in children {
             self.node(child, child_depth, map, inside, scope, node.name);
+        }
+    }
+}
+
+impl<'a> Walk<'a, '_> {
+    /// One cell's content on a row's line: a control as `role "name"
+    /// [ref=eN]`, text as its words, everything else by its children.
+    fn inline(&mut self, id: &'a str, map: &'a HashMap<&'a str, Node<'a>>, words: &mut Vec<String>) {
+        if !self.seen.insert(id) {
+            return;
+        }
+        let Some(node) = map.get(id) else { return };
+        if node.ignored {
+            return;
+        }
+        if INTERACTIVE.contains(&node.role) {
+            let mut word = format!("{} {}", node.role, serde_json::Value::String(one_line(node.name, 80)));
+            if let Some(backend) = node.backend {
+                word.push_str(&format!(" [ref={}]", self.refs.ref_for(backend)));
+            }
+            words.push(word);
+            return;
+        }
+        if node.role == "StaticText" {
+            let text = one_line(node.name, 120);
+            if !text.is_empty() {
+                words.push(text);
+            }
+            return;
+        }
+        let children = node.children.clone();
+        for child in children {
+            self.inline(child, map, words);
         }
     }
 }
@@ -366,6 +418,117 @@ mod tests {
         ]
     }
 
+    /// A docs-like page built the way Chrome's AX tree shapes one: a nav
+    /// list of links, headings and paragraphs, a 15-row table whose first
+    /// column links, and a short form. The 10.6 size fixture.
+    fn docs_page() -> Vec<Value> {
+        let mut nodes = Vec::new();
+        let mut next = 100i64;
+        let mut id = || {
+            next += 1;
+            next
+        };
+        let mut kids_of_root = Vec::new();
+        let mut push = |nodes: &mut Vec<Value>, n: i64, role: &str, name: &str, kids: Vec<i64>, parent: i64, props: Option<Value>| {
+            let kids: Vec<String> = kids.iter().map(|k| k.to_string()).collect();
+            let kid_refs: Vec<&str> = kids.iter().map(String::as_str).collect();
+            let parent = parent.to_string();
+            let mut v = node(&n.to_string(), role, name, n, &kid_refs, Some(&parent));
+            if let Some(props) = props {
+                v["properties"] = props;
+            }
+            nodes.push(v);
+        };
+        // Nav: list > 12 listitem > link > StaticText.
+        let nav = id();
+        let list = id();
+        let mut items = Vec::new();
+        for i in 0..12 {
+            let item = id();
+            let link = id();
+            let text = id();
+            let label = format!("Guide section {i}");
+            push(&mut nodes, text, "StaticText", &label, vec![], link, None);
+            push(&mut nodes, link, "link", &label, vec![text], item, None);
+            push(&mut nodes, item, "listitem", "", vec![link], list, None);
+            items.push(item);
+        }
+        push(&mut nodes, list, "list", "", items, nav, None);
+        push(&mut nodes, nav, "navigation", "Docs", vec![list], 1, None);
+        kids_of_root.push(nav);
+        // Main: headings and paragraphs.
+        let main = id();
+        let mut main_kids = Vec::new();
+        for i in 0..6 {
+            let heading = id();
+            let htext = id();
+            let label = format!("Topic {i}");
+            push(&mut nodes, htext, "StaticText", &label, vec![], heading, Some(json!([{"name": "level", "value": {"value": 2}}])));
+            push(&mut nodes, heading, "heading", &label, vec![htext], main, None);
+            let para = id();
+            let ptext = id();
+            push(&mut nodes, ptext, "StaticText", "Every request carries a token; the service refuses one without it before anything is queued.", vec![], para, None);
+            push(&mut nodes, para, "paragraph", "", vec![ptext], main, None);
+            main_kids.push(heading);
+            main_kids.push(para);
+        }
+        // Table: 15 rows x 4 cells, the first linked.
+        let table = id();
+        let mut rows = Vec::new();
+        for r in 0..15 {
+            let row = id();
+            let mut cells = Vec::new();
+            for c in 0..4 {
+                let cell = id();
+                let text = id();
+                let label = format!("r{r}c{c} value");
+                push(&mut nodes, text, "StaticText", &label, vec![], cell, None);
+                if c == 0 {
+                    let link = id();
+                    push(&mut nodes, link, "link", &label, vec![text], cell, None);
+                    push(&mut nodes, cell, "cell", &label, vec![link], row, None);
+                } else {
+                    push(&mut nodes, cell, "cell", &label, vec![text], row, None);
+                }
+                cells.push(cell);
+            }
+            push(&mut nodes, row, "row", &format!("r{r}c0 value r{r}c1 value r{r}c2 value r{r}c3 value"), cells, table, None);
+            rows.push(row);
+        }
+        push(&mut nodes, table, "table", "Results", rows, main, None);
+        main_kids.push(table);
+        // Form.
+        let form = id();
+        let mut fields = Vec::new();
+        for label in ["Name", "Email", "Message"] {
+            let field = id();
+            push(&mut nodes, field, "textbox", label, vec![], form, Some(json!([{"name": "focusable", "value": {"value": true}}, {"name": "editable", "value": {"value": "plaintext"}}, {"name": "focused", "value": {"value": label == "Name"}}])));
+            fields.push(field);
+        }
+        let send = id();
+        push(&mut nodes, send, "button", "Send", vec![], form, None);
+        fields.push(send);
+        push(&mut nodes, form, "form", "", fields, main, None);
+        main_kids.push(form);
+        push(&mut nodes, main, "main", "", main_kids, 1, None);
+        kids_of_root.push(main);
+        let kids: Vec<String> = kids_of_root.iter().map(|k| k.to_string()).collect();
+        let kid_refs: Vec<&str> = kids.iter().map(String::as_str).collect();
+        nodes.insert(0, node("1", "RootWebArea", "Docs", 1, &kid_refs, None));
+        nodes
+    }
+
+    /// docs/85 10.6: the snapshot of a docs-like page, measured. Before the
+    /// compact form this page took BEFORE_CHARS characters.
+    #[test]
+    fn a_docs_page_snapshot_is_compact() {
+        const BEFORE_CHARS: usize = 5_684;
+        let mut refs = RefTable::default();
+        let rendered = snap(&docs_page(), &mut refs, SnapshotOptions { max_chars: 1_000_000, ..SnapshotOptions::default() });
+        eprintln!("docs page snapshot: {} chars\n{}", rendered.text.len(), rendered.text.lines().take(60).collect::<Vec<_>>().join("\n"));
+        assert!(BEFORE_CHARS == 0 || rendered.text.len() * 10 <= BEFORE_CHARS * 6, "{} vs {BEFORE_CHARS}: down at least 40%", rendered.text.len());
+    }
+
     fn snap(nodes: &[Value], refs: &mut RefTable, options: SnapshotOptions) -> Rendered {
         render(&[FrameTree { nodes, owner: None }], refs, &options)
     }
@@ -376,11 +539,12 @@ mod tests {
         let shot = snap(&page(), &mut refs, SnapshotOptions::default());
         assert_eq!(
             shot.lines,
+            // Refs only where the agent can act (docs/85 10.6).
             vec![
-                "- heading \"Your cart\" [ref=e1]",
-                "- textbox \"Card number\" [ref=e2]",
-                "- button \"Pay €97\" [ref=e3]",
-                "- link \"Back\" [ref=e4]",
+                "- heading \"Your cart\"",
+                "- textbox \"Card number\" [ref=e1]",
+                "- button \"Pay €97\" [ref=e2]",
+                "- link \"Back\" [ref=e3]",
             ]
         );
     }
@@ -402,20 +566,27 @@ mod tests {
         more[0]["childIds"] = json!(["9", "2", "3", "4", "5"]);
         more.push(node("9", "button", "Coupon", 90, &[], Some("1")));
         let second = snap(&more, &mut refs, SnapshotOptions::default());
-        assert!(second.text.contains("\"Coupon\" [ref=e5]"), "{}", second.text);
-        assert!(second.text.contains("\"Pay €97\" [ref=e3]"), "the old ref holds: {}", second.text);
-        assert_eq!(refs.node_for("e3"), Some(4));
-        assert_eq!(refs.node_for("[ref=e3]"), Some(4));
+        assert!(second.text.contains("\"Coupon\" [ref=e4]"), "{}", second.text);
+        assert!(second.text.contains("\"Pay €97\" [ref=e2]"), "the old ref holds: {}", second.text);
+        assert_eq!(refs.node_for("e2"), Some(4));
+        assert_eq!(refs.node_for("[ref=e2]"), Some(4));
         assert_eq!(refs.node_for("e99"), None);
-        assert_eq!(diff(&first.lines, &second.lines), vec!["+ button \"Coupon\" [ref=e5]"]);
+        assert_eq!(diff(&first.lines, &second.lines), vec!["+ button \"Coupon\" [ref=e4]"]);
     }
 
     #[test]
     fn scope_limits_to_a_subtree() {
+        let mut nodes = page();
+        nodes[0]["childIds"] = json!(["2", "3", "4", "5", "8"]);
+        nodes.push(node("8", "listbox", "Size", 8, &["81", "82"], Some("1")));
+        nodes.push(node("81", "option", "Small", 81, &[], Some("8")));
+        nodes.push(node("82", "option", "Large", 82, &[], Some("8")));
         let mut refs = RefTable::default();
-        snap(&page(), &mut refs, SnapshotOptions::default());
-        let shot = snap(&page(), &mut refs, SnapshotOptions { scope: Some("e1".into()), ..Default::default() });
-        assert_eq!(shot.lines, vec!["- heading \"Your cart\" [ref=e1]"]);
+        snap(&nodes, &mut refs, SnapshotOptions::default());
+        let listbox = refs.ref_for(8);
+        let shot = snap(&nodes, &mut refs, SnapshotOptions { scope: Some(listbox.clone()), ..Default::default() });
+        assert_eq!(shot.lines.len(), 3, "the listbox and its two options: {:?}", shot.lines);
+        assert!(shot.lines[0].starts_with("- listbox \"Size\""), "{:?}", shot.lines);
     }
 
     #[test]

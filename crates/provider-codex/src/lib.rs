@@ -140,6 +140,16 @@ pub struct TerminalRelay {
     pub socket: std::path::PathBuf,
 }
 
+/// The token budget Codex keeps of each tool's output in the thread
+/// (docs/85 10.6): about the size of Claude's 12,000-character Bash cap.
+pub const TOOL_OUTPUT_TOKEN_LIMIT: u32 = 3000;
+
+/// `-c tool_output_token_limit=3000` (accepted by `app-server`, probed
+/// live 25 Nov 2026, docs/85-evidence/10.6). On the argv (rule 26).
+pub fn tool_output_limit() -> [String; 2] {
+    ["-c".to_owned(), format!("tool_output_token_limit={TOOL_OUTPUT_TOKEN_LIMIT}")]
+}
+
 /// `-c project_doc_fallback_filenames=["CLAUDE.md"]`: Codex reads a repo's
 /// CLAUDE.md when it has no AGENTS.md (docs/85 10.2). Never creates a file.
 pub fn claude_md_fallback() -> [String; 2] {
@@ -325,6 +335,7 @@ impl CodexAdapter {
         // there (probed live 25 Nov 2026, docs/85-evidence/10.2). On the
         // argv, never in the linked config.toml (rule 26).
         args.extend(claude_md_fallback());
+        args.extend(tool_output_limit());
         if !use_own {
             args.extend(crate::terminal::disable_overrides(
                 crate::terminal::inherited_servers().iter().map(String::as_str),
