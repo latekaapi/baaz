@@ -937,6 +937,9 @@ fn main() {
     // nothing behind).
     crate::log::init_file_log(&crate::store::support_dir());
     crate::log::init_forward();
+    // A panic leaves a report in `<state>/crashes/` (docs/82 9.5); nothing
+    // is ever sent.
+    baaz_core::crash::install_panic_hook(crate::store::support_dir());
     // One Baaz per state directory (docs/81 B D-4): a second launch on the
     // same directory brings the first forward and leaves, before it reads or
     // writes any store. `--print-tier` and `--bench` write no store and are

@@ -234,6 +234,8 @@ actions!(
         ShowAbout,
         /// Reveal the docs folder in Finder.
         ShowDocs,
+        /// Help → Show Logs: Baaz's log folder in Finder (docs/82 9.5).
+        ShowLogs,
         /// Undo (Edit menu, for OS recognition; the focused field owns the keys).
         EditUndo,
         /// Redo (Edit menu, for OS recognition; the focused field owns the keys).
@@ -541,6 +543,7 @@ pub fn set_menus(cx: &mut App) {
         ]),
         gpui::Menu::new("Help").items([
             gpui::MenuItem::action("Baaz Documentation", ShowDocs),
+            gpui::MenuItem::action("Show Logs", ShowLogs),
         ]),
     ]);
 }
@@ -1253,6 +1256,8 @@ impl Harness {
         cx.defer(move |cx| {
             migration_harness.update(cx, |harness, cx| {
                 harness.maybe_offer_session_migration(cx);
+                // Baaz quit unexpectedly last time: say so once (9.5).
+                harness.check_last_crash(cx);
             });
         });
         crate::log::boot_mark("harness-new-done");
@@ -4870,6 +4875,12 @@ impl Render for Harness {
                 // (`normalize_settings_target`). Never a toggle.
                 .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.open_settings_page("", cx)))
                 .on_action(cx.listener(|this, _: &ShowDocs, _, _| this.show_docs()))
+                .on_action(cx.listener(|_, _: &ShowLogs, _, _| {
+                    // The current log, selected in its folder; nothing is sent.
+                    if !crate::runtime::captures() {
+                        crate::open_in::reveal_folder(crate::store::support_dir().join("logs").join(crate::log::LOG_FILE));
+                    }
+                }))
                 .on_action(cx.listener(|this, _: &aui::keys::TogglePalette, _, cx| {
                     this.open_palette(PaletteKind::Commands, cx)
                 }))

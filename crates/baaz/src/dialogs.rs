@@ -970,6 +970,13 @@ impl Harness {
             self.clear_prompt_history_now(cx);
             return;
         }
+        if action == DialogAction::RevealCrash {
+            self.close_dialog(cx);
+            if let Some(report) = target.as_deref().filter(|_| !crate::runtime::captures()) {
+                crate::open_in::reveal_folder(std::path::PathBuf::from(report));
+            }
+            return;
+        }
         // The transcript's paths rode the dialog: only this button moves
         // them, and only to the Trash.
         if action == DialogAction::TrashTranscript {
@@ -1031,6 +1038,7 @@ impl Harness {
             | DialogAction::DeleteSpace
             | DialogAction::ClearHistory
             | DialogAction::ClearPromptHistory
+            | DialogAction::RevealCrash
             | DialogAction::SpaceSignIns
             | DialogAction::TrashTranscript
             | DialogAction::DeleteSession
@@ -1086,7 +1094,75 @@ impl Harness {
         Ok(())
     }
 
-    /// Baaz → About Baaz.
+    /// The one-time notice after Baaz quit unexpectedly (docs/82 9.5): off
+    /// the UI thread, macOS's own report of a native crash is copied in, and
+    /// the newest report the person has not been told of raises a dialog
+    /// whose primary shows it in Finder. Told once (`crash::mark_seen`);
+    /// Settings › Data keeps it with Copy. Never in a test or a capture.
+    pub(crate) fn check_last_crash(&mut self, cx: &mut Context<Self>) {
+        if cfg!(all(test, feature = "probe")) || crate::runtime::captures() {
+            return;
+        }
+        let state = crate::store::support_dir();
+        crate::baaz_log!("crash: looking for a report Baaz has not told of");
+        let work = move || {
+            if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+                baaz_core::crash::collect_system_reports(&state, &home.join("Library/Logs/DiagnosticReports"));
+            }
+            let unseen = baaz_core::crash::unseen(&state);
+            if let Some(report) = &unseen {
+                baaz_core::crash::mark_seen(&state, report);
+            }
+            unseen
+        };
+        self.wire_call(cx, work, |this: &mut Self, unseen, cx| {
+            let Some(report) = unseen else { return };
+            crate::baaz_log!("crash: told of {}", report.display());
+            this.show_crash_notice(&report, cx);
+        });
+    }
+
+    /// The notice itself: "Show report" reveals `report` in Finder.
+    pub(crate) fn show_crash_notice(&mut self, report: &std::path::Path, cx: &mut Context<Self>) {
+        self.set_dialog(
+            cx,
+            Dialog {
+                title: "Baaz quit unexpectedly".into(),
+                detail: "Its report is kept on this Mac; nothing was sent anywhere. Settings \u{203a} Data keeps the last one, with Copy, if you want to pass it on.".into(),
+                kind: DialogKind::Info,
+                primary: "Show report",
+                action: DialogAction::RevealCrash,
+                archive_target: Some(report.to_string_lossy().into_owned()),
+            },
+        );
+    }
+
+    #[cfg(feature = "probe")]
+    /// `crash-fixture` / `crash-fixture:notice`: capture aid (docs/82 9.5).
+    /// Writes a fixed crash report into this run's state dir (dated 1 Nov
+    /// 2026, 09:30, so the Data row reads the same in every shot); `notice`
+    /// also raises the one-time notice through the production path. Free.
+    pub(crate) fn step_crash_fixture(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let state = crate::store::support_dir();
+        let Some(report) = baaz_core::crash::write_panic_report(&state, "a fixture crash", "src/fixture.rs:1", "(no frames)") else {
+            return Err("crash-fixture: could not write the report".into());
+        };
+        let fixed = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_525_400);
+        if let Ok(file) = std::fs::File::options().write(true).open(&report) {
+            let _ = file.set_modified(fixed);
+        }
+        match rest {
+            "" => Ok(()),
+            "notice" => {
+                self.show_crash_notice(&report, cx);
+                Ok(())
+            }
+            other => Err(format!("crash-fixture: unknown payload {other:?} (empty or notice)")),
+        }
+    }
+
+    /// Baaz → About Baaz. Names the web engine the bundle carries (docs/82
+    /// 9.4): Baaz refuses nothing over its age, it only says which it is.
     pub(crate) fn show_about(&mut self, cx: &mut Context<Self>) {
         self.set_dialog(
             cx,

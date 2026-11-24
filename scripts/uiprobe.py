@@ -527,6 +527,15 @@ ENTRIES = {
     # clears nothing. Offline, idempotent.
     "settings-data":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "settings:data"]},
+    # docs/82 9.5: Settings › Data with a crash report kept — the "Last crash
+    # report" row with Copy and Reveal (a fixture report dated 1 Nov 2026,
+    # 09:30). Offline, idempotent; nothing is clicked.
+    "settings-data-crash":  {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "crash-fixture;settings:data"]},
+    # docs/82 9.5: the one-time notice after Baaz quit unexpectedly, raised
+    # through the production dialog path. Offline, idempotent.
+    "crash-notice":         {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "crash-fixture:notice"]},
     # Settings › Appearance (task 2.9): the theme choice and the summary
     # line. `-light` switches the theme by the page's own setter
     # (`settings-set:theme=light`), not by `--theme`, so it proves the live

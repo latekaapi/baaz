@@ -606,6 +606,8 @@ pub(crate) struct SettingsFacts {
     pub history_pages: u64,
     /// Data: what the Baaz folder holds on disk, once measured.
     pub storage: Option<baaz_core::store::StorageSize>,
+    /// Data: the newest crash report kept, when there is one (docs/82 9.5).
+    pub last_crash: Option<std::path::PathBuf>,
     /// Browser › Your data: the sites history never records.
     pub excluded_sites: Vec<String>,
     /// Browser › Site permissions and a site's page: every site's kept
@@ -2189,8 +2191,39 @@ impl SettingsPage {
                 )
                 .into_any_element(),
         ];
+        // The last crash report, when Baaz kept one (docs/82 9.5): shown in
+        // Finder or copied to pass on. Nothing is ever sent.
+        let mut where_rows = vec![place];
+        if let Some(report) = self.facts.last_crash.clone() {
+            let when = std::fs::metadata(&report)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .map(|at| chrono::DateTime::<chrono::Local>::from(at).format("%-d %b %Y, %H:%M").to_string())
+                .unwrap_or_default();
+            let reveal_report = report.clone();
+            let reveal = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, _| {
+                if !crate::runtime::captures() {
+                    crate::open_in::reveal_folder(reveal_report.clone());
+                }
+            });
+            let copy = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                let text = std::fs::read_to_string(&report).unwrap_or_default();
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            });
+            where_rows.push(
+                settings_row("Last crash report")
+                    .description(format!("{when} \u{b7} kept on this Mac, never sent"))
+                    .control(
+                        h_flex()
+                            .gap(px(scale::SP_2))
+                            .child(button("settings-crash-copy", "Copy").accessibility_label("Copy the last crash report").on_click(copy))
+                            .child(button("settings-crash-reveal", "Reveal").accessibility_label("Reveal the last crash report in Finder").on_click(reveal)),
+                    )
+                    .into_any_element(),
+            );
+        }
         settings_sections_stack()
-            .child(section("Where it lives").rows(vec![place]).note(
+            .child(section("Where it lives").rows(where_rows).note(
                 "baaz.db holds sessions, prompt history and usage; layout.json your settings; projects.json your projects; \
                  Browser/browser.db the browser's history, bookmarks and site settings; search.db the search index. \
                  Providers keep their transcripts in their own folders.",
@@ -2956,6 +2989,7 @@ impl Harness {
             "data" => {
                 facts.history_pages = self.browser.read(cx).data.read(cx).history_len();
                 facts.storage = baaz_core::store::storage_size_cached();
+                facts.last_crash = baaz_core::crash::latest(&crate::store::support_dir());
             }
             "browser" => {
                 facts.default_browser = self.default_browser_handler(cx).map(str::to_owned);

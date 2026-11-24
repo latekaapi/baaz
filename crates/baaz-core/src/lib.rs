@@ -16,6 +16,7 @@ pub mod byline;
 pub mod checkpoints;
 pub mod clock;
 pub mod conn;
+pub mod crash;
 pub mod data_export;
 pub mod db;
 pub mod details;

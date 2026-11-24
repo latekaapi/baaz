@@ -81,6 +81,9 @@ pub enum DialogAction {
     /// Clear every project's prompt history (Settings › Data, docs/82
     /// 8.8): confirmed, it cannot be undone; sessions stay.
     ClearPromptHistory,
+    /// Show the crash report in `archive_target` (its path) in Finder: the
+    /// one-time notice after Baaz quit unexpectedly (docs/82 9.5).
+    RevealCrash,
     /// Flip a space's own sign-ins (R4); the space id rides the dialog.
     SpaceSignIns,
     /// Move Baaz's own provider sessions into Baaz's homes (B4M): the

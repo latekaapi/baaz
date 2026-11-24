@@ -190,6 +190,8 @@
 //! | `archive-confirm` | confirm it |
 //! | `undo-confirm` | press the open Undo / Revert confirm's primary (docs/82 6.4; danger dialogs take no Enter); no such dialog open fails the step |
 //! | `error-dialog:<offline\|blocked\|sorry>` | capture aid: raise a critical error dialog of that family through the real dialog path (empty means `sorry`; an unknown family fails the step), free |
+//! | `crash-now` | panic on purpose: the forced crash of docs/82 9.5's check (the report lands in `<state>/crashes/`, the next launch says so), free |
+//! | `crash-fixture` / `crash-fixture:notice` | capture aid: write a fixed, dated crash report into this run's state dir; `notice` also raises the one-time notice (docs/82 9.5), free |
 //! | `toast:<title>\|<body>` | capture aid: raise a toast through the production toast path (empty title fails the step), free |
 //! | `projects` | open the Projects palette |
 //! | `project:<path>` | adopt `path` as a project and make it current (no panel, no session) |
@@ -524,6 +526,9 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "pin", run: |this, rest, _, cx| this.step_pin(rest, cx) },
     WindowVerb { verb: "archive", run: |this, _, _, cx| this.step_archive(cx) },
     WindowVerb { verb: "error-dialog", run: |this, rest, _, cx| this.step_error_dialog(rest, cx) },
+    // The forced crash of docs/82 9.5's check: a panic, on purpose.
+    WindowVerb { verb: "crash-now", run: |_, _, _, _| panic!("crash-now: a crash the check asked for") },
+    WindowVerb { verb: "crash-fixture", run: |this, rest, _, cx| this.step_crash_fixture(rest, cx) },
     WindowVerb { verb: "toast", run: |this, rest, _, cx| this.step_toast(rest, cx) },
     WindowVerb { verb: "archive-confirm", run: |this, _, window, cx| { this.confirm_archive_dialog(window, cx); Ok(()) } },
     WindowVerb { verb: "undo-confirm", run: |this, _, _, cx| this.step_undo_confirm(cx) },
