@@ -13,8 +13,18 @@
 //! `plugins/` (plus `CLAUDE.md`, `agents/` and `commands/` when they
 //! exist): hooks, permissions, skills and plugins keep applying, while
 //! `projects/` and `sessions/` stay private to Baaz. Links are created only
-//! when absent — never copied, never overwritten — and nothing is ever
-//! written inside the owner's `~/.claude`.
+//! when absent — never copied, never overwritten.
+//!
+//! One folder is shared on purpose (docs/85 10.1): Claude's per-project
+//! auto memory. Every Baaz-homed child carries `--settings
+//! {"autoMemoryDirectory": …}` naming `~/.claude/projects/<slug>/memory` —
+//! the folder the terminal's `claude` reads and writes for the same repo
+//! ([`memory_dir`]; a worktree or subfolder uses its main repo's slug,
+//! [`project_root`]). So the agent may write notes there; Baaz itself
+//! writes nothing inside the owner's `~/.claude`, and transcripts stay in
+//! the private home. Under redirected state (`BAAZ_STATE_DIR`, which the
+//! check build always sets) the folder is `<state>/claude-memory/<slug>/`
+//! instead, so a scratch run never touches the owner's files (rule 25).
 
 use std::path::{Path, PathBuf};
 
@@ -51,6 +61,66 @@ pub fn ensure_home(owner_home: &Path, state_dir: &Path) -> std::io::Result<PathB
     let home = home_dir(state_dir);
     provider::child_env::ensure_linked_dir(&home, &owner_config_dir(owner_home), LINKED_ENTRIES)?;
     Ok(home)
+}
+
+/// The CLI's project-folder name for `path`: every character outside
+/// `[A-Za-z0-9]` becomes `-` (`/Users/me/My App.x` →
+/// `-Users-me-My-App-x`). Checked read-only against the owner's
+/// `~/.claude/projects` on 25 Nov 2026 (claude 2.1.276): every folder
+/// there is a path spelled this way — `.claude/worktrees` reads
+/// `--claude-worktrees`, `Application Support` reads `Application-Support`.
+pub fn project_slug(path: &Path) -> String {
+    path.to_string_lossy().chars().map(|char| if char.is_ascii_alphanumeric() { char } else { '-' }).collect()
+}
+
+/// The folder whose slug names a session's memory: the main repo's root
+/// for anything inside a git repo — a subfolder walks up to it, and a
+/// linked worktree (`.git` is a file pointing at
+/// `<main>/.git/worktrees/<name>`) resolves through its `commondir` to the
+/// main repo — else `cwd` itself. The CLI does the same: auto memory is
+/// one folder per repo, shared by its worktrees and subfolders (none of
+/// the owner's worktree project folders has a `memory/`). Reads only.
+pub fn project_root(cwd: &Path) -> PathBuf {
+    let mut at = Some(cwd);
+    while let Some(dir) = at {
+        let dot_git = dir.join(".git");
+        if dot_git.is_dir() {
+            return dir.to_path_buf();
+        }
+        if dot_git.is_file() {
+            return worktree_main_root(&dot_git).unwrap_or_else(|| dir.to_path_buf());
+        }
+        at = dir.parent();
+    }
+    cwd.to_path_buf()
+}
+
+/// `<main>` for a worktree's `.git` file: `gitdir: <main>/.git/worktrees/x`,
+/// whose `commondir` names `<main>/.git` (relative to the gitdir).
+fn worktree_main_root(dot_git_file: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(dot_git_file).ok()?;
+    let gitdir = text.lines().find_map(|line| line.strip_prefix("gitdir:"))?.trim();
+    let gitdir = dot_git_file.parent()?.join(gitdir);
+    let common = std::fs::read_to_string(gitdir.join("commondir")).ok()?;
+    let common = gitdir.join(common.trim());
+    let common = std::fs::canonicalize(&common).unwrap_or(common);
+    common.parent().map(Path::to_path_buf)
+}
+
+/// Name of the redirected memory root under a redirected state dir.
+pub const REDIRECTED_MEMORY_DIR: &str = "claude-memory";
+
+/// The auto-memory folder for a session in `cwd` (docs/85 10.1, rule 25):
+/// `<owner_config>/projects/<slug>/memory` for the owner's own run, or
+/// `<state>/claude-memory/<slug>` when `redirected_state` (the
+/// `BAAZ_STATE_DIR` override) is set — then nothing points into the owner's
+/// `~/.claude`.
+pub fn memory_dir(cwd: &Path, owner_config: &Path, redirected_state: Option<&Path>) -> PathBuf {
+    let slug = project_slug(&project_root(cwd));
+    match redirected_state {
+        Some(state) => state.join(REDIRECTED_MEMORY_DIR).join(slug),
+        None => owner_config.join("projects").join(slug).join("memory"),
+    }
 }
 
 /// One owner-side file the sessions migration (B4M) may move: its
@@ -471,5 +541,73 @@ mod tests {
         pin_legacy_resume(&id);
         clear_legacy_resumes();
         assert!(!is_legacy_resume(&id), "consent clears every pin");
+    }
+
+    /// The CLI's spelling, from folder names in the owner's
+    /// `~/.claude/projects` (listed read-only, 25 Nov 2026).
+    #[test]
+    fn the_slug_matches_the_clis_folder_names() {
+        for (path, folder) in [
+            ("/Users/latekaapi/Projects/harness", "-Users-latekaapi-Projects-harness"),
+            ("/Users/latekaapi/Projects/lakshya-v2", "-Users-latekaapi-Projects-lakshya-v2"),
+            (
+                "/Users/latekaapi/Projects/dharisanam/.claude/worktrees/agitated-mirzakhani-535f89",
+                "-Users-latekaapi-Projects-dharisanam--claude-worktrees-agitated-mirzakhani-535f89",
+            ),
+            (
+                "/Users/latekaapi/Library/Application Support/Claude/scratch-workspaces/x",
+                "-Users-latekaapi-Library-Application-Support-Claude-scratch-workspaces-x",
+            ),
+        ] {
+            assert_eq!(project_slug(Path::new(path)), folder);
+        }
+    }
+
+    /// This repo's slug is a folder the CLI made, when the machine running
+    /// the test has one (a read-only listing; skipped elsewhere).
+    #[test]
+    fn this_repos_slug_is_a_real_cli_folder_when_present() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
+        let projects = home.join(".claude").join("projects");
+        let Ok(listing) = std::fs::read_dir(&projects) else { return };
+        let names: Vec<String> = listing.flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
+        let repo = project_root(Path::new(env!("CARGO_MANIFEST_DIR")));
+        let slug = project_slug(&repo);
+        if names.iter().any(|name| name.starts_with(&project_slug(&home))) && repo.ends_with("harness") {
+            assert!(names.contains(&slug), "{slug} is one of the CLI's folders");
+        }
+    }
+
+    #[test]
+    fn root_subfolder_worktree_and_plain_folder_map_to_one_slug_each() {
+        let root = temp_root("slug");
+        let main = root.join("repo");
+        std::fs::create_dir_all(main.join(".git").join("worktrees").join("wt1")).expect("main .git");
+        std::fs::create_dir_all(main.join("src").join("deep")).expect("subfolder");
+        std::fs::write(main.join(".git").join("worktrees").join("wt1").join("commondir"), "../..\n").expect("commondir");
+        let worktree = root.join("worktrees").join("wt1");
+        std::fs::create_dir_all(worktree.join("sub")).expect("worktree");
+        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", main.join(".git/worktrees/wt1").display())).expect(".git file");
+        let plain = root.join("plain").join("inner");
+        std::fs::create_dir_all(&plain).expect("plain");
+        let main = std::fs::canonicalize(&main).expect("canonical main");
+
+        let owner = Path::new("/Users/o/.claude");
+        let expect = owner.join("projects").join(project_slug(&main)).join("memory");
+        assert_eq!(memory_dir(&main, owner, None), expect, "repo root");
+        assert_eq!(memory_dir(&main.join("src/deep"), owner, None), expect, "subfolder");
+        assert_eq!(memory_dir(&worktree, owner, None), expect, "a worktree maps to its main repo");
+        assert_eq!(memory_dir(&worktree.join("sub"), owner, None), expect, "a worktree's subfolder too");
+        assert_eq!(
+            memory_dir(&plain, owner, None),
+            owner.join("projects").join(project_slug(&plain)).join("memory"),
+            "a folder outside git is its own"
+        );
+        // Redirected state (rule 25): inside the state dir, never ~/.claude.
+        let state = Path::new("/tmp/baaz-check-state");
+        let redirected = memory_dir(&worktree, owner, Some(state));
+        assert_eq!(redirected, state.join("claude-memory").join(project_slug(&main)));
+        assert!(!redirected.starts_with(owner));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

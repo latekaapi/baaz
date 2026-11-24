@@ -1034,8 +1034,23 @@ impl ClaudeCodeAdapter {
         self.prepare_home(crate::home::is_legacy_resume(&launch.session_id));
         match config {
             None => RunningChild::spawn_legacy(&self.program, launch, &self.hub),
-            Some(config) => RunningChild::spawn(&self.program, launch, &self.hub, &config),
+            Some(config) => RunningChild::spawn(&self.program, &self.with_session_settings(launch.clone()), &self.hub, &config),
         }
+    }
+
+    /// The keys every Baaz-homed child carries on `--settings`, merged
+    /// into the launch's one layer at spawn ([`argv::with_settings`]):
+    /// `autoMemoryDirectory`, the project memory the terminal's `claude`
+    /// shares (docs/85 10.1, [`crate::home::memory_dir`]). Without a known
+    /// folder the launch goes as built.
+    fn with_session_settings(&self, launch: SessionLaunch) -> SessionLaunch {
+        let known = self.workspace.lock().expect("workspace mutex").clone();
+        let Some(cwd) = launch.cwd.as_ref().map(PathBuf::from).or(known) else { return launch };
+        let redirected = provider::child_env::state_dir_override();
+        let memory = crate::home::memory_dir(&cwd, &self.owner_config_dir(), redirected.as_deref());
+        let mut extra = serde_json::Map::new();
+        extra.insert("autoMemoryDirectory".into(), serde_json::Value::String(memory.to_string_lossy().into_owned()));
+        argv::with_settings(launch, extra)
     }
 
     /// A resume launch run in its session's own folder: the cwd the
@@ -2971,6 +2986,59 @@ mod tests {
         drop(adapter);
         assert!(matches!(ack, Ok(Ack::Session { .. })), "opened: {ack:?}");
         assert_eq!(std::fs::read_to_string(&out).expect("recorded"), "/w/s-1|/p|41010|10");
+    }
+
+    /// docs/85 10.1: a spawned child carries the shared project memory on
+    /// its one `--settings` layer — the owner's `~/.claude/projects/<slug
+    /// of the main repo>/memory` (here a stand-in owner home), merged with
+    /// the Read-only layer when the session is Read-only. Against a
+    /// stand-in `claude` that records its argv. Never a real CLI.
+    #[test]
+    fn a_spawned_child_carries_the_shared_memory_folder() {
+        let root = scratch_dir("memory-argv");
+        let owner = root.join("owner");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("repo");
+        std::fs::create_dir_all(repo.join("src")).expect("subfolder");
+        let (dir, _) = seed_executable("memory-argv", "unused", "");
+        let out = dir.join("argv.txt");
+        let script = dir.join("fake-claude");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{out}.tmp'; mv '{out}.tmp' '{out}'\nexec cat >/dev/null\n", out = out.display()),
+        )
+        .expect("fake writes");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        for mode in [None, Some(PermissionMode::DenyUnmatched)] {
+            let _ = std::fs::remove_file(&out);
+            let adapter = ClaudeCodeAdapter::new(&script.to_string_lossy()).with_home(owner.clone()).with_config_dir(root.join("home"));
+            let ack = adapter.dispatch(Command::OpenSession {
+                request_id: format!("mem-{}-{}", std::process::id(), mode.is_some()),
+                workspace: Some(repo.join("src").to_string_lossy().into_owned()),
+                model: None,
+                model_provider: None,
+                mode,
+                env: Vec::new(),
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !out.is_file() {
+                assert!(std::time::Instant::now() < deadline, "the stand-in never started");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            drop(adapter);
+            assert!(matches!(ack, Ok(Ack::Session { .. })), "opened: {ack:?}");
+            let argv: Vec<String> = std::fs::read_to_string(&out).expect("recorded").lines().map(str::to_owned).collect();
+            assert_eq!(argv.iter().filter(|arg| *arg == "--settings").count(), 1, "one layer: {argv:?}");
+            let at = argv.iter().position(|arg| arg == "--settings").expect("--settings");
+            let settings: serde_json::Value = serde_json::from_str(&argv[at + 1]).expect("settings parse");
+            let expected = crate::home::memory_dir(&repo, &owner.join(".claude"), provider::child_env::state_dir_override().as_deref());
+            assert_eq!(settings["autoMemoryDirectory"], serde_json::json!(expected.to_string_lossy()), "{settings}");
+            assert!(!expected.to_string_lossy().contains("-src"), "the main repo's slug, not the subfolder's: {}", expected.display());
+            assert_eq!(settings.get("disableSkillShellExecution").is_some(), mode.is_some(), "Read-only rides the same layer: {settings}");
+        }
     }
 
     /// docs/82 6.2: `ResumeSession.env` reaches the resumed child too — a

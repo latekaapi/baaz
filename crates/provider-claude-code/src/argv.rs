@@ -304,25 +304,70 @@ pub fn with_permission_mode(mut launch: SessionLaunch, mode: Option<PermissionMo
     if let Some(at) = launch.argv.iter().position(|arg| arg == "--permission-mode") {
         launch.argv.drain(at..(at + 2).min(launch.argv.len()));
     }
-    let layer = read_only_settings().to_string();
-    if let Some(at) = launch.argv.windows(2).position(|pair| pair[0] == "--settings" && pair[1] == layer) {
-        launch.argv.drain(at..at + 2);
+    // Take the Read-only keys out of whatever `--settings` carries (it may
+    // hold the session's other keys too: [`with_settings`]).
+    let mut layer = take_settings(&mut launch);
+    for key in read_only_settings().as_object().expect("an object").keys() {
+        layer.remove(key);
     }
     launch.argv.push("--permission-mode".into());
     launch.argv.push(claude_permission_mode(mode).to_owned());
     if mode == PermissionMode::DenyUnmatched {
-        launch.argv.push("--settings".into());
-        launch.argv.push(layer);
+        layer.extend(read_only_settings().as_object().expect("an object").clone());
     }
+    put_settings(&mut launch, layer);
     launch.permission_mode = Some(mode);
     launch
+}
+
+/// Remove `--settings <json>` from `launch` and return its object (empty
+/// when there was none, or it did not parse as an object).
+fn take_settings(launch: &mut SessionLaunch) -> serde_json::Map<String, serde_json::Value> {
+    let Some(at) = launch.argv.iter().position(|arg| arg == "--settings") else { return Default::default() };
+    let value = launch.argv.get(at + 1).cloned().unwrap_or_default();
+    launch.argv.drain(at..(at + 2).min(launch.argv.len()));
+    match serde_json::from_str::<serde_json::Value>(&value) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => Default::default(),
+    }
+}
+
+/// Put `layer` back as the one `--settings <json>`; an empty layer carries
+/// no flag.
+fn put_settings(launch: &mut SessionLaunch, layer: serde_json::Map<String, serde_json::Value>) {
+    if layer.is_empty() {
+        return;
+    }
+    launch.argv.push("--settings".into());
+    launch.argv.push(serde_json::Value::Object(layer).to_string());
+}
+
+/// Merge `extra` into the launch's one `--settings` layer (the CLI reads a
+/// single `--settings`, so every key Baaz sets at launch rides the same
+/// JSON object): the session-wide keys — `autoMemoryDirectory` (docs/85
+/// 10.1) — beside the Read-only layer when there is one. `extra` wins a
+/// key both name.
+pub fn with_settings(mut launch: SessionLaunch, extra: serde_json::Map<String, serde_json::Value>) -> SessionLaunch {
+    if extra.is_empty() {
+        return launch;
+    }
+    let mut layer = take_settings(&mut launch);
+    layer.extend(extra);
+    put_settings(&mut launch, layer);
+    launch
+}
+
+/// The `--settings` value on a launch, parsed (`None` without one).
+pub fn settings_on(launch: &SessionLaunch) -> Option<serde_json::Value> {
+    let at = launch.argv.iter().position(|arg| arg == "--settings")?;
+    serde_json::from_str(launch.argv.get(at + 1)?).ok()
 }
 
 /// Whether a built launch carries the Read-only deny layer on `--settings`
 /// — a layer the child can only shed by relaunching.
 pub fn carries_read_only_settings(launch: &SessionLaunch) -> bool {
-    let layer = read_only_settings().to_string();
-    launch.argv.windows(2).any(|pair| pair[0] == "--settings" && pair[1] == layer)
+    let Some(settings) = settings_on(launch) else { return false };
+    read_only_settings().as_object().expect("an object").iter().all(|(key, value)| settings.get(key) == Some(value))
 }
 
 /// The flags every session child carries.

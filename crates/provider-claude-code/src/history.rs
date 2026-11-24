@@ -38,10 +38,14 @@ pub fn resolve_cwd(cwd: &Path) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(cwd)
 }
 
-/// Slug a resolved absolute cwd: `/` → `-`.
-/// `/private/tmp/ccprobe/work` → `-private-tmp-ccprobe-work`.
+/// Slug a resolved absolute cwd the CLI's way ([`crate::home::project_slug`]:
+/// every character outside `[A-Za-z0-9]` → `-`).
+/// `/private/tmp/ccprobe/work` → `-private-tmp-ccprobe-work`. It once
+/// replaced only `/`, so a session in a folder with a space or a dot
+/// (`Application Support`, `.claude/worktrees`) named a slug the CLI never
+/// writes (docs/85 10.1).
 pub fn slug_for_cwd(resolved: &Path) -> String {
-    resolved.to_string_lossy().replace('/', "-")
+    crate::home::project_slug(resolved)
 }
 
 /// The stored transcript path for one session under an explicit config
