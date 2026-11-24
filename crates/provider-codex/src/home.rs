@@ -22,7 +22,10 @@ pub const HOME_DIR_NAME: &str = "codex-home";
 
 /// Owner entries symlinked into the Baaz home when they exist. Notably no
 /// `*.sqlite`: those stay private to each home (see the module docs).
-pub const LINKED_ENTRIES: &[&str] = &["config.toml", "auth.json", "skills", "plugins"];
+/// `AGENTS.md` is the owner's global instructions file (docs/85 10.2): linked
+/// when they have one, so a Baaz session reads what the terminal's `codex`
+/// reads.
+pub const LINKED_ENTRIES: &[&str] = &["config.toml", "auth.json", "skills", "plugins", "AGENTS.md"];
 
 /// The auth file: the one entry whose link is re-checked before each
 /// spawn, because its token rotates.
@@ -364,6 +367,7 @@ mod tests {
         std::fs::create_dir_all(codex.join("plugins")).expect("owner plugins");
         std::fs::write(codex.join("config.toml"), "model = \"x\"\n").expect("owner config");
         std::fs::write(codex.join("auth.json"), "{\"token\":\"t\"}").expect("owner auth");
+        std::fs::write(codex.join("AGENTS.md"), "Global rules.\n").expect("owner AGENTS.md");
         // A sqlite db the home must never link.
         std::fs::write(codex.join("state_5.sqlite"), "db").expect("owner db");
         std::fs::write(codex.join("state_5.sqlite-wal"), "wal").expect("owner wal");
@@ -396,6 +400,8 @@ mod tests {
             std::fs::read_to_string(home.join("auth.json")).expect("reads through"),
             "{\"token\":\"t\"}"
         );
+        // docs/85 10.2: the owner's global AGENTS.md reads through too.
+        assert_eq!(std::fs::read_to_string(home.join("AGENTS.md")).expect("reads through"), "Global rules.\n");
         for name in ["state_5.sqlite", "state_5.sqlite-wal", "state_5.sqlite-shm", "sessions"] {
             assert!(
                 std::fs::symlink_metadata(home.join(name)).is_err(),

@@ -103,7 +103,7 @@ fn codex_with_the_switch_on_builds_bridge_only() {
     });
     adapter.set_use_own_mcp(true);
     let extra = adapter.spawn_args_for("cmd-open");
-    assert_eq!(extra.len(), 6, "bridge only (command, args, token env): {extra:?}");
+    assert_eq!(extra.len(), 8, "bridge only (command, args, token env) plus the CLAUDE.md fallback: {extra:?}");
     assert!(
         !extra.iter().any(|arg| arg.contains("enabled=false")),
         "opted in means nothing silenced: {extra:?}"

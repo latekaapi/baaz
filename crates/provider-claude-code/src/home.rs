@@ -107,6 +107,18 @@ fn worktree_main_root(dot_git_file: &Path) -> Option<PathBuf> {
     common.parent().map(Path::to_path_buf)
 }
 
+/// The repo's AGENTS.md text when the folder `cwd` is in has one and no
+/// CLAUDE.md (at the repo root or in `cwd`): what a CLI that does not read
+/// AGENTS.md would otherwise miss (docs/85 10.2). Reads only.
+pub fn agents_md_only(cwd: &Path) -> Option<String> {
+    let root = project_root(cwd);
+    let has_claude_md = [root.as_path(), cwd].iter().any(|dir| dir.join("CLAUDE.md").is_file());
+    if has_claude_md {
+        return None;
+    }
+    std::fs::read_to_string(root.join("AGENTS.md")).ok().filter(|text| !text.trim().is_empty())
+}
+
 /// Name of the redirected memory root under a redirected state dir.
 pub const REDIRECTED_MEMORY_DIR: &str = "claude-memory";
 

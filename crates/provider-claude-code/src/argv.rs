@@ -371,6 +371,34 @@ pub fn with_appended_note(mut launch: SessionLaunch, note: &str) -> SessionLaunc
     launch
 }
 
+/// The first CLI version that reads AGENTS.md through its built-in plugin
+/// (docs/85 10.2).
+pub const AGENTS_MD_VERSION: &str = "2.1.277";
+
+/// The settings that make claude ≥ [`AGENTS_MD_VERSION`] read a repo's
+/// AGENTS.md beside CLAUDE.md. Rides the launch's one `--settings` layer.
+pub fn agents_md_settings() -> serde_json::Map<String, serde_json::Value> {
+    let value = serde_json::json!({
+        "pluginConfigs": {"cc-plugin-agents-md@builtin": {"options": {"instructionFiles": "claude-md-and-agents-md"}}}
+    });
+    value.as_object().expect("an object").clone()
+}
+
+/// A repo's AGENTS.md as a section of Baaz's note, for a CLI that does
+/// not read it itself (docs/85 10.2). Cut at 32 KB.
+pub fn agents_md_section(text: &str) -> String {
+    const LIMIT: usize = 32 * 1024;
+    let mut text = text.trim().to_owned();
+    if text.len() > LIMIT {
+        let mut cut = LIMIT;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+    }
+    format!("The repository's AGENTS.md (its instructions for agents):\n\n{text}")
+}
+
 /// The `--settings` value on a launch, parsed (`None` without one).
 pub fn settings_on(launch: &SessionLaunch) -> Option<serde_json::Value> {
     let at = launch.argv.iter().position(|arg| arg == "--settings")?;

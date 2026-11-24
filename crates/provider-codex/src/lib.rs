@@ -140,6 +140,12 @@ pub struct TerminalRelay {
     pub socket: std::path::PathBuf,
 }
 
+/// `-c project_doc_fallback_filenames=["CLAUDE.md"]`: Codex reads a repo's
+/// CLAUDE.md when it has no AGENTS.md (docs/85 10.2). Never creates a file.
+pub fn claude_md_fallback() -> [String; 2] {
+    ["-c".to_owned(), r#"project_doc_fallback_filenames=["CLAUDE.md"]"#.to_owned()]
+}
+
 impl CodexAdapter {
     /// Hold the CLI `program` (usually `codex`). Spawning stays in
     /// [`ProviderAdapter::connect`] and `OpenSession`; tests never spawn —
@@ -315,6 +321,10 @@ impl CodexAdapter {
             }
             None => Vec::new(),
         };
+        // A repo with only CLAUDE.md: Codex reads it when no AGENTS.md is
+        // there (probed live 25 Nov 2026, docs/85-evidence/10.2). On the
+        // argv, never in the linked config.toml (rule 26).
+        args.extend(claude_md_fallback());
         if !use_own {
             args.extend(crate::terminal::disable_overrides(
                 crate::terminal::inherited_servers().iter().map(String::as_str),
@@ -1479,6 +1489,18 @@ impl Drop for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// docs/85 10.2: every Codex child gets the CLAUDE.md fallback exactly
+    /// once, on the argv (rule 26), bridge or not.
+    #[test]
+    fn every_child_reads_claude_md_when_a_repo_has_no_agents_md() {
+        let adapter = CodexAdapter::new("codex-must-never-spawn");
+        for use_own in [false, true] {
+            adapter.set_use_own_mcp(use_own);
+            let args = adapter.spawn_args_for("s-1");
+            assert_eq!(args.iter().filter(|arg| *arg == r#"project_doc_fallback_filenames=["CLAUDE.md"]"#).count(), 1, "{args:?}");
+        }
+    }
 
     /// docs/85 10.5: Baaz's note rides `thread/start` and every
     /// `thread/resume` as the same bytes — the stored ones, even after this

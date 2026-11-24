@@ -79,15 +79,16 @@ fn with_the_switch_on_no_disables_but_the_bridge() {
     adapter.set_terminal_relay(relay());
     adapter.set_use_own_mcp(true);
     let extra = adapter.spawn_args_for("cmd-open");
-    assert_eq!(extra.len(), 6, "bridge only (command, args, token env): {extra:?}");
+    assert_eq!(extra.len(), 8, "bridge only (command, args, token env) plus the CLAUDE.md fallback: {extra:?}");
     assert!(extra[1].starts_with("mcp_servers.baaz.command="));
     assert!(extra[3].contains("\"--session\",\"cmd-open\""));
     assert!(
         !extra.iter().any(|arg| arg.contains("enabled=false")),
         "opted in means nothing silenced: {extra:?}"
     );
-    // And without a relay the opt-in is exactly bare `app-server`.
+    // And without a relay the opt-in is bare `app-server` plus the
+    // CLAUDE.md fallback (docs/85 10.2), which every child carries.
     let bare = CodexAdapter::new("codex-must-never-spawn");
     bare.set_use_own_mcp(true);
-    assert!(bare.spawn_args_for("cmd-open").is_empty(), "opted in, no relay: bare");
+    assert_eq!(bare.spawn_args_for("cmd-open"), provider_codex::claude_md_fallback(), "opted in, no relay: bare");
 }

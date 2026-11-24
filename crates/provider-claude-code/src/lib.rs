@@ -1090,32 +1090,53 @@ impl ClaudeCodeAdapter {
     /// 10.5, [`Self::note_for`]).
     fn with_session_settings(&self, launch: SessionLaunch) -> SessionLaunch {
         let known = self.workspace.lock().expect("workspace mutex").clone();
-        let launch = match launch.cwd.as_ref().map(PathBuf::from).or(known) {
-            Some(cwd) => {
-                let redirected = provider::child_env::state_dir_override();
-                let memory = crate::home::memory_dir(&cwd, &self.owner_config_dir(), redirected.as_deref());
-                let mut extra = serde_json::Map::new();
-                extra.insert("autoMemoryDirectory".into(), serde_json::Value::String(memory.to_string_lossy().into_owned()));
-                argv::with_settings(launch, extra)
-            }
-            None => launch,
-        };
-        let note = self.note_for(&launch.session_id);
+        let cwd = launch.cwd.as_ref().map(PathBuf::from).or(known);
+        let reads_agents_md = self.reads_agents_md();
+        let mut extra = serde_json::Map::new();
+        if let Some(cwd) = &cwd {
+            let redirected = provider::child_env::state_dir_override();
+            let memory = crate::home::memory_dir(cwd, &self.owner_config_dir(), redirected.as_deref());
+            extra.insert("autoMemoryDirectory".into(), serde_json::Value::String(memory.to_string_lossy().into_owned()));
+        }
+        if reads_agents_md {
+            extra.extend(argv::agents_md_settings());
+        }
+        let launch = argv::with_settings(launch, extra);
+        let note = self.note_for(&launch.session_id, cwd.as_deref().filter(|_| !reads_agents_md));
         argv::with_appended_note(launch, &note)
+    }
+
+    /// Whether this CLI reads AGENTS.md itself, given the plugin setting
+    /// ([`argv::agents_md_settings`]): from 2.1.277 (docs/85 10.2; not
+    /// verifiable on 2.1.276, so unit-tested only — "not verified live").
+    /// An unknown version reads as no.
+    fn reads_agents_md(&self) -> bool {
+        self.version
+            .lock()
+            .expect("version mutex")
+            .as_deref()
+            .is_some_and(|version| provider::version::compare_versions(version, argv::AGENTS_MD_VERSION) != std::cmp::Ordering::Less)
     }
 
     /// Baaz's appended note as this build composes it (docs/85 10.5): the
     /// bridge's tools are named only when the bridge rides the session.
-    fn compose_note(&self) -> String {
+    fn compose_note(&self, agents_md_from: Option<&std::path::Path>) -> String {
         let bridge = self.terminal.lock().expect("terminal mutex").is_some();
-        provider::note::compose(provider::note::NoteTools { bridge })
+        let note = provider::note::compose(provider::note::NoteTools { bridge });
+        match agents_md_from.and_then(crate::home::agents_md_only) {
+            Some(agents) => format!("{note}\n\n{}", argv::agents_md_section(&agents)),
+            None => note,
+        }
     }
 
     /// The note `session_id` was opened with — stored beside the Baaz home
     /// (`<state>/notes/`) — else this build's, stored now: every resume,
     /// fork and relaunch of the session sends the same bytes.
-    fn note_for(&self, session_id: &str) -> String {
-        provider::note::for_session(&self.note_state_dir(), session_id, || self.compose_note())
+    /// `agents_md_from`: the session's folder when this CLI does not read
+    /// AGENTS.md itself — a repo with AGENTS.md and no CLAUDE.md then has it
+    /// in the note, read once at open (docs/85 10.2).
+    fn note_for(&self, session_id: &str, agents_md_from: Option<&std::path::Path>) -> String {
+        provider::note::for_session(&self.note_state_dir(), session_id, || self.compose_note(agents_md_from))
     }
 
     /// Where notes are stored: beside the Baaz home. A unit test that
@@ -3209,6 +3230,47 @@ mod tests {
         // A launch that already carried one keeps exactly one.
         let twice = adapter.with_session_settings(adapter.with_session_settings(launch()));
         flag(&twice);
+    }
+
+    /// docs/85 10.2: AGENTS.md reaches Claude exactly once, without a file
+    /// written in the repo — from 2.1.277 through the CLI's own plugin
+    /// setting (unit-tested only: not verifiable on 2.1.276), below it as a
+    /// section of the note when the repo has AGENTS.md and no CLAUDE.md.
+    #[test]
+    fn agents_md_reaches_claude_exactly_once() {
+        let root = scratch_dir("agents-md");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("repo");
+        std::fs::write(repo.join("AGENTS.md"), "Run `make check` before you finish.\n").expect("agents");
+        let listing = |dir: &std::path::Path| {
+            let mut names: Vec<String> = std::fs::read_dir(dir).expect("reads").flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            names.sort();
+            names
+        };
+        let before = listing(&repo);
+        let launch = |id: &str| SessionLaunch { cwd: Some(repo.to_string_lossy().into_owned()), ..argv::argv_for_resume(id, None, None, None) };
+        let note_of = |launch: &SessionLaunch| {
+            let at = launch.argv.iter().position(|arg| arg == "--append-system-prompt").expect("note");
+            launch.argv[at + 1].clone()
+        };
+        // Below 2.1.277: in the note, once.
+        let old = ClaudeCodeAdapter::new("claude-must-never-spawn").with_home(root.join("owner")).with_config_dir(root.join("home"));
+        *old.version.lock().expect("version mutex") = Some("2.1.276".into());
+        let spawned = old.with_session_settings(launch("agents-old"));
+        assert_eq!(note_of(&spawned).matches("make check").count(), 1, "{}", note_of(&spawned));
+        assert!(argv::settings_on(&spawned).and_then(|s| s.get("pluginConfigs").cloned()).is_none());
+        // From 2.1.277: the setting, once, and the note leaves it out.
+        let new = ClaudeCodeAdapter::new("claude-must-never-spawn").with_home(root.join("owner")).with_config_dir(root.join("home"));
+        *new.version.lock().expect("version mutex") = Some("2.1.277".into());
+        let spawned = new.with_session_settings(launch("agents-new"));
+        assert!(!note_of(&spawned).contains("make check"));
+        assert_eq!(spawned.argv.iter().filter(|arg| arg.contains("cc-plugin-agents-md@builtin")).count(), 1);
+        // A repo with CLAUDE.md as well: the CLI reads that itself.
+        std::fs::write(repo.join("CLAUDE.md"), "notes\n").expect("claude md");
+        let spawned = old.with_session_settings(launch("agents-both"));
+        assert!(!note_of(&spawned).contains("make check"));
+        std::fs::remove_file(repo.join("CLAUDE.md")).expect("rm");
+        assert_eq!(listing(&repo), before, "nothing is written in the repo");
     }
 
     /// docs/82 6.2: `ResumeSession.env` reaches the resumed child too — a
