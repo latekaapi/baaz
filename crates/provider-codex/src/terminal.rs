@@ -51,7 +51,8 @@ pub fn toml_string(value: &str) -> String {
 }
 
 /// The `codex app-server` argv fragment carrying the bridge for
-/// `session_id`: `-c mcp_servers.baaz.command=… -c mcp_servers.baaz.args=…`.
+/// `session_id`: `-c mcp_servers.baaz.command=… -c mcp_servers.baaz.args=…
+/// -c mcp_servers.baaz.env={BAAZ_BRIDGE_TOKEN=…}` (the token: docs/85 10.0).
 /// Spliced after `app-server`, before stdio takes over.
 pub fn server_overrides(
     bridge: &std::path::Path,
@@ -66,6 +67,12 @@ pub fn server_overrides(
         format!("mcp_servers.{SERVER_NAME}.command={}", toml_string(&command)),
         "-c".to_owned(),
         format!("mcp_servers.{SERVER_NAME}.args=[{}]", args.join(",")),
+        "-c".to_owned(),
+        format!(
+            "mcp_servers.{SERVER_NAME}.env={{{}={}}}",
+            provider::bridge_token::ENV,
+            toml_string(&provider::bridge_token::token_for(session_id))
+        ),
     ]
 }
 
@@ -315,7 +322,7 @@ mod tests {
     #[test]
     fn the_overrides_name_the_bridge_socket_and_session() {
         let extra = server_overrides(&bridge(), &socket(), "s-7");
-        assert_eq!(extra.len(), 4);
+        assert_eq!(extra.len(), 6);
         assert_eq!(extra[0], "-c");
         assert!(
             extra[1].starts_with("mcp_servers.baaz.command="),
@@ -330,6 +337,13 @@ mod tests {
             extra[3]
         );
         assert!(extra[3].contains("\"--session\",\"s-7\""));
+        // The session's token rides the server's env, never its argv tail
+        // (docs/85 10.0).
+        assert_eq!(extra[4], "-c");
+        assert_eq!(
+            extra[5],
+            format!("mcp_servers.baaz.env={{BAAZ_BRIDGE_TOKEN=\"{}\"}}", provider::bridge_token::token_for("s-7"))
+        );
         for arg in &extra {
             assert!(!arg.contains(".codex/config.toml"), "never the owner's file: {arg}");
             assert!(!arg.contains('~'), "no home-relative writes: {arg}");

@@ -139,6 +139,7 @@ impl AcpAdapter {
                     "--session".into(),
                     bridge_session.to_owned(),
                 ],
+                env: vec![(provider::bridge_token::ENV.to_owned(), provider::bridge_token::token_for(bridge_session))],
             })
             .into_iter()
             .collect()

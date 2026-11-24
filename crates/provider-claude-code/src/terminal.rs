@@ -37,7 +37,8 @@ pub fn bridge_args(socket: &Path, session_id: &str) -> Vec<String> {
 }
 
 /// The file's whole content: `{"mcpServers": {"baaz": {"type": "stdio",
-/// "command": <bridge>, "args": [...]}}}` — the shape the CLI's
+/// "command": <bridge>, "args": [...], "env": {BAAZ_BRIDGE_TOKEN: …}}}}`
+/// (the token: docs/85 10.0) — the shape the CLI's
 /// `--mcp-config` accepts (see docs/18-claude-code.md §4).
 pub fn mcp_config_value(bridge: &Path, socket: &Path, session_id: &str) -> serde_json::Value {
     serde_json::json!({
@@ -46,6 +47,7 @@ pub fn mcp_config_value(bridge: &Path, socket: &Path, session_id: &str) -> serde
                 "type": "stdio",
                 "command": bridge.to_string_lossy(),
                 "args": bridge_args(socket, session_id),
+                "env": { provider::bridge_token::ENV: provider::bridge_token::token_for(session_id) },
             }
         }
     })
@@ -277,6 +279,11 @@ mod tests {
     #[test]
     fn the_file_is_a_stdio_server_for_the_session() {
         let value = mcp_config_value(&bridge(), &socket(), "s-9");
+        assert_eq!(
+            value["mcpServers"]["baaz"]["env"]["BAAZ_BRIDGE_TOKEN"],
+            serde_json::json!(provider::bridge_token::token_for("s-9")),
+            "the token rides the env (docs/85 10.0)"
+        );
         let server = &value["mcpServers"]["baaz"];
         assert_eq!(server["type"], "stdio");
         assert_eq!(server["command"], bridge().to_string_lossy().as_ref());

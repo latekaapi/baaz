@@ -102,7 +102,7 @@ fn registry_for(socket: &std::path::Path, session: &str) -> ToolRegistry {
     registry.set_instructions(browser_relay::INSTRUCTIONS);
     register_browser_tools(
         &mut registry,
-        &TerminalTarget { socket: socket.to_owned(), session: session.to_owned() },
+        &TerminalTarget { socket: socket.to_owned(), session: session.to_owned(), token: None },
     );
     registry
         .register(

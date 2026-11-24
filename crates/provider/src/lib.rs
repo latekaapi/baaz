@@ -42,6 +42,7 @@
 
 mod ack;
 mod approval;
+pub mod bridge_token;
 mod capability;
 pub mod child_env;
 mod command;

@@ -130,13 +130,18 @@ pub struct StdioServer {
     pub command: String,
     /// Its arguments.
     pub args: Vec<String>,
+    /// Its environment additions, as `(name, value)`: the bridge's token.
+    pub env: Vec<(String, String)>,
 }
 
 fn servers(servers: &[StdioServer]) -> Value {
     Value::Array(
         servers
             .iter()
-            .map(|server| json!({"name": server.name, "command": server.command, "args": server.args, "env": []}))
+            .map(|server| {
+                let env: Vec<Value> = server.env.iter().map(|(name, value)| json!({"name": name, "value": value})).collect();
+                json!({"name": server.name, "command": server.command, "args": server.args, "env": env})
+            })
             .collect(),
     )
 }

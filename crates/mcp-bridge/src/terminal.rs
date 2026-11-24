@@ -2,7 +2,7 @@
 //! the app's unix socket.
 //!
 //! The relay owns no terminal state: each `tools/call` opens the socket,
-//! sends one `{id, session, tool, params}` line, and renders the
+//! sends one `{id, session, token, tool, params}` line, and renders the
 //! `{id, ok, result | error}` reply as MCP content. When Baaz is not
 //! serving its socket — the app is closed, or this session was never
 //! registered — every tool answers with [`UNAVAILABLE`] rather than
@@ -57,7 +57,15 @@ pub struct TerminalTarget {
     pub socket: PathBuf,
     /// The session id the app registered (`register_session`).
     pub session: String,
+    /// The session's token, from the environment ([`TOKEN_ENV`]): sent with
+    /// every call; the service refuses a call without the right one
+    /// (docs/85 10.0).
+    pub token: Option<String>,
 }
+
+/// The environment variable carrying the session's token. The same name as
+/// `provider::bridge_token::ENV` (this crate does not depend on `provider`).
+pub const TOKEN_ENV: &str = "BAAZ_BRIDGE_TOKEN";
 
 /// One tool's advertisement: name, description, JSON Schema.
 pub fn tool_defs() -> Vec<(String, String, Value)> {
@@ -139,7 +147,7 @@ pub fn register_terminal_tools(registry: &mut ToolRegistry, target: &TerminalTar
         let tool = name.clone();
         registry
             .register(name, description, schema, move |args| {
-                forward_call(&target.socket, &target.session, &tool, &args)
+                forward_call_with(&target.socket, &target.session, target.token.as_deref(), &tool, &args)
             })
             .expect("fresh registry takes the terminal tools");
     }
@@ -156,6 +164,17 @@ pub fn forward_call(
     tool: &str,
     args: &Value,
 ) -> Result<ToolOutcome, String> {
+    forward_call_with(socket, session, None, tool, args)
+}
+
+/// [`forward_call`] carrying the session's `token` (docs/85 10.0).
+pub fn forward_call_with(
+    socket: &Path,
+    session: &str,
+    token: Option<&str>,
+    tool: &str,
+    args: &Value,
+) -> Result<ToolOutcome, String> {
     let stream = match UnixStream::connect(socket) {
         Ok(stream) => stream,
         Err(_) => return Ok(ToolOutcome::text(unavailable_for(tool))),
@@ -163,6 +182,7 @@ pub fn forward_call(
     let request = serde_json::to_string(&json!({
         "id": 1,
         "session": session,
+        "token": token,
         "tool": tool,
         "params": args,
     }))

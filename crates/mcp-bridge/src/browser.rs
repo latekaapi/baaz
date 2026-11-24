@@ -206,7 +206,7 @@ pub fn forward_browser_call(
     tool: &str,
     args: &Value,
 ) -> Result<ToolOutcome, String> {
-    let outcome = super::terminal::forward_call(&target.socket, &target.session, tool, args)?;
+    let outcome = super::terminal::forward_call_with(&target.socket, &target.session, target.token.as_deref(), tool, args)?;
     if tool != "browser_screenshot" {
         return Ok(outcome);
     }

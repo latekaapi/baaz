@@ -23,7 +23,10 @@
 //! page never stalls a frame either.
 //!
 //! Only session ids the app registered ([`register_session`][TerminalService::register_session],
-//! D53) are served; anything else is refused. The socket file is removed
+//! D53) are served; anything else is refused. Every request also carries
+//! the session's token (`{id, session, token, tool, params}`, minted by
+//! `provider::bridge_token` and handed to the bridge by environment); a
+//! wrong or missing one is refused before the call is queued (docs/85 10.0). The socket file is removed
 //! when the service drops (quit).
 //!
 //! Every `terminal_run`, and every command line `terminal_send` types at the
@@ -881,9 +884,17 @@ fn serve_conn(stream: UnixStream, shared: Arc<Shared>) {
             Ok(Value::Object(mut map)) => {
                 let id = map.remove("id").unwrap_or(Value::Null);
                 let session = map.remove("session").and_then(|v| v.as_str().map(str::to_owned));
+                let token = map.remove("token").and_then(|v| v.as_str().map(str::to_owned));
                 let tool = map.remove("tool").and_then(|v| v.as_str().map(str::to_owned));
                 let params = map.remove("params").unwrap_or_else(|| json!({}));
                 match (session, tool) {
+                    // The caller is who its token says (docs/85 10.0, rule
+                    // 20): a call without its session's token is refused
+                    // here, before anything is queued.
+                    (Some(session), Some(_)) if !provider::bridge_token::verify(&session, token.as_deref()) => {
+                        let _ = write_reply(reader.get_mut(), &id, false, json!({"error": REFUSED_TOKEN}));
+                        continue;
+                    }
                     (Some(session), Some(tool)) => (id, session, tool, params),
                     _ => {
                         let _ = write_reply(
@@ -926,6 +937,9 @@ fn serve_conn(stream: UnixStream, shared: Arc<Shared>) {
         }
     }
 }
+
+/// The refusal for a call without its session's bridge token (docs/85 10.0).
+pub const REFUSED_TOKEN: &str = "refused: this call did not carry its session's bridge token";
 
 /// Write one malformed-request reply line.
 fn write_reply(stream: &mut UnixStream, id: &Value, ok: bool, payload: Value) -> std::io::Result<()> {
@@ -2108,6 +2122,7 @@ mod tests {
         let request = serde_json::to_string(&json!({
             "id": id,
             "session": session,
+            "token": provider::bridge_token::token_for(session),
             "tool": tool,
             "params": params,
         }))
@@ -2322,7 +2337,7 @@ mod tests {
     /// hand between the two (a `wait: exit` observed mid-flight).
     fn send_json(fx: &Fixture, session: &str, id: u64, tool: &str, params: Value) -> BufReader<UnixStream> {
         let request = serde_json::to_string(&json!({
-            "id": id, "session": session, "tool": tool, "params": params,
+            "id": id, "session": session, "token": provider::bridge_token::token_for(session), "tool": tool, "params": params,
         }))
         .expect("request serializes");
         let mut stream = UnixStream::connect(fx.service.socket_path()).expect("socket answers");
@@ -2399,6 +2414,41 @@ mod tests {
         let fx = fixture(cx, "s1");
         let reply = call_as(cx, &fx, "ghost", "terminal_list", json!({}));
         assert!(err_text(&reply).contains("unknown session"), "refusal names it: {reply}");
+    }
+
+    /// docs/85 10.0: a registered session id alone is not enough — a call
+    /// with a missing, wrong or another session's token is refused before
+    /// it is queued, and the right token is served.
+    #[gpui::test]
+    fn a_call_without_its_sessions_token_is_refused(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "tok-s1");
+        fx.service.register_session("tok-s2", fx.root.clone());
+        let other = provider::bridge_token::token_for("tok-s2");
+        let raw = |token: Option<&str>| {
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let mut request = json!({"id": id, "session": "tok-s1", "tool": "terminal_list", "params": {}});
+            if let Some(token) = token {
+                request["token"] = json!(token);
+            }
+            let mut stream = UnixStream::connect(fx.service.socket_path()).expect("socket answers");
+            stream.set_read_timeout(Some(Duration::from_millis(300))).expect("read timeout");
+            stream.write_all(format!("{request}\n").as_bytes()).expect("request writes");
+            let mut reader = BufReader::new(stream);
+            for _ in 0..100 {
+                cx.update(|cx| fx.service.drain(cx));
+                if let Some(reply) = try_recv(&mut reader, id) {
+                    return reply;
+                }
+            }
+            panic!("no reply");
+        };
+        for token in [None, Some("not-the-token"), Some(other.as_str())] {
+            let reply = raw(token);
+            assert_eq!(reply["ok"], json!(false), "{token:?} refused: {reply}");
+            assert!(err_text(&reply).contains("bridge token"), "refusal names the token: {reply}");
+        }
+        let ok = call(cx, &fx, "terminal_list", json!({}));
+        assert_eq!(ok["ok"], json!(true), "the session's own token is served: {ok}");
     }
 
     #[gpui::test]
@@ -3016,7 +3066,7 @@ mod tests {
         });
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let request = serde_json::to_string(&json!({
-            "id": id, "session": "t1c", "tool": "terminal_run",
+            "id": id, "session": "t1c", "token": provider::bridge_token::token_for("t1c"), "tool": "terminal_run",
             "params": {"command": "echo hi-from-harness", "tab": tab, "wait": "none"},
         }))
         .expect("request serializes");
@@ -3147,6 +3197,7 @@ mod tests {
         let request = serde_json::to_string(&json!({
             "id": id,
             "session": session,
+            "token": provider::bridge_token::token_for(session),
             "tool": tool,
             "params": params,
         }))
@@ -3356,7 +3407,7 @@ mod tests {
     /// Sends a tool call without waiting for its reply.
     fn bsend(fx: &Fixture, session: &str, tool: &str, params: Value) -> (BufReader<UnixStream>, u64) {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let request = json!({"id": id, "session": session, "tool": tool, "params": params}).to_string();
+        let request = json!({"id": id, "session": session, "token": provider::bridge_token::token_for(session), "tool": tool, "params": params}).to_string();
         let mut stream = UnixStream::connect(fx.service.socket_path()).expect("socket answers");
         stream.set_read_timeout(Some(Duration::from_millis(5))).expect("read timeout");
         stream.write_all(request.as_bytes()).expect("request writes");

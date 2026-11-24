@@ -67,7 +67,7 @@ impl TerminalRelay {
                     SessionMcpServerConfig::Stdio {
                         args: Some(self.bridge_args(session_id)),
                         command: self.bridge.to_string_lossy().into_owned(),
-                        env: None,
+                        env: Some(token_env(session_id)),
                         framing: None,
                         mode: Some(SessionMcpServerMode::Required),
                     },
@@ -77,6 +77,17 @@ impl TerminalRelay {
             ),
         }
     }
+}
+
+/// The bridge's environment for `session_id`: its per-session token
+/// (docs/85 10.0), which the socket service checks on every call.
+fn token_env(session_id: &str) -> std::collections::BTreeMap<String, String> {
+    [(provider::bridge_token::ENV.to_owned(), provider::bridge_token::token_for(session_id))].into_iter().collect()
+}
+
+/// The id after `--session` in a bridge argv tail.
+fn session_in(args: &[String]) -> Option<&str> {
+    args.iter().position(|arg| arg == "--session").and_then(|at| args.get(at + 1)).map(String::as_str)
 }
 
 /// The bridge `config` from the host's neutral spec fields: `command` is
@@ -92,7 +103,7 @@ pub fn session_config_for(command: &str, args: &[String]) -> SessionConfig {
                 SessionMcpServerConfig::Stdio {
                     args: Some(args.to_vec()),
                     command: command.to_owned(),
-                    env: None,
+                    env: session_in(args).map(token_env),
                     framing: None,
                     mode: Some(SessionMcpServerMode::Required),
                 },

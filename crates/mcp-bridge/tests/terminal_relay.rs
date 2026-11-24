@@ -104,7 +104,7 @@ fn serve(path: &std::path::Path, script: &Script) -> std::thread::JoinHandle<()>
 fn registry_for(socket: &std::path::Path, session: &str) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.set_instructions(format!("{INSTRUCTIONS}\n{}", browser_relay::INSTRUCTIONS));
-    let target = TerminalTarget { socket: socket.to_owned(), session: session.to_owned() };
+    let target = TerminalTarget { socket: socket.to_owned(), session: session.to_owned(), token: None };
     register_terminal_tools(&mut registry, &target);
     register_browser_tools(&mut registry, &target);
     registry
@@ -337,7 +337,7 @@ fn ping_answers_beside_the_terminal_tools() {
     let mut registry = ToolRegistry::new();
     register_terminal_tools(
         &mut registry,
-        &TerminalTarget { socket: path.clone(), session: "s1".to_owned() },
+        &TerminalTarget { socket: path.clone(), session: "s1".to_owned(), token: None },
     );
     registry
         .register(
