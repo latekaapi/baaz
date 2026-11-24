@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 
-use muse_client::{MuseClient, MuseConfig};
+use provider_muse::client::{MuseClient, MuseConfig};
 use provider::{Capability, CapabilityState, Command, ConnectInfo, Provider};
 use provider_muse::{
     capabilities_for_version, muse_version_supported, MUSE_MCP_VERSION_FLOOR, MUSE_VERSION_FLOOR,

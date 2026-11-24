@@ -2,8 +2,9 @@
 //!
 //! A [`MuseHub`] owns the one `muse serve` child and its MSP fold; each
 //! session rides it as a [`MuseLane`], a [`ProviderAdapter`] like Claude
-//! Code's and Codex's. Every wire spelling lives here: this is the only
-//! crate in the seam allowed to depend on `muse-client`, and the per-command
+//! Code's and Codex's. Every wire spelling lives here: the MSP transport is
+//! this crate's [`client`] module and the fold its [`fold`] module (each once
+//! a crate of its own, merged in docs/85 10.9), and the per-command
 //! translation is in `translate`. Spawning, `initialize` and the
 //! schema-fingerprint warning live here too — [`establish`] is what `baaz`'s
 //! connection path calls. [`MuseAdapter`] is the whole connection as one
@@ -13,8 +14,10 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 mod caps;
+pub mod client;
 pub mod errors;
 pub mod facts;
+pub mod fold;
 mod hub;
 pub mod oneshot;
 pub mod modes;
@@ -28,8 +31,8 @@ pub mod usage;
 use std::sync::Arc;
 
 use crossbeam_channel::Receiver;
-use muse_client::schema::{ApprovalRequestParams, UserInputRequestParams};
-use muse_client::{MuseClient, MuseConfig};
+use crate::client::schema::{ApprovalRequestParams, UserInputRequestParams};
+use crate::client::{MuseClient, MuseConfig};
 use provider::{
     Ack, CapabilitySet, Command, ConnectInfo, Handshake, ProviderAdapter, ProviderError,
     ProviderEvent, ProviderId,
@@ -44,7 +47,7 @@ pub use terminal::TerminalRelay;
 /// Where the `muse` program is: `MUSE_PROGRAM`, `PATH`, then the install
 /// fallbacks (the Dock launches with a minimal `PATH`). `None` when none
 /// exists.
-pub use muse_client::resolve_muse_program as resolve_program;
+pub use crate::client::resolve_muse_program as resolve_program;
 pub use translate::{approval_headline, question_headline};
 
 /// The raw transport, shared between the hub and the application's
@@ -133,7 +136,7 @@ pub(crate) fn tap_for(
                     reason: format!("unusable approval/request params: {error}"),
                 })?;
             let headline = approval_headline(&request);
-            let options = provider::ApprovalOption::of_choices(&muse_adapter::approval_choices(&request));
+            let options = provider::ApprovalOption::of_choices(&crate::fold::approval_choices(&request));
             Ok(Some(ProviderEvent::ApprovalRequested {
                 session_id: request.session_id,
                 headline,
@@ -165,7 +168,7 @@ pub(crate) fn tap_for(
 ///
 /// The child spawns like Claude Code's and Codex's (docs/81 B PM-12): with
 /// the shared scrubbed env ([`provider::child_env`], as per-child
-/// `env_remove`s on `muse-client`'s serve command — the process env is
+/// `env_remove`s on `provider_muse::client`'s serve command — the process env is
 /// never touched), the login-shell `PATH` with the program's own directory
 /// first ([`provider::env_path::child_path_for`]), the person's home as
 /// its working directory (a Dock launch's is `/`; the child must not depend

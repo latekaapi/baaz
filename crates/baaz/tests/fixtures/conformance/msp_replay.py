@@ -4,7 +4,7 @@ conformance suite (`crates/baaz/tests/conformance/replay.rs`).
 
 Not a wire capture and not a real server: a stdin/stdout stand-in run as the
 hub's child exactly like the real binary, so the fixture travels the real
-`muse-client` reader, the hub's routing, the tap and the fold. No model is
+`provider_muse::client` reader, the hub's routing, the tap and the fold. No model is
 ever reached and no turn is ever spent.
 
     msp_replay.py --replay FIXTURE [serve and the client's own flags…]

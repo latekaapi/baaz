@@ -19,7 +19,7 @@
 //!
 //! # Why a crate of its own
 //!
-//! `muse-client` is a wire crate kept free of `aui`, and `provider` (which
+//! `provider_muse::client` is a wire crate kept free of `aui`, and `provider` (which
 //! depends on `aui-protocol`) must never depend on a wire crate. The
 //! runtime sits beneath both: OS and channels only, so the wire crate and
 //! the seam share one copy without either taking the other's

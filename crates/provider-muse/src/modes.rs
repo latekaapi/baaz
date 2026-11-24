@@ -8,8 +8,8 @@
 //! reading less access than the session has.
 
 use aui_protocol::PermissionMode;
-use muse_client::schema::{ApprovalMode, Session, SessionResumeParams, SessionSetApprovalModeParams};
-use muse_client::{new_command_id, MuseClient};
+use crate::client::schema::{ApprovalMode, Session, SessionResumeParams, SessionSetApprovalModeParams};
+use crate::client::{new_command_id, MuseClient};
 use provider::{ProviderError, Refusal, RefusalHint, Severity};
 
 /// The wire's closed approval mode for a chip mode.
@@ -28,7 +28,7 @@ pub fn profile_resume_params(session_id: &str, mode: PermissionMode) -> SessionR
     SessionResumeParams {
         command_id: new_command_id(),
         session_id: session_id.to_owned(),
-        permission_profile: Some(muse_adapter::permission_profile(mode).to_owned()),
+        permission_profile: Some(crate::fold::permission_profile(mode).to_owned()),
         exclude_items: Some(true),
         ..Default::default()
     }
@@ -38,14 +38,14 @@ pub fn profile_resume_params(session_id: &str, mode: PermissionMode) -> SessionR
 /// profile it reports is another one — or none. `None` when they agree or
 /// the session reports no approval mode.
 pub fn profile_mismatch(session: &Session) -> Option<PermissionMode> {
-    let mode = muse_adapter::permission_mode(&session.approval_mode.as_ref()?.mode);
+    let mode = crate::fold::permission_mode(&session.approval_mode.as_ref()?.mode);
     let held = session.permission_state.as_ref().and_then(|state| state.profile_id.as_deref());
-    (held != Some(muse_adapter::permission_profile(mode))).then_some(mode)
+    (held != Some(crate::fold::permission_profile(mode))).then_some(mode)
 }
 
 /// The chip mode a session reports, if any.
 pub fn session_mode(session: &Session) -> Option<PermissionMode> {
-    session.approval_mode.as_ref().map(|mode| muse_adapter::permission_mode(&mode.mode))
+    session.approval_mode.as_ref().map(|mode| crate::fold::permission_mode(&mode.mode))
 }
 
 /// How much a mode lets through, for ordering a pick's two steps.

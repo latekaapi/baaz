@@ -202,7 +202,7 @@ mod tests {
     /// The C1b seam tripwire: the connection path runs on an adapter that
     /// is not `provider-muse` and knows nothing of MSP. `ScriptedProvider`
     /// answers as Codex through the same [`connect_with`] the app's shape
-    /// is built on — gated `send`, bridged events — with no `muse-client`
+    /// is built on — gated `send`, bridged events — with no Muse transport
     /// in reach. If this ever needs the wire crate, the seam is wrong.
     #[test]
     fn the_connection_path_runs_on_a_non_muse_provider() {

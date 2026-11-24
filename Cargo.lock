@@ -5191,36 +5191,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
-name = "muse-adapter"
-version = "0.1.0"
-dependencies = [
- "aui-protocol",
- "chrono",
- "criterion 0.5.1",
- "muse-client",
- "provider",
- "serde",
- "serde_json",
- "session-store",
- "transcript-core",
- "uuid",
-]
-
-[[package]]
-name = "muse-client"
-version = "0.1.0"
-dependencies = [
- "aui-protocol",
- "crossbeam-channel",
- "libc",
- "muse-adapter",
- "provider-runtime",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
 name = "naga"
 version = "30.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6720,12 +6690,17 @@ version = "0.1.0"
 dependencies = [
  "aui-protocol",
  "base64 0.22.1",
+ "chrono",
+ "criterion 0.5.1",
  "crossbeam-channel",
  "libc",
- "muse-adapter",
- "muse-client",
  "provider",
+ "provider-runtime",
+ "serde",
  "serde_json",
+ "session-store",
+ "transcript-core",
+ "uuid",
 ]
 
 [[package]]

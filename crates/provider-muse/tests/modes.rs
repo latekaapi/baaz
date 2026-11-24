@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use aui_protocol::PermissionMode;
-use muse_client::{MuseClient, MuseConfig};
+use provider_muse::client::{MuseClient, MuseConfig};
 use provider::{Ack, Command, ConnectInfo, Provider, ProviderAdapter, ProviderEvent};
 use provider_muse::MuseHub;
 

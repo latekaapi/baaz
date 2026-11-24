@@ -9,7 +9,7 @@
 //! that reads them (is this observation from the credential now installed?)
 //! already compares whole seconds.
 
-use muse_client::schema::{
+use crate::client::schema::{
     AccountLoginOutcome, AccountState, AccountStateKind, SubscriptionUsage, UsageReadResult,
 };
 use provider::{window_label, AccountLane, LoginOutcome, UsageReport, UsageWindow};
@@ -94,7 +94,7 @@ pub fn connection_event(method: &str, params: &serde_json::Value) -> Option<prov
             Some(ProviderEvent::AccountChanged { lane: lane_of(&state.state), label: state.label })
         }
         "account/loginCompleted" => {
-            let done: muse_client::schema::AccountLoginCompletedParams =
+            let done: crate::client::schema::AccountLoginCompletedParams =
                 serde_json::from_value(params.clone()).ok()?;
             Some(ProviderEvent::LoginCompleted { outcome: outcome_of(&done.outcome), message: done.message })
         }

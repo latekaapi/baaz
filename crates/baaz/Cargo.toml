@@ -51,7 +51,7 @@ baaz-core.workspace = true
 baaz-browser-core.workspace = true
 # Every provider, Muse included, through the seam (P4): `provider-muse` is
 # the only crate that names Muse's wire; the ratchet in tests/seam_ratchet.rs
-# keeps `muse-client` out of this crate.
+# keeps `provider_muse::client` out of this crate.
 provider.workspace = true
 provider-muse.workspace = true
 # P4: the effort picker reads the Codex catalog shape and the Claude Code

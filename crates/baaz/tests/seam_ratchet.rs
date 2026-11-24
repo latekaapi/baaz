@@ -2,9 +2,10 @@
 //!
 //! Since P4 (docs/63) every provider, Muse included, reaches the app
 //! through `provider` and its own adapter crate: `provider-muse` is the only
-//! crate that names Muse's wire, and `crates/baaz` depends on neither
-//! `muse-client` nor `muse-adapter`. The checks below keep it that way: no
-//! source file mentions either crate, the manifest lists neither, and no
+//! crate that names Muse's wire, and `crates/baaz` reaches neither its
+//! `client` (the transport, once `muse-client`) nor its `fold` (once
+//! `muse-adapter`). The checks below keep it that way: no source file
+//! mentions either, by its old crate name or its module path, the manifest lists neither, and no
 //! view asks whether it rides a "provider lane" — every session does, and a
 //! provider's own features are registry properties
 //! (`crate::providers::ProviderId`), never a fork on its name.
@@ -61,8 +62,10 @@ fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
+/// The wire's transport, under either name: the old crate, or the
+/// `provider-muse` module it became (docs/85 10.9).
 fn files_mentioning_muse_client() -> Vec<String> {
-    matching_files(|text| text.contains("muse_client"))
+    matching_files(|text| text.contains("muse_client") || text.contains("provider_muse::client"))
 }
 
 #[test]
@@ -101,8 +104,9 @@ fn files_mentioning(needle: &str) -> Vec<String> {
 
 #[test]
 fn no_file_names_the_muse_adapter_either() {
-    let hits = files_mentioning("muse_adapter");
-    assert!(hits.is_empty(), "these files reach past the seam into `muse_adapter`: {hits:?}");
+    let mut hits = files_mentioning("muse_adapter");
+    hits.extend(files_mentioning("provider_muse::fold"));
+    assert!(hits.is_empty(), "these files reach past the seam into Muse's fold: {hits:?}");
 }
 
 #[test]

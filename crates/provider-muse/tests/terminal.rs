@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use muse_client::{MuseClient, MuseConfig};
+use provider_muse::client::{MuseClient, MuseConfig};
 use provider::{Ack, Command, ConnectInfo, Provider};
 use provider_muse::MuseAdapter;
 use serde_json::Value;

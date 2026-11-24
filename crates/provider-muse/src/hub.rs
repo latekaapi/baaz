@@ -35,12 +35,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use muse_adapter::MuseFold;
-use muse_client::schema::{
+use crate::fold::MuseFold;
+use crate::client::schema::{
     ApprovalDecideParams, ApprovalListPendingParams, ClientCapabilities, ModelListParams, ModelSelection,
     SessionForkParams, SessionResumeParams, SessionSetModelParams, ViewPageParams,
 };
-use muse_client::{new_command_id, MuseClient, MuseError, MuseEvent};
+use crate::client::{new_command_id, MuseClient, MuseError, MuseEvent};
 use provider::facts::SessionSide;
 use provider::runtime::{Respawn, RespawnBackoff};
 use provider::{
@@ -160,7 +160,7 @@ impl MuseHub {
     /// first lane's connect is the handshake. For harnesses that drive a
     /// scripted server (tests); production connects with [`Self::connect`].
     pub fn spawn_stand_in(program: impl Into<std::path::PathBuf>, args: Vec<String>) -> Result<Self, ProviderError> {
-        let client = MuseClient::spawn(&muse_client::MuseConfig {
+        let client = MuseClient::spawn(&crate::client::MuseConfig {
             program: program.into(),
             trust_workspace: false,
             no_session_log: false,
@@ -504,7 +504,7 @@ impl Core {
                 // A wire fault belongs to the connection, not to a session:
                 // every followed session shows it.
                 let targets: Vec<Option<String>> = match &session_id {
-                    None if method == muse_client::PROTOCOL_ERROR => {
+                    None if method == crate::client::PROTOCOL_ERROR => {
                         routed.routes.keys().cloned().map(Some).collect()
                     }
                     other => vec![other.clone()],
@@ -646,7 +646,7 @@ impl Core {
     }
 
     /// The terminal bridge config for `session_id`, when there is a route.
-    fn terminal_config(&self, session_id: &str) -> Option<muse_client::schema::SessionConfig> {
+    fn terminal_config(&self, session_id: &str) -> Option<crate::client::schema::SessionConfig> {
         let granted = self.link.lock().expect("link mutex").as_ref().is_some_and(|link| link.session_mcp);
         if !granted {
             return None;
@@ -691,7 +691,7 @@ impl Core {
 
     /// Fold a session object as the `session/started` that would carry it,
     /// and route what it moved.
-    fn fold_envelope(&self, session_id: &str, session: &muse_client::schema::Session) {
+    fn fold_envelope(&self, session_id: &str, session: &crate::client::schema::Session) {
         let Ok(envelope) = serde_json::to_value(session) else { return };
         self.route_produced(session_id, |fold| {
             fold.apply(MuseEvent::Notification {
@@ -705,7 +705,7 @@ impl Core {
         // may hold a turn that never finished (a run cut off mid-turn), and
         // that is not work in progress. A turn the envelope names as active
         // is, whether or not its start is in what the view has seen.
-        let running = matches!(session.status, muse_client::schema::SessionStatus::Running);
+        let running = matches!(session.status, crate::client::schema::SessionStatus::Running);
         if let Some(turn_id) = session.active_turn_id.clone().filter(|_| running) {
             let mut routed = self.routed.lock().expect("routed mutex");
             let event = ProviderEvent::TurnRunning { session_id: session_id.to_owned(), turn_id };
@@ -735,9 +735,9 @@ impl Core {
                 lane.bind(&session_id);
                 let client = self.client()?;
                 let started = client
-                    .session_start(&muse_client::schema::SessionStartParams {
+                    .session_start(&crate::client::schema::SessionStartParams {
                         // No mode, no pick: the host default stands.
-                        permission_profile: mode.map(|mode| muse_adapter::permission_profile(mode).to_owned()),
+                        permission_profile: mode.map(|mode| crate::fold::permission_profile(mode).to_owned()),
                         approval_mode: mode.map(crate::modes::wire_mode),
                         command_id: request_id,
                         config: self.terminal_config(&session_id),
@@ -776,7 +776,7 @@ impl Core {
                 let forked = client
                     .session_fork(&SessionForkParams {
                         command_id: request_id,
-                        cut_point: through_turn.map(|last_turn_id| muse_client::schema::ForkCutPoint { last_turn_id }),
+                        cut_point: through_turn.map(|last_turn_id| crate::client::schema::ForkCutPoint { last_turn_id }),
                         // The fork's history pages in once its lane resumes it,
                         // like every Muse attach: the answer's items go unread.
                         exclude_items: Some(true),
@@ -841,7 +841,7 @@ impl Core {
             Command::DecideApproval { request_id, session_id, approval, choice, stage_token, feedback } => {
                 // The stage token is the fold's to know: a decision sent
                 // without one takes the approval's current stage.
-                let requirement = match stage_token.as_deref().and_then(muse_adapter::parse_stage_token) {
+                let requirement = match stage_token.as_deref().and_then(crate::fold::parse_stage_token) {
                     Some(requirement) => Some(requirement),
                     None => self
                         .routed
@@ -908,7 +908,7 @@ impl Core {
                             id: approval.approval_id.clone(),
                             session_id: approval.session_id.clone(),
                             headline: crate::approval_headline(approval),
-                            stage_token: Some(muse_adapter::stage_token(&approval.current_requirement_id)),
+                            stage_token: Some(crate::fold::stage_token(&approval.current_requirement_id)),
                         })
                         .collect(),
                     questions: pending
@@ -999,7 +999,7 @@ impl Core {
     /// the card on screen is a lie and no `approval/resolved` will follow,
     /// so the fold settles it here.
     fn settle_lost_decision(&self, session_id: &str, approval: &str, error: &MuseError) {
-        use muse_client::schema::ErrorKind;
+        use crate::client::schema::ErrorKind;
         let resolution = match error.kind() {
             Some(ErrorKind::ApprovalAlreadyResolved) => match error {
                 MuseError::Rpc(rpc) => rpc.data.as_ref().and_then(|data| data.resolution.clone()),
@@ -1173,7 +1173,7 @@ impl Drop for MuseLane {
 #[doc(hidden)]
 pub fn side_of(hub: &MuseHub, session_id: &str) -> Option<SessionSide> {
     let routed = hub.core.routed.lock().expect("routed mutex");
-    routed.fold.side(session_id).map(muse_adapter::neutral_side)
+    routed.fold.side(session_id).map(crate::fold::neutral_side)
 }
 
 #[cfg(test)]
@@ -1187,7 +1187,7 @@ mod tests {
     #[test]
     fn shutdown_kills_the_child_while_a_command_still_holds_it() {
         let puppet = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model_list_puppet.py");
-        let client = MuseClient::spawn(&muse_client::MuseConfig {
+        let client = MuseClient::spawn(&crate::client::MuseConfig {
             program: puppet,
             trust_workspace: false,
             no_session_log: false,

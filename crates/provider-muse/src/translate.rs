@@ -1,12 +1,12 @@
 //! Neutral commands into MSP, view events out through the fold.
 //!
 //! This is where every wire spelling lives: the only crate in the seam
-//! allowed to depend on `muse-client`. Each [`Command`] arm builds the
+//! allowed to depend on `provider_muse::client`. Each [`Command`] arm builds the
 //! typed schema params, makes the one matching client call, and maps the
 //! result back to a neutral [`Ack`]; transport failures map to
 //! [`ProviderError`] with no wire type leaking across.
 
-use muse_client::schema::{
+use crate::client::schema::{
     AccountLoginStartParams, AccountLoginType, ApprovalDecideParams,
     ApprovalMode, ApprovalRequirementRef, ApprovalSubject, ItemReadOutputParams,
     ModelSelection, SessionCompactParams, SessionForkParams, SessionListParams,
@@ -17,7 +17,7 @@ use muse_client::schema::{
     ApprovalRequestParams, ViewPageDirection, ViewPageParams, ViewSubscribeParams,
     ViewUnsubscribeParams,
 };
-use muse_client::{MuseClient, MuseError};
+use crate::client::{MuseClient, MuseError};
 use provider::{Ack, Command, ModelSummary, PendingApproval, PendingQuestion, ProviderError,
     QuestionAnswer, SessionSummary, SubmissionPart};
 
@@ -51,8 +51,8 @@ fn approval_mode(mode: aui_protocol::PermissionMode) -> ApprovalMode {
 /// [`crate::MuseAdapter`] callers store), so this is a rename and nothing
 /// more. An unknown spelling omits the field rather than guessing: `None`
 /// is exactly today's behaviour, byte for byte.
-fn reasoning_effort(level: Option<&str>) -> Option<muse_client::schema::ReasoningEffort> {
-    use muse_client::schema::ReasoningEffort as Wire;
+fn reasoning_effort(level: Option<&str>) -> Option<crate::client::schema::ReasoningEffort> {
+    use crate::client::schema::ReasoningEffort as Wire;
     match level {
         Some("none") => Some(Wire::None),
         Some("minimal") => Some(Wire::Minimal),
@@ -80,8 +80,8 @@ fn submission_text(parts: &[SubmissionPart]) -> String {
 }
 
 /// A neutral submission part, translated to the wire's content part.
-fn input_part(part: SubmissionPart) -> muse_client::schema::TurnInputPart {
-    use muse_client::schema::TurnInputPart as Wire;
+fn input_part(part: SubmissionPart) -> crate::client::schema::TurnInputPart {
+    use crate::client::schema::TurnInputPart as Wire;
     match part {
         SubmissionPart::Text(text) => Wire::text(text),
         SubmissionPart::Image { base64_data, media_type, size } => {
@@ -100,13 +100,13 @@ fn input_part(part: SubmissionPart) -> muse_client::schema::TurnInputPart {
 /// the token [`Command::ListPending`] minted, and only this adapter
 /// encodes and decodes it.
 fn encode_stage_token(requirement: &ApprovalRequirementRef) -> String {
-    muse_adapter::stage_token(requirement)
+    crate::fold::stage_token(requirement)
 }
 
 /// Decode a stage token back to MSP's guard. A token this adapter did not
 /// mint is a refusal, not a guess.
 fn decode_stage_token(token: &str) -> Result<ApprovalRequirementRef, ProviderError> {
-    muse_adapter::parse_stage_token(token).ok_or_else(|| ProviderError::Rejected {
+    crate::fold::parse_stage_token(token).ok_or_else(|| ProviderError::Rejected {
         reason: "the approval stage token is not one this backend issued".into(),
     })
 }
@@ -186,11 +186,11 @@ pub(crate) fn transport_error_unclassified(error: &MuseError) -> ProviderError {
 /// adapter's own mutex, or the hub's fold-and-routes lock.
 pub trait FoldAccess {
     /// Run `f` with the fold held.
-    fn with_fold(&self, f: &mut dyn FnMut(&mut muse_adapter::MuseFold));
+    fn with_fold(&self, f: &mut dyn FnMut(&mut crate::fold::MuseFold));
 }
 
-impl FoldAccess for std::sync::Mutex<muse_adapter::MuseFold> {
-    fn with_fold(&self, f: &mut dyn FnMut(&mut muse_adapter::MuseFold)) {
+impl FoldAccess for std::sync::Mutex<crate::fold::MuseFold> {
+    fn with_fold(&self, f: &mut dyn FnMut(&mut crate::fold::MuseFold)) {
         f(&mut self.lock().expect("fold mutex"));
     }
 }
@@ -213,7 +213,7 @@ pub fn dispatch(
     client: &MuseClient,
     fold: &dyn FoldAccess,
     command: Command,
-    terminal: Option<(String, muse_client::schema::SessionConfig)>,
+    terminal: Option<(String, crate::client::schema::SessionConfig)>,
 ) -> Result<Ack, ProviderError> {
     match command {
         Command::OpenSession { request_id, workspace, model, model_provider, mode, env: _ } => {
@@ -264,7 +264,7 @@ pub fn dispatch(
                 .session_fork(&SessionForkParams {
                     command_id: request_id,
                     cut_point: through_turn.map(|last_turn_id| {
-                        muse_client::schema::ForkCutPoint { last_turn_id }
+                        crate::client::schema::ForkCutPoint { last_turn_id }
                     }),
                     exclude_items: metadata_only.then_some(true),
                     session_id,
@@ -311,7 +311,7 @@ pub fn dispatch(
                     turn_id: through_turn,
                 })
                 .map_err(transport_error)?;
-            if result.status == muse_client::schema::CompactStatus::Noop {
+            if result.status == crate::client::schema::CompactStatus::Noop {
                 return Ok(Ack::Noop { reason: result.reason.unwrap_or_else(|| "nothing to summarize".to_owned()) });
             }
             Ok(Ack::Accepted)
@@ -377,7 +377,7 @@ pub fn dispatch(
                     workspace_roots: None,
                 })
                 .map_err(transport_error)?;
-            let queued = result.disposition == muse_client::schema::TurnStartDisposition::Queued;
+            let queued = result.disposition == crate::client::schema::TurnStartDisposition::Queued;
             if queued {
                 fold.with_fold(&mut |fold| fold.record_queued(&session, &result.turn_id, &command_id, &text));
             }
@@ -430,7 +430,7 @@ pub fn dispatch(
         }
         Command::ListModels { session } => {
             let result = client
-                .model_list(&muse_client::schema::ModelListParams { session_id: session })
+                .model_list(&crate::client::schema::ModelListParams { session_id: session })
                 .map_err(transport_error)?;
             Ok(Ack::ModelCatalog { models: model_summaries(&result.models), provider: result.provider_id })
         }
@@ -456,7 +456,7 @@ pub fn dispatch(
         }
         Command::ListPending { session_id } => {
             let result = client
-                .approval_list_pending(&muse_client::schema::ApprovalListPendingParams {
+                .approval_list_pending(&crate::client::schema::ApprovalListPendingParams {
                     session_id,
                 })
                 .map_err(transport_error)?;
@@ -594,7 +594,7 @@ pub fn dispatch(
 }
 
 /// One `session/list` row as the seam's row.
-pub(crate) fn summary_of(session: muse_client::schema::Session) -> SessionSummary {
+pub(crate) fn summary_of(session: crate::client::schema::Session) -> SessionSummary {
     SessionSummary {
         session_id: session.session_id,
         title: session.title,
@@ -605,7 +605,7 @@ pub(crate) fn summary_of(session: muse_client::schema::Session) -> SessionSummar
         created_at: session.created_at,
         last_activity_at: session.last_activity_at,
         updated_at: session.updated_at,
-        running: matches!(session.status, muse_client::schema::SessionStatus::Running),
+        running: matches!(session.status, crate::client::schema::SessionStatus::Running),
         turns: session.turn_count,
         attention: session
             .attention
@@ -621,12 +621,12 @@ pub(crate) fn summary_of(session: muse_client::schema::Session) -> SessionSummar
 /// inline` fills `items`, a snapshot fills `snapshot.state.items`, and both
 /// carry the same item schema — reading only one would be a label that
 /// depended on how big the session happened to be.
-pub(crate) fn first_shell_command(read: &muse_client::schema::SessionReadResult) -> Option<String> {
+pub(crate) fn first_shell_command(read: &crate::client::schema::SessionReadResult) -> Option<String> {
     let inline = read.history.items.iter().flatten();
     let snapshot = read.history.snapshot.iter().flat_map(|s| s.state.items.iter());
     inline
         .chain(snapshot)
-        .filter(|item| item.kind == muse_client::schema::ItemKind::UserShell)
+        .filter(|item| item.kind == crate::client::schema::ItemKind::UserShell)
         .filter_map(|item| item.command_text.clone())
         .find(|text| !text.trim().trim_start_matches(['!', '$']).trim().is_empty())
 }
@@ -635,8 +635,8 @@ pub(crate) fn first_shell_command(read: &muse_client::schema::SessionReadResult)
 /// command whose ack carries transcript, so it needs the fold — it lives on
 /// the adapter, next to the pump, rather than in [`dispatch`].
 pub fn fold_page(
-    fold: &mut muse_adapter::MuseFold,
-    page: muse_client::schema::ViewPageResult,
+    fold: &mut crate::fold::MuseFold,
+    page: crate::client::schema::ViewPageResult,
 ) -> Result<(Vec<provider::Delta>, Option<String>), ProviderError> {
     let mut deltas = Vec::new();
     for event in page.events {
@@ -650,7 +650,7 @@ pub fn fold_page(
             ),
             _ => (None, None),
         };
-        deltas.extend(fold.apply(muse_client::MuseEvent::Notification {
+        deltas.extend(fold.apply(crate::client::MuseEvent::Notification {
             method: event.method,
             params,
             cursor,
@@ -661,7 +661,7 @@ pub fn fold_page(
 }
 
 /// `model/list`'s rows as the seam carries them.
-pub fn model_summaries(models: &[muse_client::schema::ModelCatalogEntry]) -> Vec<ModelSummary> {
+pub fn model_summaries(models: &[crate::client::schema::ModelCatalogEntry]) -> Vec<ModelSummary> {
     models
         .iter()
         .map(|model| ModelSummary {
@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn a_listed_row_and_a_read_map_onto_the_seam() {
-        let session: muse_client::schema::Session = serde_json::from_value(serde_json::json!({
+        let session: crate::client::schema::Session = serde_json::from_value(serde_json::json!({
             "sessionId": "s1", "createdAt": "c", "updatedAt": "u", "lastActivityAt": "a", "path": "",
             "status": "running", "turnCount": 3, "name": "n", "firstUserPrompt": "p", "branch": "b",
             "workspaceRoot": "/w", "attention": ["inputPending"],
@@ -712,7 +712,7 @@ mod tests {
         assert_eq!((row.turns, row.name.as_deref(), row.first_prompt.as_deref()), (3, Some("n"), Some("p")));
         assert_eq!((row.workspace.as_deref(), row.branch.as_deref()), (Some("/w"), Some("b")));
         assert_eq!(row.attention, vec![provider::facts::Attention::InputPending]);
-        let read: muse_client::schema::SessionReadResult = serde_json::from_value(serde_json::json!({
+        let read: crate::client::schema::SessionReadResult = serde_json::from_value(serde_json::json!({
             "history": {"mode": "inline", "items": [
                 {"itemId": "i1", "kind": "userShell", "revision": 1, "status": "completed", "commandText": "!  "},
                 {"itemId": "i2", "kind": "userShell", "revision": 1, "status": "completed", "commandText": "!cargo test"},

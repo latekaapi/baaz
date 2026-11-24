@@ -2,7 +2,7 @@
 //!
 //! The puppet (`tests/fixtures/model_list_puppet.py`) is still a real child
 //! process spoken to over real stdin/stdout JSON-RPC framing, so
-//! `muse-client`'s writer and reader threads, its request/response matching
+//! `provider_muse::client`'s writer and reader threads, its request/response matching
 //! and its typed deserialization all genuinely run. It now records every
 //! `{method, params}` it receives (appended to `--record PATH` and flushed
 //! before the response, so a record is durable as soon as `send` returns)
@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use aui_protocol::PermissionMode;
-use muse_client::schema::{
+use provider_muse::client::schema::{
     AccountLoginStartParams, AccountLoginType, ApprovalDecideParams, ApprovalListPendingParams,
     ApprovalMode, ApprovalRequirementRef, ForkCutPoint, ItemReadOutputParams, ModelListParams,
     ModelSelection, SessionCompactParams, SessionForkParams, SessionListParams, SessionReadParams,
@@ -35,7 +35,7 @@ use muse_client::schema::{
     UserInputClarification, UserInputClarifyParams, ViewPageDirection, ViewPageParams,
     ViewSubscribeParams, ViewUnsubscribeParams,
 };
-use muse_client::{MuseClient, MuseConfig};
+use provider_muse::client::{MuseClient, MuseConfig};
 use provider::{Ack, Command, ConnectInfo, Provider, QuestionAnswer, SubmissionPart};
 use provider_muse::MuseAdapter;
 use serde_json::Value;
@@ -381,10 +381,10 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                 display_text: Some("hello display".into()),
                 if_busy: None,
                 input: vec![
-                    muse_client::schema::TurnInputPart::text("hello"),
-                    muse_client::schema::TurnInputPart::image("aGVsbG8=", "image/png"),
+                    provider_muse::client::schema::TurnInputPart::text("hello"),
+                    provider_muse::client::schema::TurnInputPart::image("aGVsbG8=", "image/png"),
                 ],
-                reasoning_effort: Some(muse_client::schema::ReasoningEffort::High),
+                reasoning_effort: Some(provider_muse::client::schema::ReasoningEffort::High),
                 session_id: "s-1".into(),
                 user_shell: None,
                 workspace_roots: None,
@@ -408,8 +408,8 @@ fn every_command_arm_sends_its_method_params_and_ack() {
             expected_params: params_of!(TurnSteerParams {
                 command_id: "cmd-steer".into(),
                 expected_turn_id: "t-1".into(),
-                input: vec![muse_client::schema::TurnInputPart::text("steer this")],
-                reasoning_effort: Some(muse_client::schema::ReasoningEffort::High),
+                input: vec![provider_muse::client::schema::TurnInputPart::text("steer this")],
+                reasoning_effort: Some(provider_muse::client::schema::ReasoningEffort::High),
                 session_id: "s-1".into(),
             }),
             check_ack: Box::new(accepted),

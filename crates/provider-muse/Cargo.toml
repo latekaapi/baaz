@@ -11,12 +11,23 @@ description = "The muse implementation of the provider seam: neutral commands in
 [dependencies]
 base64 = { workspace = true }
 provider = { workspace = true }
-muse-client = { workspace = true }
-muse-adapter = { workspace = true }
+# The process layer the client's `muse serve` child runs on.
+provider-runtime = { workspace = true }
 aui-protocol = { workspace = true }
+chrono = { workspace = true }
 crossbeam-channel = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+session-store = { workspace = true }
+transcript-core = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 # Fault tests SIGKILL their own stand-in children.
 libc = { workspace = true }
+# `benches/fold.rs` (docs/51 P2). No plots, no rayon.
+criterion = { version = "0.5.1", default-features = false }
+
+[[bench]]
+name = "fold"
+harness = false

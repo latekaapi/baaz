@@ -11,7 +11,7 @@
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, RecvTimeoutError};
-use muse_client::schema::{
+use crate::client::schema::{
     ItemKind, ModelCatalogEntry, ModelListParams, SessionReadParams, SessionReadResult, SessionStartParams,
     TurnInputPart, TurnStartParams,
 };

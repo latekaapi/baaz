@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use muse_client::{MuseClient, MuseConfig};
+use provider_muse::client::{MuseClient, MuseConfig};
 use provider::{ConnectInfo, Provider, ProviderEvent};
 use provider_muse::MuseAdapter;
 

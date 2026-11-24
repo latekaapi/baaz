@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use aui_protocol::PermissionMode;
-use muse_adapter::MuseFold;
+use crate::fold::MuseFold;
 use provider::facts::{SessionHeader, SessionSide, TurnOutcome};
 use provider::ProviderEvent;
 use serde_json::Value;
@@ -105,7 +105,7 @@ impl FactTracker {
             out.push(ProviderEvent::ApprovalModeChanged { session_id: session_id.to_owned(), mode });
         }
         let Some(side) = fold.side(session_id) else { return out };
-        let mut side = muse_adapter::neutral_side(side);
+        let mut side = crate::fold::neutral_side(side);
         side.stored_outputs = match fold.stored_outputs(session_id) {
             Some((generation, refs)) if sent.stored_gen != Some(generation) => {
                 sent.stored_gen = Some(generation);
@@ -146,7 +146,7 @@ fn outcome(params: &Value) -> TurnOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use muse_client::MuseEvent;
+    use crate::client::MuseEvent;
 
     fn notify(fold: &mut MuseFold, method: &str, params: Value) -> (String, Value) {
         fold.apply(MuseEvent::Notification {

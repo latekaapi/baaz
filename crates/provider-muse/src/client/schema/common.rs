@@ -1,0 +1,1524 @@
+//! Everything the lanes share: the envelope, errors, capabilities,
+//! platform and server info, the background and command records, and the
+//! published method and notification index.
+//!
+//! Part of [`crate::client::schema`]; see that module for the conventions every
+//! type here follows.
+
+use serde::{Deserialize, Serialize};
+
+use super::*;
+
+open_enum! {
+    /// One attention flag (tdd SS2.4, ADR 31983 D3): a pending server-initiated request class
+    /// parked on the session (muse 1.3.0). Open on the wire — clients MUST ignore unknown
+    /// values; future attention kinds are additive.
+    AttentionFlag {
+        ApprovalPending = "approvalPending",
+        InputPending = "inputPending",
+    }
+}
+
+open_enum! {
+    /// Who durably backgrounded a task (tdd SS4.5.5).
+    BackgroundInitiator {
+        User = "user",
+        Timeout = "timeout",
+    }
+}
+
+/// The latest branch observation in the snapshot (tdd SS4.6.4, SS4.9.1).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchState {
+    /// The observed branch; `null` on a detached-HEAD observation. Required-nullable.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// The detected version-control system; absent when none was detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs: Option<Vcs>,
+    /// The observed workspace root.
+    pub workspace_root: String,
+}
+
+open_enum! {
+    /// A grantable capability name (SS1.4.4).
+    CapabilityName {
+        UserShell = "userShell",
+        SessionMcp = "sessionMcp",
+        SessionListStream = "sessionListStream",
+        Feedback = "feedback",
+        ComputerUseSetup = "computerUseSetup",
+        ComputerUseHostSetup = "computerUseHostSetup",
+        SessionRename = "sessionRename",
+    }
+}
+
+/// The client's requested capability posture (SS1.4.1). Every member defaults; an absent
+/// `capabilities` object means all defaults.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientCapabilities {
+    /// Opt into experimental methods, fields, and variants (default `false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experimental_api: Option<bool>,
+    /// Exact notification method names the client declines; no wildcards; unknown names accepted
+    /// and ignored; the protected set (SS1.7) cannot be opted out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opt_out_notification_methods: Option<Vec<String>>,
+    /// Names from the capability registry. Unknown entries are not an error and simply do not
+    /// appear in `grantedCapabilities` — which is why this is a list of free strings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_capabilities: Option<Vec<String>>,
+    /// Whether this client can render a `userInput/request` dialog and answer it. **Absent
+    /// means capable**: a client that predates the member keeps today's contract, so no existing
+    /// client changes its handshake. `false` makes the host withhold `userInput/request`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input_dialogs: Option<bool>,
+}
+
+/// Client identification inside `initialize` params (SS1.4.1). Diagnostics and telemetry
+/// attribution only; never an authority claim (SS1.10).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientInfo {
+    /// Machine identifier, `[a-z0-9_]+`.
+    pub name: String,
+    /// Human display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Client version string.
+    pub version: String,
+}
+
+/// The uniform SS3.1.2 command acknowledgement: admission only, never an outcome.
+/// `session/compact` alone may answer `"noop"`; every other command answers `"accepted"`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandAcceptedResult {
+    /// Echo of the client-minted UUIDv7 `commandId`.
+    pub command_id: String,
+    /// `"accepted"` for every admitted command.
+    pub status: CommandAckStatus,
+}
+
+closed_enum! {
+    /// The ack-status vocabulary: `"accepted"` for every admitted command; `session/compact` alone
+    /// may answer `"noop"`. Closed — a third value would tell a client nothing it can act on.
+    CommandAckStatus {
+        Accepted = "accepted",
+        Noop = "noop",
+    }
+}
+
+open_enum! {
+    /// The SS3.1.2 ack `status`: `accepted` for every admitted command.
+    CommandStatus {
+        Accepted = "accepted",
+    }
+}
+
+open_enum! {
+    /// `session/compact`'s ack status (tdd SS3.7): the one method that may answer `noop` in
+    /// addition to `accepted`. A noop is a success, not an error.
+    CompactStatus {
+        Accepted = "accepted",
+        Noop = "noop",
+    }
+}
+
+open_enum! {
+    /// Compaction outcome (tdd SS4.5.10).
+    CompactionOutcome {
+        Compacted = "compacted",
+        Noop = "noop",
+        Failed = "failed",
+        Cancelled = "cancelled",
+    }
+}
+
+open_enum! {
+    /// What initiated a compaction (tdd SS4.5.10).
+    CompactionTrigger {
+        Manual = "manual",
+        Auto = "auto",
+    }
+}
+
+open_enum! {
+    /// Context pressure level (tdd SS4.6.6): hard threshold first, both inclusive `>=`.
+    ContextPressureLevel {
+        Normal = "normal",
+        Warning = "warning",
+        Blocked = "blocked",
+    }
+}
+
+/// The SS4.9.1 snapshot `contextUsage` block: the latest `(windowTokens, usedTokens, pressure)`
+/// triple; the snapshot member is absent until the fold holds a tracked anchor and the current
+/// basis is present (absent is never fabricated).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    /// Server-computed pressure level.
+    pub pressure: ContextPressureLevel,
+    /// Counted-once occupancy at the latest provider-reported fact.
+    pub used_tokens: u64,
+    /// The effective context-window size; absent when the basis has no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_tokens: Option<u64>,
+}
+
+/// Server-computed session cost member of [`CumulativeTokenUsage`] (tdd SS4.6.5, amendment
+/// #41610; muse 1.4.9). An estimate: it may move either way on price re-adoption.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CumulativeCost {
+    /// `true` when at least one leg lacked price data — render `(partial)`.
+    pub partial: bool,
+    /// Estimated USD total, finite and non-negative.
+    pub usd: f64,
+}
+
+/// Session running totals of counted-once usage (tdd SS4.6.5).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CumulativeTokenUsage {
+    /// Cache-read tokens, session total (muse 1.4.9). **Additive-optional**: absent on the wire
+    /// from older hosts, and an absent split contributes 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    /// Cache-write tokens, session total (muse 1.4.9). Additive-optional like the read split.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    /// Server-computed session cost (muse 1.4.9); absent when no leg is priced — omit the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<CumulativeCost>,
+    /// Output tokens, session total.
+    pub output_tokens: u64,
+    /// Counted-once prompt tokens, session total.
+    pub prompt_tokens: u64,
+    /// Counted-once totals, session total.
+    pub total_tokens: u64,
+}
+
+/// The effective approval-mode projection (tdd SS5.12): the same object `session/setApprovalMode`
+/// returns as `effectiveMode` and the [`Session`] object carries as `approvalMode`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectiveApprovalModeState {
+    /// The command that last set it; `null` when no command did. Required-nullable.
+    #[serde(default)]
+    pub last_command_id: Option<String>,
+    /// The mode in effect.
+    pub mode: ApprovalMode,
+    /// How the mode took effect.
+    pub source: ApprovalModeSource,
+}
+
+/// The latest effective-model fact in the snapshot (tdd SS4.9.1).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectiveModel {
+    /// The selected model.
+    pub model_id: String,
+    /// The selected provider; `null` when the selection names none. Required-nullable.
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    /// What drove the selection.
+    pub source: ModelChangeSource,
+}
+
+/// The optional `error.data` object (SS1.6). All members additive-optional; `kind` is always
+/// present when `data` is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorData {
+    /// The next provable UTF-8 boundary on a misaligned text-media `item/readOutput` read; absent
+    /// when no boundary is provable from the stored bytes ahead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aligned_next_offset: Option<u64>,
+    /// The rejected anchor value on `notFound`/`missingAnchor` and the `-32042` boundary arms; on
+    /// `-32042` it is served as an explicit `null` when the request named no concrete anchor —
+    /// optional *and* nullable, so absent and `null` stay distinguishable.
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub anchor: Option<Option<String>>,
+    /// Approval identity on SS5 errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+    /// The stored output's availability on `outputUnavailable` — the durable
+    /// `ToolOutputAvailability` value, read-time-derived when the durable record still says
+    /// `available`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability: Option<String>,
+    /// The missing capability, on `capabilityRequired` errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<CapabilityName>,
+    /// The configured command-admission bound, on `backpressured` errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<u64>,
+    /// Rejected server-minted choice on `approvalChoiceInvalid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice_id: Option<String>,
+    /// The rejected command's identifier, on `commandRejected` errors; paired with `reason` so a
+    /// client can settle the exact command it sent without parsing the message string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
+    /// Current stage token on `approvalRequirementStale`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_requirement_id: Option<ApprovalRequirementRef>,
+    /// SS1.5.1 descriptor, on `experimentalRequired` errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descriptor: Option<String>,
+    /// Free-form additive detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Map<String, Value>>,
+    /// The oldest servable view position on `viewTruncated`; served as an explicit `null` when
+    /// nothing before the head is servable — the null is present on the wire, never a dropped key.
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub earliest_cursor: Option<Option<String>>,
+    /// The item whose stored output was requested, on the `item/readOutput` arms (`notFound`,
+    /// `outputUnavailable`, and the misaligned-offset `invalidParams`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    /// The stable camelCase category clients branch on.
+    pub kind: ErrorKind,
+    /// Rejected inclusive fork boundary on `forkBoundaryInvalid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_id: Option<String>,
+    /// The latest installed boundary's view cursor on the `-32042` arms — always present in the
+    /// `-32042` JSON and explicitly `null` when no boundary exists.
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub latest_boundary_cursor: Option<Option<String>>,
+    /// The exceeded byte limit, on `inputTooLarge` errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_bytes: Option<u64>,
+    /// The store on `pluginNotFound` (`-32035`, SS3.29.1; muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marketplace: Option<String>,
+    /// The rejected marketplace or plugin name on the plugin/marketplace arms (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The requested `outputRef.id`, on the `item/readOutput` arms (`notFound`,
+    /// `outputUnavailable`, and the misaligned-offset `invalidParams`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_ref: Option<String>,
+    /// Candidate retained paths on `sessionAmbiguous`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Vec<String>>,
+    /// Failure detail vocabulary (e.g. `"missingAnchor"` on `notFound`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Winning resolution on `approvalAlreadyResolved`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<ApprovalResolutionSummary>,
+    /// Whether retrying can succeed. When present, overrides the error table row's `retryable`
+    /// default for this code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    /// Why a branch seed did not use a checkpoint, on the fork/side-chat validation arms (muse
+    /// 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_fallback_reason: Option<String>,
+    /// The branch-seed path the host read before rejecting, on the same arms (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_path: Option<String>,
+    /// The rejected skill selector on `skillNotFound` (`-32032`, SS3.22.4; muse 1.3.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    /// Session identity on errors whose lookup is session-scoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Winning settlement on `userInputAlreadySettled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement: Option<UserInputSettlementSummary>,
+    /// The rejected upload id on `uploadNotFound` (`-32038`, SS3.33; muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_id: Option<String>,
+    /// User-input prompt identity on SS5.10 errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input_id: Option<String>,
+    /// The blocked view position on `pageEventTooLarge` errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_cursor: Option<String>,
+}
+
+open_enum! {
+    /// A stable `error.data.kind` category (SS1.6): camelCase, the value clients branch on.
+    ErrorKind {
+        ParseError = "parseError",
+        InvalidRequest = "invalidRequest",
+        NotInitialized = "notInitialized",
+        AlreadyInitialized = "alreadyInitialized",
+        MethodNotFound = "methodNotFound",
+        InvalidParams = "invalidParams",
+        ExperimentalRequired = "experimentalRequired",
+        Internal = "internal",
+        PageEventTooLarge = "pageEventTooLarge",
+        OutputResultTooLarge = "outputResultTooLarge",
+        Overloaded = "overloaded",
+        InputTooLarge = "inputTooLarge",
+        CapabilityRequired = "capabilityRequired",
+        NotFound = "notFound",
+        Interrupted = "interrupted",
+        Cancelled = "cancelled",
+        SessionNotFound = "sessionNotFound",
+        SessionInUse = "sessionInUse",
+        SessionAmbiguous = "sessionAmbiguous",
+        ForkBoundaryInvalid = "forkBoundaryInvalid",
+        SessionNotLoaded = "sessionNotLoaded",
+        SessionStreamMismatch = "sessionStreamMismatch",
+        CommandRejected = "commandRejected",
+        Backpressured = "backpressured",
+        SkillNotFound = "skillNotFound",
+        ViewTruncated = "viewTruncated",
+        OutputUnavailable = "outputUnavailable",
+        BoundaryPruned = "boundaryPruned",
+        BoundaryUnusable = "boundaryUnusable",
+        NoBoundary = "noBoundary",
+        ApprovalNotFound = "approvalNotFound",
+        ApprovalAlreadyResolved = "approvalAlreadyResolved",
+        ApprovalChoiceInvalid = "approvalChoiceInvalid",
+        ApprovalRequirementStale = "approvalRequirementStale",
+        ApprovalReviewerUnavailable = "approvalReviewerUnavailable",
+        UserInputNotFound = "userInputNotFound",
+        UserInputAlreadySettled = "userInputAlreadySettled",
+        UserInputAnswerInvalid = "userInputAnswerInvalid",
+        ComputerUseUnavailable = "computerUseUnavailable",
+        MarketplaceNotFound = "marketplaceNotFound",
+        PluginNotFound = "pluginNotFound",
+        MarketplaceAlreadyExists = "marketplaceAlreadyExists",
+        PluginMutationsDisabled = "pluginMutationsDisabled",
+        UploadNotFound = "uploadNotFound",
+    }
+}
+
+/// The `error` member of an error response (SS1.2 §2.4).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorObject {
+    /// Registry code (Appendix B). A plain integer on the wire.
+    pub code: i32,
+    /// Structured detail; carries `kind` when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<ErrorData>,
+    /// Human-readable message. Never a branch point (SS1.6).
+    pub message: String,
+}
+
+/// An error response frame (SS1.2 §2.4). Exactly one of `result` or `error` appears on a response;
+/// this type is the `error` half.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorResponse {
+    /// The error payload.
+    pub error: ErrorObject,
+    /// Echo of the request id; `null` **only** for an unrecoverable parse error whose offending id
+    /// could not be recovered. Always serialized — required-nullable.
+    #[serde(default)]
+    pub id: Option<RequestId>,
+    /// The literal `"2.0"`.
+    pub jsonrpc: JsonRpcVersion,
+}
+
+/// The session goal block (tdd SS4.6.2). `status` and `percentComplete` are carried **verbatim** —
+/// out-of-contract status strings and >100 percents pass through; display clamping is the
+/// renderer's job.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Goal {
+    /// Current work description, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_work: Option<String>,
+    /// Next work description, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_work: Option<String>,
+    /// The goal objective text.
+    pub objective: String,
+    /// Percent complete, verbatim (>100 passes through).
+    pub percent_complete: f64,
+    /// Goal status, verbatim from the durable goal state (free string by design).
+    pub status: String,
+}
+
+/// `goal/clear` params (tdd SS3.18, muse 1.3.0). An `objective` here is an unknown field and
+/// rejects `-32602 invalidParams` — the bare verbs carry exactly this pair.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalClearParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+}
+
+/// The shared SS3.18 goal ack (muse 1.3.0), admission-only: all five verbs answer this one shape
+/// (the tdd's "Shared contract"), differing only in when `turnId` is present.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalCommandResult {
+    /// Echoes the client's id.
+    pub command_id: String,
+    /// Admission status.
+    pub status: CommandStatus,
+    /// Present by exactly the four SS3.18 result cases: an idle wake carries the fresh goal
+    /// turn's id; a busy `set`/`edit`/`resume` carries the admission-time active turn's id (a
+    /// routing fact, not a delivery promise); `pause`/`clear` never carry it; an idle admission
+    /// whose resulting goal is not unfinished parks the notification and carries none.
+    /// **Additive-optional**: absent means "no turn named", never fabricated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+}
+
+/// `goal/edit` params (tdd SS3.18, muse 1.3.0): replace the current goal's objective. Same shape
+/// as `goal/set`; the verbs differ in their `missing_goal` precondition, not their payload.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalEditParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The replacement objective; same trim/non-empty rule as `goal/set`.
+    pub objective: String,
+    /// The target session.
+    pub session_id: String,
+}
+
+/// `goal/pause` params (tdd SS3.18, muse 1.3.0); shape as `goal/clear`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalPauseParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+}
+
+/// `goal/resume` params (tdd SS3.18, muse 1.3.0); shape as `goal/clear`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalResumeParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+}
+
+/// `goal/set` params (tdd SS3.18, muse 1.3.0): set the session's goal objective.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalSetParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The objective text; required, non-empty after Unicode-whitespace trim (the trimmed text
+    /// is the payload). Empty-after-trim is `-32602 invalidParams` (tdd SS3.18).
+    pub objective: String,
+    /// The target session.
+    pub session_id: String,
+}
+
+open_enum! {
+    /// What history a lifecycle result actually served (tdd SS2.5.2). Open on the client side:
+    /// report-what-was-served means a client treats an unknown mode as "page it yourself".
+    HistoryMode {
+        AnchoredSnapshot = "anchoredSnapshot",
+        Inline = "inline",
+        Snapshot = "snapshot",
+        None = "none",
+    }
+}
+
+open_enum! {
+    /// Why a result served `history.mode: "none"`. An absent or unknown value decodes
+    /// conservatively as an unknown reason, and `viewCursor` text never substitutes for it.
+    HistoryNoneReason {
+        Excluded = "excluded",
+        CursorSuffix = "cursorSuffix",
+        HistoryBudget = "historyBudget",
+        ProjectionUnavailable = "projectionUnavailable",
+        ProjectionReadLimit = "projectionReadLimit",
+    }
+}
+
+closed_enum! {
+    /// The `history` request preference of `session/resume` (tdd SS2.5.2). The forced values
+    /// downgrade `anchored` → `inline` → `snapshot` → `none`.
+    HistoryPreference {
+        Auto = "auto",
+        Inline = "inline",
+        Snapshot = "snapshot",
+        Anchored = "anchored",
+    }
+}
+
+closed_enum! {
+    /// Disposition when a turn is already running (tdd SS3.2). The wire default is `queue`: an SDK
+    /// caller who has not looked at session state should not silently mutate an in-flight turn.
+    IfBusy {
+        Queue = "queue",
+        Steer = "steer",
+        Replace = "replace",
+    }
+}
+
+/// `initialize` request params (SS1.4.1).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitializeParams {
+    /// Capability posture; absent means all defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ClientCapabilities>,
+    /// Client identification.
+    pub client_info: ClientInfo,
+}
+
+impl InitializeParams {
+    /// A default-posture `initialize` for a client with this machine `name` and `version`.
+    #[must_use]
+    pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
+        Self {
+            capabilities: None,
+            client_info: ClientInfo {
+                name: name.into(),
+                title: None,
+                version: version.into(),
+            },
+        }
+    }
+}
+
+open_enum! {
+    /// Whether the host can enforce the sandbox (muse 1.4.9). A host property probed once, never
+    /// negotiated — which is why it is not a capability.
+    SandboxAvailability {
+        Available = "available",
+        Unavailable = "unavailable",
+    }
+}
+
+open_enum! {
+    /// Why sandbox enforcement is impossible on this host (muse 1.4.9).
+    SandboxUnavailableReason {
+        UserNamespacesDenied = "userNamespacesDenied",
+        BubblewrapUnavailable = "bubblewrapUnavailable",
+    }
+}
+
+/// The `initialize` result (SS1.4.1).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitializeResult {
+    /// Echo of the effective negotiated experimental setting.
+    pub experimental_api: bool,
+    /// Subset of the requested capabilities, plus policy-implicit grants. Fixed for the connection
+    /// lifetime.
+    pub granted_capabilities: Vec<CapabilityName>,
+    /// Absolute path of the muse home directory.
+    pub muse_home: String,
+    /// Server runtime platform family.
+    pub platform_family: PlatformFamily,
+    /// Server operating system.
+    pub platform_os: PlatformOs,
+    /// Whether this host can enforce the sandbox (muse 1.4.9). Additive-optional: older hosts
+    /// omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_availability: Option<SandboxAvailability>,
+    /// Why enforcement is impossible; sent only when `sandboxAvailability` is `unavailable`, and a
+    /// client MUST NOT infer a reason when none is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_unavailable_reason: Option<SandboxUnavailableReason>,
+    /// Envelope schema version and stable-surface fingerprint.
+    pub schema: SchemaInfo,
+    /// Server identification.
+    pub server_info: ServerInfo,
+    /// Whether this host persists its sessions. Optional so the addition is additive; a v1 host
+    /// always sends it, and a client reads absent as `durable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_durability: Option<SessionDurability>,
+    /// Exact user-agent string presented to upstream model providers.
+    pub user_agent: String,
+}
+
+closed_enum! {
+    /// The literal `"2.0"` every frame carries (SS1.2).
+    JsonRpcVersion {
+        V2 = "2.0",
+    }
+}
+
+// only value the enum has.
+#[allow(clippy::derivable_impls)]
+impl Default for JsonRpcVersion {
+    fn default() -> Self {
+        Self::V2
+    }
+}
+
+/// A notification frame, either direction (SS1.2 §2.2). No `id`; a notification is never answered.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Notification {
+    /// Emission time in Unix milliseconds, recorded once at emission; server→client notifications
+    /// only. Optional on the wire so decoders tolerate older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emitted_at_ms: Option<u64>,
+    /// The literal `"2.0"`.
+    pub jsonrpc: JsonRpcVersion,
+    /// Notification method name.
+    pub method: String,
+    /// Method-specific parameters; omitted entirely when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<Map<String, Value>>,
+}
+
+/// Stored-output reference (tdd SS4.5.5). The fetch path is `item/readOutput`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputRef {
+    /// Whether the bytes are servable.
+    pub availability: OutputRefAvailability,
+    /// Stored byte length.
+    pub byte_len: u64,
+    /// Content digest (e.g. `"sha256:..."`), when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    /// The stored output's durable id.
+    pub id: String,
+    /// The stored output's kind, verbatim durable vocabulary (e.g. `"tool_output"`; snake_case per
+    /// the SS1.6 casing exemption).
+    pub kind: String,
+    /// Media type, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    /// Stored path, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The stored output's URI.
+    pub uri: String,
+}
+
+open_enum! {
+    /// Whether a stored output's bytes are servable (tdd SS4.5.5).
+    OutputRefAvailability {
+        Available = "available",
+        Missing = "missing",
+        Unsupported = "unsupported",
+        AccessFailed = "accessFailed",
+    }
+}
+
+/// A pending approval in the snapshot: the SS2.5.2 pointer shape plus the gated `itemId` when one
+/// exists (tdd SS4.9.1).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingApprovalPointer {
+    /// The pending approval's id.
+    pub approval_id: String,
+    /// The parked item, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    /// The cursor the approval opened at.
+    pub view_cursor: String,
+}
+
+open_enum! {
+    /// The `pendingRequests` discriminator (tdd SS2.5.2), v1 values `approval` and `userInput`.
+    PendingRequestKind {
+        Approval = "approval",
+        UserInput = "userInput",
+    }
+}
+
+/// A late-joiner pointer at an unsettled server-initiated request (tdd SS2.5.2, SS2.2.1). The full
+/// payloads arrive as re-issued server→client requests right after a `session/resume` response;
+/// `session/read` never re-issues them. One flat object with both ids optional — the published
+/// schema names no object-variant union, so `{"kind":"approval","userInputId":…}` is accepted.
+///
+/// Note the shape the binary actually serves in `pendingRequests` is usually
+/// not this but the full payload — see [`PendingRequestEntry`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingRequestPointer {
+    /// Present on an `approval` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+    /// The discriminator; v1 values `approval` and `userInput`.
+    pub kind: PendingRequestKind,
+    /// Present on a `userInput` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input_id: Option<String>,
+    /// The cursor the request opened at.
+    pub view_cursor: String,
+}
+
+/// One entry of the `pendingRequests` array on `session/resume`, `session/fork`
+/// and `session/read` (tdd SS2.5.2).
+///
+/// The published schema names only the `{kind, approvalId?, userInputId?,
+/// viewCursor}` pointer — but the muse 1.2.1 binary serves the **full**
+/// server-initiated request payloads there instead: an approval entry is the
+/// whole [`ApprovalRequestParams`], a user-input entry the whole
+/// [`UserInputRequestParams`], and neither carries a top-level `kind`
+/// (observed 2026-09-13: `session/read` for a title failed with
+/// `missing field 'kind'`). The capture wins over the schema
+/// (`docs/01-transport.md` §4), so this is an untagged union that accepts
+/// both: full payloads first, the documented pointer last. Anything else is
+/// a hard error, not a silent drop — an undecodable pending set must not
+/// lose an approval.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PendingRequestEntry {
+    /// A pending approval, served inline with its full payload.
+    Approval(Box<ApprovalRequestParams>),
+    /// A pending user-input prompt, served inline with its full payload.
+    UserInput(Box<UserInputRequestParams>),
+    /// The documented pointer shape (`{kind, …, viewCursor}`).
+    Pointer(PendingRequestPointer),
+}
+
+/// A pending user-input prompt in the snapshot (tdd SS4.9.1, SS5.10).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingUserInputPointer {
+    /// The parked item, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    /// The pending prompt's id.
+    pub user_input_id: String,
+    /// The cursor the prompt opened at.
+    pub view_cursor: String,
+}
+
+closed_enum! {
+    /// The server runtime's platform family (SS1.4.1); may differ from the client's. Closed: SS1.4.1
+    /// fixes the value set, so widening it is a deliberate, gate-visible protocol change.
+    PlatformFamily {
+        Unix = "unix",
+        Windows = "windows",
+    }
+}
+
+closed_enum! {
+    /// The server's operating system (SS1.4.1). Closed, for the same reason as [`PlatformFamily`].
+    PlatformOs {
+        Macos = "macos",
+        Linux = "linux",
+        Windows = "windows",
+    }
+}
+
+/// One end of a [`SourceRange`]: a record's event id and its sequence number within the stream
+/// (tdd SS4.2).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordPosition {
+    /// The record's event id.
+    pub id: String,
+    /// The record's sequence number within its stream.
+    pub sequence: u64,
+}
+
+/// A request frame, either direction (SS1.2 §2.1).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Request {
+    /// Client-chosen id, unique among that client's in-flight requests.
+    pub id: RequestId,
+    /// The literal `"2.0"`.
+    pub jsonrpc: JsonRpcVersion,
+    /// Slash-namespaced camelCase method name.
+    pub method: String,
+    /// Method-specific parameters; omitted entirely when empty, never `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<Map<String, Value>>,
+    /// W3C trace passthrough (SS1.8); requests only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<TraceContext>,
+}
+
+/// A request id (SS1.3): client-chosen string or integer. `1` and `"1"` do not compare equal; each
+/// direction owns its own id space.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RequestId {
+    /// An integer id.
+    Number(i64),
+    /// A string id.
+    String(String),
+}
+
+/// The `schema` pair in [`InitializeResult`] (SS1.4.1, SS1.5.3). `version` is the wire **envelope**
+/// schema version — distinct from the session-view `schemaVersion` and the raw-log
+/// `schema_version`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaInfo {
+    /// `sha256:<64 lower hex>` content hash of this server binary's stable-surface bundle. A
+    /// mismatch against [`SCHEMA_FINGERPRINT`] is a **warning** condition, never an error.
+    pub fingerprint: String,
+    /// Envelope schema version; `1` in v1, expected to stay `1` for a long time.
+    pub version: u32,
+}
+
+/// Server identification inside [`InitializeResult`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerInfo {
+    /// Server name.
+    pub name: String,
+    /// Server version string.
+    pub version: String,
+}
+
+/// One typed-invocable shortcut spelling (tdd SS3.22.1, muse 1.3.0). A plugin skill may
+/// contribute two rows: its bare-name winner and its qualified `<pluginId>:<skillId>` form.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillCatalogEntry {
+    /// Present when the skill declares an argument hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+    /// The skill's palette summary.
+    pub description: String,
+    /// The skill display name the first-party palette shows.
+    pub display_name: String,
+    /// The owning plugin's identifier; present when `source` is `plugin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    /// The shortcut token without the leading slash — bare (`fix-bug`) or plugin-qualified
+    /// (`acme:deploy`) — the exact value a `skill` input part submits. Unique within one
+    /// response.
+    pub selector: String,
+    /// Where the skill comes from.
+    pub source: SkillSource,
+    /// The skill's declared human-readable name (`SKILL.md` `metadata.display-name`); absent when
+    /// the skill declares none (muse 1.4.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// `skill/changed` params (tdd SS3.22.2, muse 1.3.0): the session's user-invocable set changed;
+/// clients re-issue `skill/list`. Advisory — the host may coalesce bursts and guarantees no
+/// ordering relative to view events (ADR 32471 D3).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillChangedParams {
+    /// The session whose set changed.
+    pub session_id: String,
+}
+
+/// `skill/list` params (tdd SS3.22.1, muse 1.3.0). Per-session because skill scope follows the
+/// session's workspace and plugin state.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillListParams {
+    /// The target session.
+    pub session_id: String,
+}
+
+/// `skill/list` result (tdd SS3.22.1, muse 1.3.0): one row per typed-invocable shortcut spelling
+/// — exactly the invocations the first-party typed dispatch accepts (spec 11352 INV-007
+/// predicate and the shared shortcut layer's name resolution, both by call-through; ADR 32471
+/// D2).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillListResult {
+    /// The session's user-invocable skill rows.
+    pub skills: Vec<SkillCatalogEntry>,
+}
+
+open_enum! {
+    /// A skill row's source scope (tdd SS3.22.1, muse 1.3.0): the projection of the skills
+    /// crate's `SkillsSourceScope`. Open (server-produced result vocabulary, the #22785
+    /// enum-openness rule): a future scope value is additive.
+    SkillSource {
+        Bundled = "bundled",
+        User = "user",
+        Project = "project",
+        Plugin = "plugin",
+    }
+}
+
+/// The compaction boundary an anchored snapshot is anchored at (tdd SS2.5.2).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotAnchor {
+    /// The view cursor of the boundary's `compaction` event.
+    pub boundary_cursor: String,
+    /// The boundary's opaque compaction anchor.
+    pub summarized_through: String,
+}
+
+/// The complete folded view at the snapshot cursor (tdd SS4.9.1). Additive-optional evolution
+/// applies; unknown members MUST be ignored.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotState {
+    /// The running foreground turn; `null` when none is running. Required-nullable.
+    #[serde(default)]
+    pub active_turn: Option<TurnRef>,
+    /// The effective approval mode at this cursor — the same object the `Session` carries.
+    pub approval_mode: EffectiveApprovalModeState,
+    /// Latest branch observation; `null` when no fact has landed. Required-nullable.
+    #[serde(default)]
+    pub branch: Option<BranchState>,
+    /// The latest `(windowTokens, usedTokens, pressure)` triple. SS4.9.2's worked example omits the
+    /// member and the binary omits it too — this is the absent arm, while the siblings are
+    /// present-null in the same frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<ContextUsage>,
+    /// Latest effective model; `null` when no fact has landed. Required-nullable.
+    #[serde(default)]
+    pub effective_model: Option<EffectiveModel>,
+    /// Latest goal block; `null` when no fact has landed. Required-nullable.
+    #[serde(default)]
+    pub goal: Option<Goal>,
+    /// Every item, in first-opened order, each at its latest revision at the snapshot cursor — the
+    /// same item schema the notifications carry, which is what makes snapshot+suffix a pure splice.
+    pub items: Vec<Item>,
+    /// The settled canonical session name (tdd SS4.9.1 / SS2.14). **Additive-optional**, absent
+    /// until the session is named. The schema's own doc says "`null` when the session was never
+    /// named" while typing the member as a bare `string`, so the two arms are indistinguishable
+    /// here: both read as `None` and both write back as absent. No capture has served either arm
+    /// yet; revisit when one does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The pending-approval half of the pending set.
+    pub pending_approvals: Vec<PendingApprovalPointer>,
+    /// The pending-user-input half of the pending set.
+    pub pending_user_inputs: Vec<PendingUserInputPointer>,
+    /// Admitted-but-not-launched submits, in launch order.
+    pub queued_turns: Vec<TurnRef>,
+    /// The latest session-default reasoning effort with its source (tdd SS4.9.1, ADR 31255 D1).
+    /// **Additive-optional, absent arm**: missing until a set lands, never present-`null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffortState>,
+    /// Latest todo list; `null` when no fact has landed. Required-nullable.
+    #[serde(default)]
+    pub todo_list: Option<TodoListState>,
+    /// The `cumulative` block of the last `session/tokenUsage` event; zeroes when none.
+    pub token_usage: CumulativeTokenUsage,
+    /// Completed-turn count at this cursor.
+    pub turn_count: u64,
+}
+
+/// The inclusive raw-record range a durable-sourced view event folded from (tdd SS4.2) — the
+/// reconciliation token. In v1 it is an **opaque provenance token**: no wire method reads what it
+/// points at. Ephemeral-sourced events (`item/delta`, and an `item/started` that opens on an
+/// ephemeral record) carry no `sourceRange`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRange {
+    /// The first record of the inclusive range.
+    pub first: RecordPosition,
+    /// The last record of the inclusive range; equal to `first` for an event folded from one
+    /// record.
+    pub last: RecordPosition,
+    /// The stream the folded records live on.
+    pub stream: StreamRef,
+}
+
+/// One raw stream named by a [`SourceRange`] (tdd SS4.2).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamRef {
+    /// The stream id.
+    pub id: String,
+    /// The stream kind, verbatim raw-log vocabulary (e.g. `"run"`, `"session"`). A free string, not
+    /// an enum: `sourceRange` is an opaque provenance token in v1.
+    pub kind: String,
+}
+
+open_enum! {
+    /// Subagent control status (tdd SS4.5.7). The generic item `status` is the terminal authority.
+    SubagentControlStatus {
+        Accepted = "accepted",
+        Starting = "starting",
+        Running = "running",
+        ResultReady = "resultReady",
+        Closing = "closing",
+        Closed = "closed",
+        RecoveryPending = "recoveryPending",
+        ManualReconciliation = "manualReconciliation",
+    }
+}
+
+/// Params for `subagent/sendMessage` and `subagent/followupTask` (SS3.16): a child target plus the
+/// input body.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentInputParams {
+    /// The note/task text: trimmed with Unicode-whitespace semantics, rejected when empty after
+    /// trimming, delivered trimmed with multibyte content byte-for-byte intact.
+    pub body: String,
+    /// Client-minted UUIDv7 command id.
+    pub command_id: String,
+    /// Target session.
+    pub session_id: String,
+    /// Durable child id (the SS4.5.7 item's `subagentId`; opaque string).
+    pub subagent_id: String,
+}
+
+/// Params for `subagent/interrupt`, `subagent/stop`, and `subagent/close` (SS3.16): a child target
+/// plus an optional human-readable reason preserved on the durable effect record.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentOwnerReasonParams {
+    /// Client-minted UUIDv7 command id.
+    pub command_id: String,
+    /// Optional reason, preserved on the durable owner-command record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Target session.
+    pub session_id: String,
+    /// Durable child id.
+    pub subagent_id: String,
+}
+
+/// A subagent's result envelope (tdd SS4.5.7).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentResult {
+    /// Artifact references, verbatim.
+    pub artifact_refs: Vec<String>,
+    /// Error kind, verbatim durable vocabulary, when the child failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    /// Evidence references, verbatim.
+    pub evidence_refs: Vec<String>,
+    /// Structured result data, verbatim, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_data: Option<Map<String, Value>>,
+    /// Bounded result summary (<=512 chars, runtime-enforced).
+    pub summary: String,
+    /// Result text (<=32 KiB), when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// Params for `subagent/resume`, `subagent/reopen`, and `subagent/readResult` (SS3.16): the bare
+/// child target.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentTargetParams {
+    /// Client-minted UUIDv7 command id.
+    pub command_id: String,
+    /// Target session.
+    pub session_id: String,
+    /// Durable child id.
+    pub subagent_id: String,
+}
+
+/// The one usage payload shape (muse 1.3.0): the `usage/read` result's `usage` member and the
+/// `usage/changed` params (ADR 32563 D2/D3). The numbers are point-in-time — `observedAtMs` is
+/// the host's arrival stamp, so a client renders "as of", never implies live data (spec 18742
+/// US-FR-004).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionUsage {
+    /// When the host RECEIVED this observation (frame arrival or mint request-send), epoch
+    /// milliseconds.
+    pub observed_at_ms: u64,
+    /// The provider's subscription tier id, verbatim.
+    pub tier: String,
+    /// The rolling weekly block.
+    pub weekly: SubscriptionUsageWeekly,
+    /// The current window.
+    pub window: SubscriptionUsageWindow,
+}
+
+/// The rolling weekly block (muse 1.3.0): same semantics as [`SubscriptionUsageWindow`] without
+/// a duration (ADR 32563 D2).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionUsageWeekly {
+    /// When the weekly window resets, epoch milliseconds.
+    pub resets_at_ms: u64,
+    /// Percent of the weekly budget used (integer ≥ 0, may exceed 100).
+    pub used_percent: u32,
+}
+
+/// The current usage window (muse 1.3.0; the provider's 5-hour-class block): verbatim provider
+/// percentages with the reset stamp normalized to epoch milliseconds (ADR 32563 D2).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionUsageWindow {
+    /// When the window resets, epoch milliseconds.
+    pub resets_at_ms: u64,
+    /// Percent of the window's budget used: an integer ≥ 0, verbatim from the provider —
+    /// over-quota values above 100 are valid.
+    pub used_percent: u32,
+    /// The window's length in minutes (> 0).
+    pub window_duration_mins: u32,
+}
+
+/// A success response frame (SS1.2 §2.3).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuccessResponse {
+    /// Echo of the request id.
+    pub id: RequestId,
+    /// The literal `"2.0"`.
+    pub jsonrpc: JsonRpcVersion,
+    /// Always a JSON object, possibly `{}`, never a bare scalar — so every result can grow
+    /// additive-optional members.
+    pub result: Map<String, Value>,
+}
+
+/// `task/background` params (tdd §3.13, muse 1.3.0): durably send a running foreground tool task
+/// to the background.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskBackgroundParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+    /// The task to background, exactly as the view names it: the `toolCall` item's `itemId` IS
+    /// the task id (SS4.5.5).
+    pub task_id: String,
+}
+
+/// The `task/background` / `task/stop` ack (tdd §3.13/§3.14, muse 1.3.0): admission-only, echoing
+/// the targeted task.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskCommandResult {
+    /// Echoes the client's id.
+    pub command_id: String,
+    /// Admission status.
+    pub status: CommandStatus,
+    /// Echoes the targeted task id.
+    pub task_id: String,
+}
+
+/// `task/stopAll` params (tdd §3.15, muse 1.3.0): stop every stoppable background workload live
+/// at admission.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskStopAllParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+}
+
+/// The `task/stopAll` ack (tdd §3.15, muse 1.3.0): always `accepted`, including over an empty set
+/// — a blanket stop over nothing is a satisfied gesture. The ack deliberately carries no
+/// stopped-task list; count the kills from the view.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskStopAllResult {
+    /// Echoes the client's id.
+    pub command_id: String,
+    /// Admission status.
+    pub status: CommandStatus,
+}
+
+/// `task/stop` params (tdd §3.14, muse 1.3.0): stop one named background task. Required target,
+/// never "whichever is loudest" — §3.15 is the blanket verb.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskStopParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+    /// The task to stop, the `toolCall` item's `itemId` (SS4.5.5).
+    pub task_id: String,
+}
+
+/// `usage/read` result (muse 1.3.0): `{usage?}` — omitted, never `null`, when the host has
+/// observed nothing (ADR 32563 D2: truthful absence, no "nothing observed" error).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageReadResult {
+    /// The last-observed subscription usage window, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<SubscriptionUsage>,
+}
+
+open_enum! {
+    /// Version-control system of a branch observation (tdd SS4.6.4).
+    Vcs {
+        Git = "git",
+        Sapling = "sapling",
+    }
+}
+
+/// `workflow/cancel` params (tdd SS3.19, muse 1.3.0): cancel a live workflow run.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowCancelParams {
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+    /// The run to cancel, exactly as the `workflow` item names it (SS4.5.8); required,
+    /// non-empty.
+    pub workflow_run_id: String,
+}
+
+closed_enum! {
+    /// Which control to apply to the child's current attempt (tdd SS3.20, muse 1.3.0). Closed on
+    /// the wire: an unknown value is `-32602 invalidParams`.
+    WorkflowChildAction {
+        Skip = "skip",
+        Retry = "retry",
+    }
+}
+
+/// `workflow/childControl` params (tdd SS3.20, muse 1.3.0): skip or retry one workflow child,
+/// keyed by the `(childId, attempt)` pair the `workflow` item's `children[]` carries.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowChildControlParams {
+    /// The control to apply.
+    pub action: WorkflowChildAction,
+    /// The child's CURRENT attempt (integer >= 1). A stale value rejects `"stale_attempt"`;
+    /// re-read the item and re-key — never guess. Minimum 1.
+    pub attempt: u32,
+    /// The child, from the item's `children[]`; required, non-empty.
+    pub child_id: String,
+    /// The SS3.1.1 idempotency handle (UUIDv7).
+    pub command_id: String,
+    /// The target session.
+    pub session_id: String,
+    /// The run owning the child (SS4.5.8); required, non-empty.
+    pub workflow_run_id: String,
+}
+
+/// The shared SS3.19/SS3.20 admission-only ack (muse 1.3.0): deliberately bare `{commandId,
+/// status}` — settlement arrives as the workflow item's view events, never through the ack.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowControlResult {
+    /// Echoes the client's id.
+    pub command_id: String,
+    /// Admission status.
+    pub status: CommandStatus,
+}
+
+/// The `sha256:` stable-surface fingerprint of the muse 1.4.9 schema bundle these types were
+/// generated from (`fixtures/msp/msp/manifest.json`). muse 1.3.0 through 1.4.8 published
+/// `sha256:ab69549a…`; 1.4.9's surface is additive over it, so these types decode both.
+///
+/// Compare it against `InitializeResult.schema.fingerprint`. **A mismatch is a WARNING, never an
+/// error**: the server is free to ship a different stable surface, and additive evolution keeps
+/// these types working (research §1.2). Log it, do not refuse the connection.
+pub const SCHEMA_FINGERPRINT: &str =
+    "sha256:5d3b43e5ccdb7dc4f5a32c380f5f2cde0f10e3059b93610afb2e73f73b1d914c";
+
+/// Every wire **method** in the SS1.9 published index (`MspMethod`).
+///
+/// The server→client requests (`approval/request`, `userInput/request`) are **not** methods: they
+/// live in the schema's own `requests` index, mirrored here as [`MSP_SERVER_REQUESTS`].
+pub const MSP_METHODS: &[&str] = &[
+    "initialize",
+    "subagent/sendMessage",
+    "subagent/followupTask",
+    "subagent/interrupt",
+    "subagent/stop",
+    "subagent/resume",
+    "subagent/reopen",
+    "subagent/close",
+    "subagent/readResult",
+    "session/start",
+    "session/resume",
+    "session/fork",
+    "session/list",
+    "session/read",
+    "session/sideChat",
+    "turn/start",
+    "turn/steer",
+    "turn/interrupt",
+    "turn/cancel",
+    "turn/unqueue",
+    "session/compact",
+    "session/setModel",
+    "session/rename",
+    "session/setReasoningEffort",
+    "session/userShell",
+    "model/list",
+    "skill/list",
+    "skill/setActivation",
+    "skill/import",
+    "hook/list",
+    "plugin/list",
+    "plugin/install",
+    "plugin/marketplaceAdd",
+    "plugin/marketplaceUpdate",
+    "plugin/marketplaceRemove",
+    "task/background",
+    "task/stop",
+    "task/stopAll",
+    "task/list",
+    "goal/set",
+    "goal/edit",
+    "goal/clear",
+    "goal/pause",
+    "goal/resume",
+    "workflow/cancel",
+    "workflow/childControl",
+    "workflow/pause",
+    "workflow/resume",
+    "media/upload",
+    "view/subscribe",
+    "view/unsubscribe",
+    "view/page",
+    "item/readOutput",
+    "approval/decide",
+    "approval/listPending",
+    "session/setApprovalMode",
+    "userInput/answer",
+    "userInput/cancel",
+    "userInput/clarify",
+    "userInput/interrupt",
+    "usage/read",
+    "feedback/submit",
+    "recap/request",
+    "recap/cancel",
+    "computerUseSettings/read",
+    "computerUseSettings/update",
+    "computerUseSetup/read",
+    "computerUseSetup/start",
+    "computerUseSetup/check",
+];
+
+/// Every wire **notification** in the SS1.9 published index (`MspNotification`).
+///
+/// `session/started` ([`SessionStartedParams`]) was emitted but unindexed before muse 1.4.9; the
+/// 1.4.9 index lists it.
+pub const MSP_NOTIFICATIONS: &[&str] = &[
+    "initialized",
+    "session/started",
+    "session/closed",
+    "skill/changed",
+    "turn/started",
+    "turn/completed",
+    "turn/retracted",
+    "turn/retryScheduled",
+    "turn/modelRetryScheduled",
+    "turn/unqueued",
+    "turn/foregroundCompleted",
+    "item/started",
+    "item/updated",
+    "item/delta",
+    "item/completed",
+    "view/gap",
+    "approval/requested",
+    "approval/updated",
+    "approval/reviewing",
+    "approval/resolved",
+    "userInput/requested",
+    "userInput/settled",
+    "userInput/engaged",
+    "session/modelChanged",
+    "session/reasoningEffortChanged",
+    "session/statusChanged",
+    "session/goalChanged",
+    "session/todoListChanged",
+    "session/branchChanged",
+    "session/tokenUsage",
+    "session/contextUsage",
+    "session/approvalModeChanged",
+    "recap/completed",
+    "session/modelRouteUnserved",
+    "session/nameChanged",
+    "session/viewHealthChanged",
+    "session/listChanged",
+    "usage/changed",
+    "computerUseSetup/changed",
+    "plugin/changed",
+    "plugin/marketplaceChanged",
+];
+
+/// Every server-initiated wire request in the schema's `requests` index
+/// (`MspServerRequest`, SS5.3/SS5.10.1).
+///
+/// These are server→client and therefore absent from [`MSP_METHODS`]: the client never sends them,
+/// it answers each with a [`RequestReceipt`] while the decision/answer travels as a command
+/// (`approval/decide`, `userInput/answer`).
+pub const MSP_SERVER_REQUESTS: &[&str] = &["approval/request", "userInput/request"];
+
+open_enum! {
+    /// Every server-initiated wire request in the schema's `requests` index
+    /// (`MspServerRequest`, SS5.3/SS5.10.1).
+    MspServerRequest {
+        ApprovalRequest = "approval/request",
+        UserInputRequest = "userInput/request",
+    }
+}
+
+/// The SS5.3.3 presentation receipt — the client's response to a server-initiated request
+/// (`approval/request`, `userInput/request`).
+///
+/// The response acknowledges presentation only ("a surface showed or will show this"): it changes
+/// no state, the server uses it for diagnostics alone, and the decision/answer travels as a
+/// command (`approval/decide`, `userInput/answer`). An error response or a dropped connection means
+/// this connection could not present the request; the approval or prompt stays pending and the
+/// request is re-issued on the next subscribe. There is no dismiss-without-deciding on the wire.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestReceipt {}
+
+/// Every `error.data.kind` in the SS1.6 error table (`MspErrorDataKind`) — each code's primary kind
+/// plus its override kinds. Rendered as strings rather than an enum because [`ErrorKind`] already
+/// carries the same domain as a type; this list is the index, not a second type.
+pub const MSP_ERROR_DATA_KINDS: &[&str] = &[
+    "parseError",
+    "invalidRequest",
+    "notInitialized",
+    "alreadyInitialized",
+    "methodNotFound",
+    "experimentalRequired",
+    "invalidParams",
+    "internal",
+    "pageEventTooLarge",
+    "outputResultTooLarge",
+    "overloaded",
+    "inputTooLarge",
+    "capabilityRequired",
+    "notFound",
+    "interrupted",
+    "cancelled",
+    "sessionNotFound",
+    "sessionInUse",
+    "sessionAmbiguous",
+    "forkBoundaryInvalid",
+    "sessionNotLoaded",
+    "sessionStreamMismatch",
+    "commandRejected",
+    "backpressured",
+    "skillNotFound",
+    "computerUseUnavailable",
+    "marketplaceNotFound",
+    "pluginNotFound",
+    "marketplaceAlreadyExists",
+    "pluginMutationsDisabled",
+    "uploadNotFound",
+    "viewTruncated",
+    "outputUnavailable",
+    "boundaryPruned",
+    "boundaryUnusable",
+    "noBoundary",
+    "approvalNotFound",
+    "approvalAlreadyResolved",
+    "approvalChoiceInvalid",
+    "approvalRequirementStale",
+    "approvalReviewerUnavailable",
+    "userInputNotFound",
+    "userInputAlreadySettled",
+    "userInputAnswerInvalid",
+];

@@ -1,12 +1,12 @@
 //! The muse adapter against the puppet: [`MuseAdapter`] wraps a client
 //! spawned on `tests/fixtures/model_list_puppet.py` — the same fake-server
-//! seam `muse-client`'s own tests use — and round-trips `ListModels` to the
+//! seam `provider_muse::client`'s own tests use — and round-trips `ListModels` to the
 //! `model/list` call. No real `muse` process, no prompt, no spent turn.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use muse_client::{MuseClient, MuseConfig};
+use provider_muse::client::{MuseClient, MuseConfig};
 use provider::{Ack, Command, ConnectInfo, Provider};
 use provider_muse::MuseAdapter;
 
@@ -34,7 +34,7 @@ fn muse_adapter_round_trips_list_models_to_the_model_list_call() {
     assert_eq!(handshake.agent_name, "fake-muse");
 
     // The puppet answers only `model/list`: this ack proves the command
-    // reached the right `muse-client` call with its payload intact.
+    // reached the right `provider_muse::client` call with its payload intact.
     match adapter.send(Command::ListModels { session: None }).expect("list-models") {
         Ack::ModelCatalog { models, provider } => {
             assert_eq!(provider, "fake");

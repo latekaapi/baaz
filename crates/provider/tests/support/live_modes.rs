@@ -2,7 +2,7 @@
 //! verdict — shared by each provider's `live_modes` test through
 //! `#[path]`, so all three backends are judged by one rule.
 //!
-//! Std plus `aui_protocol` only: `muse-client` includes this file too, and
+//! Std plus `aui_protocol` only: `provider_muse::client` includes this file too, and
 //! it does not depend on the `provider` crate.
 //!
 //! **Every cell spends a real model turn** (two for a mid-session cell).

@@ -15,8 +15,8 @@
 use std::path::Path;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use muse_adapter::MuseFold;
-use muse_client::{frame, MuseEvent};
+use crate::fold::MuseFold;
+use crate::client::{frame, MuseEvent};
 use provider::{
     Ack, Capability, CapabilitySet, CapabilityState, Command, ConnectInfo, Handshake, ProviderAdapter,
     ProviderError, ProviderEvent, ProviderId,

@@ -22,16 +22,16 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use aui_protocol::PermissionMode;
-use muse_client::schema::{
+use provider_muse::client::schema::{
     ApprovalDecideParams, ApprovalListPendingParams, ApprovalMode, ClientCapabilities,
     SessionResumeParams, SessionSetApprovalModeParams, SessionStartParams, TurnInputPart, TurnStartParams,
 };
-use muse_client::{new_command_id, MuseClient, MuseConfig, MuseEvent};
+use provider_muse::client::{new_command_id, MuseClient, MuseConfig, MuseEvent};
 
 use live_modes::{probe_prompt, tail, Cell, Outcome, Paths, WARMUP};
 
 /// Whether each mode also selects its permission profile, the way Baaz's
-/// muse lane does (`muse_adapter::permission_profile`). `BAAZ_LIVE_MODES_MUSE_PROFILES=0`
+/// muse lane does (`provider_muse::fold::permission_profile`). `BAAZ_LIVE_MODES_MUSE_PROFILES=0`
 /// drives approval modes alone, for comparison.
 fn profiles() -> bool {
     std::env::var("BAAZ_LIVE_MODES_MUSE_PROFILES").as_deref() != Ok("0")
@@ -51,7 +51,7 @@ fn wire(mode: PermissionMode) -> ApprovalMode {
 /// Spawned the way `provider_muse::spawn` spawns: durable, trusted
 /// workspace, the desktop-agent env scrubbed.
 fn spawn() -> MuseClient {
-    let program = muse_client::resolve_muse_program()
+    let program = provider_muse::client::resolve_muse_program()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "muse".into());
     let removals = provider::child_env::scrubbed_removals();
@@ -98,7 +98,7 @@ impl Lane {
                             .get("mode")
                             .and_then(|m| serde_json::from_value::<ApprovalMode>(m.clone()).ok())
                         {
-                            self.reported = Some(muse_adapter::permission_mode(&mode));
+                            self.reported = Some(provider_muse::fold::permission_mode(&mode));
                         }
                     }
                     "turn/completed" => {
@@ -229,7 +229,7 @@ fn run_cell(cell: &Cell, paths: &Paths, provider_id: Option<&str>, model: Option
         provider_id: provider_id.map(str::to_owned),
         model_id: model.map(str::to_owned),
         approval_mode: Some(wire(opening)),
-        permission_profile: profiles().then(|| muse_adapter::permission_profile(opening).to_owned()),
+        permission_profile: profiles().then(|| provider_muse::fold::permission_profile(opening).to_owned()),
         ..Default::default()
     });
     let session_id = match started {
@@ -265,7 +265,7 @@ fn run_cell(cell: &Cell, paths: &Paths, provider_id: Option<&str>, model: Option
             if let Err(error) = lane.client.session_resume(&SessionResumeParams {
                 command_id: new_command_id(),
                 session_id: session_id.clone(),
-                permission_profile: Some(muse_adapter::permission_profile(cell.mode).to_owned()),
+                permission_profile: Some(provider_muse::fold::permission_profile(cell.mode).to_owned()),
                 exclude_items: Some(true),
                 ..Default::default()
             }) {

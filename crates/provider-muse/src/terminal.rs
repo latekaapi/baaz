@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 
-use muse_client::schema::{
+use crate::client::schema::{
     SessionConfig, SessionMcpServerConfig, SessionMcpServerMode, SessionResumeParams,
     SessionStartParams,
 };
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn start_takes_the_minted_session_id() {
-        let mut params = muse_client::schema::SessionStartParams {
+        let mut params = crate::client::schema::SessionStartParams {
             command_id: "cmd-1".into(),
             ..Default::default()
         };
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn resume_keeps_its_session_and_gains_the_bridge() {
-        let mut params = muse_client::schema::SessionResumeParams {
+        let mut params = crate::client::schema::SessionResumeParams {
             command_id: "cmd-2".into(),
             session_id: "s-known".into(),
             ..Default::default()

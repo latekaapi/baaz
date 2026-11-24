@@ -6,7 +6,7 @@ as the client's child process exactly like the real binary (its argv, always
 led by `serve`, is ignored). It accepts ANY method: it records every
 `{method, params}` it receives and answers with a minimally valid result for
 that method, so each `Command` arm can prove it called the right
-`muse-client` method with the right params. Unknown methods still come back
+`provider_muse::client` method with the right params. Unknown methods still come back
 `-32601`, exactly as before. No prompt is ever run and no turn is ever
 spent.
 

@@ -1135,7 +1135,7 @@ impl SessionView {
             // `Rc`, taken without comparing it (the deep compare was 2.1 ms a
             // refresh at 3,000 turns). `None` — a fresh or re-folded session
             // — compares everything, as before. Exactness is pinned by
-            // `muse-adapter`'s every-capture dirty-set test, and debug builds
+            // the Muse fold's every-capture dirty-set test, and debug builds
             // re-check every reuse below.
             let mut held: HashMap<&str, &Rc<Turn>> = HashMap::with_capacity(self.cached_turns.len());
             for turn in self.cached_turns.iter() {

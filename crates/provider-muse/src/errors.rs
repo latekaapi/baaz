@@ -1,6 +1,6 @@
 //! How an MSP transport failure shows up on screen.
 //!
-//! These classify [`MuseError`](muse_client::MuseError): branch on
+//! These classify [`MuseError`](crate::client::MuseError): branch on
 //! `error.data.kind`, never on the message — the wire contract refuses to
 //! make the message a branch point. They live here (not in `baaz`) because
 //! every branch is an MSP spelling; `baaz`'s `conn` re-exports them while
@@ -8,8 +8,8 @@
 //! those views onto [`ProviderError`](provider::ProviderError) removes that
 //! re-export.
 
-use muse_client::schema::ErrorKind;
-use muse_client::MuseError;
+use crate::client::schema::ErrorKind;
+use crate::client::MuseError;
 
 /// Where a failed command belongs on screen (spec §3.8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,7 +202,7 @@ mod tests {
     }
 
     fn rpc_error(kind: &str, code: i32, message: &str) -> MuseError {
-        let object: muse_client::schema::ErrorObject = serde_json::from_value(serde_json::json!({
+        let object: crate::client::schema::ErrorObject = serde_json::from_value(serde_json::json!({
             "code": code,
             "message": message,
             "data": {"kind": kind},
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn an_already_terminal_rejection_reads_as_turn_over() {
-        let object: muse_client::schema::ErrorObject = serde_json::from_value(serde_json::json!({
+        let object: crate::client::schema::ErrorObject = serde_json::from_value(serde_json::json!({
             "code": -32000,
             "message": "turn/interrupt command c1 rejected: already_terminal",
             "data": {"kind": "commandRejected", "reason": "already_terminal"},

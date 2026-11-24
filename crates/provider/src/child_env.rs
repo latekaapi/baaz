@@ -22,7 +22,7 @@
 //! enumerate removals by prefix, so the parent env is read at apply time).
 //! [`scrub_overrides`] covers the one spawn surface that cannot carry
 //! removals: the terminal PTY (whose config only adds vars). `muse serve`
-//! rides `muse-client`'s `spawn_with_env` with [`scrubbed_removals`].
+//! rides `provider_muse::client`'s `spawn_with_env` with [`scrubbed_removals`].
 //!
 //! Nothing here touches the process environment: the "launched under a
 //! desktop agent" fact is captured once ([`startup_had_entrypoint`]) and
@@ -103,7 +103,7 @@ pub fn scrubbed_removals_for(parent_had_entrypoint: bool) -> Vec<String> {
 
 /// Every scrubbed var present in this process's env, with the entrypoint
 /// captured at startup ([`startup_had_entrypoint`]). Hand these to a
-/// `Command` as `env_remove`s, or to `muse-client`'s `spawn_with_env`.
+/// `Command` as `env_remove`s, or to `provider_muse::client`'s `spawn_with_env`.
 pub fn scrubbed_removals() -> Vec<String> {
     scrubbed_removals_for(startup_had_entrypoint())
 }

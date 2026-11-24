@@ -1,7 +1,7 @@
 //! The one shape every wire call in this app has: run the blocking request on
 //! the background executor, then come back to the entity with the result.
 //!
-//! Every provider request blocks — a `muse-client` call, a provider
+//! Every provider request blocks — a Muse transport call, a provider
 //! adapter's `send` — so none of them may be issued from the UI thread. The pattern that follows from
 //! that — `background_spawn` the request, `cx.spawn` a foreground task, push
 //! it onto the entity's `tasks` so it dies with the entity, `await` the call

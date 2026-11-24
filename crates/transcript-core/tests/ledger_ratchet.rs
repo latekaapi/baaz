@@ -25,7 +25,7 @@ const FOLDS: &[(&str, &[&str])] = &[
     ),
     ("provider-claude-code/src/fold.rs", &["emitted", "approval_sites", "ApprovalSite", "TodoCard", "decided", "started: HashMap"]),
     (
-        "muse-adapter/src/fold.rs",
+        "provider-muse/src/fold/fold.rs",
         &[
             "Slots", "Slot", "TurnKey", "turn_keys", "turn_index", "block_order", "shift_slots", "reindex", "push_block",
             "assistant_turns", "user_keys",
@@ -99,7 +99,7 @@ fn no_fold_keeps_a_position_ledger() {
         let source = std::fs::read_to_string(crates.join(fold)).unwrap_or_else(|err| panic!("{fold}: {err}"));
         failures.extend(violations(&source, tokens).into_iter().map(|found| format!("{fold}:{found}")));
     }
-    assert!(!crates.join("muse-adapter/src/slots.rs").exists(), "Muse's slot ledger is back");
+    assert!(!crates.join("provider-muse/src/fold/slots.rs").exists(), "Muse's slot ledger is back");
     assert!(failures.is_empty(), "a fold keeps positions again:\n{}", failures.join("\n"));
 }
 

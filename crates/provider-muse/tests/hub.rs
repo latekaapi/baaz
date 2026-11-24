@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use muse_client::{MuseClient, MuseConfig};
+use provider_muse::client::{MuseClient, MuseConfig};
 use provider::{Ack, Command, ConnectInfo, Provider, ProviderAdapter, ProviderEvent, SubmissionPart};
 use provider_muse::{MuseHub, MuseLane};
 

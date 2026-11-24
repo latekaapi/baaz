@@ -6,8 +6,8 @@
 //! [`FULL_OUTPUT_CAP`] so a runaway log never floods the view.
 
 use base64::Engine as _;
-use muse_client::schema::{ItemReadOutputEncoding, ItemReadOutputParams};
-use muse_client::{MuseClient, MuseError};
+use crate::client::schema::{ItemReadOutputEncoding, ItemReadOutputParams};
+use crate::client::{MuseClient, MuseError};
 use provider::ProviderError;
 
 /// One `item/readOutput` page.
