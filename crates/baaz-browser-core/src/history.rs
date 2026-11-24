@@ -138,6 +138,11 @@ impl BrowserDb {
             }
         }
         let conn = Connection::open(path)?;
+        // docs/85 10.7: a new browser.db gives freed pages back
+        // (`auto_vacuum` takes effect only before the first table, so a file
+        // made earlier keeps 0 until a migration rebuilds it), and the WAL is
+        // cut back after a checkpoint.
+        let _ = conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_size_limit=8388608;");
         let _ = conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()));
         conn.execute_batch(
             "PRAGMA synchronous=NORMAL;
