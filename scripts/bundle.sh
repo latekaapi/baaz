@@ -134,6 +134,11 @@ fetch_cef() {
     fi
     mkdir -p "$work/x" && tar -xjf "$work/cef.tar.bz2" -C "$work/x"
     top="$(ls "$work/x")"
+    # The archive keeps the framework under Release/; the layout the build
+    # reads (cef-rs's export-cef-dir's) has it at the top.
+    if [ -d "$work/x/$top/Release" ]; then
+        mv "$work/x/$top/Release/"* "$work/x/$top/" && rmdir "$work/x/$top/Release"
+    fi
     mkdir -p "$(dirname "$CEF_DIR")" && rm -rf "$CEF_DIR" && mv "$work/x/$top" "$CEF_DIR"
     printf '{\n  "type": "minimal",\n  "name": "%s",\n  "sha1": "%s"\n}' "$CEF_ARCHIVE" "$CEF_SHA1" > "$CEF_DIR/archive.json"
     rm -rf "$work"
@@ -228,6 +233,14 @@ if [ "$WITH_CEF" = 1 ]; then
 HELPER
     done
 fi
+# The web engine this bundle carries, for About (docs/82 9.4): the app
+# refuses nothing over its engine's age, but says which one it is.
+if [ "$WITH_CEF" = 1 ]; then
+    CHROMIUM_VERSION="$(printf '%s' "$CEF_ARCHIVE" | sed -n 's/.*chromium-\([0-9.]*\)_.*/\1/p')"
+    ENGINE="Chromium $CHROMIUM_VERSION (CEF $CEF_VERSION)"
+else
+    ENGINE="the system's WebKit"
+fi
 cat >"$CONTENTS/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -249,6 +262,8 @@ cat >"$CONTENTS/Info.plist" <<EOF
     <string>${VERSION}</string>
     <key>CFBundleVersion</key>
     <string>${VERSION}</string>
+    <key>BaazEngine</key>
+    <string>${ENGINE}</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>LSEnvironment</key>
