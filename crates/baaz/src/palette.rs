@@ -450,17 +450,24 @@ impl Harness {
                 // Every row wears its project's display name (the folder
                 // name for sessions no project holds), so hits from several
                 // projects tell themselves apart.
-                rows: self
-                    .search_rows(cx)
-                    .into_iter()
-                    .map(|(id, label, detail)| {
-                        let session = id
-                            .strip_prefix("s:")
-                            .or_else(|| id.strip_prefix("f:").and_then(|rest| rest.split_once(':').map(|(session, _)| session)));
-                        let badge = session.and_then(|session| self.search_badge(session, cx)).map(SharedString::from);
-                        (id, label, detail, badge)
-                    })
-                    .collect(),
+                rows: {
+                    // One map per draw, not a scan of the list per row
+                    // (docs/85 10.8).
+                    let by_id = self.sessions_by_id(cx);
+                    self.search_rows(cx)
+                        .into_iter()
+                        .map(|(id, label, detail)| {
+                            let session = id
+                                .strip_prefix("s:")
+                                .or_else(|| id.strip_prefix("f:").and_then(|rest| rest.split_once(':').map(|(session, _)| session)));
+                            let badge = session
+                                .and_then(|session| by_id.get(session))
+                                .and_then(|entry| self.badge_of(entry, cx))
+                                .map(SharedString::from);
+                            (id, label, detail, badge)
+                        })
+                        .collect()
+                },
                 status: self.search_status(cx),
             },
             PaletteKind::Projects => PaletteRows::Projects(self.project_candidates(cx)),

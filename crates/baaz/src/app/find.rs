@@ -199,7 +199,14 @@ impl Harness {
         // names them, and their words come from their stored transcripts
         // ([`crate::provider_search`]) when the row is written. A session
         // both stores know (never expected) keeps its index row.
-        for (session_id, record) in &self.session_list.read(cx).provider_sessions {
+        // A scoped build looks its ids up; only a full build walks every
+        // record (docs/85 10.8).
+        let provider_sessions = &self.session_list.read(cx).provider_sessions;
+        let records: Vec<(&String, &_)> = match only {
+            Some(ids) => ids.iter().filter_map(|id| provider_sessions.get_key_value(id)).collect(),
+            None => provider_sessions.iter().collect(),
+        };
+        for (session_id, record) in records {
             if !wanted(session_id) || per_session.contains_key(session_id) || is_side(session_id) {
                 continue;
             }
@@ -491,12 +498,17 @@ impl Harness {
 
     /// The badge a search row wears: its project's display name, or the
     /// folder name when no project holds the session.
-    pub(crate) fn search_badge(&self, session_id: &str, cx: &gpui::App) -> Option<String> {
-        let entry = self.session_list.read(cx).sessions.iter().find(|e| e.id == session_id)?;
+    pub(crate) fn badge_of(&self, entry: &crate::sidebar::SessionEntry, cx: &gpui::App) -> Option<String> {
         match entry.project.as_deref().and_then(|id| self.session_list.read(cx).projects.find(id)) {
             Some(project) => Some(project.name.clone()),
             None => entry.workspace.as_deref().map(crate::sidebar::workspace_folder),
         }
+    }
+
+    /// The sidebar's sessions by id: one pass, for a draw that looks up
+    /// many hits (docs/85 10.8).
+    pub(crate) fn sessions_by_id<'a>(&self, cx: &'a gpui::App) -> std::collections::HashMap<&'a str, &'a crate::sidebar::SessionEntry> {
+        self.session_list.read(cx).sessions.iter().map(|entry| (entry.id.as_str(), entry)).collect()
     }
 
     /// The search palette's rows: session hits, then file hits, in the order
@@ -522,11 +534,10 @@ impl Harness {
                 rows.push((format!("s:{}", hit.session_id).into(), hit.label.clone().into(), detail));
             }
         }
+        let by_id = if self.search_files.is_empty() { Default::default() } else { self.sessions_by_id(cx) };
         for hit in &self.search_files {
-            let label = self
-                .session_list.read(cx).sessions
-                .iter()
-                .find(|entry| entry.id == hit.session_id)
+            let label = by_id
+                .get(hit.session_id.as_str())
                 .map(|entry| entry.label.clone())
                 .unwrap_or_else(|| "created file".to_owned());
             rows.push((format!("f:{}:{}", hit.session_id, hit.path).into(), hit.path.clone().into(), label.into()));
