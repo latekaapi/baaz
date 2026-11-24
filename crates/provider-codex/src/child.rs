@@ -428,11 +428,16 @@ fn with_thread_mode(params: &mut serde_json::Map<String, Value>, mode: Option<Pe
 /// server mints it and returns it (see [`thread_ids`]). `mode` opens the
 /// thread under that approval policy and sandbox (see
 /// [`codex_thread_mode`]); `None` omits both keys.
-pub fn thread_start_request(id: u64, cwd: &str, model: &str, mode: Option<PermissionMode>) -> Value {
-    let mut params = serde_json::Map::with_capacity(4);
+///
+/// `note` is Baaz's appended note (`provider::note`, docs/85 10.5), sent as
+/// `developerInstructions`: added beside Codex's own prompt, never in place
+/// of it. A compaction keeps it (probed live 25 Nov 2026).
+pub fn thread_start_request(id: u64, cwd: &str, model: &str, mode: Option<PermissionMode>, note: Option<&str>) -> Value {
+    let mut params = serde_json::Map::with_capacity(5);
     params.insert("cwd".to_owned(), Value::String(cwd.to_owned()));
     params.insert("model".to_owned(), Value::String(model.to_owned()));
     with_thread_mode(&mut params, mode);
+    with_note(&mut params, note);
     json!({"id": id, "method": "thread/start", "params": Value::Object(params)})
 }
 
@@ -487,11 +492,22 @@ pub fn turn_effort(picked: Option<&str>, sticky: Option<&str>, model_default: Op
 /// description) plus the effective `model` (see [`resume_ids`]).
 /// Captured live 2026-09-26 in `fixtures/codex/resume.jsonl`. `mode`
 /// rejoins under that approval policy and sandbox, as on `thread/start`.
-pub fn thread_resume_request(id: u64, thread_id: &str, mode: Option<PermissionMode>) -> Value {
-    let mut params = serde_json::Map::with_capacity(3);
+///
+/// `note`: the bytes the thread was opened with (docs/85 10.5), so the
+/// prompt prefix stays what it was.
+pub fn thread_resume_request(id: u64, thread_id: &str, mode: Option<PermissionMode>, note: Option<&str>) -> Value {
+    let mut params = serde_json::Map::with_capacity(4);
     params.insert("threadId".to_owned(), Value::String(thread_id.to_owned()));
     with_thread_mode(&mut params, mode);
+    with_note(&mut params, note);
     json!({"id": id, "method": "thread/resume", "params": Value::Object(params)})
+}
+
+/// `developerInstructions`: the one place Codex is given Baaz's note.
+fn with_note(params: &mut serde_json::Map<String, Value>, note: Option<&str>) {
+    if let Some(note) = note.filter(|note| !note.is_empty()) {
+        params.insert("developerInstructions".to_owned(), Value::String(note.to_owned()));
+    }
 }
 
 /// The `turn/steer` call injecting input into the running turn.
@@ -1847,7 +1863,7 @@ mod tests {
         assert_eq!(model, "gpt-5.6-sol", "thread/start carries an explicit model");
         let cwd = params.get("cwd").and_then(Value::as_str).expect("cwd");
         assert_eq!(
-            thread_start_request(2, cwd, model, None).get("params"),
+            thread_start_request(2, cwd, model, None, None).get("params"),
             Some(&json!({"cwd": cwd, "model": model}))
         );
 
@@ -2266,7 +2282,7 @@ mod tests {
         let turn = turn_start_request(3, "t", "m", "hi", None, ro);
         assert_eq!(frame_mode(&turn), ro);
         assert!(declines(ask, WireModes { attempted: ro, in_force: ro }), "turn started Read-only, chip moved");
-        let launched = thread_start_request(2, "/w", "m", ro);
+        let launched = thread_start_request(2, "/w", "m", ro, None);
         assert!(declines(ask, WireModes { attempted: frame_mode(&launched), in_force: None }), "launched Read-only, unanswered");
         assert!(declines(ask, WireModes { attempted: None, in_force: ro }), "launched Read-only, no override since");
         assert!(declines(ro, WireModes { attempted: ask, in_force: ask }), "the chip's Read-only refuses at once");
@@ -2714,8 +2730,8 @@ mod tests {
         ];
         for (mode, approval, sandbox, policy) in cases {
             for frame in [
-                thread_start_request(2, "/w", "gpt-5.6-sol", Some(mode)),
-                thread_resume_request(2, "thread-1", Some(mode)),
+                thread_start_request(2, "/w", "gpt-5.6-sol", Some(mode), None),
+                thread_resume_request(2, "thread-1", Some(mode), None),
             ] {
                 let params = &frame["params"];
                 assert_eq!(params["approvalPolicy"], approval, "{frame}");
@@ -2734,8 +2750,8 @@ mod tests {
         }
         // No mode, no keys: the server decides, byte-identical to before.
         for frame in [
-            thread_start_request(2, "/w", "gpt-5.6-sol", None),
-            thread_resume_request(2, "thread-1", None),
+            thread_start_request(2, "/w", "gpt-5.6-sol", None, None),
+            thread_resume_request(2, "thread-1", None, None),
             turn_start_request(3, "thread-1", "gpt-5.6-sol", "hi", None, None),
         ] {
             let params = frame["params"].as_object().expect("params");

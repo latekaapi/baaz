@@ -50,6 +50,7 @@ pub mod env_path;
 mod error;
 mod event;
 pub mod facts;
+pub mod note;
 pub mod registry;
 pub mod scripted;
 mod traits;

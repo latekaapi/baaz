@@ -211,11 +211,13 @@ impl SessionRuntime {
         let skill_plan = self.plan && self.plan_support() == provider::PlanMode::Skill;
         let model_text = if skill_plan { plan::prefix(&quoted) } else { quoted };
         // Undo (docs/82 6.4): what the person put back since the last
-        // message rides this one's wire text, ahead of it — never the
-        // bubble. A send that never leaves puts the notes back.
+        // message rides this one's wire text — after it, through the one
+        // notice helper (docs/85 10.5, rule 17: never ahead of the
+        // person's words), and never in the bubble. A send that never
+        // leaves puts the notes back.
         let preface = self.take_undo_preface();
         let model_text = match &preface {
-            Some(notes) => format!("{}\n\n{model_text}", notes.iter().map(|(_, note)| note.as_str()).collect::<Vec<_>>().join("\n")),
+            Some(notes) => provider::note::notice_suffix(&model_text, &notes.iter().map(|(_, note)| note.clone()).collect::<Vec<_>>()),
             None => model_text,
         };
         // The provider echoes the whole model-visible input; the bubble

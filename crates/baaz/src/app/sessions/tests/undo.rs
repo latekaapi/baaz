@@ -111,7 +111,7 @@ fn read(root: &std::path::Path, path: &str) -> String {
 /// Undo this turn through the confirm: its files go back (a created one
 /// removed), the person's later file stays, the turn shows its note and no
 /// longer offers Undo, the toast offers Undo; the next send's wire text
-/// leads with the preface while its bubble does not, and the send after it
+/// carries the notice after the person's words while its bubble does not, and the send after it
 /// carries none. The toast's Undo then puts the turn's files back, and —
 /// the preface having gone — the next send says so.
 #[gpui::test]
@@ -158,8 +158,8 @@ fn undo_this_turn_through_the_confirm_restores_its_files_and_tells_the_provider(
     assert_eq!(sends.len(), 2);
     assert_eq!(
         sends[0].0,
-        "Note: before this message, the person undid your changes from an earlier turn (files: a.txt and new.txt). Those files are back to how they were before that turn.\n\ncarry on",
-        "the preface rides the wire text"
+        "carry on\n\n<baaz-notice>\nNote: before this message, the person undid your changes from an earlier turn (files: a.txt and new.txt). Those files are back to how they were before that turn.\n</baaz-notice>",
+        "the notice rides the wire text, after the person's words (docs/85 10.5)"
     );
     assert_eq!(sends[0].1, "carry on", "the bubble is what the person typed");
     assert_eq!(sends[1].0, "and again", "once only");
@@ -180,8 +180,8 @@ fn undo_this_turn_through_the_confirm_restores_its_files_and_tells_the_provider(
     vc.update(|_, cx| assert!(rt.read(cx).undone_notes().is_empty(), "the note goes"));
     send(&baaz, vc, "third");
     let last = sent.lock().expect("sent").last().cloned().expect("a send");
-    assert!(last.0.starts_with("Note: before this message, the person restored changes they had undone earlier (files: a.txt and new.txt)."), "{}", last.0);
-    assert!(last.0.ends_with("\n\nthird"));
+    assert!(last.0.contains("<baaz-notice>\nNote: before this message, the person restored changes they had undone earlier (files: a.txt and new.txt)."), "{}", last.0);
+    assert!(last.0.starts_with("third\n\n<baaz-notice>"), "the person's words first: {}", last.0);
     cleanup(&root, state);
 }
 

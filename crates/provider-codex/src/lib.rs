@@ -211,6 +211,19 @@ impl CodexAdapter {
         self.state_override.lock().expect("state mutex").clone().unwrap_or_else(provider::child_env::state_dir)
     }
 
+    /// Baaz's appended note as this build composes it (docs/85 10.5): the
+    /// bridge's tools are named only when the bridge rides the session.
+    fn compose_note(&self) -> String {
+        let bridge = self.terminal.lock().expect("terminal mutex").is_some();
+        provider::note::compose(provider::note::NoteTools { bridge })
+    }
+
+    /// The note `session_id` was opened with, else this build's — stored
+    /// now, so every later resume sends the same bytes.
+    fn note_for(&self, session_id: &str) -> String {
+        provider::note::for_session(&self.resolved_state_dir(), session_id, || self.compose_note())
+    }
+
     /// The Baaz-owned Codex home this adapter spawns children with.
     /// Env-only: creates nothing (see [`Self::prepare_home`]).
     fn resolved_home(&self) -> std::path::PathBuf {
@@ -388,13 +401,15 @@ impl CodexAdapter {
             std::env::current_dir().ok().map(|cwd| cwd.to_string_lossy().into_owned())
         });
         let cwd = cwd.as_deref().unwrap_or(".");
+        let note = self.compose_note();
         let started = running
-            .send_frame(thread_start_request(running.next_request_id(), cwd, &resolved, mode))
+            .send_frame(thread_start_request(running.next_request_id(), cwd, &resolved, mode, Some(&note)))
             .map_err(Self::unavailable)?;
         let (thread_id, session_id) =
             thread_ids(&started).ok_or_else(|| ProviderError::Unavailable {
                 reason: "thread/start answered without thread ids".into(),
             })?;
+        provider::note::store(&self.resolved_state_dir(), &session_id, &note);
         self.announce_mode(&session_id, child::reported_mode(&started).or(mode));
         *self.session_id.lock().expect("session mutex") = Some(session_id.clone());
         *self.thread_id.lock().expect("thread mutex") = Some(thread_id);
@@ -617,8 +632,9 @@ impl CodexAdapter {
             self.prepare_home();
         }
         let running = self.spawn_handshaken(&extra, &env)?;
+        let note = self.note_for(session_id);
         let answer = running
-            .send_frame(child::thread_resume_request(running.next_request_id(), session_id, mode))
+            .send_frame(child::thread_resume_request(running.next_request_id(), session_id, mode, Some(&note)))
             .map_err(Self::resume_failure)?;
         let (thread_id, resumed_session, model) =
             child::resume_ids(&answer).ok_or_else(|| ProviderError::Unavailable {
@@ -748,8 +764,9 @@ impl CodexAdapter {
         }
         let running = self.spawn_handshaken(&extra, &env)?;
         let mode = self.fold.lock().expect("fold mutex").permission_mode();
+        let note = self.note_for(session_id);
         let answer = running
-            .send_frame(child::thread_resume_request(running.next_request_id(), session_id, mode))
+            .send_frame(child::thread_resume_request(running.next_request_id(), session_id, mode, Some(&note)))
             .map_err(Self::resume_failure)?;
         let (thread_id, _, _) = child::resume_ids(&answer).ok_or_else(|| ProviderError::Unavailable {
             reason: "thread/resume answered without thread ids".into(),
@@ -1452,6 +1469,31 @@ impl Drop for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// docs/85 10.5: Baaz's note rides `thread/start` and every
+    /// `thread/resume` as the same bytes — the stored ones, even after this
+    /// build's wording changed — and a compaction sends nothing (Codex keeps
+    /// developer instructions through one: probed live 25 Nov 2026).
+    #[test]
+    fn the_note_rides_start_and_resume_byte_identical() {
+        let dir = std::env::temp_dir().join(format!("codex-note-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let adapter = CodexAdapter::new("codex-must-never-spawn");
+        adapter.set_state_dir(dir.clone());
+        let note = adapter.compose_note();
+        let start = child::thread_start_request(1, "/w", "m", None, Some(&note));
+        provider::note::store(&dir, "thread-9", &note);
+        let resume = child::thread_resume_request(2, "thread-9", None, Some(&adapter.note_for("thread-9")));
+        assert_eq!(start["params"]["developerInstructions"], serde_json::json!(note));
+        assert_eq!(resume["params"]["developerInstructions"], start["params"]["developerInstructions"], "byte-identical on resume");
+        // A later build's wording never reaches a session opened before it.
+        let stored = provider::note::stored_path(&dir, "thread-9").expect("a path");
+        std::fs::write(&stored, "the wording it opened with").expect("write");
+        assert_eq!(adapter.note_for("thread-9"), "the wording it opened with");
+        let compact = child::thread_compact_request(3, "thread-9");
+        assert!(compact["params"].get("developerInstructions").is_none(), "a compaction re-sends nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The program an adapter that must never spawn is built with: a path
     /// that cannot exist, so a regression that starts a child fails to

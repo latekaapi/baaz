@@ -1081,19 +1081,43 @@ impl ClaudeCodeAdapter {
         }
     }
 
-    /// The keys every Baaz-homed child carries on `--settings`, merged
-    /// into the launch's one layer at spawn ([`argv::with_settings`]):
-    /// `autoMemoryDirectory`, the project memory the terminal's `claude`
-    /// shares (docs/85 10.1, [`crate::home::memory_dir`]). Without a known
-    /// folder the launch goes as built.
+    /// What every Baaz-homed child carries beyond its launch, added at
+    /// spawn: on `--settings` (merged into the launch's one layer,
+    /// [`argv::with_settings`]) `autoMemoryDirectory`, the project memory
+    /// the terminal's `claude` shares (docs/85 10.1,
+    /// [`crate::home::memory_dir`]; skipped without a known folder); and
+    /// `--append-system-prompt` with the session's stored note (docs/85
+    /// 10.5, [`Self::note_for`]).
     fn with_session_settings(&self, launch: SessionLaunch) -> SessionLaunch {
         let known = self.workspace.lock().expect("workspace mutex").clone();
-        let Some(cwd) = launch.cwd.as_ref().map(PathBuf::from).or(known) else { return launch };
-        let redirected = provider::child_env::state_dir_override();
-        let memory = crate::home::memory_dir(&cwd, &self.owner_config_dir(), redirected.as_deref());
-        let mut extra = serde_json::Map::new();
-        extra.insert("autoMemoryDirectory".into(), serde_json::Value::String(memory.to_string_lossy().into_owned()));
-        argv::with_settings(launch, extra)
+        let launch = match launch.cwd.as_ref().map(PathBuf::from).or(known) {
+            Some(cwd) => {
+                let redirected = provider::child_env::state_dir_override();
+                let memory = crate::home::memory_dir(&cwd, &self.owner_config_dir(), redirected.as_deref());
+                let mut extra = serde_json::Map::new();
+                extra.insert("autoMemoryDirectory".into(), serde_json::Value::String(memory.to_string_lossy().into_owned()));
+                argv::with_settings(launch, extra)
+            }
+            None => launch,
+        };
+        let note = self.note_for(&launch.session_id);
+        argv::with_appended_note(launch, &note)
+    }
+
+    /// Baaz's appended note as this build composes it (docs/85 10.5): the
+    /// bridge's tools are named only when the bridge rides the session.
+    fn compose_note(&self) -> String {
+        let bridge = self.terminal.lock().expect("terminal mutex").is_some();
+        provider::note::compose(provider::note::NoteTools { bridge })
+    }
+
+    /// The note `session_id` was opened with — stored beside the Baaz home
+    /// (`<state>/notes/`) — else this build's, stored now: every resume,
+    /// fork and relaunch of the session sends the same bytes.
+    fn note_for(&self, session_id: &str) -> String {
+        let home = self.resolved_config_dir();
+        let state = home.parent().map(PathBuf::from).unwrap_or(home);
+        provider::note::for_session(&state, session_id, || self.compose_note())
     }
 
     /// A resume launch run in its session's own folder: the cwd the
@@ -3149,6 +3173,32 @@ mod tests {
             assert!(!expected.to_string_lossy().contains("-src"), "the main repo's slug, not the subfolder's: {}", expected.display());
             assert_eq!(settings.get("disableSkillShellExecution").is_some(), mode.is_some(), "Read-only rides the same layer: {settings}");
         }
+    }
+
+    /// docs/85 10.5: every spawn of a session carries Baaz's note on one
+    /// `--append-system-prompt` (never `--system-prompt`), and it is the
+    /// note the session was opened with: the stored bytes win over this
+    /// build's wording, so a relaunch keeps the prompt prefix.
+    #[test]
+    fn every_spawn_appends_the_sessions_stored_note() {
+        let root = scratch_dir("note-argv");
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn").with_config_dir(root.join("home"));
+        let launch = || argv::argv_for_resume("sess-note", None, None, None);
+        let flag = |launch: &SessionLaunch| {
+            assert_eq!(launch.argv.iter().filter(|arg| *arg == "--append-system-prompt").count(), 1, "{:?}", launch.argv);
+            assert!(!launch.argv.iter().any(|arg| arg == "--system-prompt"), "never replaces the vendor's prompt");
+            let at = launch.argv.iter().position(|arg| arg == "--append-system-prompt").expect("flag");
+            launch.argv[at + 1].clone()
+        };
+        let first = flag(&adapter.with_session_settings(launch()));
+        assert_eq!(first, provider::note::compose(provider::note::NoteTools { bridge: false }));
+        assert_eq!(flag(&adapter.with_session_settings(launch())), first, "byte-identical on the next spawn");
+        let stored = provider::note::stored_path(&root, "sess-note").expect("a path");
+        std::fs::write(&stored, "the wording it opened with").expect("write");
+        assert_eq!(flag(&adapter.with_session_settings(launch())), "the wording it opened with");
+        // A launch that already carried one keeps exactly one.
+        let twice = adapter.with_session_settings(adapter.with_session_settings(launch()));
+        flag(&twice);
     }
 
     /// docs/82 6.2: `ResumeSession.env` reaches the resumed child too — a

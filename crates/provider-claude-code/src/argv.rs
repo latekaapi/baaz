@@ -357,6 +357,20 @@ pub fn with_settings(mut launch: SessionLaunch, extra: serde_json::Map<String, s
     launch
 }
 
+/// Set the launch's `--append-system-prompt` to `note` (docs/85 10.5):
+/// Baaz's note, added after the vendor's prompt — never `--system-prompt`,
+/// which would replace it. One flag, whatever the launch carried.
+pub fn with_appended_note(mut launch: SessionLaunch, note: &str) -> SessionLaunch {
+    if let Some(at) = launch.argv.iter().position(|arg| arg == "--append-system-prompt") {
+        launch.argv.drain(at..(at + 2).min(launch.argv.len()));
+    }
+    if !note.is_empty() {
+        launch.argv.push("--append-system-prompt".into());
+        launch.argv.push(note.to_owned());
+    }
+    launch
+}
+
 /// The `--settings` value on a launch, parsed (`None` without one).
 pub fn settings_on(launch: &SessionLaunch) -> Option<serde_json::Value> {
     let at = launch.argv.iter().position(|arg| arg == "--settings")?;
