@@ -285,6 +285,13 @@ pub enum Item {
         /// Wall-clock time in milliseconds, when reported.
         duration_ms: Option<u64>,
     },
+    /// A `contextCompaction`: the one item `thread/compact/start` runs as
+    /// (probed live 25 Nov 2026, docs/85-evidence/10.4). It carries no
+    /// counts: the turn's `thread/tokenUsage/updated` says the size after.
+    ContextCompaction {
+        /// The wire item id.
+        id: String,
+    },
     /// An item kind this decoder does not know. Carried, not dropped.
     Other {
         /// The wire `type` string.
@@ -663,6 +670,7 @@ fn decode_item(item: &Value) -> Item {
             result: item.get("result").cloned().filter(|result| !result.is_null()),
             duration_ms: item.get("durationMs").and_then(Value::as_u64),
         },
+        "contextCompaction" => Item::ContextCompaction { id },
         other => Item::Other { item_type: other.to_owned(), id },
     }
 }
@@ -933,6 +941,7 @@ impl Item {
             | Item::SubAgentActivity { id, .. }
             | Item::CollabAgentToolCall { id, .. }
             | Item::McpToolCall { id, .. }
+            | Item::ContextCompaction { id }
             | Item::Other { id, .. } => id,
         }
     }
@@ -948,6 +957,7 @@ impl Item {
             Item::SubAgentActivity { .. } => "subAgentActivity",
             Item::CollabAgentToolCall { .. } => "collabAgentToolCall",
             Item::McpToolCall { .. } => "mcpToolCall",
+            Item::ContextCompaction { .. } => "contextCompaction",
             Item::Other { .. } => "other",
         }
     }
@@ -964,6 +974,7 @@ impl Item {
             | Item::SubAgentActivity { .. }
             | Item::CollabAgentToolCall { .. }
             | Item::McpToolCall { .. }
+            | Item::ContextCompaction { .. }
             | Item::Other { .. } => "",
         }
     }

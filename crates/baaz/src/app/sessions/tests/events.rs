@@ -882,6 +882,81 @@ fn a_parked_finish_records_its_own_byline(cx: &mut gpui::TestAppContext) {
     lane_restore(state);
 }
 
+/// docs/85 10.4: a compaction settling on an unfocused session is nobody's
+/// turn — no byline, no title, no counted turn, no unread mark, so nothing
+/// a notification could announce — while a person's turn settling the
+/// same way lands all of those (`a_parked_finish_records_its_own_byline`).
+#[gpui::test]
+fn a_parked_compaction_lands_no_byline_count_or_notification(cx: &mut gpui::TestAppContext) {
+    use aui_protocol::{Block, MarkerKind, Session, Turn, TurnMeta};
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("s10-parked-compaction");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, _| {
+            harness.providers = harness.providers.with_opens_of(&parking_factory());
+            mark_muse_up(harness);
+        });
+    });
+    let open = |vc: &mut gpui::VisualTestContext| {
+        vc.update(|window, cx| {
+            baaz.update(cx, |harness, cx| {
+                let workspace = harness.workspace(cx);
+                harness.open_on_provider(ProviderId::Codex, None, workspace, window, cx);
+            });
+        });
+        vc.run_until_parked();
+        vc.update(|_, cx| baaz.read(cx).active.clone().expect("a lane opened"))
+    };
+    let parked = open(vc);
+    let _front = open(vc);
+    let parked_id = vc.update(|_, cx| parked.read(cx).rt(cx).session_id.clone());
+    vc.update(|_, cx| {
+        let mut session = Session::new(parked_id.clone(), aui_protocol::Provider::Claude, "m", "/tmp");
+        session.turns = vec![Turn::Assistant {
+            id: "compaction-1".into(),
+            blocks: vec![Block::Marker { kind: MarkerKind::ContextCompacted, text: "Context compacted \u{b7} 29k \u{2192} 1.9k".into() }],
+            meta: TurnMeta { cost_usd: 0.07, ..TurnMeta::default() },
+            timestamp: None,
+        }];
+        parked.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.load_fixture(session, cx)));
+        baaz.update(cx, |harness, _| {
+            harness.open_state.turns_admitted.insert(parked_id.clone());
+        });
+    });
+    let (before, turns_before) = vc.update(|_, cx| {
+        let harness = baaz.read(cx);
+        let row = harness.session_list.read(cx).sessions.iter().find(|row| row.id == parked_id).map(|row| row.session_state());
+        (row, harness.session_list.read(cx).provider_sessions.get(&parked_id).map(|record| record.turns))
+    });
+    vc.update(|_, cx| {
+        parked.update(cx, |_, cx| {
+            cx.emit(SessionEvent::ProviderTurnFinished {
+                session_id: parked_id.clone(),
+                turn_id: "compaction-1".into(),
+                meta: TurnMeta { cost_usd: 0.07, ..TurnMeta::default() },
+            });
+        });
+    });
+    vc.run_until_parked();
+    vc.update(|_, cx| {
+        let harness = baaz.read(cx);
+        let meta = harness.session_list.read(cx).overrides.get(&parked_id);
+        assert!(meta.and_then(|m| m.last_ask.as_deref()).is_none(), "no byline from a compaction");
+        assert!(meta.and_then(|m| m.derived_title.as_deref()).is_none(), "no title from a compaction");
+        assert_eq!(
+            harness.session_list.read(cx).provider_sessions.get(&parked_id).map(|record| record.turns),
+            turns_before,
+            "a compaction counts no turn"
+        );
+        let row = harness.session_list.read(cx).sessions.iter().find(|row| row.id == parked_id).expect("the row");
+        assert!(!row.unread, "no unread mark");
+        assert_eq!(Some(row.session_state()), before, "the row's state does not move, so nothing is announced");
+    });
+    lane_restore(state);
+}
+
 /// F2/F17 (docs/81 A): the boot-time field subscriptions — the search
 /// query, the API-key field — outlive a session activation. Before the
 /// split, `activate` cleared them with the per-view ones, so typing in ⌘⇧F

@@ -267,6 +267,7 @@ fn copy_ledger(tx: &Transaction) -> rusqlite::Result<()> {
                 cached_tokens: row.get(11)?,
                 cost_usd: row.get(12)?,
                 provider: row.get(13)?,
+                compaction: false,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

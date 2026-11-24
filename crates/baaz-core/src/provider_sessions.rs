@@ -401,6 +401,22 @@ pub fn send_resume(
 /// serving provider. The `(session_id, turn_id)` key deduplicates replay:
 /// reopening replays the same finished turns and the second write is a
 /// no-op, so history never double-counts.
+/// Whether `turn` is a compaction (docs/85 10.4): an assistant turn whose
+/// only rows are "Context compacted" markers — what `/compact` folds to on
+/// every provider. Not a person's turn: it is ledgered (as a compaction)
+/// but titles, bylines, turn counts and unread marks never read it.
+pub fn is_compaction_turn(turn: &aui_protocol::Turn) -> bool {
+    match turn {
+        aui_protocol::Turn::Assistant { blocks, .. } => {
+            !blocks.is_empty()
+                && blocks
+                    .iter()
+                    .all(|block| matches!(block, aui_protocol::Block::Marker { kind: aui_protocol::MarkerKind::ContextCompacted, .. }))
+        }
+        _ => false,
+    }
+}
+
 pub fn ledger_row(
     session_id: &str,
     provider: &str,

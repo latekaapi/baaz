@@ -126,9 +126,9 @@ mod tests {
     #[test]
     fn slash_commands_are_offered_per_provider() {
         use crate::overlays::Command;
-        assert!(!Command::Compact.offered_on(ProviderId::ClaudeCode));
+        assert!(Command::Compact.offered_on(ProviderId::ClaudeCode), "docs/85 10.4");
         assert!(Command::Fork.offered_on(ProviderId::ClaudeCode));
-        assert!(!Command::Compact.offered_on(ProviderId::Codex));
+        assert!(Command::Compact.offered_on(ProviderId::Codex), "docs/85 10.4");
         assert!(!Command::Fork.offered_on(ProviderId::Codex));
         assert!(Command::Compact.offered_on(ProviderId::Muse));
         assert!(Command::Model.offered_on(ProviderId::Codex), "commands that need nothing are always offered");

@@ -37,16 +37,10 @@ pub fn capabilities() -> CapabilitySet {
         // Native: executed for real (§8 caveat retired by fork.jsonl —
         // resuming f3815266-… with --fork-session minted c4b6fee5-…).
         (Capability::ForkSession, CapabilityState::Native),
-        // The adapter refuses compact-now: `--autocompact` only sets a
-        // window, so offering "/compact" would always fail (docs/81 F D1).
-        (
-            Capability::CompactSession,
-            CapabilityState::Unavailable {
-                reason: "no compact-now command exists over --print; compaction happens when the \
-                         --autocompact window fills, not when asked"
-                    .into(),
-            },
-        ),
+        // Native: `/compact` sent as a user message compacts and answers
+        // with `compact_boundary` (probed live 24 + 25 Nov 2026, docs/85
+        // 10.4; the frames are docs/85-evidence/10.4).
+        (Capability::CompactSession, CapabilityState::Native),
         (Capability::SessionConfig, CapabilityState::Native),
         // The adapter refuses `RunShell`: the Bash tool runs inside turns.
         (
@@ -117,7 +111,7 @@ mod tests {
         use CapabilityState as S;
         assert_eq!(set.state(C::SessionLifecycle), &S::Native);
         assert_eq!(set.state(C::ForkSession), &S::Native);
-        assert!(matches!(set.state(C::CompactSession), S::Unavailable { .. }));
+        assert_eq!(set.state(C::CompactSession), &S::Native);
         assert_eq!(set.state(C::SessionConfig), &S::Native);
         assert!(matches!(set.state(C::SessionShell), S::Unavailable { .. }));
         assert_eq!(set.state(C::SubmitTurn), &S::Native);

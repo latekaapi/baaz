@@ -515,11 +515,27 @@ impl Harness {
             crate::providers::write_claude_code_last_reported_model(&meta.model);
         }
         let cursor = runtime.read(cx).last_cursor();
+        // A compaction (docs/85 10.4) is ledgered as one, and is nobody's
+        // turn: it counts no exchange, lands no byline or title, and —
+        // since only a person's turn moves those — leaves the row as it was.
+        let compactions: std::collections::HashSet<String> = runtime
+            .read(cx)
+            .session()
+            .map(|session| {
+                session
+                    .turns
+                    .iter()
+                    .filter(|turn| crate::provider_sessions::is_compaction_turn(turn))
+                    .map(|turn| turn.id().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
         let rows: Vec<_> = turns
             .iter()
             .map(|(turn_id, meta)| {
                 let cursor = cursor.clone().unwrap_or_else(|| turn_id.clone());
-                crate::provider_sessions::ledger_row(&session_id, &provider, &cursor, turn_id, meta)
+                let row = crate::provider_sessions::ledger_row(&session_id, &provider, &cursor, turn_id, meta);
+                if compactions.contains(turn_id) { row.as_compaction() } else { row }
             })
             .collect();
         // Fire-and-forget on the background executor, like the muse
@@ -528,6 +544,11 @@ impl Harness {
         // a replayed turn a no-op insert rather than a duplicate, and a
         // batch is one write.
         self.wire_call(cx, move || crate::usage::record_backfilled(&rows), |_this, (), _cx| {});
+        if turns.iter().all(|(turn_id, _)| compactions.contains(turn_id)) {
+            self.sync_row_live(&session_id, false, cx);
+            cx.notify();
+            return;
+        }
         // Count exchanges, as muse rows do: the folded assistant
         // turns, never a blind increment — a reopen replays the
         // same `TurnFinished`s, and incrementing again read "2
@@ -540,6 +561,7 @@ impl Harness {
                     .turns
                     .iter()
                     .filter(|turn| matches!(turn, aui_protocol::Turn::Assistant { .. }))
+                    .filter(|turn| !crate::provider_sessions::is_compaction_turn(turn))
                     .count() as u64
             })
             .unwrap_or(0);

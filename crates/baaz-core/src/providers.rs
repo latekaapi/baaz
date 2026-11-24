@@ -1569,16 +1569,18 @@ mod tests {
     fn offered_controls_match_what_each_adapter_does() {
         use Capability as C;
         let offered = |id, c| offers(id, c);
-        // Claude Code: no compact-now, no out-of-turn shell; fork, steer
-        // (as its own turn), images, questions.
-        assert!(!offered(ProviderId::ClaudeCode, C::CompactSession));
+        // Claude Code: compact-now (`/compact`, docs/85 10.4), no
+        // out-of-turn shell; fork, steer (as its own turn), images, questions.
+        assert!(offered(ProviderId::ClaudeCode, C::CompactSession));
         assert!(!offered(ProviderId::ClaudeCode, C::SessionShell));
         assert!(offered(ProviderId::ClaudeCode, C::ForkSession));
         assert!(offered(ProviderId::ClaudeCode, C::SteerTurn));
         assert!(offered(ProviderId::ClaudeCode, C::ImageInput));
-        // Codex: the adapter refuses fork, compact, shell, question answers
-        // and images; steer and stop are native.
-        for c in [C::ForkSession, C::CompactSession, C::SessionShell, C::Questions, C::ImageInput] {
+        // Codex: the adapter refuses fork, shell, question answers and
+        // images; compact (`thread/compact/start`, docs/85 10.4), steer and
+        // stop are native.
+        assert!(offered(ProviderId::Codex, C::CompactSession));
+        for c in [C::ForkSession, C::SessionShell, C::Questions, C::ImageInput] {
             assert!(!offered(ProviderId::Codex, c), "{c:?} on Codex");
         }
         assert!(offered(ProviderId::Codex, C::SteerTurn));

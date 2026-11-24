@@ -69,7 +69,7 @@ use std::time::Instant;
 
 use aui_protocol::{
     ApprovalBodyKind, ApprovalState, Attachment, AttachmentKind,
-    Block, Delta, Diff, DiffKind, DiffStat, Hunk, PermissionMode, Provider, ThinkingState, TodoItem,
+    Block, Delta, Diff, DiffKind, DiffStat, Hunk, MarkerKind, PermissionMode, Provider, ThinkingState, TodoItem,
     ToolBody, ToolKind, ToolStatus, Turn, TurnMeta, UploadState,
 };
 use provider::ProviderEvent;
@@ -570,6 +570,12 @@ fn abandoned_state(pressed: &HashMap<String, PersonDecision>, approval_id: &str,
 /// `plan:<turn>`).
 #[derive(Clone, Debug, Default)]
 pub struct CodexFold {
+    /// The context the latest model request carried (`last.totalTokens`),
+    /// and the turn it was reported for; plus the one before, from an
+    /// earlier turn: a compaction's "before" (docs/85 10.4) — its own
+    /// update arrives first and already reads the compacted size.
+    context_now: Option<(String, u64)>,
+    context_before: Option<u64>,
     session_id: Option<String>,
     thread_id: Option<String>,
     model: Option<String>,
@@ -667,6 +673,13 @@ impl CodexFold {
     /// The latest turn id seen on `turn/started`, if any.
     pub fn current_turn(&self) -> Option<&str> {
         self.current_turn.as_deref()
+    }
+
+    /// Whether a turn is running now: started and not yet completed or
+    /// abandoned (`current_turn` keeps the last turn's id after it ends).
+    /// What a compact-now waits on.
+    pub fn turn_running(&self) -> bool {
+        self.live_turn.is_some()
     }
 
     /// The child died (docs/71 §2): settle every approval card it raised as
@@ -1123,6 +1136,13 @@ impl CodexFold {
                 }
             }
             Notification::TokenUsage { .. } => {
+                if let (Some(turn), Some(usage)) = (notification.turn_id(), notification.usage()) {
+                    let same_turn = self.context_now.as_ref().is_some_and(|(at, _)| at == turn);
+                    if !same_turn {
+                        self.context_before = self.context_now.as_ref().map(|(_, tokens)| *tokens);
+                    }
+                    self.context_now = Some((turn.to_owned(), usage.last.total_tokens));
+                }
                 if let (Some(thread), Some(turn), Some(usage)) =
                     (notification.thread_id(), notification.turn_id(), notification.usage())
                 {
@@ -1241,6 +1261,19 @@ impl CodexFold {
     fn apply_item(&mut self, notification: &Notification) {
         let (Some(turn_id), Some(item)) = (notification.turn_id(), notification.item()) else { return };
         match item.kind() {
+            // `thread/compact/start`'s one item (probed live 25 Nov 2026,
+            // docs/85-evidence/10.4): one row on its turn, "Context
+            // compacted · 13k → 4.9k" — before from the previous turn's
+            // last request, after from this turn's.
+            "contextCompaction" => {
+                let after = self.context_now.as_ref().filter(|(at, _)| at == turn_id).map(|(_, tokens)| *tokens);
+                let text = match (self.context_before, after) {
+                    (Some(before), after) => provider::facts::compaction_text(before, after),
+                    (None, _) => "Context compacted".to_owned(),
+                };
+                self.builder.open_turn(turn_id, None);
+                self.builder.add(turn_id, None, Block::Marker { kind: MarkerKind::ContextCompacted, text });
+            }
             "agentMessage" => {
                 self.drop_delta(turn_id, item.id());
                 if item.text().is_empty() {
@@ -1740,6 +1773,35 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// docs/85 10.4: `thread/compact/start` folds to one row on its own
+    /// turn — "Context compacted · 13k → 4.9k", before from the previous
+    /// turn's last request, after from the compaction turn's — from frames
+    /// recorded live on 25 Nov 2026 (`fixtures/codex/compact.jsonl`).
+    #[test]
+    fn a_compaction_folds_to_one_marker_row() {
+        let (fold, deltas) = replay("compact.jsonl");
+        let markers: Vec<&str> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                Delta::BlockAdded { block: Block::Marker { kind: MarkerKind::ContextCompacted, text }, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(markers, ["Context compacted \u{b7} 13k \u{2192} 4.9k"]);
+        let compaction_turn = fold
+            .builder
+            .session()
+            .turns
+            .iter()
+            .find_map(|turn| match turn {
+                Turn::Assistant { blocks, .. } if blocks.iter().any(|block| matches!(block, Block::Marker { .. })) => Some(blocks.clone()),
+                _ => None,
+            })
+            .expect("a compaction turn");
+        assert_eq!(compaction_turn.len(), 1, "the row stands alone on its turn: {compaction_turn:?}");
+        assert!(!fold.turn_running(), "every turn settled");
     }
 
     #[test]

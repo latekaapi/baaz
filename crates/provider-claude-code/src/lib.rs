@@ -1974,11 +1974,33 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                     ),
                 }),
             },
-            Command::CompactSession { .. } => Err(ProviderError::unsupported(
-                "compact-session",
-                "no compact-now command exists over --print; compaction happens when the \
-                 --autocompact window fills, not when asked",
-            )),
+            // `/compact` sent as a user message compacts the session and
+            // answers with a `compact_boundary` (probed live 24 and 25 Nov
+            // 2026, docs/85-evidence/10.4). It runs as a turn of its own —
+            // never the person's: its echo does not bubble, and the app
+            // knows the turn by its lone "Context compacted" row (no
+            // title, byline, count or unread from it). A turn in flight
+            // is refused: the line would queue behind it as a prompt.
+            Command::CompactSession { session_id, .. } => {
+                self.check_session(&session_id)?;
+                self.revive(&session_id)?;
+                if self.fold.lock().expect("fold mutex").turn_open() {
+                    return Err(ProviderError::Rejected { reason: "a turn is running; compact when it finishes".into() });
+                }
+                let uuid = argv::line_uuid();
+                let line = argv::user_content_line("/compact", &[], Some(&uuid));
+                let opened = self.fold.lock().expect("fold mutex").begin_compaction(&uuid);
+                if !opened.is_empty() {
+                    let _ = self.tx.send(ProviderEvent::Deltas { session_id: Some(session_id.clone()), deltas: opened });
+                }
+                match self.child.lock().expect("child mutex").as_mut() {
+                    Some(running) => running.send_line(&line).map_err(|error| ProviderError::Unavailable {
+                        reason: format!("the session child is unreachable: {error}"),
+                    })?,
+                    None => return Err(ProviderError::Unavailable { reason: "no session child is running".into() }),
+                }
+                Ok(Ack::Accepted)
+            }
             Command::SelectModel { session_id, model, .. } => {
                 self.check_session(&session_id)?;
                 // Mid-session switch, no relaunch: `set_model` reaches the

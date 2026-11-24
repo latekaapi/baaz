@@ -4201,31 +4201,35 @@ mod tests {
     }
 
     /// docs/82 5.5: a typed escape the provider cannot run is not
-    /// intercepted and refused — `!ls` and `/compact` on a provider with no
-    /// shell and no compaction go to the agent as the person's words (it
-    /// may well have its own `/compact`), never a "Not available" banner.
+    /// intercepted and refused — `!ls` on a provider with no shell goes to
+    /// the agent as the person's words, never a "Not available" banner.
+    /// docs/85 10.4: `/compact` typed in the composer compacts on Claude
+    /// Code and Codex — one `CompactSession`, no words sent.
     #[gpui::test]
     fn typed_escapes_a_provider_cannot_run_go_to_the_agent_as_words(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
-        let vc = cx.add_empty_window();
-        let (adapter, handle) = RecordingProvider::new();
-        let (view, tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
-        for typed in ["!ls -la", "/compact"] {
-            vc.update(|window, cx| view.update(cx, |view, cx| view.dispatch_text(typed.to_owned(), window, cx)));
-            vc.run_until_parked();
-            drain_recording(&view, &tx, vc);
+        for provider in ["claude-code", "codex"] {
+            let vc = cx.add_empty_window();
+            let (adapter, handle) = RecordingProvider::new();
+            let (view, tx) = open_recording_view(vc, "s-1", provider, adapter);
+            for typed in ["!ls -la", "/compact"] {
+                vc.update(|window, cx| view.update(cx, |view, cx| view.dispatch_text(typed.to_owned(), window, cx)));
+                vc.run_until_parked();
+                drain_recording(&view, &tx, vc);
+            }
+            let sent: Vec<String> = handle
+                .received()
+                .into_iter()
+                .filter_map(|command| match command {
+                    provider::Command::SubmitInput { display_text, .. } => display_text,
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(sent, ["!ls -la"], "{provider}");
+            assert!(handle.commands_of("run-shell").is_empty(), "{provider}");
+            assert_eq!(handle.commands_of("compact-session").len(), 1, "{provider}: /compact compacts");
+            vc.update(|_, cx| assert_eq!(view.read(cx).rt(cx).banner_text(), None, "{provider}: nothing refused"));
         }
-        let sent: Vec<String> = handle
-            .received()
-            .into_iter()
-            .filter_map(|command| match command {
-                provider::Command::SubmitInput { display_text, .. } => display_text,
-                _ => None,
-            })
-            .collect();
-        assert_eq!(sent, ["!ls -la", "/compact"]);
-        assert!(handle.commands_of("run-shell").is_empty() && handle.commands_of("compact-session").is_empty());
-        vc.update(|_, cx| assert_eq!(view.read(cx).rt(cx).banner_text(), None, "nothing refused"));
     }
 
     /// docs/82 5.5 (docs/81 F H): the `/` menu's skills come from the

@@ -111,6 +111,10 @@ pub struct UsageRow {
     /// `""` on rows written before the tag existed (schema version 2 and
     /// earlier) — never `NULL`, so the column needs no null handling.
     pub provider: String,
+    /// A compaction, not a person's turn (docs/85 10.4): written with
+    /// `role = 'compaction'`, so the ledger counts its cost and every
+    /// per-turn reader (`role = 'assistant'`) leaves it out.
+    pub compaction: bool,
 }
 
 /// Build the row a finished turn writes: the fold's final [`TurnMeta`] for
@@ -144,6 +148,7 @@ pub fn row_from_finished(
         cached_tokens: meta.cached_tokens as i64,
         cost_usd: meta.cost_usd,
         provider: String::new(),
+        compaction: false,
     }
 }
 
@@ -153,6 +158,12 @@ impl UsageRow {
     /// lane tags every row it writes.
     pub fn with_provider(mut self, provider: &str) -> Self {
         self.provider = provider.to_owned();
+        self
+    }
+
+    /// Mark the row a compaction (docs/85 10.4).
+    pub fn as_compaction(mut self) -> Self {
+        self.compaction = true;
         self
     }
 }

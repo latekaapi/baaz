@@ -355,6 +355,23 @@ fn an_unknown_cost_is_null_not_zero() {
     assert_eq!(super::turns::cost(&conn, "s-a", "t-1"), Some((Some(0.0), "reported".to_owned())));
 }
 
+/// docs/85 10.4: a compaction's ledger row is marked `role = 'compaction'`:
+/// its cost is on the ledger, and the per-turn reader (`find_ledger`, which
+/// asks for assistant turns) leaves it out.
+#[test]
+fn a_compaction_row_is_marked_and_kept_out_of_turn_lookups() {
+    let conn = super::open_memory();
+    let meta = aui_protocol::TurnMeta { model: "m".into(), cost_usd: 0.07, ..aui_protocol::TurnMeta::default() };
+    let row = crate::usage::row_from_finished("s-k", "v", "compaction-1", 1, &meta).with_provider("claude-code").as_compaction();
+    assert!(super::turns::record_ledger_row(&conn, &row).unwrap());
+    let role: String = conn
+        .query_row("SELECT role FROM turn WHERE turn_id = 'compaction-1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(role, super::turns::ROLE_COMPACTION);
+    assert_eq!(super::turns::cost(&conn, "s-k", "compaction-1"), Some((Some(0.07), "reported".to_owned())));
+    assert!(super::turns::find_ledger(&conn, "s-k", "compaction-1").is_none());
+}
+
 /// D-3: a bubble text is keyed by its turn: two turns with the same echoed
 /// text keep their own.
 #[test]

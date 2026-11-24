@@ -47,14 +47,10 @@ pub fn capabilities() -> CapabilitySet {
                     .into(),
             },
         ),
-        // `thread/compact/start` exists; never executed, and the adapter refuses it.
-        (
-            Capability::CompactSession,
-            CapabilityState::Unavailable {
-                reason: "thread/compact/start was never executed; not compacted blind"
-                    .into(),
-            },
-        ),
+        // Native: `thread/compact/start` executed live (24 + 25 Nov 2026,
+        // docs/85-evidence/10.4): a turn of its own with one
+        // `contextCompaction` item.
+        (Capability::CompactSession, CapabilityState::Native),
         // thread/start and turn/start both carry an explicit model.
         (Capability::SessionConfig, CapabilityState::Native),
         // No out-of-turn shell surface was captured; the shell runs inside
@@ -133,7 +129,7 @@ mod tests {
         use CapabilityState as S;
         assert_eq!(set.state(C::SessionLifecycle), &S::Native);
         assert!(matches!(set.state(C::ForkSession), S::Unavailable { .. }));
-        assert!(matches!(set.state(C::CompactSession), S::Unavailable { .. }));
+        assert_eq!(set.state(C::CompactSession), &S::Native);
         assert_eq!(set.state(C::SessionConfig), &S::Native);
         assert!(matches!(set.state(C::SessionShell), S::Unavailable { .. }));
         assert_eq!(set.state(C::SubmitTurn), &S::Native);

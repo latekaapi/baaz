@@ -226,3 +226,35 @@ pub struct ProviderSkill {
     /// One line on what it does, when the provider says.
     pub description: Option<String>,
 }
+
+/// The one row a compaction shows, on every provider (docs/85 10.4):
+/// "Context compacted · 29k → 1.9k" — the context before and, when the
+/// provider says it, after.
+pub fn compaction_text(before: u64, after: Option<u64>) -> String {
+    fn short(n: u64) -> String {
+        if n >= 1_000_000 {
+            format!("{:.1}M", n as f64 / 1_000_000.0)
+        } else if n >= 10_000 {
+            format!("{}k", (n + 500) / 1000)
+        } else if n >= 1000 {
+            format!("{:.1}k", n as f64 / 1000.0)
+        } else {
+            n.to_string()
+        }
+    }
+    match after {
+        Some(after) => format!("Context compacted \u{b7} {} \u{2192} {}", short(before), short(after)),
+        None => format!("Context compacted \u{b7} {} before", short(before)),
+    }
+}
+
+#[cfg(test)]
+mod compaction_text_tests {
+    #[test]
+    fn sizes_read_short() {
+        assert_eq!(super::compaction_text(29_177, Some(1_867)), "Context compacted \u{b7} 29k \u{2192} 1.9k");
+        assert_eq!(super::compaction_text(412_000, Some(38_000)), "Context compacted \u{b7} 412k \u{2192} 38k");
+        assert_eq!(super::compaction_text(1_200_000, None), "Context compacted \u{b7} 1.2M before");
+        assert_eq!(super::compaction_text(512, Some(90)), "Context compacted \u{b7} 512 \u{2192} 90");
+    }
+}

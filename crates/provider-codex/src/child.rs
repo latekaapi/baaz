@@ -508,6 +508,17 @@ pub fn turn_steer_request(id: u64, thread_id: &str, expected_turn_id: &str, text
     })
 }
 
+/// `thread/compact/start`: compact the thread now. Answers `{}` at once;
+/// the work runs as a turn of its own holding one `contextCompaction` item
+/// (probed live 24 and 25 Nov 2026, docs/85-evidence/10.4).
+pub fn thread_compact_request(id: u64, thread_id: &str) -> Value {
+    json!({
+        "id": id,
+        "method": "thread/compact/start",
+        "params": {"threadId": thread_id}
+    })
+}
+
 /// The `turn/interrupt` call stopping the named turn.
 pub fn turn_interrupt_request(id: u64, thread_id: &str, turn_id: &str) -> Value {
     json!({

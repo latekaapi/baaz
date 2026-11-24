@@ -67,7 +67,7 @@ use std::time::Instant;
 
 use aui_protocol::{
     ApprovalBodyKind, ApprovalState, Attachment, AttachmentKind, Block,
-    Delta, Diff, Hunk, PermissionMode, Provider, ThinkingState, TodoItem, TodoState, ToolBody, ToolKind,
+    Delta, Diff, Hunk, MarkerKind, PermissionMode, Provider, ThinkingState, TodoItem, TodoState, ToolBody, ToolKind,
     ToolStatus, Turn, TurnMeta, UploadState,
 };
 use provider::{ProviderError, ProviderEvent};
@@ -505,6 +505,12 @@ pub struct ClaudeFold {
     /// that ends the turn is the person's stop, settled `Interrupted` —
     /// never `Failed`. Cleared by that result.
     stopping: bool,
+    /// The turn a `/compact` Baaz sent runs as (docs/85 10.4): opened by
+    /// [`Self::begin_compaction`], marked by the `compact_boundary`, closed
+    /// by the `result` that follows. `None` when no compaction is asked.
+    compacting: Option<String>,
+    /// How many compactions this fold has opened: the next one's key.
+    compactions: u32,
     open: Vec<String>,
     /// The turn this CLI turn's assistant messages share: `Some` from the
     /// first message's `TurnStarted` until the `result` frame (or the next
@@ -821,6 +827,25 @@ impl ClaudeFold {
     pub fn forget_submissions(&mut self) {
         self.submissions.clear();
         self.answering = None;
+    }
+
+    /// Open the turn a `/compact` runs as (docs/85 10.4): a turn of its
+    /// own, never the person's — `echo_uuid` is the uuid of the `/compact`
+    /// line, whose echo must not bubble. Returns the turn's deltas.
+    pub fn begin_compaction(&mut self, echo_uuid: &str) -> Vec<Delta> {
+        self.user_echoes.insert(echo_uuid.to_owned());
+        self.compactions += 1;
+        let key = format!("{}{}", COMPACTION_TURN_PREFIX, self.compactions);
+        self.open.push(key.clone());
+        self.builder.open_turn(&key, self.live.then(epoch_ms_now));
+        self.compacting = Some(key);
+        self.builder.take()
+    }
+
+    /// Whether a turn is open (running, or a compaction): a `/compact` then
+    /// waits for it to settle.
+    pub fn turn_open(&self) -> bool {
+        self.assistant_turn.is_some() || !self.open.is_empty() || !self.submissions.is_empty()
     }
 
     /// Whether any submission or steer waits on the child.
@@ -1195,6 +1220,7 @@ impl ClaudeFold {
                 // message) must not claim the next submission's turn.
                 self.close_answered();
                 self.settle_streaming();
+                self.compacting = None;
                 let finishing = std::mem::take(&mut self.open);
                 let owner = self.assistant_turn.take().or_else(|| finishing.last().cloned());
                 for turn_id in finishing {
@@ -1205,6 +1231,20 @@ impl ClaudeFold {
                 }
             }
             Frame::RateLimit(info) => self.account.observe(info.clone()),
+            // A compaction — the one Baaz asked for, or the CLI's own
+            // mid-turn — is one marker row on the turn it happened in.
+            Frame::CompactBoundary { pre_tokens, post_tokens, .. } => {
+                let turn_id = match self.compacting.clone().or_else(|| self.assistant_turn.clone()).or_else(|| self.open.last().cloned()) {
+                    Some(turn) => turn,
+                    None => {
+                        self.compactions += 1;
+                        let key = format!("{}{}", COMPACTION_TURN_PREFIX, self.compactions);
+                        self.control_turn(&key)
+                    }
+                };
+                let text = compaction_text(*pre_tokens, *post_tokens);
+                self.builder.add(&turn_id, None, Block::Marker { kind: MarkerKind::ContextCompacted, text });
+            }
             // A permission decision the child is suspended on. Queued as
             // pending and carded — never folded away, or the turn hangs
             // forever with no timeout to save it.
@@ -2077,6 +2117,16 @@ impl ClaudeFold {
         self.builder.open_turn(key, self.live.then(epoch_ms_now));
         key.to_owned()
     }
+}
+
+/// The key prefix of a turn that is a compaction Baaz asked for (docs/85
+/// 10.4). The app knows a compaction by its content (a lone
+/// `ContextCompacted` marker), not by this key.
+pub const COMPACTION_TURN_PREFIX: &str = "compaction-";
+
+/// The one row a compaction shows ([`provider::facts::compaction_text`]).
+pub fn compaction_text(pre_tokens: u64, post_tokens: Option<u64>) -> String {
+    provider::facts::compaction_text(pre_tokens, post_tokens)
 }
 
 /// Claude Code's question tool.
@@ -5172,6 +5222,36 @@ mod tests {
         assert_eq!(at("2026-09-26T13:53:14+02:00"), 1_790_423_594_000);
         assert_eq!(timestamp_ms(&serde_json::json!({})), None);
         assert_eq!(timestamp_ms(&serde_json::json!({"timestamp": "not-a-time"})), None);
+    }
+
+    /// docs/85 10.4: a `/compact` Baaz sent folds to one turn holding one
+    /// row, "Context compacted · 29k → 1.9k", closed by the `result` that
+    /// follows — from the frames recorded live on 25 Nov 2026
+    /// (`fixtures/claude-code/compact.jsonl`). The summary the CLI hands
+    /// the model and its `<local-command-stdout>` echo never bubble.
+    #[test]
+    fn a_compaction_folds_to_one_marker_row() {
+        let lines = fixture_lines("compact.jsonl");
+        let mut fold = ClaudeFold::new();
+        let mut deltas = fold.begin_compaction("compact-echo");
+        for line in &lines {
+            deltas.extend(fold.apply(&crate::frame::decode_line(line).expect("decodes")));
+        }
+        let session = fold.builder.session();
+        assert_eq!(session.turns.len(), 1, "one turn: {:?}", session.turns);
+        let blocks = match &session.turns[0] {
+            Turn::Assistant { id, blocks, .. } => {
+                assert!(id.starts_with(COMPACTION_TURN_PREFIX), "{id}");
+                blocks.clone()
+            }
+            other => panic!("expected the compaction turn, got {other:?}"),
+        };
+        assert_eq!(
+            blocks,
+            vec![Block::Marker { kind: MarkerKind::ContextCompacted, text: "Context compacted \u{b7} 29k \u{2192} 1.9k".into() }]
+        );
+        assert!(deltas.iter().any(|delta| matches!(delta, Delta::TurnFinished { .. })), "the result closes it");
+        assert!(!fold.turn_open(), "nothing left open");
     }
 
     /// The submit ack's turn id is not the id the turn streams under (the

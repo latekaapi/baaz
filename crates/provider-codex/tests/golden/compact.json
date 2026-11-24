@@ -1,0 +1,176 @@
+{
+  "final": {
+    "codex": {
+      "id": "codex",
+      "agent": "codex",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "01a20f6c-9743-7122-bc1f-e32694facad8",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "QUOKKA\n\nZEBRA",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "golden-model",
+            "duration_ms": 3553,
+            "tokens_in": 12978,
+            "tokens_out": 11,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 10624
+          }
+        },
+        {
+          "kind": "user",
+          "id": "01a20f6c-a0b6-7952-bfd5-dc0a21572330",
+          "text": "What is the project codeword from your instructions? Answer in one word.",
+          "attachments": [],
+          "mentions": []
+        },
+        {
+          "kind": "assistant",
+          "id": "01a20f6c-a52a-75b1-818d-634d9be79a7a",
+          "blocks": [
+            {
+              "kind": "marker",
+              "marker_kind": {
+                "kind": "context_compacted"
+              },
+              "text": "Context compacted · 13k → 4.9k"
+            }
+          ],
+          "meta": {
+            "model": "golden-model",
+            "duration_ms": 3003,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 0
+          }
+        },
+        {
+          "kind": "assistant",
+          "id": "01a20f6c-b0e8-7f70-869c-87687f906d4f",
+          "blocks": [
+            {
+              "kind": "text",
+              "text": "OK3\nZEBRA",
+              "streaming": false
+            }
+          ],
+          "meta": {
+            "model": "golden-model",
+            "duration_ms": 1523,
+            "tokens_in": 13100,
+            "tokens_out": 35,
+            "reasoning_tokens": 23,
+            "cost_usd": 0.0,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "cached_tokens": 10624
+          }
+        },
+        {
+          "kind": "user",
+          "id": "01a20f6c-b0f7-7123-a22f-fa623c326378",
+          "text": "Reply with exactly: OK3",
+          "attachments": [],
+          "mentions": []
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:08f44b07b5901a25",
+    "4:c11f324e035c08d3",
+    "13:1ee869f393393819",
+    "16:aab368ae26c008e9",
+    "25:ffa876d403a9e2ce",
+    "29:a67bc206bd882189",
+    "33:429e2f0b1591b40f",
+    "37:ae18c6a886092308",
+    "39:b58e19fd5662a3bb",
+    "43:35cd5c807410372a",
+    "45:83c75540a20293a9",
+    "55:e94e3d46d3dd362f",
+    "59:24db1dc3dbd1efee"
+  ],
+  "abandon": [
+    "1:c11f324e035c08d3",
+    "2:c11f324e035c08d3",
+    "3:c11f324e035c08d3",
+    "4:c11f324e035c08d3",
+    "5:c11f324e035c08d3",
+    "6:c11f324e035c08d3",
+    "7:c11f324e035c08d3",
+    "8:c11f324e035c08d3",
+    "9:c11f324e035c08d3",
+    "10:c11f324e035c08d3",
+    "11:c11f324e035c08d3",
+    "12:c11f324e035c08d3",
+    "13:1ebc1b3f794153f7",
+    "14:1ebc1b3f794153f7",
+    "15:1ebc1b3f794153f7",
+    "16:7be119545d182bbb",
+    "17:7be119545d182bbb",
+    "18:9c6fc854b1c4fbf8",
+    "19:75a0b0cbb665d202",
+    "20:b94fcd9412c76636",
+    "21:c49897e015eae816",
+    "22:efc74765d4291776",
+    "23:b3459b6d05828c31",
+    "24:cf3eebd7aae03bc8",
+    "25:6bdcce5d182d4d9c",
+    "26:c46bcdaea387e376",
+    "27:c46bcdaea387e376",
+    "28:c46bcdaea387e376",
+    "29:a67bc206bd882189",
+    "30:a67bc206bd882189",
+    "31:a67bc206bd882189",
+    "32:a67bc206bd882189",
+    "33:6896fef62d57f89d",
+    "34:6896fef62d57f89d",
+    "35:6896fef62d57f89d",
+    "36:6896fef62d57f89d",
+    "37:22743cb7d4d1fada",
+    "38:22743cb7d4d1fada",
+    "39:b58e19fd5662a3bb",
+    "40:b58e19fd5662a3bb",
+    "41:b58e19fd5662a3bb",
+    "42:b58e19fd5662a3bb",
+    "43:d22c682f0dfa5b50",
+    "44:d22c682f0dfa5b50",
+    "45:497dac6bba02c96b",
+    "46:497dac6bba02c96b",
+    "47:497dac6bba02c96b",
+    "48:497dac6bba02c96b",
+    "49:c62d663b63ba86de",
+    "50:626dfac38993a715",
+    "51:45a0314580c59563",
+    "52:778bb968fc7983ab",
+    "53:95a28b95e421ba26",
+    "54:9ff7fae1517456b5",
+    "55:0e003f06d40f443d",
+    "56:82033dba8f1ab39a",
+    "57:82033dba8f1ab39a",
+    "58:82033dba8f1ab39a",
+    "59:24db1dc3dbd1efee"
+  ]
+}

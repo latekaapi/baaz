@@ -1,0 +1,71 @@
+{
+  "final": {
+    "claude": {
+      "id": "claude",
+      "agent": "claude",
+      "model": "",
+      "mode": "onRequest",
+      "plan": false,
+      "cwd": "",
+      "branch": null,
+      "environment": {
+        "kind": "local"
+      },
+      "turns": [
+        {
+          "kind": "assistant",
+          "id": "compaction-1",
+          "blocks": [
+            {
+              "kind": "marker",
+              "marker_kind": {
+                "kind": "context_compacted"
+              },
+              "text": "Context compacted · 29k → 1.9k"
+            }
+          ],
+          "meta": {
+            "model": "claude-haiku-4-5-20251001",
+            "duration_ms": 12170,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.07188415000000001,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "steps": [
+    "1:ffdc458af9e37b66",
+    "4:223078e047554d0c",
+    "7:a04380f3dd8238ac"
+  ],
+  "abandon": [
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "1:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "2:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "3:ffdc458af9e37b66",
+    "4:ea24232156bcd2f0",
+    "4:223078e047554d0c",
+    "4:223078e047554d0c",
+    "5:ea24232156bcd2f0",
+    "5:223078e047554d0c",
+    "5:223078e047554d0c",
+    "6:ea24232156bcd2f0",
+    "6:223078e047554d0c",
+    "6:223078e047554d0c",
+    "7:a04380f3dd8238ac",
+    "7:a04380f3dd8238ac",
+    "7:a04380f3dd8238ac",
+    "7:a04380f3dd8238ac"
+  ]
+}

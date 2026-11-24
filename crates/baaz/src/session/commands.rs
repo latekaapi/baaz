@@ -883,8 +883,10 @@ impl SessionRuntime {
     /// `session/compact`. An ack of `noop` is a success, and says why.
     /// On a provider lane the request travels as a neutral
     /// `CompactSession` where the capability is anything but `Unavailable`
-    /// — and a refusal banners its reason rather than going quiet (Claude
-    /// Code has no compact-now over `--print`; Codex never executed one).
+    /// — and a refusal banners its reason rather than going quiet (a
+    /// provider without it, or a turn still running). Claude Code sends
+    /// `/compact`, Codex `thread/compact/start` (docs/85 10.4); either way
+    /// the session shows one "Context compacted" row.
     pub(crate) fn compact(&mut self, cx: &mut Context<Self>) {
         if !crate::providers::capability_state(self.provider_kind(), provider::Capability::CompactSession)
             .allows_attempt()

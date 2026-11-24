@@ -49,7 +49,7 @@ static CATALOG_DEFAULTS: Mutex<Option<HashMap<std::path::PathBuf, CatalogDefault
 
 use child::{
     initialize_request, initialized_notification, thread_ids, thread_start_request, turn_id_from,
-    turn_interrupt_request, turn_start_request, turn_steer_request, ApprovalAnswer, ApprovalKind,
+    thread_compact_request, turn_interrupt_request, turn_start_request, turn_steer_request, ApprovalAnswer, ApprovalKind,
     CommandApprovalDecision, FileChangeApprovalDecision, NetworkPolicyAction, PermissionGrantScope,
     PermissionsApprovalAnswer, RunningChild,
 };
@@ -1171,9 +1171,20 @@ impl ProviderAdapter for CodexAdapter {
                     }),
                 }
             }
-            Command::CompactSession { .. } => Err(ProviderError::Rejected {
-                reason: "thread/compact/start was never executed; not compacted blind".into(),
-            }),
+            // Compact now: `thread/compact/start` (probed live, docs/85
+            // 10.4). Its turn holds one `contextCompaction` row; the app
+            // knows the turn by that row (no title, byline, count or
+            // unread). A running turn is refused: compact when it settles.
+            Command::CompactSession { session_id, .. } => {
+                self.check_session(&session_id)?;
+                let (thread_id, _) = self.thread_and_model()?;
+                if self.fold.lock().expect("fold mutex").turn_running() {
+                    return Err(ProviderError::Rejected { reason: "a turn is running; compact when it finishes".into() });
+                }
+                self.with_child(|running| running.send_frame(thread_compact_request(running.next_request_id(), &thread_id)))?
+                    .map_err(Self::unavailable)?;
+                Ok(Ack::Accepted)
+            }
             Command::SelectModel { session_id, model, .. } => {
                 self.check_session(&session_id)?;
                 // Admission only: the running turn keeps its model; the next

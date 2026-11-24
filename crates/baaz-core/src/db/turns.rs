@@ -8,6 +8,10 @@ use rusqlite::{params, Connection, OptionalExtension as _};
 
 use crate::usage::UsageRow;
 
+/// The `turn.role` of a compaction's ledger row (docs/85 10.4): its cost
+/// counts in totals; per-turn readers, which ask for `assistant`, skip it.
+pub const ROLE_COMPACTION: &str = "compaction";
+
 /// Where a turn's `cost_usd` came from.
 pub const COST_REPORTED: &str = "reported";
 /// The provider never said what a turn cost: `cost_usd` is `NULL`.
@@ -34,7 +38,7 @@ pub fn record_ledger_row(conn: &Connection, row: &UsageRow) -> rusqlite::Result<
     let changed = conn.execute(
         "INSERT INTO turn(session_id, turn_id, role, view_cursor, finished_at, model, duration_ms, tokens_in,
             tokens_out, reasoning, cache_read, cache_write, cached_tokens, cost_usd, cost_source, provider)
-         VALUES (?1, ?2, 'assistant', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         VALUES (?1, ?2, ?16, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(session_id, turn_id) DO NOTHING",
         params![
             uuid,
@@ -52,6 +56,7 @@ pub fn record_ledger_row(conn: &Connection, row: &UsageRow) -> rusqlite::Result<
             cost,
             source,
             row.provider,
+            if row.compaction { ROLE_COMPACTION } else { "assistant" },
         ],
     )?;
     Ok(changed == 1)
@@ -92,6 +97,7 @@ pub fn find_ledger(conn: &Connection, session_id: &str, turn_id: &str) -> Option
                 cached_tokens: row.get::<_, Option<i64>>(11)?.unwrap_or(0),
                 cost_usd: row.get::<_, Option<f64>>(12)?.unwrap_or(0.0),
                 provider: row.get(13)?,
+                compaction: false,
             })
         },
     )

@@ -374,6 +374,20 @@ pub enum Frame {
     },
     /// A `rate_limit_event` frame: the account meter (doc §5).
     RateLimit(crate::account::RateLimitInfo),
+    /// A `system/compact_boundary` frame: the context was compacted, by a
+    /// `/compact` Baaz sent (`trigger: "manual"`) or by the CLI's own
+    /// auto-compaction mid-turn (docs/85 10.4; frames recorded live 25 Nov
+    /// 2026 in docs/85-evidence/10.4).
+    CompactBoundary {
+        /// Session this belongs to.
+        session_id: String,
+        /// `manual` or `auto`.
+        trigger: String,
+        /// The context before (`compact_metadata.pre_tokens`).
+        pre_tokens: u64,
+        /// The context after (`compact_metadata.post_tokens`), when said.
+        post_tokens: Option<u64>,
+    },
     /// A `result` frame: the turn's final text, usage, and cost.
     TurnResult {
         /// Session this belongs to.
@@ -609,6 +623,7 @@ impl Frame {
             | Frame::UserResult { session_id, .. }
             | Frame::UserText { session_id, .. }
             | Frame::Stream { session_id, .. }
+            | Frame::CompactBoundary { session_id, .. }
             | Frame::TurnResult { session_id, .. } => Some(session_id),
             Frame::RateLimit(_)
             | Frame::Ignored { .. }
@@ -926,7 +941,11 @@ fn decode_user(value: &Value) -> Frame {
     // row already says it. It folds to an empty result, which the fold
     // drops without a bubble or a split. A line that also carries tool
     // results keeps its results: suppression never eats data.
-    if value.get("isMeta").and_then(Value::as_bool).unwrap_or(false) && results.is_empty() {
+    // The same for the summary a compaction hands the model
+    // (`isSynthetic` live, `isCompactSummary` in the stored transcript):
+    // the model's input, never the person's words (docs/85 10.4).
+    let flagged = |key: &str| value.get(key).and_then(Value::as_bool).unwrap_or(false);
+    if (flagged("isMeta") || flagged("isSynthetic") || flagged("isCompactSummary")) && results.is_empty() {
         return Frame::UserResult {
             session_id: session_id.clone(),
             results: Vec::new(),
@@ -1257,6 +1276,15 @@ pub fn decode_line(line: &str) -> Result<Frame, DecodeError> {
                     }),
                     None => Ok(Frame::Ignored { note: "status".to_owned() }),
                 },
+                "compact_boundary" => {
+                    let metadata = value.get("compact_metadata").unwrap_or(&Value::Null);
+                    Ok(Frame::CompactBoundary {
+                        session_id: value.get("session_id").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                        trigger: metadata.get("trigger").and_then(Value::as_str).unwrap_or("auto").to_owned(),
+                        pre_tokens: metadata.get("pre_tokens").and_then(Value::as_u64).unwrap_or(0),
+                        post_tokens: metadata.get("post_tokens").and_then(Value::as_u64),
+                    })
+                }
                 // The operator's own hooks are noise; so are the spinner,
                 // the token estimates, and the turn summaries.
                 // A `SessionStart` hook starts each child process, before
