@@ -79,7 +79,7 @@ fn with_the_switch_on_no_disables_but_the_bridge() {
     adapter.set_terminal_relay(relay());
     adapter.set_use_own_mcp(true);
     let extra = adapter.spawn_args_for("cmd-open");
-    assert_eq!(extra.len(), 4, "bridge only: {extra:?}");
+    assert_eq!(extra.len(), 6, "bridge only (command, args, token env): {extra:?}");
     assert!(extra[1].starts_with("mcp_servers.baaz.command="));
     assert!(extra[3].contains("\"--session\",\"cmd-open\""));
     assert!(
