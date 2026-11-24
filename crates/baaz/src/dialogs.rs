@@ -1093,8 +1093,9 @@ impl Harness {
             Dialog {
                 title: "About Baaz".into(),
                 detail: format!(
-                    "Baaz {} \u{2014} a native macOS workspace for the coding agents you already use.\n\nKeys: docs/08-keymap.md. App: docs/02-app.md.",
-                    env!("CARGO_PKG_VERSION")
+                    "Baaz {} \u{2014} a native macOS workspace for the coding agents you already use.\n\nWeb engine: {}.\n\nKeys: docs/08-keymap.md. App: docs/02-app.md.",
+                    env!("CARGO_PKG_VERSION"),
+                    engine_line()
                 ),
                 kind: DialogKind::Info,
                 primary: "OK",
@@ -2551,5 +2552,34 @@ mod tests {
         let after = foot_gap(vc);
         assert!(after.abs() < 1.0, "the narrowed list kept its end (tail foot {after} px below the list's)");
         restore_state(state);
+    }
+}
+
+/// The web engine the running bundle carries, from its Info.plist's
+/// `BaazEngine` (written by `scripts/bundle.sh`, docs/82 9.4); "a development
+/// build" outside a bundle.
+pub(crate) fn engine_line() -> String {
+    let plist = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().and_then(std::path::Path::parent).map(|contents| contents.join("Info.plist")))
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    plist.as_deref().and_then(engine_from_plist).unwrap_or_else(|| "a development build".to_owned())
+}
+
+/// `BaazEngine`'s string in an Info.plist's text.
+fn engine_from_plist(text: &str) -> Option<String> {
+    let after = &text[text.find("<key>BaazEngine</key>")? + "<key>BaazEngine</key>".len()..];
+    let start = after.find("<string>")? + "<string>".len();
+    let end = after[start..].find("</string>")?;
+    Some(after[start..start + end].trim().to_owned()).filter(|engine| !engine.is_empty())
+}
+
+#[cfg(test)]
+mod engine_tests {
+    #[test]
+    fn the_engine_reads_from_the_bundles_plist() {
+        let plist = "<dict>\n    <key>CFBundleVersion</key>\n    <string>0.1.0</string>\n    <key>BaazEngine</key>\n    <string>Chromium 154.0.8037.94 (CEF 154.0.33)</string>\n</dict>";
+        assert_eq!(super::engine_from_plist(plist).as_deref(), Some("Chromium 154.0.8037.94 (CEF 154.0.33)"));
+        assert_eq!(super::engine_from_plist("<dict></dict>"), None);
     }
 }
