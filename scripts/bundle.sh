@@ -94,10 +94,56 @@ if [ "${BAAZ_PROBE:-0}" = "1" ]; then
     echo "bundle: with the probe (BAAZ_PROBE=1)"
 fi
 
-# Chromium (docs/25-browser-design.md): embedded when the CEF binary
-# distribution is on disk. CEF_PATH names it (default ~/.local/share/cef,
-# which cef-rs's `export-cef-dir` fills); BAAZ_CEF=0 builds a WebKit-only app.
+# Chromium (docs/25-browser-design.md): embedded from the CEF binary
+# distribution. CEF_PATH names its folder (default ~/.local/share/cef);
+# BAAZ_CEF=0 builds a WebKit-only app.
 CEF_DIR="${CEF_PATH:-$HOME/.local/share/cef}"
+
+# The pinned CEF (docs/82 9.1): the minimal macOS arm64 distribution the `cef`
+# crate in Cargo.lock is built against, fetched from the CEF project's own
+# build server and checked against its SHA-1 before anything is unpacked. A
+# folder that already holds this archive (its archive.json names it) is used
+# as it is; a missing one is fetched, so a clean clone on a clean cache builds
+# the full app. Bump all three together with the `cef` crate.
+CEF_VERSION="154.0.33"
+CEF_ARCHIVE="cef_binary_154.0.33+ga03e714+chromium-154.0.8037.94_macosarm64_minimal.tar.bz2"
+CEF_SHA1="bfa2358a5fba8d0a016118941d9cda0bf2d06f20"
+
+pinned_cef_matches_lock() {
+    grep -A1 '^name = "cef"$' "$ROOT/Cargo.lock" | grep -q "+$CEF_VERSION\""
+}
+
+fetch_cef() {
+    if [ -f "$CEF_DIR/archive.json" ] && grep -q "\"$CEF_ARCHIVE\"" "$CEF_DIR/archive.json" \
+        && [ -d "$CEF_DIR/Chromium Embedded Framework.framework" ]; then
+        return 0
+    fi
+    if [ -e "$CEF_DIR" ] && [ -n "$(ls -A "$CEF_DIR" 2>/dev/null)" ]; then
+        echo "bundle: $CEF_DIR holds another CEF than $CEF_VERSION; move it aside or set CEF_PATH" >&2
+        return 1
+    fi
+    url="https://cef-builds.spotifycdn.com/$(printf '%s' "$CEF_ARCHIVE" | sed 's/+/%2B/g')"
+    work="$(mktemp -d "${TMPDIR:-/tmp}/baaz-cef.XXXXXX")"
+    echo "bundle: fetching CEF $CEF_VERSION ($url)"
+    if ! curl -fL --retry 3 -o "$work/cef.tar.bz2" "$url"; then
+        rm -rf "$work"; echo "bundle: the CEF download failed" >&2; return 1
+    fi
+    got="$(shasum -a 1 "$work/cef.tar.bz2" | cut -d' ' -f1)"
+    if [ "$got" != "$CEF_SHA1" ]; then
+        rm -rf "$work"; echo "bundle: CEF checksum mismatch (got $got, want $CEF_SHA1); nothing unpacked" >&2; return 1
+    fi
+    mkdir -p "$work/x" && tar -xjf "$work/cef.tar.bz2" -C "$work/x"
+    top="$(ls "$work/x")"
+    mkdir -p "$(dirname "$CEF_DIR")" && rm -rf "$CEF_DIR" && mv "$work/x/$top" "$CEF_DIR"
+    printf '{\n  "type": "minimal",\n  "name": "%s",\n  "sha1": "%s"\n}' "$CEF_ARCHIVE" "$CEF_SHA1" > "$CEF_DIR/archive.json"
+    rm -rf "$work"
+    echo "bundle: CEF $CEF_VERSION at $CEF_DIR"
+}
+
+if [ "${BAAZ_CEF:-1}" != "0" ]; then
+    pinned_cef_matches_lock || { echo "bundle: the CEF pin ($CEF_VERSION) does not match the cef crate in Cargo.lock; bump the pin" >&2; exit 1; }
+    fetch_cef
+fi
 if [ "${BAAZ_CEF:-1}" != "0" ] && [ -d "$CEF_DIR/Chromium Embedded Framework.framework" ]; then
     WITH_CEF=1
     export CEF_PATH="$CEF_DIR"
