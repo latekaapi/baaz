@@ -415,10 +415,11 @@ fn with_model(mut argv: Vec<String>, model: Option<&str>) -> Vec<String> {
 }
 
 /// The effort levels the installed CLI accepts (`claude --help`):
-/// `--effort <level>`, one of these five. Effort is a launch flag, not a
-/// per-turn channel — there is no effort surface over stream-json stdin —
-/// so a mid-session change relaunches the child with `--resume` plus the
-/// new flag (see the adapter's `SubmitInput` arm).
+/// `--effort <level>`, one of these five. At launch it rides `--effort`;
+/// mid-session it changes live over the control channel
+/// (`apply_flag_settings{effortLevel}`, and `null` for Default — see the
+/// adapter's `SubmitInput` arm), with no relaunch. Only a level the child
+/// was launched with clears by relaunching (docs/85 10.3).
 pub const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 fn with_effort(mut argv: Vec<String>, effort: Option<&str>) -> Vec<String> {

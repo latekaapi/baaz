@@ -95,11 +95,20 @@ pub struct ClaudeCodeAdapter {
     /// raised with `apply_flag_settings{effortLevel}` (verified live
     /// 2026-09-28 — the next turn's session jsonl carries the level), or
     /// the `--effort` launch flag when the child spawned with one. `None`
-    /// is Default: no override in effect. Clearing back to Default has no
-    /// verified control-channel reset, so it keeps the `--resume`
-    /// relaunch path (see [`Self::resume_launch_for_effort`]). Shared with
-    /// the [`ControlHub`], which rolls it back when the child refuses.
+    /// is Default: no override in effect. Clearing back to Default rides
+    /// the same channel — `apply_flag_settings{effortLevel: null}` (probed
+    /// live 25 Nov 2026, docs/85-evidence/10.3: `get_settings` drops the
+    /// key, same pid) — unless the level came from the launch's `--effort`
+    /// flag ([`Self::launch_effort`]), which no settings layer reaches: that
+    /// one keeps the `--resume` relaunch ([`Self::resume_launch_for_effort`]).
+    /// Shared with the [`ControlHub`], which rolls it back when the child
+    /// refuses.
     effort: Arc<Mutex<Option<String>>>,
+    /// The running child's `--effort` launch flag (`None`: it launched
+    /// without one). `--effort` is not a settings layer (`get_settings`
+    /// never reports it, probed 25 Nov 2026), so a level that came from it
+    /// clears only by relaunching.
+    launch_effort: Mutex<Option<String>>,
     /// Whether the running child may switch into `bypassPermissions` over
     /// the control channel: only a child launched in it may (probed live
     /// 2026-10-16 — any other answers "the session was not launched with
@@ -218,13 +227,26 @@ pub fn set_model_control_request(request_id: &str, model: &str) -> String {
 
 /// `apply_flag_settings{effortLevel}` raises the live child's effort from
 /// the next turn, with no relaunch: set to `high` on `sonnet`, the next
-/// turn's session jsonl carried `"effort":"high"`. There is no verified
-/// reset — clearing back to Default keeps the `--resume` relaunch path.
+/// turn's session jsonl carried `"effort":"high"`. The reset is
+/// [`reset_effort_control_request`].
 pub fn apply_effort_control_request(request_id: &str, level: &str) -> String {
     serde_json::json!({
         "type": "control_request",
         "request_id": request_id,
         "request": {"subtype": "apply_flag_settings", "settings": {"effortLevel": level}},
+    })
+    .to_string()
+}
+
+/// `apply_flag_settings{effortLevel: null}`: back to Default on the live
+/// child. Probed live 25 Nov 2026 (claude 2.1.276, docs/85-evidence/10.3):
+/// after it `get_settings` no longer names `effortLevel`, the pid is the
+/// same, and the next turn runs.
+pub fn reset_effort_control_request(request_id: &str) -> String {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "apply_flag_settings", "settings": {"effortLevel": null}},
     })
     .to_string()
 }
@@ -334,6 +356,7 @@ impl ClaudeCodeAdapter {
             session_id,
             model,
             effort,
+            launch_effort: Mutex::new(None),
             bypass_capable: Mutex::new(false),
             read_only_layer: Mutex::new(ReadOnlyLayer::Off),
             mode_relaunch_due: Mutex::new(None),
@@ -787,6 +810,26 @@ impl ClaudeCodeAdapter {
         self.send_control(&apply_effort_control_request(&request_id, level), pending)
     }
 
+    /// The `apply_flag_settings{effortLevel: null}` line taking a live-raised
+    /// effort back to Default from the next turn, with no relaunch (docs/85
+    /// 10.3). A refusal rolls the record back and owes a resume relaunch
+    /// without `--effort`, like a refused raise.
+    fn send_reset_effort(&self, previous_effort: Option<String>) -> Result<(), ProviderError> {
+        let request_id = self.next_control_id();
+        let pending = PendingControl {
+            kind: PendingControlKind::ApplyEffort,
+            request_id: request_id.clone(),
+            wanted_model: None,
+            previous_model: None,
+            previous_fold_model: None,
+            wanted_effort: None,
+            previous_effort,
+            wanted_mcp: None,
+            sent_at: Instant::now(),
+        };
+        self.send_control(&reset_effort_control_request(&request_id), pending)
+    }
+
     /// The `set_permission_mode` line for the live child. The chip does not
     /// move here: the child's answer and `status` frame report the mode,
     /// and a refusal banners its reason.
@@ -1123,9 +1166,10 @@ impl ClaudeCodeAdapter {
             *self.model.lock().expect("model mutex") = Some(model.clone());
         }
         // The launch's `--effort`, whatever it was — including none: the
-        // next `SubmitInput` compares against this, so clearing back to
-        // Default relaunches without the flag.
+        // next `SubmitInput` compares against this; a level from the flag
+        // clears back to Default only by relaunching without it.
         *self.effort.lock().expect("effort mutex") = launch.effort.clone();
+        *self.launch_effort.lock().expect("launch effort mutex") = launch.effort.clone();
         // Remember the session's own workspace cwd for stored-history
         // lookup. Only a stated cwd counts: resume/fork launches carry
         // none, and an unknown cwd stays unknown (honest unavailable)
@@ -1495,6 +1539,7 @@ impl ClaudeCodeAdapter {
             *self.model.lock().expect("model mutex") = Some(model.clone());
         }
         *self.effort.lock().expect("effort mutex") = launch.effort.clone();
+        *self.launch_effort.lock().expect("launch effort mutex") = launch.effort.clone();
         if let Some(cwd) = &launch.cwd {
             *self.workspace.lock().expect("workspace mutex") = Some(PathBuf::from(cwd));
         }
@@ -2042,9 +2087,10 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 // 2026-09-28 — the next turn's session jsonl carried
                 // `"effort":"high"`). Same level — or none anywhere — skips
                 // the send and the turn goes straight in. Clearing back to
-                // Default has no verified control-channel reset, so only
-                // that direction keeps the `--resume` relaunch path (the
-                // relaunched child spawns without `--effort`). A rejected
+                // Default rides it too (`effortLevel: null`, probed live
+                // 25 Nov 2026), except for a level the child was launched
+                // with (`--effort`), which keeps the `--resume` relaunch
+                // path (the relaunched child spawns without it). A rejected
                 // level never sticks silently: the answer rolls the recorded
                 // level back to where the child actually is, banners the
                 // CLI's reason, and records a `--resume` relaunch carrying
@@ -2079,6 +2125,11 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                             self.check_session(&session_id)?;
                             self.send_apply_effort(&level, recorded)?;
                             *self.effort.lock().expect("effort mutex") = Some(level);
+                        }
+                        None if self.launch_effort.lock().expect("launch effort mutex").is_none() => {
+                            self.check_session(&session_id)?;
+                            self.send_reset_effort(recorded)?;
+                            *self.effort.lock().expect("effort mutex") = None;
                         }
                         None => {
                             if let Some(launch) =
@@ -2720,6 +2771,43 @@ mod tests {
             adapter.resume_launch_for_effort("sess-9", None).is_none(),
             "default needs no swap"
         );
+    }
+
+    /// docs/85 10.3: a level raised live clears back to Default over the
+    /// control channel — `apply_flag_settings{effortLevel: null}` — with no
+    /// relaunch (no spawn: the stand-in program must never run); a level
+    /// the child was launched with (`--effort`) still relaunches flagless.
+    #[test]
+    fn clearing_a_live_raised_effort_sends_null_and_never_relaunches() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-9");
+        *adapter.effort.lock().expect("effort mutex") = Some("high".into());
+        let _ = adapter.dispatch(Command::SubmitInput {
+            request_id: "t-1".into(),
+            session_id: "sess-9".into(),
+            parts: vec![provider::SubmissionPart::Text("hi".into())],
+            display_text: None,
+            effort: None,
+        });
+        let lines: Vec<serde_json::Value> =
+            adapter.sent_control_lines().iter().map(|line| serde_json::from_str(line).expect("json")).collect();
+        let reset = lines
+            .iter()
+            .find(|line| line["request"]["subtype"] == "apply_flag_settings")
+            .unwrap_or_else(|| panic!("a reset line: {lines:?}"));
+        assert_eq!(reset["request"]["settings"], serde_json::json!({"effortLevel": null}));
+        assert_eq!(adapter.effort.lock().expect("effort mutex").clone(), None, "Default from the next turn");
+        assert!(adapter.hub.take_effort_relaunch().is_none(), "no relaunch owed");
+        // A refused reset owes a flagless relaunch, bannered as Default.
+        adapter.ingest_child_line(&error_line(&pending_id(&adapter), "nope"));
+        let launch = adapter.hub.take_effort_relaunch().expect("a refusal owes a relaunch");
+        assert!(!launch.argv.iter().any(|arg| arg == "--effort"), "{:?}", launch.argv);
+        let cards = control_cards(&drain_events(&adapter));
+        assert!(cards.iter().any(|card| card.1.contains("\"Default\"")), "{cards:?}");
+        // From the launch flag: only a relaunch clears it.
+        *adapter.launch_effort.lock().expect("launch effort mutex") = Some("high".into());
+        *adapter.effort.lock().expect("effort mutex") = Some("high".into());
+        assert!(adapter.resume_launch_for_effort("sess-9", None).is_some());
     }
 
     #[test]

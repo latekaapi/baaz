@@ -878,7 +878,10 @@ impl ControlHub {
                 }
             }
             PendingControlKind::ApplyEffort => {
+                // A refused reset wants Default: its relaunch carries no
+                // `--effort` (an empty level is dropped by the builder).
                 let wanted = pending.wanted_effort.clone().unwrap_or_default();
+                let shown = if wanted.is_empty() { "Default" } else { wanted.as_str() };
                 // Owned reads first (see above): the session guard must be
                 // released before `emit_card` locks it again.
                 if *self.effort.lock().expect("effort mutex") != pending.wanted_effort {
@@ -897,7 +900,7 @@ impl ControlHub {
                         self.emit_card(
                             CONTROL_EFFORT_REJECTED_CARD,
                             format!(
-                                "Claude Code rejected the effort change to \"{wanted}\" ({reason}); falling back to a resume relaunch."
+                                "Claude Code rejected the effort change to \"{shown}\" ({reason}); falling back to a resume relaunch."
                             ),
                         );
                     }
@@ -905,7 +908,7 @@ impl ControlHub {
                         self.emit_card(
                             CONTROL_EFFORT_REJECTED_CARD,
                             format!(
-                                "Claude Code rejected the effort change to \"{wanted}\" ({reason}); no session is held, so the level stays off."
+                                "Claude Code rejected the effort change to \"{shown}\" ({reason}); no session is held, so the level stays off."
                             ),
                         );
                     }
