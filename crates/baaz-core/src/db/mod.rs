@@ -36,6 +36,7 @@ pub use rusqlite::Connection;
 
 pub mod accounts;
 pub mod attachments;
+pub mod branches;
 pub mod goals;
 pub mod history;
 pub mod integrity;

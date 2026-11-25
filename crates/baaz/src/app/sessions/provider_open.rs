@@ -399,6 +399,7 @@ impl Harness {
         }
         self.registry.park(session_id.clone(), view, cx);
         self.registry.resubscribe(self.active.as_ref(), cx);
+        self.push_branch_counts(cx);
         // Nothing on screen changes: its row arrives through the list.
         session_id
     }

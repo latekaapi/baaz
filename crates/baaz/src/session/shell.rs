@@ -100,6 +100,58 @@ impl SessionRuntime {
         });
     }
 
+    /// The newest user message's turn id (captures, docs/85 16.3).
+    #[cfg(feature = "probe")]
+    pub(crate) fn last_user_turn_id(&self) -> Option<String> {
+        self.session()?.turns.iter().rev().find_map(|t| match t {
+            aui_protocol::Turn::User { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+    }
+
+    /// docs/85 16.3, "Branch from here" on the user message `message`: a
+    /// fork through that message's answer (the assistant turn after it),
+    /// opened as its own session beside this one; the app records the
+    /// branch and nests it under this session. A message with no finished
+    /// answer yet says so.
+    pub(crate) fn branch_from(&mut self, message: &str, cx: &mut Context<Self>) {
+        // Rule 13: a fork that copies the whole session is not a branch.
+        if !self.provider_kind().has(provider::ProviderTrait::ForkAtTurn) {
+            self.plain_banner(format!("{} cannot branch from a message yet.", self.provider_kind().label()), cx);
+            return;
+        }
+        let answer = self.session().and_then(|session| {
+            let at = session.turns.iter().position(|t| matches!(t, aui_protocol::Turn::User { id, .. } if id == message))?;
+            session.turns[at + 1..].iter().find_map(|t| match t {
+                aui_protocol::Turn::Assistant { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+        });
+        let running = self.running.as_ref().map(|r| r.turn_id.clone());
+        let Some(through) = answer.filter(|id| Some(id) != running.as_ref()) else {
+            self.plain_banner("This message has no finished answer yet, so there is nothing to branch from.".to_owned(), cx);
+            return;
+        };
+        let command = ProviderCommand::ForkSession {
+            request_id: provider::new_request_id(),
+            session_id: self.session_id.clone(),
+            through_turn: Some(through),
+            metadata_only: false,
+            mode: Some(self.mode()),
+        };
+        let (provider, source, message) = (self.provider_kind(), self.session_id.clone(), message.to_owned());
+        self.provider_send(command, cx, move |this, result, cx| match result {
+            Ok(provider::Ack::Session { session_id, .. }) => {
+                *this.branch_counts.entry(message.clone()).or_insert(0) += 1;
+                cx.emit(SessionEvent::Branched { branch: session_id.clone(), source: source.clone(), message: message.clone() });
+                cx.emit(SessionEvent::ForkedOnProvider { session_id, provider });
+                cx.emit(RuntimeEvent::BannerChanged);
+            }
+            Ok(_) => this.set_banner("The branch answered without a session.", None, cx),
+            Err(error) => this.report_provider_error(&error, cx),
+        });
+    }
+
     /// The completed assistant turns, newest first: the rows of the `/fork`
     /// picker. Each row is the turn id, the first line of the user prompt that
     /// started the turn, and the turn's wall-clock time.

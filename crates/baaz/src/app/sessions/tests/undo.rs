@@ -53,6 +53,10 @@ pub(super) fn recording_factory_numbered(numbered: bool) -> (crate::providers::R
                 }).collect();
                 self.sent.lock().expect("sent").push((text, "(steered)".into()));
             }
+            // A fork (docs/85 16.3) is recorded as `fork:<through turn>`.
+            if let provider::Command::ForkSession { through_turn, .. } = &command {
+                self.sent.lock().expect("sent").push((format!("fork:{}", through_turn.as_deref().unwrap_or("")), String::new()));
+            }
             // A native goal (docs/85 15.1) is recorded as `goal:<words>`
             // (`goal:clear` when cleared, `goal-paused:` when paused).
             if let provider::Command::SetGoal { objective, paused, .. } = &command {

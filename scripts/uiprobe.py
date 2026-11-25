@@ -1250,6 +1250,8 @@ ENTRIES.update({
     "sidebar-needs-you":       _populated(_PROJECTS + ";needs-you-filter:on"),
     "sidebar-projects-light":  _populated(_PROJECTS, theme="light"),
     "transcript-full":         _populated(replay=True, sidebar=False),
+    # docs/85 16.3: the branch count under a user message.
+    "branches-message":        _populated("branches-fixture", replay=True, sidebar=False),
     "transcript-full-light":   _populated(replay=True, sidebar=False, theme="light"),
     "transcript-full-top":     _populated("top", replay=True, sidebar=False),
     "transcript-full-mid":     _populated("mid", replay=True, sidebar=False),

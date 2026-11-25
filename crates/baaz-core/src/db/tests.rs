@@ -484,7 +484,7 @@ fn versions_six_and_seven_add_the_task_and_goal_records_and_move_nothing() {
         let mut conn = super::open_at(&path).expect("opens");
         let rows: Vec<_> = (0..3).map(|n| crate::usage::row_from_finished("s-v6", "v", &format!("t-{n}"), n, &meta).with_provider("codex")).collect();
         super::turns::record_ledger(&mut conn, &rows).expect("ledger");
-        conn.execute_batch("DROP TABLE usage_daily; DROP TABLE goal; DROP TABLE task_outbox; DROP TABLE task; PRAGMA user_version = 5;").expect("back to the version-5 shape");
+        conn.execute_batch("DROP TABLE branch; DROP TABLE usage_daily; DROP TABLE goal; DROP TABLE task_outbox; DROP TABLE task; PRAGMA user_version = 5;").expect("back to the version-5 shape");
         (count(&conn, "turn"), count(&conn, "session"))
     });
     super::close(path.clone());

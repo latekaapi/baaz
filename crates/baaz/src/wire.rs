@@ -224,13 +224,9 @@ mod tests {
                 probe.provider_call(
                     cx,
                     Arc::clone(&provider),
-                    Command::ForkSession {
-                        request_id: "r-9".into(),
-                        session_id: "s".into(),
-                        through_turn: None,
-                        metadata_only: false,
-                        mode: None,
-                    },
+                    // One the stand-in still refuses (it forks since docs/85
+                    // 16.3).
+                    Command::CompactSession { request_id: "r-9".into(), session_id: "s".into(), through_turn: None, focus: None },
                     |probe, result, _| {
                         probe.seen = Some(match result {
                             Err(error) if error.is_unsupported() => {
@@ -246,7 +242,7 @@ mod tests {
         vc.run_until_parked();
 
         let seen = vc.update(|_, cx| probe.read(cx).seen.clone());
-        assert_eq!(seen, Some(Ok("fork-session".to_owned())));
+        assert_eq!(seen, Some(Ok("compact-session".to_owned())));
     }
 
     /// Finished wire tasks are dropped once the list is long: two hundred

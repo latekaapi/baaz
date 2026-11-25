@@ -64,6 +64,7 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         ProviderTrait::SideSessionCompletions,
         ProviderTrait::CatalogEfforts,
         ProviderTrait::ManagedSkills,
+        ProviderTrait::ForkAtTurn,
         ProviderTrait::PagesHistory,
         ProviderTrait::AccountOnConnection,
     ],

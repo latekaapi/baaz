@@ -192,7 +192,7 @@ impl ProviderAdapter for ScriptedProvider {
         let on = |capability: Capability| if self.refused.contains(&capability) { off() } else { CapabilityState::Native };
         CapabilitySet::new([
             (Capability::SessionLifecycle, on(Capability::SessionLifecycle)),
-            (Capability::ForkSession, off()),
+            (Capability::ForkSession, on(Capability::ForkSession)),
             (Capability::CompactSession, off()),
             (Capability::SessionConfig, on(Capability::SessionConfig)),
             (Capability::SessionShell, off()),
@@ -253,6 +253,13 @@ impl ProviderAdapter for ScriptedProvider {
             Command::SelectModel { .. } => Ok(Ack::Accepted),
             // A goal is recorded with the commands, like every send.
             Command::SetGoal { .. } => Ok(Ack::Accepted),
+            // A fork is a new session id (docs/85 16.3's branches); nothing
+            // is copied — the stand-in keeps no history.
+            Command::ForkSession { session_id, .. } => {
+                let mut state = self.inner.state.lock().expect("scripted mutex");
+                state.next_turn += 1;
+                Ok(Ack::Session { session_id: format!("{session_id}-fork-{}", state.next_turn), title: None })
+            }
             Command::SelectApprovalMode { session_id, mode, .. } => {
                 let _ = self.inner.tx.send(ProviderEvent::ApprovalModeChanged { session_id, mode });
                 Ok(Ack::Accepted)

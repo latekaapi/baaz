@@ -130,9 +130,9 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
             | Command::SelectModel { .. }
             | Command::SelectApprovalMode { .. }
             | Command::SetPlanMode { .. }
-            | Command::SetGoal { .. } => None,
+            | Command::SetGoal { .. }
+            | Command::ForkSession { .. } => None,
             command @ Command::ResumeSession { .. } => Some((command, "resume-session")),
-            command @ Command::ForkSession { .. } => Some((command, "fork-session")),
             command @ Command::ListSessions { .. } => Some((command, "list-sessions")),
             command @ Command::ReadSession { .. } => Some((command, "read-session")),
             command @ Command::CompactSession { .. } => Some((command, "compact-session")),
@@ -169,13 +169,6 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
             mode: None,
             workspace: None,
             env: Vec::new(),
-        },
-        Command::ForkSession {
-            request_id: "r".into(),
-            session_id: "s".into(),
-            through_turn: None,
-            metadata_only: false,
-            mode: None,
         },
         Command::ListSessions { cursor: None, limit: None, workspace: None, updated_after: None },
         Command::ReadSession { session_id: "s".into(), metadata_only: false },
@@ -255,7 +248,7 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
     }
     // Backstop for edits to the list itself (duplicates, dropped entries):
     // new variants are caught by `classify`, not by this count.
-    assert_eq!(refused.len(), 24, "the refusal list drifted from the 24 unimplemented commands");
+    assert_eq!(refused.len(), 23, "the refusal list drifted from the 23 unimplemented commands");
     refused
 }
 

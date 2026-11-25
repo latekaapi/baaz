@@ -148,6 +148,10 @@ pub struct Folds {
     pub assistant_action: Option<AssistantActionHandler>,
     /// Bottom-row actions on user turns: turn id plus its text (C6).
     pub user_action: Option<UserActionHandler>,
+    /// docs/85 16.3: user turns offer Branch (the provider forks), and how
+    /// many branches start at each message, by its turn id.
+    pub branchable: bool,
+    pub branches: Rc<HashMap<String, u32>>,
     /// What each turn currently holds spanned, by turn id (C8b). Per turn
     /// because the library scopes cell keys to the markdown view that
     /// rendered them — one shared span would light up every turn at once.
@@ -1648,6 +1652,14 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
             }
             if folds.copied.contains(id) {
                 turn = turn.copied(true);
+            }
+            // docs/85 16.3: Branch from here, where the provider forks; the
+            // count of branches started at this message under its bubble.
+            if folds.branchable {
+                turn = turn.actions(&[UserTurnAction::Edit, UserTurnAction::Copy, UserTurnAction::Branch]);
+            }
+            if let Some(n) = folds.branches.get(id).copied().filter(|n| *n > 0) {
+                turn = turn.branches(Some(if n == 1 { "1 branch".into() } else { format!("{n} branches").into() }));
             }
             if let Some(on_link) = &folds.link {
                 let on_link = on_link.clone();
@@ -3305,6 +3317,8 @@ mod tests {
 
     fn quiet_folds() -> Folds {
         Folds {
+            branchable: false,
+            branches: Rc::new(HashMap::new()),
             toggled: Rc::new(HashSet::new()),
             toggle: Rc::new(|_: String, _: &mut Window, _: &mut App| {}),
             plan: None,

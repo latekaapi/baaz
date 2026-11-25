@@ -1179,6 +1179,8 @@ impl Harness {
                     this.reconcile_tasks_on_open(cx);
                     // docs/85 15.6: goals the last run left running.
                     this.resume_goals_on_open(cx);
+                    // docs/85 16.3: branches nest under their sources again.
+                    this.load_branches(cx);
                 });
             }));
             // docs/85 14.7: the stall rules, once a minute.
@@ -3156,6 +3158,7 @@ impl Harness {
         crate::log::trace_mark("replay-folded");
         crate::log::trace_arm_first_frame();
         self.registry.resubscribe(Some(&view), cx);
+        self.push_branch_counts(cx);
         // The replayed row stands for the capture's own turns: without them
         // the empty filter reads it as a turn-less session and drops it the
         // moment it is not the open one — so switching sessions in a replay
