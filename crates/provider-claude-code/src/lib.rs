@@ -1095,7 +1095,8 @@ impl ClaudeCodeAdapter {
     /// spawn: on `--settings` (merged into the launch's one layer,
     /// [`argv::with_settings`]) `autoMemoryDirectory`, the project memory
     /// the terminal's `claude` shares (docs/85 10.1,
-    /// [`crate::home::memory_dir`]; skipped without a known folder); and
+    /// [`crate::home::memory_dir`]; skipped without a known folder);
+    /// `idleCompaction` on a claude that has it (docs/85 12.1); and
     /// `--append-system-prompt` with the session's stored note (docs/85
     /// 10.5, [`Self::note_for`]).
     fn with_session_settings(&self, launch: SessionLaunch) -> SessionLaunch {
@@ -1110,6 +1111,11 @@ impl ClaudeCodeAdapter {
         }
         if reads_agents_md {
             extra.extend(argv::agents_md_settings());
+        }
+        // docs/85 12.1: a claude that compacts idle sessions itself does
+        // it on the 1 h cache; Baaz runs no timer of its own for it.
+        if argv::compacts_idle_itself(self.version.lock().expect("version mutex").as_deref()) {
+            extra.extend(argv::idle_compaction_settings());
         }
         extra.extend(argv::token_settings());
         let mut launch = argv::with_token_flags(argv::with_settings(launch, extra));
@@ -2056,14 +2062,14 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             // knows the turn by its lone "Context compacted" row (no
             // title, byline, count or unread from it). A turn in flight
             // is refused: the line would queue behind it as a prompt.
-            Command::CompactSession { session_id, .. } => {
+            Command::CompactSession { session_id, focus, .. } => {
                 self.check_session(&session_id)?;
                 self.revive(&session_id)?;
                 if self.fold.lock().expect("fold mutex").turn_open() {
                     return Err(ProviderError::Rejected { reason: "a turn is running; compact when it finishes".into() });
                 }
                 let uuid = argv::line_uuid();
-                let line = argv::user_content_line("/compact", &[], Some(&uuid));
+                let line = argv::user_content_line(&argv::compact_text(focus.as_deref()), &[], Some(&uuid));
                 let opened = self.fold.lock().expect("fold mutex").begin_compaction(&uuid);
                 if !opened.is_empty() {
                     let _ = self.tx.send(ProviderEvent::Deltas { session_id: Some(session_id.clone()), deltas: opened });

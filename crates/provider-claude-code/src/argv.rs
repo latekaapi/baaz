@@ -407,6 +407,34 @@ pub const PROMPT_CACHE_TTL_ENV: &str = "CLAUDE_CODE_PROMPT_CACHE_TTL";
 /// (docs/85 10.2).
 pub const AGENTS_MD_VERSION: &str = "2.1.277";
 
+/// The first claude with its own idle compaction (`idleCompaction`,
+/// "compacts long conversations idle on the 1 h cache", reported for
+/// 2.1.290; absent from the probed 2.1.276 — docs/85 12.1). From here Baaz
+/// turns it on and runs no timer of its own for Claude.
+pub const IDLE_COMPACTION_VERSION: &str = "2.1.290";
+
+/// Whether claude `version` compacts idle sessions itself
+/// ([`IDLE_COMPACTION_VERSION`]). Unknown or unparseable reads as no.
+pub fn compacts_idle_itself(version: Option<&str>) -> bool {
+    version.is_some_and(|version| provider::version::compare_versions(version, IDLE_COMPACTION_VERSION) != std::cmp::Ordering::Less)
+}
+
+/// The line that compacts: `/compact`, with the focus after it when one is
+/// given (docs/85 12.1: what the summary must keep).
+pub fn compact_text(focus: Option<&str>) -> String {
+    match focus.map(str::trim).filter(|focus| !focus.is_empty()) {
+        Some(focus) => format!("/compact {}", focus.replace(['\n', '\r'], " ")),
+        None => "/compact".to_owned(),
+    }
+}
+
+/// The setting that turns claude's own idle compaction on.
+pub fn idle_compaction_settings() -> serde_json::Map<String, serde_json::Value> {
+    let mut settings = serde_json::Map::new();
+    settings.insert("idleCompaction".into(), serde_json::Value::Bool(true));
+    settings
+}
+
 /// The settings that make claude ≥ [`AGENTS_MD_VERSION`] read a repo's
 /// AGENTS.md beside CLAUDE.md. Rides the launch's one `--settings` layer.
 pub fn agents_md_settings() -> serde_json::Map<String, serde_json::Value> {
@@ -723,6 +751,27 @@ pub struct ImageInput {
 
 #[cfg(test)]
 mod tests {
+
+    /// docs/85 12.1: claude ≥ 2.1.290 compacts idle sessions itself and
+    /// gets `idleCompaction`; 2.1.276 (installed) does not; unknown is no.
+    #[test]
+    fn idle_compaction_is_claudes_own_from_2_1_290() {
+        assert!(!compacts_idle_itself(Some("2.1.276 (Claude Code)")));
+        assert!(!compacts_idle_itself(Some("2.1.289")));
+        assert!(compacts_idle_itself(Some("2.1.290 (Claude Code)")));
+        assert!(compacts_idle_itself(Some("2.2.0")));
+        assert!(!compacts_idle_itself(None));
+        assert!(!compacts_idle_itself(Some("garbage")));
+        assert_eq!(idle_compaction_settings()["idleCompaction"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn the_compact_line_carries_its_focus_on_one_line() {
+        assert_eq!(compact_text(None), "/compact");
+        assert_eq!(compact_text(Some("  ")), "/compact");
+        assert_eq!(compact_text(Some("Keep it.\nAll of it.")), "/compact Keep it. All of it.");
+    }
+
     use super::*;
 
     fn tool(name: &str, read_only: bool) -> McpToolStatus {

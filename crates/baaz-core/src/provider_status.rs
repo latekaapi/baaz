@@ -1564,6 +1564,14 @@ pub fn live_statuses() -> Vec<ProviderStatus> {
     ProviderId::all().iter().map(|id| live.service.status(*id)).collect()
 }
 
+/// One provider's installed `--version` line, when the last probe found it.
+pub fn live_version(id: ProviderId) -> Option<String> {
+    match live_service().service.status(id).installed {
+        Installed::Yes { version, .. } => Some(version),
+        _ => None,
+    }
+}
+
 /// One provider's live auth: what the billing rule reads (docs/85 11.6).
 pub fn live_auth(id: ProviderId) -> Auth {
     live_service().service.status(id).auth

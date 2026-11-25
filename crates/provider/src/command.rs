@@ -154,6 +154,11 @@ pub enum Command {
         session_id: String,
         /// The run whose context to compact.
         through_turn: Option<String>,
+        /// What the summary must keep (docs/85 12.1: the user's
+        /// instructions word for word, the task just finished). Claude
+        /// Code sends it after `/compact`; a provider whose compaction
+        /// takes no instruction ignores it.
+        focus: Option<String>,
     },
     /// Switch a session's model. Admission only: a running turn picks the
     /// new model up at its next model-call boundary.

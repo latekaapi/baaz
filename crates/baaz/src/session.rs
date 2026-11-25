@@ -211,6 +211,7 @@ const CARET_MENU_CHROME: f32 = 56.0 + 140.0 + 50.0;
 const SKILL_ROWS: usize = 8;
 
 mod approvals;
+mod auto_compact;
 mod checkpoints;
 mod clocks;
 mod commands;

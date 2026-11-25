@@ -321,6 +321,18 @@ fn env_override(id: ProviderId) -> Option<&'static str> {
     binary_name(id).and_then(|_| id.descriptor().env_overrides.first().copied())
 }
 
+/// Whether `id`'s installed CLI compacts idle sessions itself, so Baaz's
+/// automatic compaction (docs/85 12.1) leaves it alone: claude from
+/// 2.1.290 (`idleCompaction`, which its adapter turns on).
+pub fn compacts_idle_itself(id: ProviderId) -> bool {
+    match id {
+        ProviderId::ClaudeCode => {
+            provider_claude_code::argv::compacts_idle_itself(crate::provider_status::live_version(id).as_deref())
+        }
+        _ => false,
+    }
+}
+
 /// Where a per-lane CLI's binary comes from, in order: the env override
 /// (`BAAZ_CLAUDE` / `BAAZ_CODEX`), else the login-shell `PATH` (which
 /// already carries the fixed fallbacks). The login `PATH` matters because

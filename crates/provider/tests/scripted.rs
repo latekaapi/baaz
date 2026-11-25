@@ -178,7 +178,7 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
         },
         Command::ListSessions { cursor: None, limit: None, workspace: None, updated_after: None },
         Command::ReadSession { session_id: "s".into(), metadata_only: false },
-        Command::CompactSession { request_id: "r".into(), session_id: "s".into(), through_turn: None },
+        Command::CompactSession { request_id: "r".into(), session_id: "s".into(), through_turn: None, focus: None },
         Command::RunShell { request_id: "r".into(), session_id: "s".into(), command: "ls".into() },
         Command::SteerInput {
             request_id: "r".into(),

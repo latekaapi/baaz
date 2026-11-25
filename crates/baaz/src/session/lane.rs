@@ -1149,6 +1149,8 @@ impl SessionRuntime {
                     // where they settle in one `HistoryReplayed` (docs/81 A
                     // F14), not one settle each.
                     if !replaying {
+                        // docs/85 12.1: a new idle stretch, and its timer.
+                        self.auto_compact_turn_ended(cx);
                         cx.emit(super::SessionEvent::ProviderTurnFinished {
                             session_id: self.session_id.clone(),
                             turn_id: turn_id.clone(),
@@ -4198,6 +4200,76 @@ mod tests {
                 assert!(commands.iter().all(|command| command.offered_on(id)), "{}: the menu lists only offered commands", id.as_str());
             });
         }
+    }
+
+    /// docs/85 12.1: automatic compaction on a long, idle Claude Code
+    /// session on a subscription — once, at the decision's moment, with a
+    /// focus line; never after a key in the composer; and a topic switch
+    /// above the threshold compacts before the message goes.
+    #[gpui::test]
+    fn automatic_compaction_runs_once_at_its_moment_and_never_while_typing(cx: &mut gpui::TestAppContext) {
+        use baaz_core::billing::{self, BillingMode};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::new();
+        let (view, _tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        let id = vc.update(|_, cx| view.read(cx).rt(cx).provider_kind());
+        billing::reset();
+        billing::report(id, Some(BillingMode::Subscription));
+        let long = provider::facts::ContextReading::measured(412_000, Some(1_000_000));
+        let rt = vc.update(|_, cx| view.read(cx).runtime().clone());
+        vc.update(|_, cx| rt.update(cx, |rt, _| rt.fake_context = Some(long.clone())));
+        let compacts = || handle.received().into_iter().filter_map(|command| match command {
+            provider::Command::CompactSession { focus, .. } => Some(focus),
+            _ => None,
+        }).collect::<Vec<_>>();
+
+        // 30 minutes idle: not yet. 58 minutes: now, once.
+        vc.update(|_, cx| rt.update(cx, |rt, cx| rt.step_auto_compact("1800", cx).unwrap()));
+        vc.run_until_parked();
+        assert!(compacts().is_empty(), "not before the cache's last two minutes");
+        vc.update(|_, cx| rt.update(cx, |rt, cx| rt.step_auto_compact("3480", cx).unwrap()));
+        vc.run_until_parked();
+        let sent = compacts();
+        assert_eq!(sent.len(), 1, "one compaction");
+        assert!(sent[0].as_deref().is_some_and(|focus| focus.starts_with("Keep every instruction the user gave, word for word.")), "{sent:?}");
+        vc.update(|_, cx| rt.update(cx, |rt, cx| rt.step_auto_compact("3500", cx).unwrap()));
+        vc.run_until_parked();
+        assert_eq!(compacts().len(), 1, "once per idle stretch");
+
+        // A new stretch where the person typed: never.
+        vc.update(|_, cx| rt.update(cx, |rt, cx| {
+            rt.auto_compact = Default::default();
+            rt.auto_compact_typed();
+            rt.step_auto_compact("3480", cx).unwrap();
+        }));
+        vc.run_until_parked();
+        assert_eq!(compacts().len(), 1, "a key in the composer cancels it");
+
+        // Per-token billing (a 5-minute cache): left to the vendor.
+        vc.update(|_, cx| rt.update(cx, |rt, cx| {
+            rt.auto_compact = Default::default();
+            billing::report(id, Some(BillingMode::PerToken));
+            rt.step_auto_compact("3480", cx).unwrap();
+        }));
+        vc.run_until_parked();
+        assert_eq!(compacts().len(), 1, "no timer on a 5-minute cache");
+
+        // The topic switch: NEW compacts first, then the message goes.
+        billing::report(id, Some(BillingMode::Subscription));
+        billing::note_sent(id);
+        baaz_core::utility::set_test_completer(|_, _| Ok("NEW".to_owned()));
+        vc.update(|_, cx| rt.update(cx, |rt, cx| rt.send_text("Now write the release notes".to_owned(), cx)));
+        vc.run_until_parked();
+        assert_eq!(compacts().len(), 2, "a new topic above the threshold compacts first");
+        assert_eq!(handle.commands_of("submit-input").len(), 1, "and the message still goes");
+        // SAME: the message goes as it is.
+        baaz_core::utility::set_test_completer(|_, _| Ok("SAME".to_owned()));
+        vc.update(|_, cx| rt.update(cx, |rt, cx| { rt.running = None; rt.submitting = false; rt.send_text("And the changelog".to_owned(), cx) }));
+        vc.run_until_parked();
+        assert_eq!(compacts().len(), 2, "the same topic sends as it is");
+        assert_eq!(handle.commands_of("submit-input").len(), 2);
+        billing::reset();
     }
 
     /// docs/82 5.5: a typed escape the provider cannot run is not
