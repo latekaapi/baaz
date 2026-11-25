@@ -170,6 +170,9 @@ pub struct SessionRuntime {
     /// docs/85 14.2: escalation cards Baaz put up (card id → task id and
     /// the offered options): answered here, never sent to the provider.
     pub(super) escalations: HashMap<String, (String, Vec<String>)>,
+    /// docs/85 14.7: when the provider last said anything (ms, Baaz's
+    /// clock): what the stall rules measure quiet from.
+    pub(crate) last_event_ms: i64,
     /// When each pending question's auto-resolution clock started, keyed by
     /// `userInputId`. MSP sends a duration, never a deadline.
     pub(super) question_started: HashMap<String, Instant>,
@@ -459,6 +462,7 @@ impl SessionRuntime {
             shared_child_starting: false,
             answers: HashMap::new(),
             escalations: HashMap::new(),
+            last_event_ms: baaz_core::clock::now_ms() as i64,
             question_started: HashMap::new(),
             retry_started: None,
             countdown: None,

@@ -227,6 +227,10 @@ pub struct Task {
     /// Automatic fix-up turns spent on a failing check (one, 14.5).
     #[serde(default)]
     pub fixups: u8,
+    /// The stall rules' step (docs/85 14.7): 1 nudged, 2 interrupted and
+    /// resent; and when that step was taken (ms).
+    #[serde(default)]
+    pub stall: Option<(u8, i64)>,
     pub created_at: i64,
     pub updated_at: i64,
     pub started_at: Option<i64>,
@@ -431,6 +435,37 @@ pub fn criterion_line(criterion: &Criterion, claim: Option<&Claim>, check_passed
     serde_json::json!({"criterion": criterion.text, "state": state, "by": by, "worker_says": claim.map(|c| if c.met { "met" } else { "not met" }), "evidence": claim.map(|c| c.evidence.clone())})
 }
 
+/// Quiet before the first nudge (docs/85 14.7, Synara's rule).
+pub const STALL_NUDGE_MS: i64 = 10 * 60_000;
+/// Quiet after a nudge before the interrupt and resend, and after that
+/// before "needs you".
+pub const STALL_STEP_MS: i64 = 5 * 60_000;
+
+/// What the stall rules do now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StallStep {
+    Wait,
+    /// Activity since the last step: the rules start over.
+    Reset,
+    Nudge,
+    Interrupt,
+    NeedsYou,
+}
+
+/// The stall rules for a running worker last heard from at `last_event`
+/// (ms), given the step already taken: nudge after 10 quiet minutes,
+/// interrupt and resend after 5 more, then needs you. Activity after a
+/// step starts the rules over.
+pub fn stall_step(now: i64, last_event: i64, stall: Option<(u8, i64)>) -> StallStep {
+    match stall {
+        Some((_, at)) if last_event > at => StallStep::Reset,
+        None if now - last_event >= STALL_NUDGE_MS => StallStep::Nudge,
+        Some((1, at)) if now - at >= STALL_STEP_MS => StallStep::Interrupt,
+        Some((2, at)) if now - at >= STALL_STEP_MS => StallStep::NeedsYou,
+        _ => StallStep::Wait,
+    }
+}
+
 /// A side effect a status change needs, carried out by the app.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -553,6 +588,7 @@ pub(crate) fn sample(id: &str, status: Status) -> Task {
         past_workers: Vec::new(),
         base: None,
         fixups: 0,
+        stall: None,
         created_at: 1,
         updated_at: 1,
         started_at: None,
@@ -689,6 +725,19 @@ mod tests {
         assert_eq!(match_claims(&criteria, &amended).unwrap_err().code, Code::CriteriaFrozen);
         assert_eq!(criterion_line(&criteria[0], None, Some(true), None)["state"], "met");
         assert_eq!(criterion_line(&criteria[1], matched[0].as_ref(), Some(true), None)["state"], "not proven", "a worker's word alone proves nothing");
+    }
+
+    /// docs/85 14.7 on a frozen clock.
+    #[test]
+    fn the_stall_rules_nudge_then_interrupt_then_need_you() {
+        let m = 60_000;
+        assert_eq!(stall_step(9 * m, 0, None), StallStep::Wait);
+        assert_eq!(stall_step(10 * m, 0, None), StallStep::Nudge);
+        assert_eq!(stall_step(14 * m, 0, Some((1, 10 * m))), StallStep::Wait);
+        assert_eq!(stall_step(15 * m, 0, Some((1, 10 * m))), StallStep::Interrupt);
+        assert_eq!(stall_step(19 * m, 0, Some((2, 15 * m))), StallStep::Wait);
+        assert_eq!(stall_step(20 * m, 0, Some((2, 15 * m))), StallStep::NeedsYou);
+        assert_eq!(stall_step(12 * m, 11 * m, Some((1, 10 * m))), StallStep::Reset, "the worker answered the nudge");
     }
 
     #[test]

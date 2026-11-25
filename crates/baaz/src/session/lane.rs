@@ -384,6 +384,7 @@ impl SessionRuntime {
     /// Only the lane task calls this, so `apply_deltas` has exactly one
     /// writer.
     pub(super) fn on_provider_event(&mut self, event: provider::ProviderEvent, cx: &mut Context<Self>) {
+        self.last_event_ms = baaz_core::clock::now_ms() as i64;
         match event {
             provider::ProviderEvent::Deltas { session_id, deltas } => {
                 if session_id.as_deref() != Some(self.session_id.as_str()) {

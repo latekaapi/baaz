@@ -291,3 +291,36 @@ fn a_restart_mid_task_resumes_its_worker(cx: &mut gpui::TestAppContext) {
     assert_eq!(active, lead);
     cleanup(&root, state);
 }
+
+/// docs/85 14.7 through the window on a frozen clock: a quiet worker is
+/// nudged at 10 minutes, interrupted and nudged again 5 later, and needs
+/// the person 5 after that, waking its lead.
+#[gpui::test]
+fn a_quiet_worker_is_nudged_interrupted_then_needs_you(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("orchestra-stall");
+    let root = folder(&state.2, true);
+    let (factory, sent) = recording_factory_numbered(true);
+    let (baaz, vc, lead) = session_with(cx, &root, factory);
+    let out = reply(&pane_call(&baaz, vc, &lead, &root, "delegate", serde_json::json!({"task": "slow job", "provider": "codex"})));
+    let task = out["result"]["task"].as_str().unwrap().to_owned();
+    vc.run_until_parked();
+    let worker = worker_of(&baaz, vc, &task);
+    let last = vc.update(|_, cx| baaz.read(cx).registry.find_runtime(baaz.read(cx).active.as_ref(), &worker, cx).unwrap().read(cx).last_event_ms);
+    let nudges = |sent: &super::undo::Sent| sent.lock().unwrap().iter().filter(|s| s.0 == crate::orchestra::NUDGE_TEXT).count();
+    let m = 60_000;
+    let tick = |vc: &mut gpui::VisualTestContext, at: i64| {
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.stall_tick(at, cx)));
+        settle(vc);
+    };
+    tick(vc, last + 9 * m);
+    assert_eq!(nudges(&sent), 0);
+    tick(vc, last + 10 * m);
+    assert_eq!(nudges(&sent), 1, "nudged at 10 quiet minutes");
+    assert_eq!(status_of(&task).stall.map(|s| s.0), Some(1));
+    tick(vc, last + 15 * m);
+    assert_eq!(nudges(&sent), 2, "interrupted and nudged again 5 later");
+    tick(vc, last + 20 * m);
+    assert_eq!(status_of(&task).status, baaz_core::tasks::Status::NeedsYou);
+    assert!(sent.lock().unwrap().iter().any(|s| s.0.starts_with("From Baaz (not the user): your delegated tasks settled")), "its lead is woken");
+    cleanup(&root, state);
+}

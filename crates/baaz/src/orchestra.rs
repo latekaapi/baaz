@@ -220,6 +220,7 @@ impl Harness {
             past_workers: Vec::new(),
             base: None,
             fixups: 0,
+            stall: None,
             created_at: now(),
             updated_at: now(),
             started_at: None,
@@ -531,6 +532,7 @@ impl Harness {
                 past_workers: Vec::new(),
                 base: None,
                 fixups: 0,
+                stall: None,
                 created_at: now(),
                 updated_at: now(),
                 started_at: Some(now()),
@@ -1043,5 +1045,71 @@ impl Harness {
                 self.start_worker(task, mode, root, cx);
             }
         }
+    }
+}
+
+/// The nudge a quiet worker gets (docs/85 14.7).
+pub(crate) const NUDGE_TEXT: &str = "From Baaz (not the user): you have been quiet for a while. If your task is done, commit and call report; if you are blocked, call escalate; otherwise carry on.";
+
+impl Harness {
+    /// docs/85 14.7: the stall rules over every running task's worker at
+    /// `now` (ms): nudge after 10 quiet minutes, interrupt and resend the
+    /// nudge after 5 more, then the task needs the person and its lead is
+    /// woken. Run once a minute while the window lives.
+    pub(crate) fn stall_tick(&mut self, now: i64, cx: &mut Context<Self>) {
+        let workers: Vec<(String, String)> = self.registry.orchestra.workers.iter().map(|(w, t)| (w.clone(), t.clone())).collect();
+        if workers.is_empty() {
+            return;
+        }
+        let heard: Vec<(String, i64)> = workers
+            .iter()
+            .filter_map(|(w, _)| self.registry.find_runtime(self.active.as_ref(), w, cx).map(|rt| (w.clone(), rt.read(cx).last_event_ms)))
+            .collect();
+        cx.spawn(async move |this, cx| {
+            let steps = cx
+                .background_spawn(async move {
+                    with_db(move |conn| {
+                        let mut out = Vec::new();
+                        for (worker, last) in heard {
+                            let Some(mut task) = crate::db::tasks::for_worker(conn, &worker).ok().flatten() else { continue };
+                            if task.status != Status::Running {
+                                continue;
+                            }
+                            let step = core::stall_step(now, last, task.stall);
+                            match step {
+                                core::StallStep::Wait => continue,
+                                core::StallStep::Reset => task.stall = None,
+                                core::StallStep::Nudge => task.stall = Some((1, now)),
+                                core::StallStep::Interrupt => task.stall = Some((2, now)),
+                                core::StallStep::NeedsYou => {
+                                    task.stall = None;
+                                    let _ = task.move_to(Status::NeedsYou, now);
+                                    task.verdict = Some(json!({"needs_you": "the worker went quiet: nudged, then interrupted, and still nothing"}));
+                                }
+                            }
+                            let _ = crate::db::tasks::save(conn, &task);
+                            out.push((worker, step, task));
+                        }
+                        out
+                    })
+                    .unwrap_or_default()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                for (worker, step, task) in steps {
+                    let runtime = this.registry.find_runtime(this.active.as_ref(), &worker, cx);
+                    match (step, runtime) {
+                        (core::StallStep::Nudge, Some(rt)) => rt.update(cx, |rt, cx| rt.send_or_queue(NUDGE_TEXT.to_owned(), cx)),
+                        (core::StallStep::Interrupt, Some(rt)) => rt.update(cx, |rt, cx| {
+                            rt.interrupt(cx);
+                            rt.send_or_queue(NUDGE_TEXT.to_owned(), cx);
+                        }),
+                        (core::StallStep::NeedsYou, _) => this.task_settled(task, cx),
+                        _ => {}
+                    }
+                }
+            });
+        })
+        .detach();
     }
 }

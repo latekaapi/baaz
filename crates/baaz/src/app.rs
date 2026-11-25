@@ -1174,6 +1174,14 @@ impl Harness {
                 cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
                 let _ = this.update(cx, |this, cx| this.reconcile_tasks_on_open(cx));
             }));
+            // docs/85 14.7: the stall rules, once a minute.
+            this.tasks.push(cx.spawn(async move |this, cx| loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(60)).await;
+                let now = baaz_core::clock::now_ms() as i64;
+                if this.update(cx, |this, cx| this.stall_tick(now, cx)).is_err() {
+                    return;
+                }
+            }));
         }
         // The two capture boots (`probe` builds only: without it neither
         // flag parses).
