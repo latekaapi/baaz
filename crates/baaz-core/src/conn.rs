@@ -276,17 +276,12 @@ mod tests {
         let (provider, _events) =
             connect_with(ScriptedProvider::new(), &ConnectInfo::new("baaz", "0.1.0"))
                 .expect("a scripted provider connects");
-        match provider.send(Command::ForkSession {
-            request_id: "r-9".into(),
-            session_id: "s".into(),
-            through_turn: None,
-            metadata_only: false,
-            mode: None,
-        }) {
+        // One the stand-in still refuses (it forks since docs/85 16.3).
+        match provider.send(Command::CompactSession { request_id: "r-9".into(), session_id: "s".into(), through_turn: None, focus: None }) {
             Err(provider::ProviderError::Unsupported { capability, .. }) => {
-                assert_eq!(capability, "fork-session");
+                assert_eq!(capability, "compact-session");
             }
-            other => panic!("fork-session must refuse, not answer {other:?}"),
+            other => panic!("compact-session must refuse, not answer {other:?}"),
         }
     }
 }

@@ -493,7 +493,6 @@ fn visible(statuses: &[ProviderStatus]) -> Vec<ProviderStatus> {
         .collect()
 }
 
-#[cfg(feature = "probe")]
 /// docs/85 16.1: every signed-in account the statuses name goes into
 /// baaz.db's `account` table (its email, how it signed in, its plan),
 /// off the UI thread; never in a capture or with scripted providers.
@@ -530,6 +529,7 @@ fn record_accounts(statuses: &[ProviderStatus]) {
 }
 
 
+#[cfg(feature = "probe")]
 #[cfg(test)]
 mod tests {
     use super::NewProvider;

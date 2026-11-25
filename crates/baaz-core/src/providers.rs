@@ -1635,11 +1635,12 @@ mod tests {
         assert!(offered(ProviderId::ClaudeCode, C::ForkSession));
         assert!(offered(ProviderId::ClaudeCode, C::SteerTurn));
         assert!(offered(ProviderId::ClaudeCode, C::ImageInput));
-        // Codex: the adapter refuses fork, shell, question answers and
-        // images; compact (`thread/compact/start`, docs/85 10.4), steer and
-        // stop are native.
+        // Codex: the adapter refuses shell, question answers and images;
+        // compact (`thread/compact/start`, docs/85 10.4), fork
+        // (`thread/fork`, docs/85 16.3), steer and stop are native.
         assert!(offered(ProviderId::Codex, C::CompactSession));
-        for c in [C::ForkSession, C::SessionShell, C::Questions, C::ImageInput] {
+        assert!(offered(ProviderId::Codex, C::ForkSession));
+        for c in [C::SessionShell, C::Questions, C::ImageInput] {
             assert!(!offered(ProviderId::Codex, c), "{c:?} on Codex");
         }
         assert!(offered(ProviderId::Codex, C::SteerTurn));
@@ -1650,7 +1651,7 @@ mod tests {
         }
         assert!(!offered(ProviderId::Muse, C::SessionShell));
         // The words a refused control shows name the provider, nothing else.
-        assert_eq!(gate(ProviderId::Codex, C::ForkSession).as_deref(), Some("Not available in Codex."));
+        assert_eq!(gate(ProviderId::Codex, C::SessionShell).as_deref(), Some("Not available in Codex."));
     }
 
     fn sample() -> ExternalApproval {
