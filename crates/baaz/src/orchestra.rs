@@ -346,9 +346,12 @@ impl Harness {
             }
         };
         self.registry.orchestra.workers.insert(session.clone(), task.id.clone());
+        let lead = task.lead_session.clone();
+        self.session_list.update(cx, |list, cx| list.set_worker_lead(&session, &lead, cx));
         task.worker_session = Some(session.clone());
         let _ = task.move_to(Status::Running, now());
         let prompt = core::worker_prompt(&task);
+        let lead_for_block = task.lead_session.clone();
         if let Some(runtime) = self.registry.find_runtime(self.active.as_ref(), &session, cx) {
             runtime.update(cx, |rt, cx| rt.send_or_queue(prompt, cx));
         }
@@ -363,7 +366,7 @@ impl Harness {
             });
         })
         .detach();
-        cx.notify();
+        self.refresh_workers(&lead_for_block, cx);
     }
 
     /// `task_status`: the lead's tasks (or one), each short, with what its
@@ -421,6 +424,7 @@ impl Harness {
             match stopped {
                 Ok(task) => {
                     let _ = this.update(cx, |this, cx| {
+                        this.refresh_workers(&task.lead_session, cx);
                         if let Some(runtime) = task.worker_session.as_deref().and_then(|s| this.registry.find_runtime(this.active.as_ref(), s, cx)) {
                             runtime.update(cx, |rt, cx| rt.interrupt(cx));
                         }
@@ -542,6 +546,8 @@ impl Harness {
         for task in &tasks {
             if let Some(worker) = &task.worker_session {
                 self.registry.orchestra.workers.insert(worker.clone(), task.id.clone());
+                let lead = task.lead_session.clone();
+                self.session_list.update(cx, |list, cx| list.set_worker_lead(worker, &lead, cx));
             }
         }
         let rows: Vec<Value> = tasks.iter().map(|t| task_summary(t, None)).collect();
@@ -660,6 +666,7 @@ impl Harness {
                 Ok(task) => {
                     call.answer(Ok(json!({"escalated": task.id, "note": "the person is asked; stop here and wait for their answer"})));
                     let _ = this.update(cx, |this, cx| {
+                        this.refresh_workers(&task.lead_session, cx);
                         let card = format!("escalation-{}-{}", task.id, task.updated_at);
                         let header = format!("{} asks", task.title);
                         for session in [Some(task.lead_session.clone()), task.worker_session.clone()].into_iter().flatten() {
@@ -695,6 +702,7 @@ impl Harness {
                 .await;
             let Some(task) = task else { return };
             let _ = this.update(cx, |this, cx| {
+                this.refresh_workers(&task.lead_session, cx);
                 for session in [Some(task.lead_session.clone()), task.worker_session.clone()].into_iter().flatten() {
                     if let Some(runtime) = this.registry.find_runtime(this.active.as_ref(), &session, cx) {
                         runtime.update(cx, |rt, _| rt.settle_escalation_card(&card, aui_protocol::Answer { selected: Vec::new(), other: Some(words.clone()) }));
@@ -730,6 +738,7 @@ impl Harness {
             })
             .await;
             let _ = this.update(cx, |this, cx| {
+                this.refresh_workers(&task.lead_session, cx);
                 if let Some(text) = fixup {
                     if let Some(runtime) = task.worker_session.as_deref().and_then(|w| this.registry.find_runtime(this.active.as_ref(), w, cx)) {
                         runtime.update(cx, |rt, cx| rt.send_or_queue(text, cx));
@@ -781,6 +790,9 @@ impl Harness {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                if let Some((lead, _)) = wake.as_ref() {
+                    this.refresh_workers(lead, cx);
+                }
                 for t in released {
                     let root = this.session_workspace(&t.lead_session, cx);
                     let mode = this
@@ -963,6 +975,13 @@ impl Harness {
                 return;
             }
             let _ = this.update(cx, |this, cx| {
+                // Every worker's row nests under its lead (docs/85 14.9).
+                for task in &tasks {
+                    if let Some(worker) = &task.worker_session {
+                        let lead = task.lead_session.clone();
+                        this.session_list.update(cx, |list, cx| list.set_worker_lead(worker, &lead, cx));
+                    }
+                }
                 let live = |session: &str| this.registry.find_runtime(this.active.as_ref(), session, cx).is_some();
                 let actions = core::reconcile(&tasks, &pending, &live);
                 crate::baaz_log!("orchestra: reconcile on open: {} task(s), {} action(s)", tasks.len(), actions.len());
@@ -1097,6 +1116,10 @@ impl Harness {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                let leads: std::collections::HashSet<String> = steps.iter().map(|(_, _, t)| t.lead_session.clone()).collect();
+                for lead in leads {
+                    this.refresh_workers(&lead, cx);
+                }
                 for (worker, step, task) in steps {
                     let runtime = this.registry.find_runtime(this.active.as_ref(), &worker, cx);
                     match (step, runtime) {
@@ -1177,5 +1200,253 @@ impl Harness {
             call.answer(Ok(json!({"steps": rows, "check": check.describe()})));
         })
         .detach();
+    }
+}
+
+impl Harness {
+    /// docs/85 14.9: the Workers block's ↗ — the worker opens beside its
+    /// lead in the right pane (its own view and composer); the person stays
+    /// on the lead.
+    pub(crate) fn open_worker_beside(&mut self, worker: &str, cx: &mut Context<Self>) {
+        let Some(view) = self.registry.parked(worker) else {
+            crate::baaz_log!("orchestra: worker {worker} is not live; nothing to open beside");
+            return;
+        };
+        // The task's title, from the lead's Workers block; else the row's.
+        let from_block = self
+            .active
+            .as_ref()
+            .and_then(|lead| lead.read(cx).rt(cx).workers.iter().find(|row| row.id.as_ref() == worker).map(|row| row.title.to_string()));
+        let title = from_block
+            .or_else(|| self.session_list.read(cx).sessions.iter().find(|row| row.id == worker).map(|row| row.label.clone()))
+            .unwrap_or_else(|| "Worker".into());
+        self.right_pane.update(cx, |pane, _| pane.worker = Some((view, title)));
+        let kind = crate::layout::right_kind(crate::layout::Layout::get(cx));
+        self.open_right_on(kind, cx);
+        // The pane draws the worker on its next refresh.
+        self.refresh_right_now(cx);
+    }
+
+    /// docs/85 14.9: push a lead's Workers block (and, once its tasks
+    /// settle, their per-criterion summary) from its task rows.
+    pub(crate) fn refresh_workers(&mut self, lead: &str, cx: &mut Context<Self>) {
+        let lead = lead.to_owned();
+        cx.spawn(async move |this, cx| {
+            let key = lead.clone();
+            let tasks = cx.background_spawn(async move { with_db(move |conn| crate::db::tasks::for_lead(conn, &key).unwrap_or_default()).unwrap_or_default() }).await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(runtime) = this.registry.find_runtime(this.active.as_ref(), &lead, cx) else { return };
+                let (rows, summary) = workers_view(&tasks, now());
+                runtime.update(cx, |rt, cx| rt.set_workers(rows, summary, cx));
+            });
+        })
+        .detach();
+    }
+}
+
+/// A lead's tasks as the Workers block and the summary card show them.
+pub(crate) fn workers_view(tasks: &[Task], now: i64) -> (Vec<aui::transcript::WorkerRow>, Vec<aui::transcript::CriteriaTask>) {
+    use aui::transcript::{CriteriaTask, CriterionLine, CriterionState, WorkerRow, WorkerState};
+    let label = |provider: &str| crate::providers::ProviderId::parse_known(provider).map(|p| p.label().to_owned()).unwrap_or_else(|| provider.to_owned());
+    let rows = tasks
+        .iter()
+        .map(|t| {
+            let state = match t.status {
+                Status::Waiting => WorkerState::Waiting,
+                Status::Queued => WorkerState::Starting,
+                Status::Running => WorkerState::Running,
+                Status::Reported | Status::Checking => WorkerState::Checking,
+                Status::Passed => WorkerState::Passed,
+                Status::Failed => WorkerState::Failed,
+                Status::NeedsYou => WorkerState::NeedsYou,
+                Status::Stopped => WorkerState::Stopped,
+                Status::Landed => WorkerState::Landed,
+            };
+            let minutes = t.started_at.map(|at| (now - at).max(0) / 60_000);
+            let elapsed = match minutes {
+                None => String::new(),
+                Some(m) if m < 60 => format!("{m}m"),
+                Some(m) => format!("{}h {}m", m / 60, m % 60),
+            };
+            WorkerRow { id: t.worker_session.clone().unwrap_or_default().into(), title: t.title.clone().into(), provider: label(&t.provider).into(), state, elapsed: elapsed.into() }
+        })
+        .collect();
+    let summary = tasks
+        .iter()
+        .filter_map(|t| {
+            let lines = t.verdict.as_ref()?.get("criteria")?.as_array()?;
+            let lines = lines
+                .iter()
+                .map(|l| CriterionLine {
+                    text: l["criterion"].as_str().unwrap_or_default().to_owned().into(),
+                    state: match l["state"].as_str().unwrap_or_default() {
+                        "met" => CriterionState::Met,
+                        "not met" => CriterionState::NotMet,
+                        "for you to judge" => CriterionState::YourCall,
+                        _ => CriterionState::NotProven,
+                    },
+                    by: l["by"].as_str().unwrap_or_default().to_owned().into(),
+                })
+                .collect();
+            Some(CriteriaTask { title: t.title.clone().into(), provider: label(&t.provider).into(), lines })
+        })
+        .collect();
+    (rows, summary)
+}
+
+impl Harness {
+    /// docs/85 14.9: a worker whose task settled was sent a new message by
+    /// the person — a comment on its diff becomes a fix: the task runs
+    /// again (its fix-up count and verdict start over), and Baaz checks it
+    /// again when it reports. A running task is left as it is.
+    pub(crate) fn reopen_for_fix(&mut self, worker: &str, cx: &mut Context<Self>) {
+        let worker = worker.to_owned();
+        cx.spawn(async move |this, cx| {
+            let reopened = cx
+                .background_spawn(async move {
+                    with_db(move |conn| {
+                        let mut task = crate::db::tasks::for_worker(conn, &worker).ok().flatten()?;
+                        if !matches!(task.status, Status::Passed | Status::Failed | Status::NeedsYou) {
+                            return None;
+                        }
+                        task.move_to(Status::Running, now()).ok()?;
+                        task.fixups = 0;
+                        task.verdict = None;
+                        task.report = None;
+                        crate::db::tasks::save(conn, &task).ok()?;
+                        Some(task)
+                    })
+                    .flatten()
+                })
+                .await;
+            if let Some(task) = reopened {
+                crate::baaz_log!("orchestra: {} reopened for a fix", task.id);
+                let _ = this.update(cx, |this, cx| this.refresh_workers(&task.lead_session, cx));
+            }
+        })
+        .detach();
+    }
+}
+
+impl Harness {
+    /// `workers-fixture:<running|settled>` (docs/85 14.9 captures): the open
+    /// session as a lead of three fixture workers — their rows nested under
+    /// it in the sidebar (local rows; nothing runs), its Workers block, and
+    /// (settled) the per-criterion summary. No task row is written.
+    #[cfg(feature = "probe")]
+    pub(crate) fn step_workers_fixture(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let settled = match rest.trim() {
+            "" | "running" => false,
+            "settled" => true,
+            other => return Err(format!("workers-fixture: `{other}` is not running or settled")),
+        };
+        let lead_view = self.active.clone().ok_or("no open session to lead")?;
+        let lead = lead_view.read(cx).rt(cx).session_id.clone();
+        let project = self.session_list.read(cx).sessions.iter().find(|row| row.id == lead).and_then(|row| row.project.clone());
+        let workspace = self.current_project(cx).map(|p| p.root.to_string_lossy().into_owned());
+        let now = baaz_core::clock::now_local();
+        let workers = [("fixture-worker-write", "Write 15 questions · Sonnet"), ("fixture-worker-review", "Review them · Codex"), ("fixture-worker-import", "Import approved ones · Muse")];
+        for (id, label) in workers {
+            if !self.session_list.read(cx).sessions.iter().any(|row| row.id == id) {
+                let row = crate::sidebar::local_started_row(id, label.to_owned(), project.clone(), workspace.clone(), now);
+                self.session_list.update(cx, |list, _| list.sessions.push(row));
+            }
+            self.session_list.update(cx, |list, cx| list.set_worker_lead(id, &lead, cx));
+        }
+        self.invalidate_list(cx);
+        let at = baaz_core::clock::now_ms() as i64;
+        let task = |id: &str, title: &str, provider: &str, role: Role, status: Status, minutes: i64, verdict: Option<Value>| {
+            let mut t = baaz_core::tasks::Task {
+                id: format!("task-{id}"),
+                lead_session: lead.clone(),
+                lead_provider: String::new(),
+                worker_session: Some(id.to_owned()),
+                provider: provider.to_owned(),
+                model: None,
+                parent: None,
+                depth: 1,
+                role,
+                worktree: None,
+                status,
+                title: title.to_owned(),
+                prompt: String::new(),
+                inputs: Vec::new(),
+                criteria: Vec::new(),
+                check: None,
+                scope: Vec::new(),
+                verdict,
+                report: None,
+                budget: Budget::default(),
+                used_tokens: 0,
+                generation: 0,
+                after: Vec::new(),
+                watched: false,
+                past_workers: Vec::new(),
+                base: None,
+                fixups: 0,
+                stall: None,
+                created_at: at,
+                updated_at: at,
+                started_at: (status != Status::Waiting).then_some(at - minutes * 60_000),
+            };
+            t.updated_at = at;
+            t
+        };
+        let line = |c: &str, state: &str, by: &str| json!({"criterion": c, "state": state, "by": by});
+        let tasks = if settled {
+            vec![
+                task("fixture-worker-write", "Write 15 questions", "claude-code", Role::Writer, Status::Passed, 6, Some(json!({"criteria": [line("15 questions on fractions", "not proven", "nothing checks it"), line("The tests pass", "met", "the check")]}))),
+                task("fixture-worker-review", "Review them", "codex", Role::Reviewer, Status::Passed, 3, Some(json!({"criteria": [line("Each question reviewed as correct", "met", "the reviewer")]}))),
+                task("fixture-worker-import", "Import the approved ones", "muse", Role::Writer, Status::Passed, 1, Some(json!({"criteria": [line("14 rows in the questions table", "met", "the check"), line("The wording suits Lakshya", "for you to judge", "you")]}))),
+            ]
+        } else {
+            vec![
+                task("fixture-worker-write", "Write 15 questions", "claude-code", Role::Writer, Status::Passed, 6, None),
+                task("fixture-worker-review", "Review them", "codex", Role::Reviewer, Status::NeedsYou, 3, None),
+                task("fixture-worker-import", "Import the approved ones", "muse", Role::Writer, Status::Waiting, 0, None),
+            ]
+        };
+        let (rows, summary) = workers_view(&tasks, at);
+        let runtime = lead_view.read(cx).runtime().clone();
+        runtime.update(cx, |rt, cx| {
+            rt.set_workers(rows, summary, cx);
+            rt.workers_open = Some(true);
+        });
+        Ok(())
+    }
+
+    /// `workers-pane`: a stand-in worker opened beside the open session, as
+    /// the Workers block's ↗ opens one (docs/85 14.9 capture). Its lane is
+    /// the window's scripted stand-in: nothing is sent anywhere.
+    #[cfg(feature = "probe")]
+    pub(crate) fn step_workers_pane(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if !crate::runtime::captures() {
+            return Err("workers-pane opens a stand-in worker: captures only".into());
+        }
+        let workspace = self.current_project(cx).map(|p| p.root.to_string_lossy().into_owned()).ok_or("no project")?;
+        self.open_worker(crate::providers::ProviderId::Codex, None, aui_protocol::PermissionMode::DenyUnmatched, None, workspace, |this, opened, cx| match opened {
+            Ok(id) => {
+                if let Some(runtime) = this.registry.find_runtime(this.active.as_ref(), &id, cx) {
+                    runtime.update(cx, |rt, cx| rt.send_or_queue("Review the 15 questions in questions.md against the three criteria.".into(), cx));
+                }
+                // As a real worker: its lead's block names it.
+                if let Some(lead) = this.active.clone() {
+                    let runtime = lead.read(cx).runtime().clone();
+                    runtime.update(cx, |rt, _| {
+                        if let Some(row) = rt.workers.iter_mut().find(|row| row.title.as_ref() == "Review them") {
+                            row.id = id.clone().into();
+                        }
+                    });
+                }
+                this.session_list.update(cx, |list, _| {
+                    if !list.sessions.iter().any(|row| row.id == id) {
+                        list.sessions.push(crate::sidebar::local_started_row(&id, "Review them · Codex".into(), None, None, baaz_core::clock::now_local()));
+                    }
+                });
+                this.open_worker_beside(&id, cx);
+            }
+            Err(why) => crate::baaz_log!("workers-pane: the stand-in did not open ({why})"),
+        }, window, cx);
+        Ok(())
     }
 }

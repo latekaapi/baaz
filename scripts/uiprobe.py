@@ -1263,7 +1263,7 @@ ENTRIES.update({
     # docs/85 13.1: an agent's `pane_show`, one entry per view, through the
     # bridge call's own handler (`pane-show:` builds the call's arguments).
     # Scoped views load the fixture checkpoint index, as `changes-scope:`.
-    "pane-show-file":          _populated("right-width:440;pane-show:view=file,path=crates/baaz/src/layout.rs,line=154", replay=True),
+    "pane-show-file":          _populated("right-width:440;pane-show:view=file,path=src/lib.rs,line=6", replay=True, workspace=_REPO_ACME),
     "pane-show-files":         _populated("right-width:440;pane-show:view=files", replay=True),
     "pane-show-diff":          _populated("right-width:440;pane-show:view=diff,path=crates/baaz/src/right.rs", replay=True),
     "pane-show-diff-last":     _populated("right-width:440;pane-show:view=diff,path=crates/baaz/src/layout.rs,scope=last_turn", replay=True),
@@ -1278,6 +1278,13 @@ ENTRIES.update({
     "pane-comment":            _populated("right-width:440;pane-comment:path=crates/baaz/src/right.rs,line=12,text=This branch never runs on a capture: worth a test?", replay=True),
     # docs/85 13.4: Baaz's own approval for an agent's push (rule 29).
     "pane-push-ask":           _populated("pane-push-ask:feature/pane-tools", replay=True),
+    # docs/85 14.9: a lead with three workers — nested in the sidebar, the
+    # Workers block while work runs, the summary once settled, and a worker
+    # open beside its lead.
+    "workers-sidebar":         _populated("workers-fixture:running", replay=True),
+    "workers-block":           _populated("workers-fixture:running", replay=True, sidebar=False),
+    "workers-summary":         _populated("workers-fixture:settled", replay=True, sidebar=False),
+    "workers-pane":            _populated("right-width:440;workers-fixture:running;workers-pane", replay=True),
     # Task 6.4's confirms, from fixture data: a capture takes no
     # checkpoints and runs in the owner's repository, so neither button can
     # apply anything (the session refuses: no checkpoints).

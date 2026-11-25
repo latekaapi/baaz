@@ -134,6 +134,9 @@ pub(crate) struct SessionList {
     /// show-empty/archived flags. It is the key the list cache is
     /// validated against (findings `performance-5`, `support-2`).
     pub(crate) epoch: u64,
+    /// docs/85 14.9: worker session → its lead's, so a worker's row nests
+    /// under its lead (`sidebar::nest_workers`).
+    pub(crate) worker_leads: std::collections::HashMap<String, String>,
     /// One sorted visible list and one grouping per change, not per frame.
     cache: RefCell<ListCache>,
     /// The handoff chains over full storage, built once per `epoch` and
@@ -217,6 +220,7 @@ impl SessionList {
         Self {
             sessions: Vec::new(),
             epoch: 0,
+            worker_leads: Default::default(),
             cache: RefCell::new(ListCache::default()),
             chain_index: RefCell::new(None),
             chain_index_builds: Cell::new(0),
@@ -245,6 +249,15 @@ impl SessionList {
     /// derived from changed. Says so ([`SessionListEvent::Changed`]) and
     /// notifies this entity — its observers (the sidebar pane) re-render;
     /// the root is not notified.
+    /// docs/85 14.9: `worker` is `lead`'s worker; its row nests under the
+    /// lead's from the next grouping.
+    pub(crate) fn set_worker_lead(&mut self, worker: &str, lead: &str, cx: &mut Context<Self>) {
+        if self.worker_leads.get(worker).map(String::as_str) != Some(lead) {
+            self.worker_leads.insert(worker.to_owned(), lead.to_owned());
+            self.invalidate(cx);
+        }
+    }
+
     pub(crate) fn invalidate(&mut self, cx: &mut Context<Self>) {
         self.epoch = self.epoch.wrapping_add(1);
         Self::say(SessionListEvent::Changed, cx);
@@ -519,7 +532,9 @@ impl SessionList {
             // final shape when the wire rows replace them.
             crate::layout::GroupBy::Project => sidebar::grouping_at(&visible, now),
         };
-        // The v2 sidebar lists pinned rows in their own section (D3).
+        // A lead's workers nest under it (docs/85 14.9), then the v2
+        // sidebar lists pinned rows in their own section (D3).
+        let grouping = sidebar::nest_workers(grouping, &self.worker_leads);
         let (grouping, pinned) = sidebar::lift_pinned(grouping);
         let grouping = Rc::new(grouping);
         crate::log::boot_mark(&format!(

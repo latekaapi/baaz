@@ -330,8 +330,8 @@ impl SessionView {
             }
             self.clarify_open = None;
             self.clarify.update(cx, |state, cx| state.set_value("", window, cx));
+            // The answer's QuestionsChanged redraws the view.
             self.runtime.update(cx, |rt, cx| rt.answer_escalation(block_id, aui_protocol::Answer { selected: Vec::new(), other: Some(content) }, cx));
-            cx.notify();
             return;
         }
         // The provider lane clarifies with free text instead of the offered
@@ -377,5 +377,63 @@ impl SessionRuntime {
             }
             _ => self.report_provider_error(error, cx),
         }
+    }
+}
+
+impl SessionRuntime {
+    /// docs/85 14.9: the Workers block's rows and the delegated work's
+    /// summary, from orchestration. A changed list redraws the band.
+    pub(crate) fn set_workers(&mut self, rows: Vec<aui::transcript::WorkerRow>, delegated: Vec<aui::transcript::CriteriaTask>, cx: &mut Context<Self>) {
+        if self.workers == rows && self.delegated == delegated {
+            return;
+        }
+        // A new worker unfolds the block again.
+        if rows.len() > self.workers.len() {
+            self.workers_open = None;
+        }
+        self.workers = rows;
+        self.delegated = delegated;
+        cx.emit(RuntimeEvent::BannerChanged);
+    }
+}
+
+impl SessionView {
+    /// docs/85 14.9: the Workers block pinned at the foot of the transcript
+    /// (on the composer band), with the per-criterion summary above it once
+    /// every worker has settled and the block is open. `None` with nothing
+    /// delegated.
+    pub(crate) fn render_workers_block(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rt = self.runtime.read(cx);
+        if rt.workers.is_empty() {
+            return None;
+        }
+        let settled = rt.workers.iter().all(|w| w.state.settled());
+        let open = rt.workers_open.unwrap_or(!settled);
+        let runtime = self.runtime.clone();
+        let block = aui::transcript::workers_block("workers-block", rt.workers.clone(), open).on_action(move |action, _, cx| match action {
+            aui::transcript::WorkersAction::Toggle => runtime.update(cx, |rt, cx| {
+                rt.workers_open = Some(!open);
+                cx.emit(RuntimeEvent::BannerChanged);
+            }),
+            aui::transcript::WorkersAction::OpenBeside(worker) => runtime.update(cx, |_, cx| cx.emit(SessionEvent::OpenWorker { worker: worker.to_string() })),
+        });
+        let summary = (settled && open && !rt.delegated.is_empty()).then(|| aui::transcript::criteria_card("workers-summary", rt.delegated.clone()));
+        // On the transcript's measure, like the composer under it.
+        Some(
+            gpui::div()
+                .w_full()
+                .px(gpui::px(TRANSCRIPT_PAD_X))
+                .pb(gpui::px(aui_tokens::scale::SP_2))
+                .child(
+                    gpui_kit::base::v_flex()
+                        .w_full()
+                        .max_w(gpui::px(TRANSCRIPT_MEASURE))
+                        .mx_auto()
+                        .gap(gpui::px(aui_tokens::scale::SP_2))
+                        .children(summary)
+                        .child(block),
+                )
+                .into_any_element(),
+        )
     }
 }

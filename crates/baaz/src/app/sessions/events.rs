@@ -391,6 +391,10 @@ impl Harness {
             SessionEvent::UndoLanded { session_id, title, body, undo } => {
                 self.undo_landed(session_id, title, body, *undo, cx);
             }
+            // docs/85 14.9: the Workers block's ↗.
+            SessionEvent::OpenWorker { worker } => {
+                self.open_worker_beside(worker, cx);
+            }
             // docs/85 14.2: the person answered a worker's escalation.
             SessionEvent::EscalationAnswered { task_id, card_id, answer } => {
                 self.escalation_answered(task_id, card_id, answer, cx);
@@ -412,6 +416,11 @@ impl Harness {
         // A turn that started is a session made real: it is no
         // draft any more, whether it already had a row or not.
         self.open_state.admit_turn(&session_id);
+        // docs/85 14.9: a settled worker that gets a new message (a
+        // comment on its diff, a correction) is working on its task again.
+        if self.registry.orchestra.workers.contains_key(&session_id) {
+            self.reopen_for_fix(&session_id, cx);
+        }
         let handoff_dest =
             sidebar::is_handoff_dest(&session_id, &self.session_list.read(cx).overrides);
         // A handoff destination's first words are the pack, then the

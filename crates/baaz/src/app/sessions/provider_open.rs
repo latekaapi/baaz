@@ -399,7 +399,7 @@ impl Harness {
         }
         self.registry.park(session_id.clone(), view, cx);
         self.registry.resubscribe(self.active.as_ref(), cx);
-        cx.notify();
+        // Nothing on screen changes: its row arrives through the list.
         session_id
     }
 

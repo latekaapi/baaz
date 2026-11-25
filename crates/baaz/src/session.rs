@@ -439,6 +439,9 @@ pub(crate) struct Draft {
 
 /// What the session needs the application to do about something.
 pub enum SessionEvent {
+    /// docs/85 14.9: the Workers block's ↗: open that worker beside this
+    /// session.
+    OpenWorker { worker: String },
     /// docs/85 14.2: the person answered an escalation card (Baaz's own
     /// question, put up for a worker's `escalate`).
     EscalationAnswered { task_id: String, card_id: String, answer: String },

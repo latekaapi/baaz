@@ -142,6 +142,8 @@ impl Status {
             (Passed, Landed) => true,
             (Failed | NeedsYou | Stopped, Queued) => true,
             (NeedsYou, Running) => true,
+            // A fix asked for after it settled (docs/85 14.9).
+            (Passed | Failed, Running) => true,
             _ => false,
         }
     }

@@ -1903,8 +1903,12 @@ impl Harness {
     /// Changes view through [`layout::right_kind`]. Works with no session
     /// open and never touches [`Self::active`].
     pub(crate) fn select_right(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
-        // A user pick always animates (see `toggle_right`).
-        self.right_pane.update(cx, |pane, _| pane.snap = false);
+        // A user pick always animates (see `toggle_right`), and leaves a
+        // worker open beside the session (docs/85 14.9).
+        self.right_pane.update(cx, |pane, _| {
+            pane.snap = false;
+            pane.worker = None;
+        });
         self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::PageMenu, cx); });
         self.open_right_on(kind, cx);
         self.arm_browser_url_focus(cx);
@@ -3871,6 +3875,9 @@ impl Harness {
                 };
                 let band = view.update(cx, |view, cx| view.render_composer_band(window, cx));
                 let jump = view.update(cx, |view, cx| view.render_jump_pill(cx));
+                // docs/85 14.9: a lead's Workers block rides the band, at the
+                // transcript's foot, above the composer.
+                let workers = view.update(cx, |view, cx| view.render_workers_block(cx));
                 // The composer floats over the transcript (owner 2026-10-15:
                 // "it's not floating on top of the transcript"): the band is
                 // absolute at the column's bottom and the list runs under it.
@@ -3905,6 +3912,7 @@ impl Harness {
                                 v_flex()
                                     .w_full()
                                     .relative()
+                                    .children(workers)
                                     .children(provider_banner.take())
                                     .child(band)
                                     // Off this column's top, so it clears the

@@ -173,6 +173,14 @@ pub struct SessionRuntime {
     /// docs/85 14.7: when the provider last said anything (ms, Baaz's
     /// clock): what the stall rules measure quiet from.
     pub(crate) last_event_ms: i64,
+    /// docs/85 14.9: this session's delegated tasks as its Workers block
+    /// shows them, and (once they settle) their per-criterion summary.
+    /// Pushed by orchestration; empty for a session that delegated nothing.
+    pub(crate) workers: Vec<aui::transcript::WorkerRow>,
+    pub(crate) delegated: Vec<aui::transcript::CriteriaTask>,
+    /// The person folded or unfolded the block (`None`: it folds itself
+    /// once every worker has settled).
+    pub(crate) workers_open: Option<bool>,
     /// When each pending question's auto-resolution clock started, keyed by
     /// `userInputId`. MSP sends a duration, never a deadline.
     pub(super) question_started: HashMap<String, Instant>,
@@ -463,6 +471,9 @@ impl SessionRuntime {
             answers: HashMap::new(),
             escalations: HashMap::new(),
             last_event_ms: baaz_core::clock::now_ms() as i64,
+            workers: Vec::new(),
+            delegated: Vec::new(),
+            workers_open: None,
             question_started: HashMap::new(),
             retry_started: None,
             countdown: None,
