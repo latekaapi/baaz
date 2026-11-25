@@ -929,9 +929,9 @@ impl SessionList {
             // other state dir carries no override here, so its own row flag
             // is what keeps it hidden.
             // The index may land after the row joined: a session another
-            // client made is marked here too (`made_elsewhere`).
+            // client made is marked here too (`made_by_another_client`).
             let root = wire.get(entry.id.as_str()).and_then(|w| w.workspace_root.as_deref());
-            entry.side_marker = entry.side_marker || sidebar::made_elsewhere(index, root, meta);
+            entry.side_marker = entry.side_marker || sidebar::made_by_another_client(index, root, meta);
             entry.hidden = meta.is_some_and(|m| m.hidden) || entry.side_marker;
             entry.pinned = meta.is_some_and(|m| m.pinned);
             entry.archived = meta.is_some_and(|m| m.archived);

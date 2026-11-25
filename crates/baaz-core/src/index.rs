@@ -44,7 +44,7 @@ pub struct IndexEntry {
     /// `Some("baaz")` for Baaz, `Some("")` for one with no client name — a
     /// `muse` CLI run, `muse exec` included — and `None` when the index
     /// cannot say (an older Muse, or a cached entry from before this field).
-    /// [`crate::sidebar::made_elsewhere`] reads it; unknown never hides.
+    /// [`crate::sidebar::made_by_another_client`] reads it; unknown never hides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
 }
