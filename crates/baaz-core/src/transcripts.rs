@@ -248,22 +248,31 @@ pub fn source_now(provider: &str, session_id: &str, muse_stamp: Option<i64>) -> 
     }
 }
 
-/// A provider file's fingerprint: its length and modified time. Empty for a
-/// file that is not there (never equal to a kept one).
+/// A provider file's fingerprint: its length and a hash of its last
+/// [`FINGERPRINT_TAIL`] bytes. Empty for a file that is not there (never
+/// equal to a kept one).
+///
+/// Not the modified time: Claude Code re-stamps its jsonl's mtime on every
+/// resume without changing a byte (found at Gate 11: 203,898 bytes before
+/// and after, a new mtime each open), so an mtime fingerprint missed the
+/// store on every second reopen. These files only grow, so a turn written
+/// since always moves the length; the tail hash catches a rewrite in place.
 pub fn file_fingerprint(path: &Path) -> String {
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            let modified = meta
-                .modified()
-                .ok()
-                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|at| at.as_nanos())
-                .unwrap_or(0);
-            format!("{}:{modified}", meta.len())
-        }
-        Err(_) => String::new(),
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else { return String::new() };
+    let Ok(len) = file.metadata().map(|meta| meta.len()) else { return String::new() };
+    let mut tail = Vec::new();
+    let start = len.saturating_sub(FINGERPRINT_TAIL);
+    if file.seek(SeekFrom::Start(start)).is_err() || file.take(FINGERPRINT_TAIL).read_to_end(&mut tail).is_err() {
+        return String::new();
     }
+    // FNV-1a, 64-bit: stable across builds and platforms.
+    let hash = tail.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3));
+    format!("{len}:{hash:016x}")
 }
+
+/// How much of a provider file's end its fingerprint reads.
+pub const FINGERPRINT_TAIL: u64 = 64 * 1024;
 
 /// One turn of a synthetic long session for the size test and the perf
 /// budget: an ask, or an answer with a paragraph and a finished tool card —
@@ -384,6 +393,30 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         let conn = open_at(&path).expect("recreated");
         assert_eq!(read(&conn, "codex", "t-1").unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Gate 11: a resume that re-stamps the file's mtime without writing
+    /// keeps the fingerprint; a turn appended, or a byte rewritten in the
+    /// tail, moves it.
+    #[test]
+    fn a_touched_file_keeps_its_fingerprint_and_a_written_one_does_not() {
+        let dir = std::env::temp_dir().join(format!("baaz-fingerprint-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, "{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n").unwrap();
+        let first = file_fingerprint(&path);
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
+        assert_eq!(file_fingerprint(&path), first, "a touch is not a change");
+        std::fs::write(&path, "{\"type\":\"user\"}\n{\"type\":\"assistanT\"}\n").unwrap();
+        let rewritten = file_fingerprint(&path);
+        assert_ne!(rewritten, first, "a rewrite in place moves it");
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("{\"type\":\"user\"}\n");
+        std::fs::write(&path, text).unwrap();
+        assert_ne!(file_fingerprint(&path), rewritten, "an appended turn moves it");
+        assert_eq!(file_fingerprint(&dir.join("missing.jsonl")), "", "no file, no fingerprint");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
