@@ -49,7 +49,7 @@ static CATALOG_DEFAULTS: Mutex<Option<HashMap<std::path::PathBuf, CatalogDefault
 
 use child::{
     initialize_request, initialized_notification, thread_ids, thread_start_request, turn_id_from,
-    thread_compact_request, thread_goal_clear_request, thread_goal_set_request, turn_interrupt_request, turn_start_request, turn_steer_request, ApprovalAnswer, ApprovalKind,
+    fork_thread_id, thread_compact_request, thread_fork_request, thread_goal_clear_request, thread_goal_set_request, turn_interrupt_request, turn_start_request, turn_steer_request, ApprovalAnswer, ApprovalKind,
     CommandApprovalDecision, FileChangeApprovalDecision, NetworkPolicyAction, PermissionGrantScope,
     PermissionsApprovalAnswer, RunningChild,
 };
@@ -1211,10 +1211,18 @@ impl ProviderAdapter for CodexAdapter {
                 *self.session_env.lock().expect("session env mutex") = env;
                 self.resume_session(&session_id, mode, metadata_only)
             }
-            Command::ForkSession { .. } => Err(ProviderError::Rejected {
-                reason: "thread/fork was never executed against a live server; not forked blind"
-                    .into(),
-            }),
+            // `thread/fork {threadId, lastTurnId}` (docs/85 16.3, probed
+            // live: the fork holds the turns through `lastTurnId`, the
+            // source keeps all of its). The fork opens as its own session.
+            Command::ForkSession { session_id, through_turn, .. } => {
+                self.check_session(&session_id)?;
+                let (thread_id, _) = self.thread_and_model()?;
+                let answer = self
+                    .with_child(|running| running.send_frame(thread_fork_request(running.next_request_id(), &thread_id, through_turn.as_deref())))?
+                    .map_err(Self::unavailable)?;
+                let forked = fork_thread_id(&answer).ok_or_else(|| ProviderError::Unavailable { reason: "thread/fork answered without a thread id".into() })?;
+                Ok(Ack::Session { session_id: forked, title: None })
+            }
             Command::ListSessions { .. } => Err(ProviderError::Rejected {
                 reason: "thread/list was never captured against a live server; not parsed blind"
                     .into(),

@@ -535,6 +535,22 @@ pub fn thread_compact_request(id: u64, thread_id: &str) -> Value {
     })
 }
 
+/// `thread/fork` (docs/85 16.3, probed live 25 Nov 2026, codex 0.144.6):
+/// a new thread holding the source's turns through `last_turn` (all of
+/// them when `None`), the source untouched.
+pub fn thread_fork_request(id: u64, thread_id: &str, last_turn: Option<&str>) -> Value {
+    let mut params = json!({"threadId": thread_id});
+    if let Some(turn) = last_turn {
+        params["lastTurnId"] = json!(turn);
+    }
+    json!({"id": id, "method": "thread/fork", "params": params})
+}
+
+/// The new thread's id from a `thread/fork` result.
+pub fn fork_thread_id(result: &Value) -> Option<String> {
+    result.get("thread")?.get("id")?.as_str().map(str::to_owned)
+}
+
 /// `thread/goal/set` (docs/85 15.1, probed live): the thread's goal,
 /// active or paused.
 pub fn thread_goal_set_request(id: u64, thread_id: &str, objective: &str, paused: bool) -> Value {
@@ -2809,5 +2825,15 @@ mod tests {
             reported_mode(&json!({"approvalPolicy": "never", "sandbox": {"type": "externalSandbox"}})),
             Some(PermissionMode::AllowAll)
         );
+    }
+
+    /// docs/85 16.3: the fork names the turn it cuts at, or none.
+    #[test]
+    fn fork_request_names_the_last_turn() {
+        let r = thread_fork_request(7, "t-1", Some("turn-1"));
+        assert_eq!(r["method"], "thread/fork");
+        assert_eq!(r["params"], serde_json::json!({"threadId": "t-1", "lastTurnId": "turn-1"}));
+        assert!(thread_fork_request(8, "t-1", None)["params"].get("lastTurnId").is_none());
+        assert_eq!(fork_thread_id(&serde_json::json!({"thread": {"id": "t-2", "forkedFromId": "t-1"}})).as_deref(), Some("t-2"));
     }
 }

@@ -39,14 +39,10 @@ pub fn capabilities() -> CapabilitySet {
         // thread/resume rejoins it with its turns[] history, executed
         // live 2026-09-26 (`fixtures/codex/resume.jsonl`).
         (Capability::SessionLifecycle, CapabilityState::Native),
-        // `thread/fork` exists; no fixture forks, and the adapter refuses it.
-        (
-            Capability::ForkSession,
-            CapabilityState::Unavailable {
-                reason: "thread/fork was never executed against a live server; not forked blind"
-                    .into(),
-            },
-        ),
+        // Native: `thread/fork {threadId, lastTurnId}` executed live
+        // (25 Nov 2026, docs/85-evidence/16.3): the fork holds the turns
+        // through lastTurnId, the source all of its own.
+        (Capability::ForkSession, CapabilityState::Native),
         // Native: `thread/compact/start` executed live (24 + 25 Nov 2026,
         // docs/85-evidence/10.4): a turn of its own with one
         // `contextCompaction` item.
@@ -128,7 +124,7 @@ mod tests {
         use Capability as C;
         use CapabilityState as S;
         assert_eq!(set.state(C::SessionLifecycle), &S::Native);
-        assert!(matches!(set.state(C::ForkSession), S::Unavailable { .. }));
+        assert_eq!(set.state(C::ForkSession), &S::Native);
         assert_eq!(set.state(C::CompactSession), &S::Native);
         assert_eq!(set.state(C::SessionConfig), &S::Native);
         assert!(matches!(set.state(C::SessionShell), S::Unavailable { .. }));
