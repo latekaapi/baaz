@@ -437,6 +437,35 @@ pub fn criterion_line(criterion: &Criterion, claim: Option<&Claim>, check_passed
     serde_json::json!({"criterion": criterion.text, "state": state, "by": by, "worker_says": claim.map(|c| if c.met { "met" } else { "not met" }), "evidence": claim.map(|c| c.evidence.clone())})
 }
 
+/// A passed reviewer's word on the task it reviewed (Gate 14's live run:
+/// the writer's reviewer-proven criteria still read "no reviewer yet" after
+/// Codex had approved every question). For each task in the reviewer's
+/// `after`, every line still waiting on a reviewer takes the review: met
+/// when the reviewer reported each of its own criteria met, not met when it
+/// reported any one not met. Returns the tasks it changed.
+pub fn apply_review(reviewer: &Task, reviewed: &mut [Task]) -> Vec<String> {
+    if reviewer.role.writes() || reviewer.status != Status::Passed {
+        return Vec::new();
+    }
+    let claims: Vec<Claim> = reviewer.report.as_ref().and_then(|r| r.get("criteria")).and_then(|c| serde_json::from_value(c.clone()).ok()).unwrap_or_default();
+    let approved = !claims.is_empty() && claims.iter().all(|c| c.met);
+    let by = format!("the reviewer ({})", reviewer.title);
+    let mut changed = Vec::new();
+    for task in reviewed.iter_mut().filter(|t| reviewer.after.contains(&t.id)) {
+        let Some(lines) = task.verdict.as_mut().and_then(|v| v.get_mut("criteria")).and_then(|c| c.as_array_mut()) else { continue };
+        let mut touched = false;
+        for line in lines.iter_mut().filter(|l| l["by"] == "no reviewer yet") {
+            line["state"] = serde_json::json!(if approved { "met" } else { "not met" });
+            line["by"] = serde_json::json!(by);
+            touched = true;
+        }
+        if touched {
+            changed.push(task.id.clone());
+        }
+    }
+    changed
+}
+
 /// Quiet before the first nudge (docs/85 14.7, Synara's rule).
 pub const STALL_NUDGE_MS: i64 = 10 * 60_000;
 /// Quiet after a nudge before the interrupt and resend, and after that
@@ -747,5 +776,34 @@ mod tests {
         assert_eq!(Role::parse(None).unwrap(), Role::Writer);
         assert!(!Role::parse(Some("reviewer")).unwrap().writes());
         assert_eq!(Role::parse(Some("boss")).unwrap_err().code, Code::BadArgument);
+    }
+
+    /// Gate 14 live: a passed reviewer settles the reviewed task's
+    /// reviewer-proven lines; a check-proven line is left alone.
+    #[test]
+    fn a_passed_reviewer_settles_the_reviewed_tasks_reviewer_lines() {
+        let mut writer = sample("w", Status::Passed);
+        writer.verdict = Some(serde_json::json!({"criteria": [
+            {"criterion": "answers are correct", "state": "not proven", "by": "no reviewer yet"},
+            {"criterion": "tests pass", "state": "met", "by": "the check"},
+        ]}));
+        let mut reviewer = sample("r", Status::Running);
+        reviewer.role = Role::Reviewer;
+        reviewer.title = "Review it".into();
+        reviewer.after = vec!["w".into()];
+        reviewer.report = Some(serde_json::json!({"criteria": [{"criterion": "1", "met": true}, {"criterion": "2", "met": true}]}));
+        let mut tasks = vec![writer.clone()];
+        assert!(apply_review(&reviewer, &mut tasks).is_empty(), "only once the review passed");
+        reviewer.status = Status::Passed;
+        assert_eq!(apply_review(&reviewer, &mut tasks), vec!["w".to_owned()]);
+        let lines = &tasks[0].verdict.as_ref().unwrap()["criteria"];
+        assert_eq!(lines[0]["state"], "met");
+        assert_eq!(lines[0]["by"], "the reviewer (Review it)");
+        assert_eq!(lines[1]["by"], "the check");
+        // A review with any criterion not met marks the lines not met.
+        let mut tasks = vec![writer];
+        reviewer.report = Some(serde_json::json!({"criteria": [{"criterion": "1", "met": false}]}));
+        apply_review(&reviewer, &mut tasks);
+        assert_eq!(tasks[0].verdict.as_ref().unwrap()["criteria"][0]["state"], "not met");
     }
 }

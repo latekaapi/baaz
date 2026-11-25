@@ -791,7 +791,13 @@ impl Harness {
             let (released, wake) = cx
                 .background_spawn(async move {
                     with_db(move |conn| {
-                        let all = crate::db::tasks::load_all(conn).unwrap_or_default();
+                        let mut all = crate::db::tasks::load_all(conn).unwrap_or_default();
+                        // A passed review settles the reviewed tasks' reviewer-proven lines.
+                        for id in core::apply_review(&task, &mut all) {
+                            if let Some(t) = all.iter().find(|t| t.id == id) {
+                                let _ = crate::db::tasks::save(conn, t);
+                            }
+                        }
                         let mut released = Vec::new();
                         for waiting in all.iter().filter(|t| t.status == Status::Waiting && t.after.contains(&task.id) && t.ready(&all)) {
                             let mut t = waiting.clone();
