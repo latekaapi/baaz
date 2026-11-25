@@ -37,7 +37,7 @@
 //! | step | what it does |
 //! |---|---|
 //! | `draft:<text>` | put text in the composer |
-//! | `send:<text>` | send a turn — **costs a turn** |
+//! | `send:<text>` | send a turn as the composer's Enter does (a goal in the words is set, docs/85 15.1) — **costs a turn** |
 //! | `steer:<text>` | steer the running turn — **costs a turn** |
 //! | `agents-md-suggest` | the one-line suggestion to add a well-used memory note to AGENTS.md (docs/85 12.5) |
 //! | `memory-rows` | a settled turn with the session/memory tools' three outcome rows (docs/85 12.3) |

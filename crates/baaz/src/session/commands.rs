@@ -101,9 +101,11 @@ impl SessionView {
 
 impl SessionRuntime {
     #[cfg(feature = "probe")]
-    /// Send `text` without touching the composer — the scripting hook.
+    /// Send `text` without touching the composer — the scripting hook. It
+    /// stands for the person's Enter, so a goal in the words is set as the
+    /// composer would set it (docs/85 15.1).
     pub fn send_text(&mut self, text: String, cx: &mut Context<Self>) {
-        self.submit(text, cx);
+        self.send_with_goal(text, cx);
     }
 
     /// Send `text` now, or — while the session is still starting — queue it
