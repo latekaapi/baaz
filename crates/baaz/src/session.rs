@@ -217,6 +217,7 @@ mod clocks;
 mod commands;
 mod composer;
 mod events;
+pub(crate) mod goals;
 pub(crate) mod find;
 mod handoff;
 mod lane;
@@ -445,6 +446,11 @@ pub enum SessionEvent {
     /// docs/85 14.2: the person answered an escalation card (Baaz's own
     /// question, put up for a worker's `escalate`).
     EscalationAnswered { task_id: String, card_id: String, answer: String },
+    /// docs/85 15.1: a goal turn finished; the app judges it.
+    GoalTurnEnded,
+    /// docs/85 15.5: a goal started, paused, settled or stopped (what
+    /// keeps the Mac awake follows it).
+    GoalChanged,
     /// Show this in a modal dialog: an identity or protocol failure.
     Dialog {
         /// Dialog heading.

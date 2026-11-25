@@ -535,6 +535,21 @@ pub fn thread_compact_request(id: u64, thread_id: &str) -> Value {
     })
 }
 
+/// `thread/goal/set` (docs/85 15.1, probed live): the thread's goal,
+/// active or paused.
+pub fn thread_goal_set_request(id: u64, thread_id: &str, objective: &str, paused: bool) -> Value {
+    json!({
+        "id": id,
+        "method": "thread/goal/set",
+        "params": {"threadId": thread_id, "objective": objective, "status": if paused { "paused" } else { "active" }}
+    })
+}
+
+/// `thread/goal/clear`: the thread works toward nothing.
+pub fn thread_goal_clear_request(id: u64, thread_id: &str) -> Value {
+    json!({"id": id, "method": "thread/goal/clear", "params": {"threadId": thread_id}})
+}
+
 /// The `turn/interrupt` call stopping the named turn.
 pub fn turn_interrupt_request(id: u64, thread_id: &str, turn_id: &str) -> Value {
     json!({

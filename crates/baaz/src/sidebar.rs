@@ -442,11 +442,28 @@ pub fn grouping_by_project(
     Grouping::Project(groups)
 }
 
+/// docs/85 14.9: the rows that will nest under a listed lead, kept out of
+/// the grouping (`None` when there are none, so nothing is copied). A
+/// worker whose lead is not listed stays a row of its own.
+pub fn split_workers<'a>(rows: &'a [SessionEntry], leads: &HashMap<String, String>) -> (Option<Vec<SessionEntry>>, Vec<&'a SessionEntry>) {
+    if leads.is_empty() {
+        return (None, Vec::new());
+    }
+    let listed: std::collections::HashSet<&str> = rows.iter().map(|e| e.id.as_str()).collect();
+    let is_worker = |e: &SessionEntry| leads.get(e.id.as_str()).is_some_and(|lead| listed.contains(lead.as_str()));
+    let workers: Vec<&SessionEntry> = rows.iter().filter(|e| is_worker(e)).collect();
+    if workers.is_empty() {
+        return (None, workers);
+    }
+    (Some(rows.iter().filter(|e| !is_worker(e)).cloned().collect()), workers)
+}
+
 /// docs/85 14.9: each worker's row moves under its lead's row (`leads`:
 /// worker → lead) when the lead is listed; a worker whose lead is not
 /// listed stays where it is. One level: a worker's own workers nest under
-/// the same lead.
-pub fn nest_workers(grouping: Grouping, leads: &HashMap<String, String>) -> Grouping {
+/// the same lead. `extra` are worker rows kept out of the grouping
+/// ([`split_workers`]), attached the same way.
+pub fn nest_workers(grouping: Grouping, leads: &HashMap<String, String>, extra: Vec<SessionSummary>) -> Grouping {
     if leads.is_empty() {
         return grouping;
     }
@@ -458,7 +475,8 @@ pub fn nest_workers(grouping: Grouping, leads: &HashMap<String, String>) -> Grou
         }
     }
     let mut grouping = grouping;
-    let listed: std::collections::HashSet<String> = lists(&mut grouping).iter().flat_map(|l| l.iter().map(|s| s.id.to_string())).collect();
+    let mut listed: std::collections::HashSet<String> = lists(&mut grouping).iter().flat_map(|l| l.iter().map(|s| s.id.to_string())).collect();
+    listed.extend(extra.iter().map(|s| s.id.to_string()));
     // The top lead of a chain (a worker's worker nests under the first lead).
     let top = |id: &str| {
         let mut at = id.to_owned();
@@ -471,6 +489,10 @@ pub fn nest_workers(grouping: Grouping, leads: &HashMap<String, String>) -> Grou
         at
     };
     let mut moved: HashMap<String, Vec<SessionSummary>> = HashMap::new();
+    for row in extra {
+        let lead = top(&row.id);
+        moved.entry(lead).or_default().push(row);
+    }
     for list in lists(&mut grouping) {
         let mut kept = Vec::with_capacity(list.len());
         for row in list.drain(..) {
@@ -554,7 +576,7 @@ pub(crate) mod tests {
         let row = |id: &str| SessionSummary::new(id, id, AgentState::Idle, "1m");
         let grouping = Grouping::Date(vec![DateGroup::new("Today", vec![row("lead"), row("w1"), row("w2"), row("w3"), row("orphan")])]);
         let leads: HashMap<String, String> = [("w1", "lead"), ("w2", "lead"), ("w3", "w2"), ("orphan", "gone")].into_iter().map(|(a, b)| (a.to_owned(), b.to_owned())).collect();
-        let Grouping::Date(groups) = nest_workers(grouping, &leads) else { panic!() };
+        let Grouping::Date(groups) = nest_workers(grouping, &leads, Vec::new()) else { panic!() };
         let ids: Vec<&str> = groups[0].sessions.iter().map(|s| s.id.as_ref()).collect();
         assert_eq!(ids, ["lead", "orphan"]);
         let children: Vec<&str> = groups[0].sessions[0].children.iter().map(|s| s.id.as_ref()).collect();
@@ -1576,6 +1598,33 @@ pub(crate) mod tests {
         let ids: Vec<&str> = group.sessions.iter().map(|s| s.id.as_ref()).collect();
         assert_eq!(ids, vec!["s0", "s1", "s2", "s3", "s4", "s8"]);
         assert_eq!(group.fold, Some((3, false)));
+    }
+
+    /// docs/85 14.9 (Gate 15's workers-sidebar capture): workers whose lead
+    /// is listed never spend a project's five recent rows — the newest three
+    /// rows are workers of s8, so the project still shows five of its own.
+    #[test]
+    fn workers_never_count_toward_a_projects_five() {
+        let projects = grouped_projects();
+        let entries = nine_sessions("p-baaz");
+        let leads: HashMap<String, String> = [("s0", "s8"), ("s1", "s8"), ("s2", "s8")].into_iter().map(|(a, b)| (a.to_owned(), b.to_owned())).collect();
+        let (grouped, workers) = split_workers(&entries, &leads);
+        let grouped = grouped.expect("three workers kept out");
+        assert_eq!(workers.len(), 3);
+        let empty = HashSet::new();
+        let view = GroupView { closed: &empty, expanded: &empty, active: None, active_project: None, pending: None };
+        let layout = crate::layout::Layout::default();
+        let now = Local::now();
+        let grouping = grouping_by_project(&grouped, &projects, &HashMap::new(), &view, &layout, now);
+        let Grouping::Project(groups) = nest_workers(grouping, &leads, workers.iter().map(|e| e.summary(now)).collect()) else { panic!() };
+        let group = folded_group(&groups, "p-baaz");
+        let ids: Vec<&str> = group.sessions.iter().map(|s| s.id.as_ref()).collect();
+        assert_eq!(ids, vec!["s3", "s4", "s5", "s6", "s7"], "five of its own");
+        assert_eq!(group.fold, Some((1, false)), "s8 held back");
+        // s8, held back, is not listed: its workers stay rows of their own
+        // only when s8 is not in the list at all.
+        let (none, _) = split_workers(&entries[..8], &leads);
+        assert!(none.is_none(), "no lead listed, nothing kept out");
     }
 
     /// Pinned rows always show and never count toward the five: two pinned

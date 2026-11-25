@@ -35,6 +35,7 @@ use std::sync::{mpsc, Mutex, OnceLock};
 pub use rusqlite::Connection;
 
 pub mod attachments;
+pub mod goals;
 pub mod history;
 pub mod integrity;
 pub mod journals;

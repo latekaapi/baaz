@@ -1282,6 +1282,12 @@ ENTRIES.update({
     # Workers block while work runs, the summary once settled, and a worker
     # open beside its lead.
     "workers-sidebar":         _populated("workers-fixture:running", replay=True),
+    # docs/85 15.2: the goal pill above the composer, running, met and
+    # paused; 15.1: the offer chip.
+    "goal-running":            _populated("goal-fixture:running", replay=True, sidebar=False),
+    "goal-met":                _populated("goal-fixture:met", replay=True, sidebar=False),
+    "goal-paused":             _populated("goal-fixture:paused", replay=True, sidebar=False),
+    "goal-offer":              _populated("goal-fixture:offer", replay=True, sidebar=False),
     "workers-block":           _populated("workers-fixture:running", replay=True, sidebar=False),
     "workers-summary":         _populated("workers-fixture:settled", replay=True, sidebar=False),
     "workers-pane":            _populated("right-width:440;workers-fixture:running;workers-pane", replay=True),

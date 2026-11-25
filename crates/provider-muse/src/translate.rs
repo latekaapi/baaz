@@ -343,6 +343,8 @@ pub fn dispatch(
         }
         // Muse's plan mode is a skill the prompt reaches (`PlanMode::Skill`):
         // there is no mode to switch, so the command is never offered.
+        // No native goal on Muse: the app judges its goals itself.
+        Command::SetGoal { .. } => Err(ProviderError::unsupported("set-goal", "Muse holds no native goal; the app judges it after each turn")),
         Command::SetPlanMode { .. } => Err(ProviderError::unsupported(
             "set-plan-mode",
             "Muse plans through its `plan` skill, reached by the prompt, not a mode",

@@ -181,6 +181,10 @@ pub struct SessionRuntime {
     /// The person folded or unfolded the block (`None`: it folds itself
     /// once every worker has settled).
     pub(crate) workers_open: Option<bool>,
+    /// docs/85 15.1: the session's goal, when it has one (the pill), and a
+    /// possible one offered as a chip under the composer.
+    pub(crate) goal: Option<baaz_core::goals::Goal>,
+    pub(crate) goal_offer: Option<String>,
     /// When each pending question's auto-resolution clock started, keyed by
     /// `userInputId`. MSP sends a duration, never a deadline.
     pub(super) question_started: HashMap<String, Instant>,
@@ -474,6 +478,8 @@ impl SessionRuntime {
             workers: Vec::new(),
             delegated: Vec::new(),
             workers_open: None,
+            goal: None,
+            goal_offer: None,
             question_started: HashMap::new(),
             retry_started: None,
             countdown: None,

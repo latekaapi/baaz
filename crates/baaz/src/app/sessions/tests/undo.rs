@@ -53,6 +53,12 @@ pub(super) fn recording_factory_numbered(numbered: bool) -> (crate::providers::R
                 }).collect();
                 self.sent.lock().expect("sent").push((text, "(steered)".into()));
             }
+            // A native goal (docs/85 15.1) is recorded as `goal:<words>`
+            // (`goal:clear` when cleared, `goal-paused:` when paused).
+            if let provider::Command::SetGoal { objective, paused, .. } = &command {
+                let tag = if *paused { "goal-paused" } else { "goal" };
+                self.sent.lock().expect("sent").push((format!("{tag}:{}", objective.as_deref().unwrap_or("clear")), String::new()));
+            }
             if let provider::Command::SubmitInput { parts, display_text, .. } = &command {
                 let text: String = parts
                     .iter()

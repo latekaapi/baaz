@@ -73,6 +73,9 @@ impl Harness {
             SessionEvent::ProviderTurnOutcome { session_id, failed, error } => {
                 let (session_id, failed, error) = (session_id.clone(), *failed, error.clone());
                 self.record_turn_outcome(&session_id, failed, error.as_deref(), cx);
+                if failed {
+                    self.goal_turn_failed(runtime.clone(), error.as_deref(), cx);
+                }
             }
             SessionEvent::Closed => {
                 let closed_id = runtime.read(cx).session_id.clone();
@@ -399,6 +402,10 @@ impl Harness {
             SessionEvent::EscalationAnswered { task_id, card_id, answer } => {
                 self.escalation_answered(task_id, card_id, answer, cx);
             }
+            // docs/85 15.1: Baaz judges the goal turn; 15.5: keep-awake
+            // follows every goal change.
+            SessionEvent::GoalTurnEnded => self.goal_turn_ended(runtime.clone(), cx),
+            SessionEvent::GoalChanged => self.update_keep_awake(cx),
         }
         cx.notify();
     }

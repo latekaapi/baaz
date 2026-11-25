@@ -97,6 +97,8 @@ mod perf_budget;
 mod picker;
 #[cfg(feature = "probe")]
 mod perf_turn;
+mod goals;
+mod keep_awake;
 mod orchestra;
 mod palette;
 mod pane_tools;

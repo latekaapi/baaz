@@ -1152,6 +1152,9 @@ impl SessionRuntime {
                     if !replaying {
                         // docs/85 12.1: a new idle stretch, and its timer.
                         self.auto_compact_turn_ended(cx);
+                        // docs/85 15.1: a goal counts each finished turn
+                        // once (by its id), live or settled late.
+                        self.goal_turn_ended(turn_id, meta, cx);
                         cx.emit(super::SessionEvent::ProviderTurnFinished {
                             session_id: self.session_id.clone(),
                             turn_id: turn_id.clone(),

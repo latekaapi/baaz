@@ -49,7 +49,7 @@ static CATALOG_DEFAULTS: Mutex<Option<HashMap<std::path::PathBuf, CatalogDefault
 
 use child::{
     initialize_request, initialized_notification, thread_ids, thread_start_request, turn_id_from,
-    thread_compact_request, turn_interrupt_request, turn_start_request, turn_steer_request, ApprovalAnswer, ApprovalKind,
+    thread_compact_request, thread_goal_clear_request, thread_goal_set_request, turn_interrupt_request, turn_start_request, turn_steer_request, ApprovalAnswer, ApprovalKind,
     CommandApprovalDecision, FileChangeApprovalDecision, NetworkPolicyAction, PermissionGrantScope,
     PermissionsApprovalAnswer, RunningChild,
 };
@@ -1236,6 +1236,21 @@ impl ProviderAdapter for CodexAdapter {
                 }
                 self.with_child(|running| running.send_frame(thread_compact_request(running.next_request_id(), &thread_id)))?
                     .map_err(Self::unavailable)?;
+                Ok(Ack::Accepted)
+            }
+            // The thread's goal (docs/85 15.1): set, paused or cleared; the
+            // server streams `thread/goal/updated` as it works.
+            Command::SetGoal { session_id, objective, paused, .. } => {
+                self.check_session(&session_id)?;
+                let (thread_id, _) = self.thread_and_model()?;
+                self.with_child(|running| {
+                    let id = running.next_request_id();
+                    running.send_frame(match &objective {
+                        Some(objective) => thread_goal_set_request(id, &thread_id, objective, paused),
+                        None => thread_goal_clear_request(id, &thread_id),
+                    })
+                })?
+                .map_err(Self::unavailable)?;
                 Ok(Ack::Accepted)
             }
             Command::SelectModel { session_id, model, .. } => {

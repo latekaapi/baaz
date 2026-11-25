@@ -93,15 +93,19 @@ impl SessionView {
             self.run_command_with(command, argument.to_owned(), window, cx);
             return;
         }
-        self.runtime.update(cx, |rt, cx| rt.submit(text, cx));
+        // docs/85 15.1: a clear end in the message sets a goal, a typed
+        // `/goal` is one.
+        self.runtime.update(cx, |rt, cx| rt.send_with_goal(text, cx));
     }
 }
 
 impl SessionRuntime {
     #[cfg(feature = "probe")]
-    /// Send `text` without touching the composer — the scripting hook.
+    /// Send `text` without touching the composer — the scripting hook. It
+    /// stands for the person's Enter, so a goal in the words is set as the
+    /// composer would set it (docs/85 15.1).
     pub fn send_text(&mut self, text: String, cx: &mut Context<Self>) {
-        self.submit(text, cx);
+        self.send_with_goal(text, cx);
     }
 
     /// Send `text` now, or — while the session is still starting — queue it
@@ -1223,7 +1227,7 @@ impl SessionRuntime {
     }
 
     /// The text of the newest assistant text block, which is the plan reply.
-    pub(super) fn last_assistant_text(&self) -> Option<String> {
+    pub(crate) fn last_assistant_text(&self) -> Option<String> {
         let session = self.session()?;
         for turn in session.turns.iter().rev() {
             if let aui_protocol::Turn::Assistant { blocks, .. } = turn {

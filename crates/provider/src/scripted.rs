@@ -251,6 +251,8 @@ impl ProviderAdapter for ScriptedProvider {
             // they do live. A model pick has no event of its own; its ack
             // lands it.
             Command::SelectModel { .. } => Ok(Ack::Accepted),
+            // A goal is recorded with the commands, like every send.
+            Command::SetGoal { .. } => Ok(Ack::Accepted),
             Command::SelectApprovalMode { session_id, mode, .. } => {
                 let _ = self.inner.tx.send(ProviderEvent::ApprovalModeChanged { session_id, mode });
                 Ok(Ack::Accepted)

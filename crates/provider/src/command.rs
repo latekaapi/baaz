@@ -195,6 +195,19 @@ pub enum Command {
         /// Plan mode on or off.
         on: bool,
     },
+    /// Set, pause or clear the session's native goal (docs/85 15.1): only
+    /// where the descriptor declares [`crate::ProviderTrait::GoalCommand`]
+    /// (Codex `thread/goal/set` / `thread/goal/clear`).
+    SetGoal {
+        /// Client-minted idempotency handle.
+        request_id: String,
+        /// The target session.
+        session_id: String,
+        /// The goal's words; `None` clears it.
+        objective: Option<String>,
+        /// Paused rather than active.
+        paused: bool,
+    },
     /// Run a shell command inside the session, outside any turn. Still
     /// subject to the approval policy; output arrives as events.
     RunShell {
@@ -432,6 +445,7 @@ impl Command {
             Self::SelectModel { .. } => "select-model",
             Self::SelectApprovalMode { .. } => "select-approval-mode",
             Self::SetPlanMode { .. } => "set-plan-mode",
+            Self::SetGoal { .. } => "set-goal",
             Self::RunShell { .. } => "run-shell",
             Self::SubmitInput { .. } => "submit-input",
             Self::SteerInput { .. } => "steer-input",
