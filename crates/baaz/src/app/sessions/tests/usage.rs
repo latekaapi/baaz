@@ -14,8 +14,13 @@ fn the_usage_page_splits_the_ledger_and_follows_its_controls(cx: &mut gpui::Test
     let (baaz, vc, _) = session_with(cx, &root, factory);
     let now = baaz_core::clock::now_ms() as i64;
     crate::db::call(crate::db::path(), move |opened| baaz_core::db::usage_daily::insert_fixture(&opened.conn, now).unwrap());
-    vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings_page("usage", cx)));
+    // The account menu's "Usage…" row opens the page.
+    vc.update(|window, cx| baaz.update(cx, |h, cx| {
+        h.sidebar_intent(aui::screens::sidebar::SidebarIntent::AccountAction(aui::screens::sidebar::AccountAction::Usage), window, cx)
+    }));
     vc.run_until_parked();
+    let section = vc.update(|_, cx| baaz.read(cx).settings_page.read(cx).state.section.clone());
+    assert_eq!(section, "usage", "Usage… opens Settings › Usage");
     let usage = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| baaz.read(cx).settings_facts(cx).usage.expect("the usage facts"));
     let first = usage(vc);
     assert_eq!((first.range, first.split), (1, 1), "30 days by model on first open");
