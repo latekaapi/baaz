@@ -1272,6 +1272,12 @@ ENTRIES.update({
     "pane-show-tasks":         _populated("right-width:440;tasks-fixture;pane-show:view=tasks", replay=True),
     "pane-show-pr":            _populated("right-width:440;pr-fixture:failing;pane-show:view=pr", replay=True),
     "pane-show-browser":       _populated("right-width:440;pane-show:view=browser", replay=True),
+    # docs/85 13.3: an agent's line comment under its file's diff; and the
+    # confirm an agent's `changes_revert` raises — the same dialog as the
+    # row's Revert (`revert-file-confirm`), from fixture data in a capture.
+    "pane-comment":            _populated("right-width:440;pane-comment:path=crates/baaz/src/right.rs,line=12,text=This branch never runs on a capture: worth a test?", replay=True),
+    # docs/85 13.4: Baaz's own approval for an agent's push (rule 29).
+    "pane-push-ask":           _populated("pane-push-ask:feature/pane-tools", replay=True),
     # Task 6.4's confirms, from fixture data: a capture takes no
     # checkpoints and runs in the owner's repository, so neither button can
     # apply anything (the session refuses: no checkpoints).

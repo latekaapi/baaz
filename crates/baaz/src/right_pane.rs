@@ -237,6 +237,8 @@ pub(crate) struct RightPane {
     /// that was not on screen, by session id; shown when the person opens
     /// that session (the latest ask wins), never before.
     pub(crate) pending_shows: std::collections::HashMap<String, baaz_core::pane_tools::Show>,
+    /// docs/85 13.4: an agent's push waiting on the person's approval.
+    pub(crate) agent_push: Option<crate::pane_tools::AgentPush>,
     /// The layout observer: drops the watch when the pane closes.
     _layout: gpui::Subscription,
 }
@@ -281,6 +283,7 @@ impl RightPane {
             lower: LowerDivider::default(),
             facts: RightFacts::default(),
             pending_shows: Default::default(),
+            agent_push: None,
             _layout: layout,
         }
     }

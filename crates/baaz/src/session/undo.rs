@@ -50,6 +50,23 @@ pub(crate) struct UndoAsk {
     pub action: UndoAction,
     /// The folder it runs in.
     pub folder: PathBuf,
+    /// docs/85 13.3: an agent's `changes_revert` asked, and waits on this
+    /// for the answer (reverted, declined, refused). An agent's ask may run
+    /// while its own turn does (the agent is blocked on the call), and its
+    /// revert tells the provider nothing more: the agent asked for it.
+    pub waiter: Option<std::sync::mpsc::Sender<Result<serde_json::Value, String>>>,
+}
+
+impl UndoAsk {
+    fn by_agent(&self) -> bool {
+        self.waiter.is_some()
+    }
+
+    fn answer(&self, outcome: Result<serde_json::Value, String>) {
+        if let Some(waiter) = &self.waiter {
+            let _ = waiter.send(outcome);
+        }
+    }
 }
 
 /// One action done here, for the toast's Undo.
@@ -306,7 +323,7 @@ impl SessionRuntime {
             let _ = this.update(cx, |this: &mut Self, cx| {
                 this.undo.busy = false;
                 match read {
-                    Ok((action, files)) if !files.is_empty() => this.put_up_confirm(action, files, folder, cx),
+                    Ok((action, files)) if !files.is_empty() => this.put_up_confirm(action, files, folder, None, cx),
                     Ok((action, _)) => this.undo_refused(&action, &crate::undo::Refusal::Nothing, cx),
                     Err(why) => crate::baaz_log!("undo: the turn's files could not be read ({why})"),
                 }
@@ -329,16 +346,58 @@ impl SessionRuntime {
             None => UndoAction::FileToHead { path: path.to_owned() },
             Some((turn_id, number, pre, post)) => UndoAction::FileInTurn { path: path.to_owned(), turn_id, number, pre, post },
         };
-        self.put_up_confirm(action, vec![path.to_owned()], folder.to_path_buf(), cx);
+        self.put_up_confirm(action, vec![path.to_owned()], folder.to_path_buf(), None, cx);
         Ok(())
     }
 
+    /// docs/85 13.3: an agent's `changes_revert`, through the same confirm.
+    /// Unlike the person's Revert it may be asked while the session's turn
+    /// runs — that turn is the agent waiting on this call. `waiter` hears
+    /// the outcome.
+    pub(crate) fn ask_revert_file_for_agent(
+        &mut self,
+        folder: &Path,
+        path: &str,
+        turn: Option<(String, usize, String, String)>,
+        waiter: std::sync::mpsc::Sender<Result<serde_json::Value, String>>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.replay || self.read_only || self.checkpoints.folder().is_none() || self.undo.busy {
+            return Err("Revert is not offered in this session now (no checkpoints here, or an undo is running)".into());
+        }
+        let action = match turn {
+            None => UndoAction::FileToHead { path: path.to_owned() },
+            Some((turn_id, number, pre, post)) => UndoAction::FileInTurn { path: path.to_owned(), turn_id, number, pre, post },
+        };
+        self.put_up_confirm(action, vec![path.to_owned()], folder.to_path_buf(), Some(waiter), cx);
+        Ok(())
+    }
+
+    /// The confirm numbered `seq` was dismissed (Cancel, Escape, the
+    /// scrim): an agent waiting on it hears "declined". Nothing changed.
+    pub(crate) fn decline_undo(&mut self, seq: u64) {
+        if self.undo.asked.as_ref().is_some_and(|ask| ask.seq == seq) {
+            let ask = self.undo.asked.take().expect("checked");
+            ask.answer(Ok(serde_json::json!({"declined": true, "note": "the person said no; nothing was changed"})));
+        }
+    }
+
     /// Keep the ask and have the window put its dialog up.
-    fn put_up_confirm(&mut self, action: UndoAction, files: Vec<String>, folder: PathBuf, cx: &mut Context<Self>) {
+    fn put_up_confirm(
+        &mut self,
+        action: UndoAction,
+        files: Vec<String>,
+        folder: PathBuf,
+        waiter: Option<std::sync::mpsc::Sender<Result<serde_json::Value, String>>>,
+        cx: &mut Context<Self>,
+    ) {
         self.undo.seq += 1;
         let seq = self.undo.seq;
         let (title, detail, primary) = confirm_copy(&action, &files);
-        self.undo.asked = Some(UndoAsk { seq, action, folder });
+        if let Some(old) = self.undo.asked.take() {
+            old.answer(Err("another confirm replaced this one; nothing was changed".into()));
+        }
+        self.undo.asked = Some(UndoAsk { seq, action, folder, waiter });
         cx.emit(SessionEvent::UndoConfirm { session_id: self.session_id.clone(), seq, title, detail, primary });
     }
 
@@ -349,7 +408,9 @@ impl SessionRuntime {
             return Err("that confirm is no longer waiting".into());
         }
         let ask = self.undo.asked.take().expect("checked");
-        if !self.undo_ready() {
+        let ready = if ask.by_agent() { !self.replay && !self.read_only && !self.undo.busy } else { self.undo_ready() };
+        if !ready {
+            ask.answer(Err("Undo cannot act now; nothing was changed".into()));
             return Err("Undo cannot act now".into());
         }
         let known = self.checkpoints.key().map(str::to_owned);
@@ -371,8 +432,15 @@ impl SessionRuntime {
             let _ = this.update(cx, |this: &mut Self, cx| {
                 this.undo.busy = false;
                 match result {
-                    Ok(applied) => this.undo_landed(Done { applied, action: ask.action, folder: ask.folder }, cx),
-                    Err(refusal) => this.undo_refused(&ask.action, &refusal, cx),
+                    Ok(applied) => {
+                        ask.answer(Ok(serde_json::json!({"reverted": applied.files, "note": "the person can take it back from the toast"})));
+                        let by_agent = ask.by_agent();
+                        this.undo_landed(Done { applied, action: ask.action, folder: ask.folder }, by_agent, cx);
+                    }
+                    Err(refusal) => {
+                        ask.answer(Err(format!("not reverted: {refusal}")));
+                        this.undo_refused(&ask.action, &refusal, cx);
+                    }
                 }
                 cx.emit(RuntimeEvent::UndoChanged);
             });
@@ -381,14 +449,17 @@ impl SessionRuntime {
         Ok(())
     }
 
-    fn undo_landed(&mut self, done: Done, cx: &mut Context<Self>) {
+    /// `by_agent`: the agent asked for it, so no preface tells it again.
+    fn undo_landed(&mut self, done: Done, by_agent: bool, cx: &mut Context<Self>) {
         let files = done.applied.files.clone();
         let n = done.applied.n;
         if let UndoAction::Turn { turn_id, .. } = &done.action {
             Rc::make_mut(&mut self.undo.undone).insert(turn_id.clone(), undone_note(files.len()));
             self.undo.reoffer();
         }
-        self.undo.preface.push((n, preface_for(&done.action, &files)));
+        if !by_agent {
+            self.undo.preface.push((n, preface_for(&done.action, &files)));
+        }
         let (title, body) = landed_copy(&done.action, &files);
         self.undo.done.retain(|old| old.applied.n != n);
         self.undo.done.push(done);
@@ -489,7 +560,7 @@ impl SessionRuntime {
         let root = self.workspace_path().trim_end_matches('/').to_owned();
         let files: Vec<String> = files.iter().map(|f| f.strip_prefix(&format!("{root}/")).unwrap_or(f).to_owned()).collect();
         let action = UndoAction::Turn { turn_id, number, pre: "fixture-pre".into(), post: "fixture-post".into() };
-        self.put_up_confirm(action, files, PathBuf::from(root), cx);
+        self.put_up_confirm(action, files, PathBuf::from(root), None, cx);
         Ok(())
     }
 
@@ -498,6 +569,6 @@ impl SessionRuntime {
     /// [`Self::fixture_undo_confirm`].
     #[cfg(feature = "probe")]
     pub(crate) fn fixture_revert_confirm(&mut self, folder: &Path, path: &str, cx: &mut Context<Self>) {
-        self.put_up_confirm(UndoAction::FileToHead { path: path.to_owned() }, vec![path.to_owned()], folder.to_path_buf(), cx);
+        self.put_up_confirm(UndoAction::FileToHead { path: path.to_owned() }, vec![path.to_owned()], folder.to_path_buf(), None, cx);
     }
 }

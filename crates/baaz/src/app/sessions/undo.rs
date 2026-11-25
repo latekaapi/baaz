@@ -21,7 +21,7 @@ fn parse_undo_target(target: &str) -> Option<(&str, u64)> {
 
 impl Harness {
     /// The runtime of `session_id`, wherever it is held.
-    fn undo_runtime(&self, session_id: &str, cx: &gpui::App) -> Option<Entity<SessionRuntime>> {
+    pub(crate) fn undo_runtime(&self, session_id: &str, cx: &gpui::App) -> Option<Entity<SessionRuntime>> {
         self.registry.find_runtime(self.active.as_ref(), session_id, cx)
     }
 
@@ -78,6 +78,15 @@ impl Harness {
             self.overlays.update(cx, |overlays, cx| {
                 overlays.toast("Nothing was changed", "Undo can't act on this session right now.", cx);
             });
+        }
+    }
+
+    /// The confirm was dismissed (Cancel, Escape, the scrim): its ask is
+    /// dropped, and an agent waiting on it hears "declined" (docs/85 13.3).
+    pub(crate) fn decline_undo_dialog(&mut self, target: Option<&str>, cx: &mut Context<Self>) {
+        let Some((session_id, seq)) = target.and_then(parse_undo_target) else { return };
+        if let Some(runtime) = self.undo_runtime(session_id, cx) {
+            runtime.update(cx, |rt, _| rt.decline_undo(seq));
         }
     }
 
