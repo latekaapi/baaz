@@ -100,6 +100,32 @@ fn a_native_goal_that_carries_on_by_itself_gets_no_message(cx: &mut gpui::TestAp
     cleanup(&root, state);
 }
 
+/// Gate 15 live: an agent that will not move the failing check (it held to
+/// an earlier "change only add()") is not sent the same failure forever:
+/// the third identical failure blocks the goal and asks the person.
+#[gpui::test]
+fn the_same_failure_three_turns_running_blocks_the_goal(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("goal-stuck");
+    let root = folder(&state.2, true);
+    with_check(&root, "echo F test_mul; false");
+    let (factory, sent) = recording_factory_numbered(true);
+    let (baaz, vc, _) = session_with(cx, &root, factory);
+    let rt = runtime_of(&baaz, vc);
+    vc.update(|_, cx| rt.update(cx, |rt, cx| rt.send_with_goal("Keep going until the tests pass".into(), cx)));
+    vc.run_until_parked();
+    for n in 1..=4 {
+        finish_turn(&rt, vc, n, "Blocked: I may only change add().");
+        vc.executor().advance_clock(crate::goals::NATIVE_CONTINUE_GRACE + std::time::Duration::from_secs(1));
+        vc.run_until_parked();
+    }
+    let goal = goal_of(&rt, vc);
+    assert_eq!(goal.state, GoalState::Blocked, "{goal:?}");
+    assert!(goal.reason.as_deref().unwrap().contains("failed the same way 3 turns running"));
+    let messages = sent.lock().unwrap().iter().filter(|s| s.0.starts_with("Baaz ran")).count();
+    assert_eq!(messages, 2, "the first two failures are sent; the third blocks");
+    cleanup(&root, state);
+}
+
 /// 15.4 + 15.7: over its ceiling the goal pauses and says why in one line;
 /// the progress note is written once and replaced, never duplicated.
 #[gpui::test]

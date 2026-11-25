@@ -106,6 +106,14 @@ impl Harness {
             } else {
                 let tail = last_lines(&outcome.tail, FAILING_TAIL_LINES);
                 let next = goal.continue_text(Some((&command, &tail)));
+                // The same failure three goal turns running: the agent is
+                // not moving it, so the person decides (no more messages).
+                let stuck = runtime.update(cx, |rt, _| rt.goal.as_mut().is_some_and(|g| g.note_failure(&tail)));
+                if stuck {
+                    let reason = format!("`{command}` failed the same way {} turns running. It needs you: answer the agent, then Resume.", baaz_core::goals::SAME_FAILURE_LIMIT);
+                    runtime.update(cx, |rt, cx| rt.settle_goal(GoalState::Blocked, Some(line), Some(reason), None, cx));
+                    return;
+                }
                 if !runtime.read(cx).provider_kind().has(provider::ProviderTrait::GoalCommand) {
                     runtime.update(cx, |rt, cx| rt.settle_goal(GoalState::Running, Some(line), None, Some(next), cx));
                     return;

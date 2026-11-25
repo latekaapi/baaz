@@ -156,6 +156,7 @@ impl SessionRuntime {
         goal.resume_at = None;
         goal.started_at = now();
         goal.tokens = 0;
+        goal.same_failures = 0;
         let (native, text) = (goal.native_text(), goal.continue_text(None));
         self.save_goal(cx);
         if self.provider_kind().has(provider::ProviderTrait::GoalCommand) {

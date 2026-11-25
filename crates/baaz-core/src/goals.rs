@@ -184,6 +184,13 @@ pub struct Goal {
     /// goal sessions, 15.4).
     #[serde(default)]
     pub stall: Option<(u8, i64)>,
+    /// The last failing check's output, and how many goal turns running it
+    /// failed exactly so (Gate 15 live: an agent that will not or cannot
+    /// move answered the same failure 30 times).
+    #[serde(default)]
+    pub last_failure: Option<String>,
+    #[serde(default)]
+    pub same_failures: u32,
     /// The last turn counted, so a finish heard twice counts once.
     #[serde(default)]
     pub last_turn: Option<String>,
@@ -213,6 +220,8 @@ impl Goal {
             reason: None,
             turns_since_note: 0,
             stall: None,
+            last_failure: None,
+            same_failures: 0,
             last_turn: None,
             resent: false,
             updated_at: now,
@@ -272,6 +281,24 @@ impl Goal {
     /// Whether a progress note is due (every 10 turns, and on a pause).
     pub fn note_due(&self) -> bool {
         self.turns_since_note >= PROGRESS_EVERY || matches!(self.state, GoalState::Paused | GoalState::BudgetReached | GoalState::Blocked)
+    }
+}
+
+/// Goal turns in a row with the check failing exactly the same way before
+/// the goal is blocked and the person asked.
+pub const SAME_FAILURE_LIMIT: u32 = 3;
+
+impl Goal {
+    /// A failing check's output, noted: whether the goal is now stuck
+    /// (the same failure [`SAME_FAILURE_LIMIT`] turns running).
+    pub fn note_failure(&mut self, tail: &str) -> bool {
+        if self.last_failure.as_deref() == Some(tail) {
+            self.same_failures += 1;
+        } else {
+            self.last_failure = Some(tail.to_owned());
+            self.same_failures = 1;
+        }
+        self.same_failures >= SAME_FAILURE_LIMIT
     }
 }
 
@@ -366,6 +393,16 @@ mod tests {
         g.state = GoalState::Met;
         g.updated_at = 5 * 60_000;
         assert_eq!(g.elapsed(65 * 60_000), "5m", "a settled goal's time stops");
+    }
+
+    #[test]
+    fn the_same_failure_three_turns_running_is_stuck() {
+        let mut g = Goal::new("s", "codex", "tests pass", Some("t".into()), true, limits_for(provider::BillingMode::Subscription), 0);
+        assert!(!g.note_failure("F test_mul"));
+        assert!(!g.note_failure("F test_mul"));
+        assert!(!g.note_failure("F test_add"), "a different failure starts over");
+        assert!(!g.note_failure("F test_add"));
+        assert!(g.note_failure("F test_add"));
     }
 
     #[test]
