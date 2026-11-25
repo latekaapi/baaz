@@ -385,7 +385,7 @@ pub fn worker_prompt(task: &Task) -> String {
     let finish = if task.role.writes() {
         "When you are done, commit your work, then call the `report` tool with your result and, for each criterion, how you met it. If you are blocked or need a decision, call `escalate` with your question instead of guessing."
     } else {
-        "Change nothing. When you are done, call the `report` tool with your findings and, for each criterion, your verdict. If you are blocked, call `escalate` with your question."
+        "Change nothing and write no file: your findings go in your report. When you are done, call the `report` tool with your findings and, for each criterion, your verdict. If you are blocked, call `escalate` with your question."
     };
     out.push_str(&format!("\n{finish}"));
     out

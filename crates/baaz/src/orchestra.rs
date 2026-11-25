@@ -179,6 +179,16 @@ impl Harness {
         if !role.writes() && !provider_id.descriptor().modes.iter().any(|m| m.id == aui_protocol::PermissionMode::DenyUnmatched) {
             return call.answer(Err(refuse(Refusal::new(Code::ProviderUnavailable, format!("{} has no Read-only mode, so it cannot review; pick another provider", provider_id.label())))));
         }
+        // A reviewer or helper runs Read-only: a task that names files for it
+        // to write would only end in an escalation (Gate 14's live run: the
+        // reviewer was asked to save review.json). Its findings travel in its
+        // report, which a chained task receives as an input.
+        if !role.writes() && !texts(&params, "scope").is_empty() {
+            return call.answer(Err(refuse(Refusal::new(
+                Code::BadArgument,
+                "a reviewer or helper changes no file, so it takes no scope: its findings come back in its report, and a task chained after it gets that report as an input. Drop scope (and any file it should write), or make it a writer",
+            ))));
+        }
         let Some(lead) = self.registry.find_runtime(self.active.as_ref(), &call.session, cx) else {
             return call.answer(Err(refuse(Refusal::new(Code::NotFound, "this session is not open in Baaz"))));
         };

@@ -9,6 +9,17 @@
 //! The app keeps its `crate::<module>` paths: `crates/baaz/src/main.rs`
 //! imports each module from here under its old name.
 
+/// `eprintln!` that never panics: std's panics when stderr is gone (a
+/// closed pipe), and the crash hook's own print then aborted the app (the
+/// 25 Nov 2026 crash in the provider status log). Shadows std's for every
+/// module below.
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 pub mod attachments;
 pub mod auth;
 pub mod auto_compact;

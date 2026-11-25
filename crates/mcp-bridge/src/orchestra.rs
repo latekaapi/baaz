@@ -42,7 +42,7 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
         ),
         def(
             "delegate",
-            "Hand a task to another agent, which works in its own session the person can watch: \"write this with Sonnet\", \"have Codex review it\", \"use Muse to import them\", \"do these in parallel\". A writer gets its own worktree; a reviewer reads, changing nothing. Give 2-5 acceptance criteria from the person's words; Baaz checks the work before it counts as done. Use after to chain tasks (the next starts when the previous passes, with its report and branch). You are woken once when your tasks settle.",
+            "Hand a task to another agent, which works in its own session the person can watch: \"write this with Sonnet\", \"have Codex review it\", \"use Muse to import them\", \"do these in parallel\". A writer gets its own worktree; a reviewer reads, changing nothing and writing no file: its findings come back in its report, which a task chained after it receives. Give 2-5 acceptance criteria from the person's words; Baaz checks the work before it counts as done. Use after to chain tasks (the next starts when the previous passes, with its report and branch). You are woken once when your tasks settle.",
             json!({"type": "object", "required": ["task", "provider"], "properties": {
                 "task": {"type": "string", "description": "What the worker should do, complete enough to act on alone."},
                 "title": {"type": "string", "description": "A few words for the sidebar."},
@@ -53,7 +53,7 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
                 "check": {"type": "string", "description": "A command that must exit 0 (default: the project's tests, found by Baaz)."},
                 "after": {"type": "array", "items": {"type": "string"}, "description": "Task ids that must pass first."},
                 "inputs": {"type": "array", "items": {"type": "string"}, "description": "Files, notes or facts the worker needs."},
-                "scope": {"type": "array", "items": {"type": "string"}, "description": "Paths the change may touch."},
+                "scope": {"type": "array", "items": {"type": "string"}, "description": "Paths a writer's change may touch (none for a reviewer)."},
                 "budget": {"type": "object", "properties": {"tokens": {"type": "integer"}, "minutes": {"type": "integer"}}},
             }}),
         ),

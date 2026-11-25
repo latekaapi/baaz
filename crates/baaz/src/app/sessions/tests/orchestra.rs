@@ -135,6 +135,9 @@ fn a_writer_gets_its_own_worktree_and_its_reviewer_reads_it_read_only(cx: &mut g
     // A provider with no Read-only mode cannot review.
     let out = reply(&pane_call(&baaz, vc, &lead, &root, "delegate", serde_json::json!({"task": "review", "provider": "acp", "role": "reviewer"})));
     assert!(error_text(&out).starts_with("[provider_unavailable]"), "{out}");
+    // A reviewer writes no file, so a scope for it is refused (Gate 14 live).
+    let out = reply(&pane_call(&baaz, vc, &lead, &root, "delegate", serde_json::json!({"task": "review into review.json", "provider": "codex", "role": "reviewer", "scope": ["review.json"]})));
+    assert!(error_text(&out).starts_with("[bad_argument]") && error_text(&out).contains("its report"), "{out}");
     cleanup(&root, state);
 }
 
