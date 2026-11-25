@@ -99,6 +99,40 @@ pub fn load_index(conn: &Connection) -> rusqlite::Result<HashMap<String, IndexEn
     Ok(out)
 }
 
+/// What a boot paints the sidebar from, in one query over the session table
+/// (docs/85 11.2): the kept Muse list (`None` when none was kept) and the
+/// index facts.
+pub fn load_both(conn: &Connection) -> rusqlite::Result<(Option<ListCache<ListedRow>>, HashMap<String, IndexEntry>)> {
+    super::check_writer("load list and index");
+    let version = meta_get(conn, "listing_version").and_then(|v| v.parse::<u32>().ok());
+    let mut statement = conn.prepare_cached(
+        "SELECT provider_session_id, listing, index_facts FROM session
+         WHERE listing IS NOT NULL OR index_facts IS NOT NULL
+         ORDER BY listing IS NULL, listing_order",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?))
+    })?;
+    let mut sessions = Vec::new();
+    let mut index = HashMap::new();
+    for row in rows {
+        let (id, listing, facts) = row?;
+        if let Some(row) = listing.and_then(|json| serde_json::from_str::<ListedRow>(&json).ok()) {
+            sessions.push(row);
+        }
+        if let Some(entry) = facts.and_then(|json| serde_json::from_str::<IndexEntry>(&json).ok()) {
+            index.insert(id, entry);
+        }
+    }
+    let listing = (version == Some(crate::list_cache::VERSION)).then(|| ListCache {
+        version: crate::list_cache::VERSION,
+        source: meta_get(conn, "listing_source").unwrap_or_default(),
+        full_at_ms: meta_get(conn, "listing_full_at").and_then(|v| v.parse().ok()).unwrap_or(0),
+        sessions,
+    });
+    Ok((listing, index))
+}
+
 /// The one-time import of the old cache files next to the database (they
 /// were caches: imported here, then removed).
 pub(crate) fn import_old_files(conn: &mut Connection, state_dir: &std::path::Path) -> rusqlite::Result<()> {

@@ -312,12 +312,6 @@ fn has_column(connection: &Connection, column: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// The kept index facts from baaz.db (docs/85 11.2), empty when none were
-/// kept. Blocking: it waits on the database writer.
-pub fn load_saved() -> HashMap<String, IndexEntry> {
-    crate::db::read(crate::db::path(), |db| crate::db::listing::load_index(&db.conn).unwrap_or_default()).unwrap_or_default()
-}
-
 /// Keep `index` in baaz.db when it differs from what this process last
 /// kept (docs/85 10.7: the old file was rewritten on every refresh).
 /// Returns whether it wrote.

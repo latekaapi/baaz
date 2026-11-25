@@ -163,8 +163,14 @@ impl Harness {
             move || {
                 let at = std::time::Instant::now();
                 crate::log::boot_mark("index-read-start");
-                // baaz.db holds the last read (docs/85 11.2), not a file.
-                let previous = if previous.is_empty() { std::sync::Arc::new(index::load_saved()) } else { previous };
+                // baaz.db holds the last read and the last list (docs/85
+                // 11.2), read together in one query on the first read.
+                let (kept_list, kept_index) = if first {
+                    crate::db::read(crate::db::path(), |db| crate::db::listing::load_both(&db.conn).ok()).flatten().unwrap_or_default()
+                } else {
+                    (None, std::collections::HashMap::new())
+                };
+                let previous = if previous.is_empty() { std::sync::Arc::new(kept_index) } else { previous };
                 let map = index::read_changed(&index::index_path(), &previous);
                 let changed = (!first).then(|| index::changed_ids(&previous, &map)).flatten();
                 if changed.as_ref().is_none_or(|ids| !ids.is_empty()) && map != *previous {
@@ -173,11 +179,8 @@ impl Harness {
                 // The saved `session/list` too, on the first read: the boot
                 // rows join it exactly as the list reply will, so nothing
                 // (labels, search rows) changes when the reply lands.
-                let listed: Option<std::sync::Arc<crate::list_cache::ListCache<crate::list_cache::ListedRow>>> = if first {
-                    crate::list_cache::load_saved().map(std::sync::Arc::new)
-                } else {
-                    None
-                };
+                let listed: Option<std::sync::Arc<crate::list_cache::ListCache<crate::list_cache::ListedRow>>> =
+                    kept_list.map(std::sync::Arc::new);
                 // Warm the run's canonical-root memo here, off the UI
                 // thread: the provisional rows join on the UI thread and
                 // asked the disk once per distinct root, cold — ~2,100

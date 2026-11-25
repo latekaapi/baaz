@@ -381,6 +381,7 @@ fn the_list_and_index_live_in_the_session_table() {
         assert!(!dir.join("session-list-cache.json").exists() && !dir.join("index-cache.json").exists(), "the old files are gone");
         assert_eq!(super::listing::load_listing(&conn).unwrap(), Some(listing.clone()), "the list reads back in order");
         assert_eq!(super::listing::load_index(&conn).unwrap(), index, "the index facts read back");
+        assert_eq!(super::listing::load_both(&conn).unwrap(), (Some(listing.clone()), index.clone()), "one query, both");
         assert!(uuid_of(&conn, "muse", "m-2").is_some(), "a never-opened Muse row has a session row");
         let created_by: Option<String> =
             conn.query_row("SELECT created_by FROM session WHERE provider_session_id = 'm-1'", [], |r| r.get(0)).unwrap();
