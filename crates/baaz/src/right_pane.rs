@@ -233,6 +233,10 @@ pub(crate) struct RightPane {
     pub(crate) lower: LowerDivider,
     /// What the root told the pane (see [`RightFacts`]).
     pub(crate) facts: RightFacts,
+    /// docs/85 13.1: what an agent's `pane_show` asked for in a session
+    /// that was not on screen, by session id; shown when the person opens
+    /// that session (the latest ask wins), never before.
+    pub(crate) pending_shows: std::collections::HashMap<String, baaz_core::pane_tools::Show>,
     /// The layout observer: drops the watch when the pane closes.
     _layout: gpui::Subscription,
 }
@@ -276,6 +280,7 @@ impl RightPane {
             terminal,
             lower: LowerDivider::default(),
             facts: RightFacts::default(),
+            pending_shows: Default::default(),
             _layout: layout,
         }
     }

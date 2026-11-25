@@ -40,6 +40,7 @@ pub mod list_cache;
 pub mod log;
 pub mod memory;
 pub mod memory_lint;
+pub mod pane_tools;
 pub mod plan;
 pub mod projects;
 pub mod provider_search;

@@ -87,6 +87,7 @@ mod picker;
 #[cfg(feature = "probe")]
 mod perf_turn;
 mod palette;
+mod pane_tools;
 use baaz_core::plan;
 mod project_menu;
 use baaz_core::projects;

@@ -19,6 +19,8 @@ pub mod terminal;
 pub mod browser;
 /// The memory relay: past sessions and memory notes, over the same socket.
 pub mod memory;
+/// The pane relay: show things in the right pane, read and act on Changes.
+pub mod pane;
 
 /// Protocol version the probe server answered with, and this bridge keeps.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";

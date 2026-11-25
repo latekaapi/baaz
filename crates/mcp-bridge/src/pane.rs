@@ -1,0 +1,121 @@
+//! The pane relay (docs/85 13.1–13.4, W4): show the person something in
+//! Baaz's right pane, and read or act on Changes, as MCP tools forwarded to
+//! the app's socket beside the terminal, browser and memory tools — same
+//! routing, same token, same absence rule.
+//!
+//! Each description carries the phrases a person would say (rule 19), so a
+//! provider that defers tools finds them by search.
+
+use serde_json::{Value, json};
+
+use crate::terminal::TerminalTarget;
+use crate::ToolRegistry;
+
+/// Steering for the model.
+pub const INSTRUCTIONS: &str = "To show the person something — a file at a line, a diff, what changed, the terminal, \
+    the pull request — use pane_show: it opens in the pane beside the chat. changes_read tells what changed (all \
+    changes, this session, the last turn, a turn); changes_revert, changes_comment and changes_commit act through the \
+    pane so the person sees it; pr_status reads the pull request's state, checks and review comments.";
+
+/// The tools, in contract order.
+pub const PANE_TOOL_NAMES: [&str; 6] = ["pane_show", "changes_read", "changes_revert", "changes_comment", "changes_commit", "pr_status"];
+
+const SCOPE: &str = "all (the working tree against HEAD, the default), session (since this session began), last_turn, or turn_<n>.";
+
+/// One tool's advertisement: name, description, JSON Schema.
+pub fn tool_defs() -> Vec<(String, String, Value)> {
+    let def = |name: &str, description: &str, schema: Value| (name.to_owned(), description.to_owned(), schema);
+    vec![
+        def(
+            "pane_show",
+            "Show the person something in Baaz's right pane: open a file in the preview (at a line), reveal it in the file tree, \
+             show the diff of a file, show what changed (all, this session, the last turn, turn N), switch to the terminal, \
+             the browser or Tasks, or show the pull request. Use for \"open X in the preview\", \"show me the diff in X\", \
+             \"show what you changed last turn\", \"switch to the terminal\", \"show me the PR\". Changes nothing.",
+            json!({"type": "object", "required": ["view"], "properties": {
+                "view": {"type": "string", "enum": ["files", "file", "changes", "diff", "browser", "terminal", "tasks", "pr"],
+                    "description": "file: preview one file (path, line); files: the tree (path reveals); diff: one file's diff (path, scope); changes: the list (scope)."},
+                "path": {"type": "string", "description": "A file, absolute or project-relative."},
+                "line": {"type": "integer", "description": "The line to show (file)."},
+                "scope": {"type": "string", "description": SCOPE},
+            }}),
+        ),
+        def(
+            "changes_read",
+            "What changed, as Baaz's Changes pane shows it: a diff stat (files, +added −removed) by default, one file's diff \
+             when file is given. Scopes include this session and single turns, which plain git cannot tell apart. Use for \
+             \"what did the last turn change?\", \"what have you changed?\". Read-only.",
+            json!({"type": "object", "properties": {
+                "scope": {"type": "string", "description": SCOPE},
+                "file": {"type": "string", "description": "One file: its diff instead of the stat."},
+            }}),
+        ),
+        def(
+            "changes_revert",
+            "Undo a change to one file through the pane's Revert: back to HEAD (scope all) or out of one turn (last_turn, turn_<n>). \
+             The person confirms first; the answer says reverted, declined, or waiting for the person. Use for \"undo your \
+             change to X\", \"revert X\".",
+            json!({"type": "object", "required": ["path"], "properties": {
+                "path": {"type": "string"},
+                "scope": {"type": "string", "description": SCOPE},
+            }}),
+        ),
+        def(
+            "changes_comment",
+            "Leave a comment on a line of a changed file; the person sees it in Changes beside that line. For review notes.",
+            json!({"type": "object", "required": ["path", "line", "text"], "properties": {
+                "path": {"type": "string"},
+                "line": {"type": "integer"},
+                "text": {"type": "string"},
+            }}),
+        ),
+        def(
+            "changes_commit",
+            "Commit through the pane's commit box, so the person's Changes pane and pull request card stay in step: the files \
+             ticked there (by default what this session changed), with your message, then push when push is true (the person \
+             approves a push unless the session has full access). Use for \"commit this\", \"commit and push\".",
+            json!({"type": "object", "properties": {
+                "message": {"type": "string", "description": "The commit message. Default: the one in the box."},
+                "push": {"type": "boolean", "description": "Push the branch after committing."},
+            }}),
+        ),
+        def(
+            "pr_status",
+            "The pull request for the current branch: state, checks (failing ones named) and review comments. Use for \"did CI \
+             pass?\", \"any review comments?\". Read-only.",
+            json!({"type": "object", "properties": {}}),
+        ),
+    ]
+}
+
+/// Register the six tools, each forwarded over the terminal socket.
+pub fn register_pane_tools(registry: &mut ToolRegistry, target: &TerminalTarget) {
+    for (name, description, schema) in tool_defs() {
+        let target = target.clone();
+        let tool = name.clone();
+        registry
+            .register(name, description, schema, move |args| {
+                super::terminal::forward_call_with(&target.socket, &target.session, target.token.as_deref(), &tool, &args)
+            })
+            .expect("fresh registry takes the pane tools");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_six_tools_are_declared_in_order_with_their_phrases() {
+        let defs = tool_defs();
+        let names: Vec<&str> = defs.iter().map(|(name, _, _)| name.as_str()).collect();
+        assert_eq!(names, PANE_TOOL_NAMES);
+        let show = &defs[0].1;
+        for phrase in ["open X in the preview", "show me the diff in X", "switch to the terminal"] {
+            assert!(show.contains(phrase), "pane_show names {phrase:?}");
+        }
+        assert!(defs[1].1.contains("what did the last turn change"));
+        assert!(defs[4].1.contains("commit and push"));
+        assert_eq!(defs[3].2["required"], json!(["path", "line", "text"]));
+    }
+}

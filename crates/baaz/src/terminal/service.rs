@@ -286,6 +286,8 @@ struct Shared {
     tab_grants: Mutex<HashMap<u64, Vec<TabGrant>>>,
     /// What the harness does for `browser_tabs`.
     browser_tabs: Mutex<Option<BrowserTabsHook>>,
+    /// What the harness does for the pane tools (docs/85 13.1–13.4).
+    pane: Mutex<Option<PaneHook>>,
     /// One live webview per session id, registered by the harness when the
     /// pane creates it. A `browser_*` tool acts only on its calling
     /// session's entry here — never another session's — which is what
@@ -407,6 +409,35 @@ pub(crate) fn answer_tabs(call: &TabsCall, outcome: Result<Value, String>) {
 /// What the harness runs for `browser_tabs` (deferred, like [`BrowserOpenHook`]).
 type BrowserTabsHook = Box<dyn Fn(&mut App, TabsCall) + Send + Sync>;
 
+/// The pane tools (docs/85 13.1–13.4, W4): show something in the right
+/// pane, read or act on Changes. The harness answers them: it owns the
+/// pane, the sessions and their checkpoints.
+pub const PANE_TOOL_NAMES: [&str; 6] = ["pane_show", "changes_read", "changes_revert", "changes_comment", "changes_commit", "pr_status"];
+
+/// A pane tool's call, answered by the harness. `session` is the bridge's
+/// (rule 20), resolved to the lane's current id; `root` its project root.
+pub struct PaneCall {
+    pub tool: String,
+    pub session: String,
+    pub root: PathBuf,
+    pub params: Value,
+    pub id: Value,
+    pub reply: mpsc::Sender<String>,
+}
+
+impl PaneCall {
+    /// Send the answer (from any thread).
+    pub(crate) fn answer(&self, outcome: Result<Value, String>) {
+        match outcome {
+            Ok(value) => send(&self.reply, &self.id, true, value),
+            Err(error) => send(&self.reply, &self.id, false, json!({"error": error})),
+        }
+    }
+}
+
+/// What the harness runs for a pane tool (deferred, like [`BrowserOpenHook`]).
+type PaneHook = Box<dyn Fn(&mut App, PaneCall) + Send + Sync>;
+
 /// A run the service already answered (`wait: none`, or a `wait: exit` that
 /// timed out) whose blocks still want the agent mark: `before` counts the
 /// blocks that predate the run, and each drain stamps what has appeared
@@ -462,6 +493,7 @@ impl TerminalService {
             tab_pages: Mutex::new(HashMap::new()),
             tab_grants: Mutex::new(HashMap::new()),
             browser_tabs: Mutex::new(None),
+            pane: Mutex::new(None),
             session_aliases: Mutex::new(HashMap::new()),
         });
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -619,6 +651,12 @@ impl TerminalService {
         *self.shared.browser_tabs.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
     }
 
+    /// What the harness does for a pane tool. Same re-entrancy rule as
+    /// [`Self::set_activity_hook`]: it runs inside `drain`.
+    pub fn set_pane_hook(&self, hook: impl Fn(&mut App, PaneCall) + Send + Sync + 'static) {
+        *self.shared.pane.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
+    }
+
     /// Forget `session`'s webview for `browser_*` tools. Called on the UI
     /// thread when the session's last tab closes (and defensively when a
     /// registered page is discarded), so a closed tab stays dead through
@@ -757,6 +795,16 @@ impl TerminalService {
                 Ok(result) => send(&reply, &id, true, result),
                 Err(error) => send(&reply, &id, false, json!({"error": error})),
             });
+            return;
+        }
+        // docs/85 13.1–13.4: the pane tools, answered by the harness.
+        if PANE_TOOL_NAMES.contains(&job.tool.as_str()) {
+            let Job { id, tool, params, reply, .. } = job;
+            let call = PaneCall { tool, session, root, params, id, reply };
+            match self.shared.pane.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+                Some(hook) => hook(cx, call),
+                None => call.answer(Err("the pane tools are not available here".into())),
+            }
             return;
         }
         let outcome: Result<Value, String> = match job.tool.as_str() {
@@ -2168,6 +2216,34 @@ mod tests {
             .and_then(Value::as_str)
             .expect("refusal names itself")
             .to_owned()
+    }
+
+    /// docs/85 13.1: a pane tool reaches the harness's hook with the
+    /// bridge's own session and root (rule 20) and answers from there; with
+    /// no hook it says the tools are not available.
+    #[gpui::test]
+    fn a_pane_tool_reaches_the_hook_with_the_bridges_session_and_root(cx: &mut gpui::TestAppContext) {
+        let fx = fixture(cx, "sp-1");
+        let message = err_text(&call(cx, &fx, "pane_show", json!({"view": "terminal"})));
+        assert!(message.contains("not available"), "{message}");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        {
+            let seen = seen.clone();
+            fx.service.set_pane_hook(move |_, call: PaneCall| {
+                seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((call.tool.clone(), call.session.clone(), call.root.clone(), call.params.clone()));
+                call.answer(Ok(json!({"shown": "the terminal"})));
+            });
+        }
+        let out = result(&call(cx, &fx, "pane_show", json!({"view": "terminal", "session": "someone-else"})));
+        assert_eq!(out["shown"], "the terminal");
+        let seen = seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "pane_show");
+        assert_eq!(seen[0].1, "sp-1", "the bridge's session, never the agent's word");
+        assert_eq!(seen[0].2, fx.root);
+        for tool in PANE_TOOL_NAMES {
+            assert!(!TOOL_NAMES.contains(&tool) && !BROWSER_TOOL_NAMES.contains(&tool), "{tool} routes once");
+        }
     }
 
     /// A scripted pty that answers writes: once the session pastes a command

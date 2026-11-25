@@ -1260,6 +1260,18 @@ ENTRIES.update({
     # the owner's repository): `changes-scope:` loads a fixture index of two
     # finished turns over the fixture tree. No baseline yet.
     "right-changes-scope-last": _populated("right-width:440;right:changes;changes-scope:last;changes-open:crates/baaz/src/layout.rs", replay=True),
+    # docs/85 13.1: an agent's `pane_show`, one entry per view, through the
+    # bridge call's own handler (`pane-show:` builds the call's arguments).
+    # Scoped views load the fixture checkpoint index, as `changes-scope:`.
+    "pane-show-file":          _populated("right-width:440;pane-show:view=file,path=crates/baaz/src/layout.rs,line=154", replay=True),
+    "pane-show-files":         _populated("right-width:440;pane-show:view=files", replay=True),
+    "pane-show-diff":          _populated("right-width:440;pane-show:view=diff,path=crates/baaz/src/right.rs", replay=True),
+    "pane-show-diff-last":     _populated("right-width:440;pane-show:view=diff,path=crates/baaz/src/layout.rs,scope=last_turn", replay=True),
+    "pane-show-changes-turn":  _populated("right-width:440;pane-show:view=changes,scope=last_turn", replay=True),
+    "pane-show-terminal":      _populated("right-width:440;pane-show:view=terminal", replay=True),
+    "pane-show-tasks":         _populated("right-width:440;tasks-fixture;pane-show:view=tasks", replay=True),
+    "pane-show-pr":            _populated("right-width:440;pr-fixture:failing;pane-show:view=pr", replay=True),
+    "pane-show-browser":       _populated("right-width:440;pane-show:view=browser", replay=True),
     # Task 6.4's confirms, from fixture data: a capture takes no
     # checkpoints and runs in the owner's repository, so neither button can
     # apply anything (the session refuses: no checkpoints).
