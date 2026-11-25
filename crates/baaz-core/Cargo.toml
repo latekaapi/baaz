@@ -52,3 +52,8 @@ zip.workspace = true
 ignore.workspace = true
 # FSEvents for the right pane's watch (`right_watch.rs`).
 notify = "7.0"
+# docs/85 12.6: code_find's symbols (the versions gpui-kit already locks).
+tree-sitter = "=0.26.13"
+tree-sitter-rust = "=0.24.2"
+tree-sitter-python = "=0.23.6"
+tree-sitter-typescript = "=0.23.2"
