@@ -318,6 +318,37 @@ pub fn cache_path() -> PathBuf {
     crate::store::support_dir().join("index-cache.json")
 }
 
+/// The kept index facts from baaz.db (docs/85 11.2), empty when none were
+/// kept. Blocking: it waits on the database writer.
+pub fn load_saved() -> HashMap<String, IndexEntry> {
+    crate::db::read(crate::db::path(), |db| crate::db::listing::load_index(&db.conn).unwrap_or_default()).unwrap_or_default()
+}
+
+/// Keep `index` in baaz.db when it differs from what this process last
+/// kept. Returns whether it wrote.
+pub fn save_saved(index: &HashMap<String, IndexEntry>) -> bool {
+    static LAST: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+    let sorted: std::collections::BTreeMap<&String, &IndexEntry> = index.iter().collect();
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_vec(&sorted).unwrap_or_default().hash(&mut hasher);
+        hasher.finish()
+    };
+    let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *last == Some(hash) {
+        return false;
+    }
+    *last = Some(hash);
+    let index = index.clone();
+    crate::db::run(crate::db::path(), move |db| {
+        if let Err(error) = crate::db::listing::save_index(&mut db.conn, &index) {
+            crate::baaz_log!("db: the index facts were not kept ({error})");
+        }
+    });
+    true
+}
+
 /// The last saved read, or an empty map (no file yet, or one this build
 /// cannot parse — the next read rewrites it).
 pub fn load_cache(path: &std::path::Path) -> HashMap<String, IndexEntry> {

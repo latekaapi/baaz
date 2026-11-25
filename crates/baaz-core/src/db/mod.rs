@@ -36,6 +36,7 @@ pub mod attachments;
 pub mod history;
 pub mod journals;
 pub mod json_import;
+pub mod listing;
 pub mod schema;
 pub mod sessions;
 pub mod turns;
@@ -306,6 +307,11 @@ pub fn open_at(path: &Path) -> rusqlite::Result<Connection> {
     schema::migrate(&mut conn)?;
     if let Some(state_dir) = path.parent() {
         json_import::run_once(&mut conn, state_dir)?;
+        // docs/85 11.2: the old list and index cache files, once.
+        if schema::meta(&conn, "list_files_imported")?.is_none() {
+            listing::import_old_files(&mut conn, state_dir)?;
+            schema::set_meta(&conn, "list_files_imported", "1")?;
+        }
     }
     Ok(conn)
 }

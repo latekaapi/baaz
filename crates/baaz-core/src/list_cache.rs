@@ -164,7 +164,7 @@ pub struct Ask<'a> {
 }
 
 /// Bumped when the saved shape changes; an older file is a full listing.
-const VERSION: u32 = 1;
+pub const VERSION: u32 = 1;
 
 /// How old the last full listing may be before the next one runs anyway:
 /// the only way a session deleted outside Baaz leaves the sidebar.
@@ -227,6 +227,22 @@ pub struct Listing<R> {
 /// `session-list-cache.json` in Baaz's state dir.
 pub fn cache_path() -> PathBuf {
     crate::store::support_dir().join("session-list-cache.json")
+}
+
+/// The kept Muse list from baaz.db (docs/85 11.2: the one list source),
+/// `None` when none was kept. Blocking: it waits on the database writer.
+pub fn load_saved() -> Option<ListCache<ListedRow>> {
+    crate::db::read(crate::db::path(), |db| crate::db::listing::load_listing(&db.conn).ok().flatten()).flatten()
+}
+
+/// Keep `listing` in baaz.db. Blocking.
+pub fn save_saved(listing: &ListCache<ListedRow>) {
+    let listing = listing.clone();
+    crate::db::run(crate::db::path(), move |db| {
+        if let Err(error) = crate::db::listing::save_listing(&mut db.conn, &listing) {
+            crate::baaz_log!("db: the session list was not kept ({error})");
+        }
+    });
 }
 
 /// The saved copy, or `None` (no file, or one this build cannot read).
