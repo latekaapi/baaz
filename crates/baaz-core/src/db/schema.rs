@@ -51,6 +51,8 @@
 //!   record and the side effects its changes still owe ([`super::tasks`]).
 //! * `goal` (version 7, docs/85 15.1): one goal per session
 //!   ([`super::goals`]).
+//! * `usage_daily` (version 8, docs/85 16.1): the ledger rolled up by day,
+//!   provider, model and project ([`super::usage_daily`]).
 //!
 //! Not here: `projects.json` (projects are not keyed by session, and the
 //! plan row moves only the session stores), the regenerable caches and
@@ -60,7 +62,7 @@
 use rusqlite::{params, Connection, Transaction};
 
 /// The schema this build writes.
-pub const VERSION: i32 = 7;
+pub const VERSION: i32 = 8;
 
 /// Step 1: every table.
 const V1: &str = "
@@ -314,6 +316,12 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(super::goals::V7)?;
         tx.pragma_update(None, "user_version", 7)?;
+        tx.commit()?;
+    }
+    if version < 8 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(super::usage_daily::V8)?;
+        tx.pragma_update(None, "user_version", 8)?;
         tx.commit()?;
     }
     Ok(())

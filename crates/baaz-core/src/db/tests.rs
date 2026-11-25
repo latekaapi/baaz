@@ -484,14 +484,14 @@ fn versions_six_and_seven_add_the_task_and_goal_records_and_move_nothing() {
         let mut conn = super::open_at(&path).expect("opens");
         let rows: Vec<_> = (0..3).map(|n| crate::usage::row_from_finished("s-v6", "v", &format!("t-{n}"), n, &meta).with_provider("codex")).collect();
         super::turns::record_ledger(&mut conn, &rows).expect("ledger");
-        conn.execute_batch("DROP TABLE goal; DROP TABLE task_outbox; DROP TABLE task; PRAGMA user_version = 5;").expect("back to the version-5 shape");
+        conn.execute_batch("DROP TABLE usage_daily; DROP TABLE goal; DROP TABLE task_outbox; DROP TABLE task; PRAGMA user_version = 5;").expect("back to the version-5 shape");
         (count(&conn, "turn"), count(&conn, "session"))
     });
     super::close(path.clone());
     super::as_writer(|| {
         let mut conn = super::open_at(&path).expect("reopens");
         let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, super::schema::VERSION);
         assert_eq!((count(&conn, "turn"), count(&conn, "session")), (turns_before, sessions_before), "nothing else moved");
         let goal = crate::goals::Goal::new("s-v6", "codex", "tests pass", None, true, crate::goals::limits_for(provider::BillingMode::Subscription), 1);
         super::goals::save(&conn, &goal).expect("the goal table takes a goal");

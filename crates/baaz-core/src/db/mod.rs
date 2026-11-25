@@ -45,6 +45,7 @@ pub mod schema;
 pub mod sessions;
 pub mod tasks;
 pub mod turns;
+pub mod usage_daily;
 pub mod worktrees;
 
 thread_local! {
