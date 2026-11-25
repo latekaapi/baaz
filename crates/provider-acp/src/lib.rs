@@ -582,3 +582,28 @@ impl Drop for AcpAdapter {
         self.shutdown();
     }
 }
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+
+    /// docs/85 13.7: an ACP session gets Baaz's bridge like every other
+    /// provider — `session/new` and `session/load` carry it as a stdio MCP
+    /// server with the session's own token (10.0); with no relay set, none.
+    #[test]
+    fn every_acp_session_carries_the_bridge_with_its_token() {
+        let adapter = AcpAdapter::new("agent", &[]);
+        assert!(adapter.servers("s-1").is_empty(), "no relay, no bridge");
+        adapter.set_terminal_relay(McpServer { command: "/bin/mcp-bridge".into(), socket: "/tmp/baaz.sock".into() });
+        let new = wire::session_new_params("/repo", &adapter.servers("s-1"));
+        let load = wire::session_load_params("w-1", "/repo", &adapter.servers("s-1"));
+        for params in [new, load] {
+            let server = &params["mcpServers"][0];
+            assert_eq!(server["name"], "baaz");
+            assert_eq!(server["command"], "/bin/mcp-bridge");
+            assert_eq!(server["args"], serde_json::json!(["--terminal", "--socket", "/tmp/baaz.sock", "--session", "s-1"]));
+            assert_eq!(server["env"][0]["name"], provider::bridge_token::ENV);
+            assert_eq!(server["env"][0]["value"], provider::bridge_token::token_for("s-1"));
+        }
+    }
+}
