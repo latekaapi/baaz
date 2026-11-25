@@ -125,6 +125,7 @@ impl Harness {
             }
             "session_watch" => self.session_watch_call(call, cx),
             "task_wait" => self.task_wait_call(call, cx),
+            "task_land" => self.task_land_call(call, cx),
             "report" => self.report_call(call, cx),
             "escalate" => self.escalate_call(call, cx),
             other => call.answer(Err(refuse(Refusal::new(Code::NotFound, format!("{other} is not built yet"))))),
@@ -1109,6 +1110,71 @@ impl Harness {
                     }
                 }
             });
+        })
+        .detach();
+    }
+}
+
+impl Harness {
+    /// `task_land` (docs/85 14.8): the caller's passed tasks (watched
+    /// sessions included) merge into the caller's own folder one at a time,
+    /// with its check after each ([`baaz_core::land`]).
+    fn task_land_call(&mut self, call: PaneCall, cx: &mut Context<Self>) {
+        let ids = texts(&call.params, "tasks");
+        if ids.is_empty() {
+            return call.answer(Err(refuse(Refusal::new(Code::BadArgument, "name the tasks to land"))));
+        }
+        let lead = call.session.clone();
+        let root = self.session_workspace(&lead, cx);
+        cx.background_spawn(async move {
+            let (ids2, lead2) = (ids.clone(), lead.clone());
+            let tasks = with_db(move |conn| ids2.iter().map(|id| crate::db::tasks::load(conn, id).ok().flatten().ok_or_else(|| id.clone())).collect::<Vec<_>>()).unwrap_or_default();
+            let mut items = Vec::new();
+            let mut found = Vec::new();
+            for task in tasks {
+                let task = match task {
+                    Ok(task) => task,
+                    Err(id) => return call.answer(Err(refuse(Refusal::new(Code::NotFound, format!("no task {id}"))))),
+                };
+                if task.lead_session != lead2 {
+                    return call.answer(Err(refuse(Refusal::new(Code::NotYours, format!("task {} is another session's", task.id)))));
+                }
+                let ready = task.status == Status::Passed || (task.watched && matches!(task.status, Status::Reported | Status::Passed));
+                if !ready {
+                    return call.answer(Err(refuse(Refusal::new(Code::WrongState, format!("task {} is {}; only passed work lands", task.id, task.status.as_str())))));
+                }
+                let Some(folder) = task.worktree.clone() else {
+                    return call.answer(Err(refuse(Refusal::new(Code::WrongState, format!("task {} has no branch of its own to land (it worked in the project folder)", task.id)))));
+                };
+                let worktree = baaz_core::worktrees::by_path(&crate::store::support_dir(), std::path::Path::new(&folder));
+                let branch = worktree.as_ref().map(|w| w.branch.clone()).or_else(|| baaz_core::git_ops::read_tree(std::path::Path::new(&folder)).map(|g| g.branch)).unwrap_or_default();
+                items.push(baaz_core::land::Item { task_id: task.id.clone(), branch, worktree });
+                found.push(task);
+            }
+            let root_path = std::path::Path::new(&root);
+            let check = baaz_core::checks::detect(root_path);
+            let steps = baaz_core::land::land(&crate::store::support_dir(), root_path, &items, &check, CHECK_DEADLINE);
+            let landed: Vec<String> = steps.iter().filter_map(|s| match s { baaz_core::land::Step::Landed { task_id, .. } => Some(task_id.clone()), _ => None }).collect();
+            let at = now();
+            with_db(move |conn| {
+                for mut task in found.into_iter().filter(|t| landed.contains(&t.id)) {
+                    if task.watched && task.status == Status::Reported {
+                        task.status = Status::Passed;
+                    }
+                    let _ = task.move_to(Status::Landed, at);
+                    let _ = crate::db::tasks::save(conn, &task);
+                }
+            });
+            let rows: Vec<Value> = steps
+                .iter()
+                .map(|step| match step {
+                    baaz_core::land::Step::Landed { task_id, branch, saved } => json!({"task": task_id, "landed": branch, "saved_as": saved}),
+                    baaz_core::land::Step::Conflict { task_id, files } => json!({"task": task_id, "conflict": files, "note": "stopped; nothing was resolved — the person (or you, by hand) decides"}),
+                    baaz_core::land::Step::CheckFailed { task_id, tail } => json!({"task": task_id, "check_failed": check.describe(), "tail": tail}),
+                    baaz_core::land::Step::Refused { task_id, why } => json!({"task": task_id, "refused": why}),
+                })
+                .collect();
+            call.answer(Ok(json!({"steps": rows, "check": check.describe()})));
         })
         .detach();
     }

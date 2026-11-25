@@ -324,3 +324,48 @@ fn a_quiet_worker_is_nudged_interrupted_then_needs_you(cx: &mut gpui::TestAppCon
     assert!(sent.lock().unwrap().iter().any(|s| s.0.starts_with("From Baaz (not the user): your delegated tasks settled")), "its lead is woken");
     cleanup(&root, state);
 }
+
+/// docs/85 14.8 through the tool: two passed writers land into the lead's
+/// folder one at a time (worktrees saved to refs first, branches deleted
+/// after), a third that conflicts stops with its file named, and a task
+/// that has not passed is refused.
+#[gpui::test]
+fn task_land_merges_passed_work_and_stops_at_a_conflict(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("orchestra-land");
+    let root = folder(&state.2, true);
+    std::fs::create_dir_all(root.join(".baaz")).unwrap();
+    std::fs::write(root.join(".baaz/project.toml"), "check = \"true\"\n").unwrap();
+    super::checkpoints::git(&root, &["add", "-A"]);
+    super::checkpoints::git(&root, &["commit", "-qm", "check"]);
+    let (factory, _) = recording_factory_numbered(true);
+    let (baaz, vc, lead) = session_with(cx, &root, factory);
+    let mut tasks = Vec::new();
+    for (n, (file, text)) in [("b.txt", "b\n"), ("c.txt", "c\n"), ("a.txt", "theirs\n")].into_iter().enumerate() {
+        let out = reply(&pane_call(&baaz, vc, &lead, &root, "delegate", serde_json::json!({"task": format!("writer {n}"), "provider": "codex"})));
+        let task = out["result"]["task"].as_str().unwrap().to_owned();
+        settle(vc);
+        let worker = worker_of(&baaz, vc, &task);
+        commit_in(status_of(&task).worktree.as_deref().unwrap(), file, text);
+        assert_eq!(reply(&pane_call(&baaz, vc, &worker, &root, "report", serde_json::json!({"result": "done"})))["ok"], true);
+        settle(vc);
+        assert_eq!(status_of(&task).status, baaz_core::tasks::Status::Passed);
+        tasks.push(task);
+    }
+    // The lead's own branch moves on a.txt, so the third conflicts.
+    std::fs::write(root.join("a.txt"), "mine\n").unwrap();
+    super::checkpoints::git(&root, &["commit", "-qam", "mine"]);
+    let out = reply(&pane_call(&baaz, vc, &lead, &root, "task_land", serde_json::json!({"tasks": tasks})));
+    let steps = out["result"]["steps"].as_array().unwrap().clone();
+    assert_eq!(steps.len(), 3, "{out}");
+    assert!(steps[0]["landed"].is_string() && steps[1]["landed"].is_string(), "{out}");
+    assert_eq!(steps[2]["conflict"], serde_json::json!(["a.txt"]), "{out}");
+    assert!(root.join("b.txt").exists() && root.join("c.txt").exists());
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "mine\n", "nothing was resolved");
+    assert_eq!(status_of(&tasks[0]).status, baaz_core::tasks::Status::Landed);
+    assert_eq!(status_of(&tasks[2]).status, baaz_core::tasks::Status::Passed);
+    let saved = steps[0]["saved_as"].as_str().expect("saved to a ref first");
+    assert!(!super::checkpoints::git(&root, &["rev-parse", "--verify", saved]).is_empty(), "the saved ref stays");
+    let out = reply(&pane_call(&baaz, vc, &lead, &root, "task_land", serde_json::json!({"tasks": [tasks[0]]})));
+    assert!(error_text(&out).starts_with("[wrong_state]"), "{out}");
+    cleanup(&root, state);
+}
