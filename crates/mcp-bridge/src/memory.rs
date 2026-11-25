@@ -60,8 +60,8 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
         ),
         def(
             "memory_edit",
-            "Change or delete one memory note by its title. Use delete when the person says to forget something (\"forget the \
-             note about X\"); use this, never a file edit, for Baaz's notes.",
+            "Forget or change a memory note: \"forget the note about X\", \"forget that…\", \"that note is wrong, it is…\". \
+             Delete (delete: true) or rewrite one note by its title; Baaz's notes are changed only through this tool.",
             json!({"type": "object", "required": ["title"], "properties": {
                 "title": {"type": "string"},
                 "body": {"type": "string", "description": "The new body."},
