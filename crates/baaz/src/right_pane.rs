@@ -157,6 +157,8 @@ pub(crate) enum RightPaneEvent {
     OpenTerminalTab(String),
     /// The lower pane's ✕ (docs/82 8.1).
     CloseLower,
+    /// docs/85 14.9: the worker pane's "Open in centre".
+    WorkerInCentre(String),
     /// What the Page's own controls ask (screenshot, annotate, console…).
     BrowserIntent(aui_webview::WebviewIntent),
 }
@@ -237,6 +239,10 @@ pub(crate) struct RightPane {
     /// that was not on screen, by session id; shown when the person opens
     /// that session (the latest ask wins), never before.
     pub(crate) pending_shows: std::collections::HashMap<String, baaz_core::pane_tools::Show>,
+    /// docs/85 14.9: a worker open beside its lead: its own view (transcript
+    /// and composer) stands in the pane in place of the strip until closed
+    /// or opened in the centre.
+    pub(crate) worker: Option<(Entity<SessionView>, String)>,
     /// docs/85 13.4: an agent's push waiting on the person's approval.
     pub(crate) agent_push: Option<crate::pane_tools::AgentPush>,
     /// The layout observer: drops the watch when the pane closes.
@@ -284,6 +290,7 @@ impl RightPane {
             facts: RightFacts::default(),
             pending_shows: Default::default(),
             agent_push: None,
+            worker: None,
             _layout: layout,
         }
     }
@@ -728,6 +735,9 @@ impl Render for RightPane {
                 .child(body)
                 .into_any_element();
         }
+        if let Some((worker, title)) = self.worker.clone() {
+            return self.worker_screen(worker, title, window, cx);
+        }
         let index = right::screen_index(kind);
         let pos = aui::workbench::strip_position("right-strip", index, window, cx);
         self.strip_moving = aui::workbench::strip_moving(pos, index);
@@ -1023,11 +1033,73 @@ impl Harness {
                     self.with_terminal_dock(cx, |dock, cx| dock.open_tab(Some(tab), window, cx));
                 }
             }
+            RightPaneEvent::WorkerInCentre(worker) => {
+                let worker = worker.clone();
+                self.right_pane.update(cx, |pane, _| pane.worker = None);
+                // The switch restores the pane, which redraws it.
+                self.resume(worker, window, cx);
+            }
             RightPaneEvent::CloseLower => {
                 let _ = self.set_right_lower(None, window, cx);
             }
             RightPaneEvent::BrowserIntent(intent) => self.handle_browser_intent(intent.clone(), window, cx),
         }
+    }
+}
+
+impl RightPane {
+    /// docs/85 14.9: a worker beside its lead — a header (its title, its
+    /// provider and mode, Open in centre, ✕) over the worker's own view and
+    /// composer band, so a message to it steers where its provider steers
+    /// and queues where not, exactly as in the centre.
+    fn worker_screen(&mut self, worker: Entity<SessionView>, title: String, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        use aui_tokens::{scale, ActiveAui as _, AuiStyled as _, TextRole};
+        let p = cx.aui().colors;
+        let (id, provider, mode) = {
+            let rt = worker.read(cx).rt(cx);
+            (rt.session_id.clone(), rt.provider_kind().label(), rt.mode())
+        };
+        let mode_word = match mode {
+            aui_protocol::PermissionMode::DenyUnmatched => "Read-only",
+            aui_protocol::PermissionMode::AllowAll => "Full access",
+            aui_protocol::PermissionMode::PromptUnmatched => "Ask",
+            aui_protocol::PermissionMode::OnRequest => "Auto",
+        };
+        let centre_id = id.clone();
+        let centre = aui::data::button("worker-open-centre", "Open in centre")
+            .ghost()
+            .accessibility_label(format!("Open {title} in the centre"))
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(RightPaneEvent::WorkerInCentre(centre_id.clone()))));
+        let close = aui::data::icon_button("worker-close", aui_icons::IconName::X)
+            .ghost()
+            .muted()
+            .accessibility_label("Close the worker pane")
+            // Back to the strip on the kind it shows (select_right leaves
+            // the worker).
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(RightPaneEvent::Select(crate::layout::right_kind(crate::layout::Layout::get(cx))))));
+        let header = gpui_kit::base::h_flex()
+            .w_full()
+            .h(px(scale::H_MD))
+            .flex_none()
+            .px(px(scale::SP_3))
+            .gap(px(scale::SP_2))
+            .items_center()
+            .border_b_1()
+            .border_color(p.line)
+            .child(gpui::div().flex_1().min_w(px(0.0)).truncate().text_role(TextRole::Body).text_color(p.ink).child(title))
+            .child(gpui::div().flex_none().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(format!("{provider} · {mode_word}")))
+            .child(centre)
+            .child(close);
+        let band = worker.update(cx, |view, cx| view.render_composer_band(window, cx));
+        gpui_kit::base::v_flex()
+            .id("right-worker")
+            .size_full()
+            .role(gpui::Role::Complementary)
+            .aria_label("Right pane: worker")
+            .child(header)
+            .child(gpui::div().flex_1().min_h(px(0.0)).relative().child(worker.into_any_element()))
+            .child(gpui::div().flex_none().w_full().bg(p.surface_1).child(band))
+            .into_any_element()
     }
 }
 

@@ -449,6 +449,57 @@ pub fn grouping_by_project(
 /// empty by the lift is dropped. Status groupings are untouched. The
 /// project's count keeps counting them: the head says how many sessions
 /// the project has, not how many rows sit under it.
+/// docs/85 14.9: each worker's row moves under its lead's row (`leads`:
+/// worker → lead) when the lead is listed; a worker whose lead is not
+/// listed stays where it is. One level: a worker's own workers nest under
+/// the same lead.
+pub fn nest_workers(grouping: Grouping, leads: &HashMap<String, String>) -> Grouping {
+    if leads.is_empty() {
+        return grouping;
+    }
+    fn lists(grouping: &mut Grouping) -> Vec<&mut Vec<SessionSummary>> {
+        match grouping {
+            Grouping::Project(groups) => groups.iter_mut().map(|g| &mut g.sessions).collect(),
+            Grouping::Date(groups) => groups.iter_mut().map(|g| &mut g.sessions).collect(),
+            Grouping::Status(groups) => groups.iter_mut().map(|g| &mut g.sessions).collect(),
+        }
+    }
+    let mut grouping = grouping;
+    let listed: std::collections::HashSet<String> = lists(&mut grouping).iter().flat_map(|l| l.iter().map(|s| s.id.to_string())).collect();
+    // The top lead of a chain (a worker's worker nests under the first lead).
+    let top = |id: &str| {
+        let mut at = id.to_owned();
+        for _ in 0..4 {
+            match leads.get(&at) {
+                Some(lead) if listed.contains(lead) => at = lead.clone(),
+                _ => break,
+            }
+        }
+        at
+    };
+    let mut moved: HashMap<String, Vec<SessionSummary>> = HashMap::new();
+    for list in lists(&mut grouping) {
+        let mut kept = Vec::with_capacity(list.len());
+        for row in list.drain(..) {
+            let lead = top(&row.id);
+            if lead != row.id.as_ref() {
+                moved.entry(lead).or_default().push(row);
+            } else {
+                kept.push(row);
+            }
+        }
+        *list = kept;
+    }
+    for list in lists(&mut grouping) {
+        for row in list.iter_mut() {
+            if let Some(children) = moved.remove(row.id.as_ref()) {
+                row.children.extend(children);
+            }
+        }
+    }
+    grouping
+}
+
 pub fn lift_pinned(grouping: Grouping) -> (Grouping, Vec<aui::nav::SessionSummary>) {
     match grouping {
         Grouping::Project(mut groups) => {
@@ -495,6 +546,20 @@ pub(crate) mod tests {
     use crate::providers::ProviderId;
     use provider::facts::Attention;
     use crate::projects::Projects;
+
+    /// docs/85 14.9: workers nest under their lead; a worker of a worker
+    /// under the first lead; a worker whose lead is not listed stays put.
+    #[test]
+    fn workers_nest_under_their_lead() {
+        let row = |id: &str| SessionSummary::new(id, id, AgentState::Idle, "1m");
+        let grouping = Grouping::Date(vec![DateGroup::new("Today", vec![row("lead"), row("w1"), row("w2"), row("w3"), row("orphan")])]);
+        let leads: HashMap<String, String> = [("w1", "lead"), ("w2", "lead"), ("w3", "w2"), ("orphan", "gone")].into_iter().map(|(a, b)| (a.to_owned(), b.to_owned())).collect();
+        let Grouping::Date(groups) = nest_workers(grouping, &leads) else { panic!() };
+        let ids: Vec<&str> = groups[0].sessions.iter().map(|s| s.id.as_ref()).collect();
+        assert_eq!(ids, ["lead", "orphan"]);
+        let children: Vec<&str> = groups[0].sessions[0].children.iter().map(|s| s.id.as_ref()).collect();
+        assert_eq!(children, ["w1", "w2", "w3"]);
+    }
 
     /// docs/82 5.5 (docs/81 F C3): every row wears its provider's badge —
     /// Muse's too, where "no badge" used to mean Muse — and the wire id's

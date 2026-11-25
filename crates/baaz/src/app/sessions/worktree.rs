@@ -168,6 +168,11 @@ impl Harness {
         });
     }
 
+    /// [`Self::run_worktree_setup`] for a worker's worktree (docs/85 14.3).
+    pub(crate) fn run_worktree_setup_for(&mut self, worktree: worktrees::Worktree, cx: &mut Context<Self>) {
+        self.run_worktree_setup(worktree, cx);
+    }
+
     /// The project's `setup` script, once, in the background: the lane is
     /// not held for it. A failure keeps the worktree and says so.
     fn run_worktree_setup(&mut self, worktree: worktrees::Worktree, cx: &mut Context<Self>) {

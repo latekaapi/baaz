@@ -85,6 +85,15 @@ CASES = [
     ("Open the diff for src/util.py so I can review it.", {"pane_show"}),
     ("Show me what changed since this session began, in the pane.", {"pane_show"}),
     ("Check the PR checks and tell me which ones fail.", {"pr_status"}),
+    # docs/85 Stage 14: orchestration (run them with --only 51-58).
+    ("Have Codex review src/app.py while you keep going.", {"delegate", "agents_available"}),
+    ("Write a test for load_config with Sonnet, then have Codex review it.", {"delegate", "agents_available"}),
+    ("Which agents can I hand work to right now?", {"agents_available"}),
+    ("How are the tasks you delegated doing?", {"task_status"}),
+    ("Stop the review task task-1.", {"task_stop"}),
+    ("Tell the worker on task-1 to also update the README.", {"task_send"}),
+    ("Merge the finished tasks' branches here.", {"task_land", "task_status"}),
+    ("Do these three in parallel with other agents: lint, docs, tests.", {"delegate", "agents_available"}),
 ]
 
 STUB_ANSWERS = {
@@ -230,7 +239,9 @@ def run_muse(case_i, phrase, repo, work, sock, model, note):
 
 
 BAAZ_TOOLS = {"pane_show", "changes_read", "changes_revert", "changes_comment", "changes_commit", "pr_status",
-              "session_search", "session_read", "memory_save", "memory_edit", "code_find"}
+              "session_search", "session_read", "memory_save", "memory_edit", "code_find",
+              "agents_available", "delegate", "task_status", "task_send", "task_stop", "task_wait", "task_land",
+              "session_send", "session_watch", "report", "escalate"}
 
 
 def first_called(provider, raw):

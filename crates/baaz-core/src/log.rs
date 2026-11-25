@@ -16,7 +16,10 @@
 macro_rules! baaz_log {
     ($($arg:tt)*) => {{
         let line = format!($($arg)*);
-        eprintln!("baaz: {line}");
+        {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "baaz: {line}");
+        }
         $crate::log::file_line(&line);
     }};
 }

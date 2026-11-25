@@ -73,6 +73,7 @@ impl Harness {
                     call.answer(Ok(core::pr_summary(pr.as_ref())));
                 });
             }
+            other if crate::orchestra::ORCHESTRA_TOOL_NAMES.contains(&other) => self.orchestra_call(call, cx),
             other => call.answer(Err(format!("unknown pane tool: {other}"))),
         }
     }

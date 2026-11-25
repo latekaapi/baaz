@@ -1278,6 +1278,13 @@ ENTRIES.update({
     "pane-comment":            _populated("right-width:440;pane-comment:path=crates/baaz/src/right.rs,line=12,text=This branch never runs on a capture: worth a test?", replay=True),
     # docs/85 13.4: Baaz's own approval for an agent's push (rule 29).
     "pane-push-ask":           _populated("pane-push-ask:feature/pane-tools", replay=True),
+    # docs/85 14.9: a lead with three workers — nested in the sidebar, the
+    # Workers block while work runs, the summary once settled, and a worker
+    # open beside its lead.
+    "workers-sidebar":         _populated("workers-fixture:running", replay=True),
+    "workers-block":           _populated("workers-fixture:running", replay=True, sidebar=False),
+    "workers-summary":         _populated("workers-fixture:settled", replay=True, sidebar=False),
+    "workers-pane":            _populated("right-width:440;workers-fixture:running;workers-pane", replay=True),
     # Task 6.4's confirms, from fixture data: a capture takes no
     # checkpoints and runs in the owner's repository, so neither button can
     # apply anything (the session refuses: no checkpoints).

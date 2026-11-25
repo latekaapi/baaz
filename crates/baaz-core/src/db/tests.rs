@@ -470,6 +470,35 @@ fn version_four_indexes_the_ledger_and_drops_the_legacy_copy() {
     });
 }
 
+/// docs/85 14.1 migration, from real-shaped data: a version-5 file (the
+/// first-launch import of real-shaped stores, then its ledger) reaches
+/// version 6 with the task tables, every session and turn as they were.
+#[test]
+fn version_six_adds_the_task_record_and_moves_nothing() {
+    let dir = temp("v6");
+    real_shaped_stores(&dir);
+    let path = super::path_in(&dir);
+    let meta = aui_protocol::TurnMeta { model: "m".into(), tokens_in: 10, ..aui_protocol::TurnMeta::default() };
+    let (turns_before, sessions_before) = super::as_writer(|| {
+        let mut conn = super::open_at(&path).expect("opens");
+        let rows: Vec<_> = (0..3).map(|n| crate::usage::row_from_finished("s-v6", "v", &format!("t-{n}"), n, &meta).with_provider("codex")).collect();
+        super::turns::record_ledger(&mut conn, &rows).expect("ledger");
+        conn.execute_batch("DROP TABLE task_outbox; DROP TABLE task; PRAGMA user_version = 5;").expect("back to the version-5 shape");
+        (count(&conn, "turn"), count(&conn, "session"))
+    });
+    super::close(path.clone());
+    super::as_writer(|| {
+        let mut conn = super::open_at(&path).expect("reopens");
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(version, 6);
+        assert_eq!((count(&conn, "turn"), count(&conn, "session")), (turns_before, sessions_before), "nothing else moved");
+        let task = crate::tasks::sample("t-1", crate::tasks::Status::Queued);
+        super::tasks::save_with(&mut conn, &task, Some(&crate::tasks::Effect::Start { generation: 0 })).expect("the new tables take a task");
+        assert_eq!(super::tasks::load(&conn, "t-1").unwrap(), Some(task));
+    });
+    super::close(path);
+}
+
 /// docs/85 10.4: a compaction's ledger row is marked `role = 'compaction'`:
 /// its cost is on the ledger, and the per-turn reader (`find_ledger`, which
 /// asks for assistant turns) leaves it out.

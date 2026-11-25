@@ -10,10 +10,17 @@ use super::*;
 use crate::overlays::DialogAction;
 
 /// What each `SubmitInput` carried: its text parts, then its display text.
-type Sent = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
+pub(super) type Sent = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
 
 /// The scripted double behind a recorder of every send.
-fn recording_factory() -> (crate::providers::Registry, Sent) {
+pub(super) fn recording_factory() -> (crate::providers::Registry, Sent) {
+    recording_factory_numbered(false)
+}
+
+/// [`recording_factory`], but every open after the first mints its own
+/// session id (`s-scripted-2`, …): a lead and its workers are distinct
+/// sessions (docs/85 Stage 14).
+pub(super) fn recording_factory_numbered(numbered: bool) -> (crate::providers::Registry, Sent) {
     use provider::ProviderAdapter as _;
     struct Recording {
         inner: provider::scripted::ScriptedProvider,
@@ -30,6 +37,22 @@ fn recording_factory() -> (crate::providers::Registry, Sent) {
             self.inner.capabilities()
         }
         fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
+            // A resume (docs/85 14.1's restart) echoes the session.
+            if let provider::Command::ResumeSession { session_id, .. } = &command {
+                self.sent.lock().expect("sent").push((format!("resumed:{session_id}"), String::new()));
+                return Ok(provider::Ack::Session { session_id: session_id.clone(), title: None });
+            }
+            let steered = match &command {
+                provider::Command::SteerInput { parts, .. } => Some(parts),
+                _ => None,
+            };
+            if let Some(parts) = steered {
+                let text: String = parts.iter().filter_map(|part| match part {
+                    provider::SubmissionPart::Text(text) => Some(text.clone()),
+                    provider::SubmissionPart::Image { .. } => None,
+                }).collect();
+                self.sent.lock().expect("sent").push((text, "(steered)".into()));
+            }
             if let provider::Command::SubmitInput { parts, display_text, .. } = &command {
                 let text: String = parts
                     .iter()
@@ -51,8 +74,11 @@ fn recording_factory() -> (crate::providers::Registry, Sent) {
     }
     let sent: Sent = std::sync::Arc::default();
     let factory_sent = sent.clone();
+    let opened = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let factory = crate::providers::Registry::test(move |_: ProviderId| {
-        let mut adapter = Recording { inner: provider::scripted::ScriptedProvider::new(), sent: factory_sent.clone() };
+        let n = opened.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let inner = if numbered && n > 1 { provider::scripted::ScriptedProvider::with_session_id(format!("s-scripted-{n}")) } else { provider::scripted::ScriptedProvider::new() };
+        let mut adapter = Recording { inner, sent: factory_sent.clone() };
         adapter.connect(&conn::connect_info())?;
         Ok(provider::Provider::new(adapter))
     });
@@ -303,7 +329,7 @@ fn revert_file_through_the_confirm_and_the_toasts_undo(cx: &mut gpui::TestAppCon
 
 /// One pane tool call through the harness's hook, as the service hands it
 /// over (docs/85 13.3); the reply's channel.
-fn pane_call(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext, session: &str, root: &std::path::Path, tool: &str, params: serde_json::Value) -> std::sync::mpsc::Receiver<String> {
+pub(super) fn pane_call(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext, session: &str, root: &std::path::Path, tool: &str, params: serde_json::Value) -> std::sync::mpsc::Receiver<String> {
     let (reply, rx) = std::sync::mpsc::channel();
     let call = crate::terminal::service::PaneCall { tool: tool.into(), session: session.into(), root: root.to_path_buf(), params, id: serde_json::json!(1), reply };
     vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.pane_tool_call(call, cx)));
@@ -311,7 +337,7 @@ fn pane_call(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext, ses
     rx
 }
 
-fn reply(rx: &std::sync::mpsc::Receiver<String>) -> serde_json::Value {
+pub(super) fn reply(rx: &std::sync::mpsc::Receiver<String>) -> serde_json::Value {
     let text = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the tool answered");
     serde_json::from_str(&text).expect("json")
 }

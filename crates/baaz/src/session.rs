@@ -439,6 +439,12 @@ pub(crate) struct Draft {
 
 /// What the session needs the application to do about something.
 pub enum SessionEvent {
+    /// docs/85 14.9: the Workers block's ↗: open that worker beside this
+    /// session.
+    OpenWorker { worker: String },
+    /// docs/85 14.2: the person answered an escalation card (Baaz's own
+    /// question, put up for a worker's `escalate`).
+    EscalationAnswered { task_id: String, card_id: String, answer: String },
     /// Show this in a modal dialog: an identity or protocol failure.
     Dialog {
         /// Dialog heading.
@@ -1337,6 +1343,14 @@ impl SessionRuntime {
     /// Replace the first block of a client-authored turn.
     pub(crate) fn replace_client_block(&mut self, id: &str, block: Block) -> Vec<Delta> {
         self.store.replace_client_block(id, block)
+    }
+
+    /// The first block of the client-authored turn `id`, if there is one.
+    pub(crate) fn client_block(&self, id: &str) -> Option<Block> {
+        self.session()?.turns.iter().find(|turn| turn.id() == id).and_then(|turn| match turn {
+            Turn::Assistant { blocks, .. } => blocks.first().cloned(),
+            Turn::User { .. } => None,
+        })
     }
 
     /// Tests: fold one Muse wire frame ([`wire_note`]) through the same
@@ -2522,6 +2536,12 @@ impl SessionRuntime {
     /// draft, even before its row exists.
     pub(crate) fn is_sending(&self) -> bool {
         self.submitting || self.running.is_some()
+    }
+
+    /// Whether the server says a turn runs now (accepted, not finished):
+    /// what a steer needs (docs/85 14.2 delivers into it).
+    pub(crate) fn turn_running(&self) -> bool {
+        self.running.is_some()
     }
 }
 

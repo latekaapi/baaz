@@ -160,6 +160,14 @@ impl SessionView {
     /// **labels**, so a request with several questions gathers its answers here
     /// and sends one `userInput/answer` when the last one is answered.
     pub fn answer_question(&mut self, block_id: String, cx: &mut Context<Self>) {
+        if self.runtime.read(cx).escalation_of(&block_id).is_some() {
+            let selected = self.selections.get(&block_id).cloned().unwrap_or_default();
+            if selected.is_empty() {
+                return;
+            }
+            self.runtime.update(cx, |rt, cx| rt.answer_escalation(&block_id, aui_protocol::Answer { selected, other: None }, cx));
+            return;
+        }
         self.answer_provider_question(block_id, cx);
     }
 
@@ -218,6 +226,64 @@ impl SessionRuntime {
 }
 
 impl SessionRuntime {
+    /// docs/85 14.2: put an escalation card up — the worker's question to
+    /// the person, as a question card of Baaz's own (its answer goes to the
+    /// task, never to this session's provider).
+    pub(crate) fn post_escalation(&mut self, card_id: &str, task_id: &str, header: &str, question: &str, options: Vec<String>, cx: &mut Context<Self>) {
+        let block = Block::Question {
+            id: card_id.to_owned(),
+            header: header.to_owned(),
+            prompt: question.to_owned(),
+            subtitle: "A worker is waiting for your answer.".to_owned(),
+            options: options.iter().enumerate().map(|(i, label)| aui_protocol::QuestionOption { label: label.clone(), description: String::new(), key: (i + 1).to_string(), preview: None }).collect(),
+            multi: false,
+            allow_other: true,
+            answer: None,
+            timeout_ms: None,
+        };
+        self.escalations.insert(card_id.to_owned(), (task_id.to_owned(), options));
+        self.append_client_block(card_id, block);
+        cx.emit(RuntimeEvent::EntriesAppended);
+    }
+
+    /// The task and options of the escalation card `block_id`, if it is one
+    /// still waiting.
+    pub(crate) fn escalation_of(&self, block_id: &str) -> Option<&(String, Vec<String>)> {
+        self.escalations.get(block_id)
+    }
+
+    /// The escalation card still waiting here, if any (tests).
+    #[cfg(feature = "probe")]
+    #[cfg(test)]
+    pub(crate) fn escalation_of_any(&self) -> Option<String> {
+        self.escalations.keys().next().cloned()
+    }
+
+    /// The person answered the escalation card: it settles here, and the
+    /// window hears it ([`SessionEvent::EscalationAnswered`]).
+    pub(crate) fn answer_escalation(&mut self, card_id: &str, answer: aui_protocol::Answer, cx: &mut Context<Self>) {
+        let Some((task_id, options)) = self.escalations.remove(card_id) else { return };
+        let words = match (&answer.other, answer.selected.first()) {
+            (Some(text), _) => text.clone(),
+            (None, Some(i)) => options.get(*i).cloned().unwrap_or_default(),
+            (None, None) => return,
+        };
+        self.settle_escalation_card(card_id, answer);
+        cx.emit(RuntimeEvent::QuestionsChanged);
+        cx.emit(SessionEvent::EscalationAnswered { task_id, card_id: card_id.to_owned(), answer: words });
+    }
+
+    /// Show the escalation card `card_id` answered (here, or in the other
+    /// transcript that carries the same card).
+    pub(crate) fn settle_escalation_card(&mut self, card_id: &str, answer: aui_protocol::Answer) {
+        self.escalations.remove(card_id);
+        let Some(Block::Question { header, prompt, subtitle, options, multi, allow_other, .. }) = self.client_block(card_id) else { return };
+        let block = Block::Question { id: card_id.to_owned(), header, prompt, subtitle, options, multi, allow_other, answer: Some(answer), timeout_ms: None };
+        self.replace_client_block(card_id, block);
+    }
+}
+
+impl SessionRuntime {
     /// "Skip": `userInput/cancel`.
     pub fn skip_question(&mut self, block_id: String, cx: &mut Context<Self>) {
         if !self.check_questions_gate(cx) {
@@ -256,6 +322,18 @@ impl SessionView {
     }
 
     pub(super) fn send_clarification(&mut self, block_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // An escalation's typed answer is the answer (docs/85 14.2).
+        if self.runtime.read(cx).escalation_of(block_id).is_some() {
+            let content = self.clarify.read(cx).value().trim().to_string();
+            if content.is_empty() {
+                return;
+            }
+            self.clarify_open = None;
+            self.clarify.update(cx, |state, cx| state.set_value("", window, cx));
+            // The answer's QuestionsChanged redraws the view.
+            self.runtime.update(cx, |rt, cx| rt.answer_escalation(block_id, aui_protocol::Answer { selected: Vec::new(), other: Some(content) }, cx));
+            return;
+        }
         // The provider lane clarifies with free text instead of the offered
         // options — the "let me explain" path — gated like every question
         // command.
@@ -299,5 +377,64 @@ impl SessionRuntime {
             }
             _ => self.report_provider_error(error, cx),
         }
+    }
+}
+
+impl SessionRuntime {
+    /// docs/85 14.9: the Workers block's rows and the delegated work's
+    /// summary, from orchestration. A changed list redraws the band.
+    pub(crate) fn set_workers(&mut self, rows: Vec<aui::transcript::WorkerRow>, delegated: Vec<aui::transcript::CriteriaTask>, cx: &mut Context<Self>) {
+        if self.workers == rows && self.delegated == delegated {
+            return;
+        }
+        // A new worker unfolds the block again.
+        if rows.len() > self.workers.len() {
+            self.workers_open = None;
+        }
+        self.workers = rows;
+        self.delegated = delegated;
+        cx.emit(RuntimeEvent::BannerChanged);
+    }
+}
+
+impl SessionView {
+    /// docs/85 14.9: the Workers block pinned at the foot of the transcript
+    /// (on the composer band), with the per-criterion summary above it once
+    /// every worker has settled (the rows fold then; the summary stays).
+    /// `None` with nothing delegated.
+    pub(crate) fn render_workers_block(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rt = self.runtime.read(cx);
+        if rt.workers.is_empty() {
+            return None;
+        }
+        let settled = rt.workers.iter().all(|w| w.state.settled());
+        let open = rt.workers_open.unwrap_or(!settled);
+        let runtime = self.runtime.clone();
+        let block = aui::transcript::workers_block("workers-block", rt.workers.clone(), open).on_action(move |action, _, cx| match action {
+            aui::transcript::WorkersAction::Toggle => runtime.update(cx, |rt, cx| {
+                rt.workers_open = Some(!open);
+                cx.emit(RuntimeEvent::BannerChanged);
+            }),
+            aui::transcript::WorkersAction::OpenBeside(worker) => runtime.update(cx, |_, cx| cx.emit(SessionEvent::OpenWorker { worker: worker.to_string() })),
+        });
+        // At the end the summary shows by itself; only the rows fold.
+        let summary = (settled && !rt.delegated.is_empty()).then(|| aui::transcript::criteria_card("workers-summary", rt.delegated.clone()));
+        // On the transcript's measure, like the composer under it.
+        Some(
+            gpui::div()
+                .w_full()
+                .px(gpui::px(TRANSCRIPT_PAD_X))
+                .pb(gpui::px(aui_tokens::scale::SP_2))
+                .child(
+                    gpui_kit::base::v_flex()
+                        .w_full()
+                        .max_w(gpui::px(TRANSCRIPT_MEASURE))
+                        .mx_auto()
+                        .gap(gpui::px(aui_tokens::scale::SP_2))
+                        .children(summary)
+                        .child(block),
+                )
+                .into_any_element(),
+        )
     }
 }
