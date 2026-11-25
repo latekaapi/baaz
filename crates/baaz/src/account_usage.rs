@@ -19,11 +19,12 @@ use crate::provider_status::{Auth, Headline, ProviderStatus};
 use crate::tier::{ResetClause, Tier, resolve_plan_name};
 use crate::providers::ProviderMark as _;
 
-/// The app's live muse connection and tier for the Muse row: present
-/// exactly when the app is signed in to Muse. The row then reports the
-/// tier card's own windows even when no `muse` binary was found.
+/// The billing-tier provider's live connection and tier for its row
+/// (`ProviderTrait::BillingTier`, today Muse): present exactly when the app
+/// is signed in to it. The row then reports the tier card's own windows
+/// even when its binary was not found.
 #[derive(Clone, Debug, PartialEq)]
-pub struct MuseFeed {
+pub struct TierFeed {
     /// The tier probe's latest answer, when it has answered yet.
     pub tier: Option<Tier>,
 }
@@ -38,7 +39,7 @@ pub struct MuseFeed {
 /// * not connected → `Unavailable` with the headline plus its advisory.
 pub fn usage_rows(
     statuses: &[ProviderStatus],
-    muse: Option<MuseFeed>,
+    muse: Option<TierFeed>,
     now: i64,
 ) -> Vec<UsageRowData> {
     let refreshing: HashSet<ProviderId> =
@@ -51,7 +52,7 @@ pub fn usage_rows(
 /// so tests drive the in-flight reads without touching the live service.
 fn usage_rows_with(
     statuses: &[ProviderStatus],
-    muse: Option<MuseFeed>,
+    muse: Option<TierFeed>,
     now: i64,
     refreshing: &HashSet<ProviderId>,
     muse_stale: bool,
@@ -111,7 +112,7 @@ fn refreshing_row(status: &ProviderStatus) -> UsageRowData {
 /// the card's own reset clauses — then the snapshot's own words. When the
 /// last wire read carried no numbers (`muse_stale`), the kept snapshot's
 /// footnote says "unavailable now" beside its age.
-fn muse_row(status: &ProviderStatus, feed: &MuseFeed, now: i64, muse_stale: bool) -> UsageRowData {
+fn muse_row(status: &ProviderStatus, feed: &TierFeed, now: i64, muse_stale: bool) -> UsageRowData {
     let snapshot = status.usage.as_ref();
     // The tier card is the richer source (both windows, their reset
     // clauses) and the app's own refresh derives the stored Muse snapshot
@@ -527,7 +528,7 @@ mod tests {
         // "unavailable now" beside them — never a wiped snapshot.
         let mut muse = status(ProviderId::Muse);
         muse.usage = Some(snapshot("muse", 1700000000 - 600));
-        let feed = MuseFeed { tier: Some(subscription("Muse Code High Usage", None, None)) };
+        let feed = TierFeed { tier: Some(subscription("Muse Code High Usage", None, None)) };
         let rows = usage_rows_with(&[muse], Some(feed), 1700000000, &HashSet::new(), true);
         assert_eq!(rows.len(), 1);
         match &rows[0].state {
@@ -542,7 +543,7 @@ mod tests {
         // Without the flag the same row reads just its age.
         let mut muse = status(ProviderId::Muse);
         muse.usage = Some(snapshot("muse", 1700000000 - 600));
-        let feed = MuseFeed { tier: Some(subscription("Muse Code High Usage", None, None)) };
+        let feed = TierFeed { tier: Some(subscription("Muse Code High Usage", None, None)) };
         let rows = usage_rows_with(&[muse], Some(feed), 1700000000, &HashSet::new(), false);
         match &rows[0].state {
             UsageRowState::Windows(_, as_of) => {
@@ -589,7 +590,7 @@ mod tests {
 
     fn muse_rows(tier: Option<Tier>, now: i64) -> Vec<UsageRowData> {
         let muse = status(ProviderId::Muse);
-        usage_rows(&[muse], Some(MuseFeed { tier }), now)
+        usage_rows(&[muse], Some(TierFeed { tier }), now)
     }
 
     /// One wire-built Muse tier with fixed reset instants: the Current
@@ -627,7 +628,7 @@ mod tests {
         let mut muse = status(ProviderId::Muse);
         muse.installed = Installed::No;
         muse.auth = Auth::Unknown;
-        let rows = usage_rows(&[muse], Some(MuseFeed { tier: Some(subscription("Muse Code Power Usage", Some(0), Some(3))) }), 1700000000);
+        let rows = usage_rows(&[muse], Some(TierFeed { tier: Some(subscription("Muse Code Power Usage", Some(0), Some(3))) }), 1700000000);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, AuiProvider::Muse);
         assert_eq!(rows[0].plan.as_deref(), Some("Power Usage"));
@@ -731,7 +732,7 @@ mod tests {
             }],
             as_of: 1700000000,
         });
-        let rows = usage_rows(&[muse.clone()], Some(MuseFeed { tier: Some(wired_subscription()) }), 1700000000);
+        let rows = usage_rows(&[muse.clone()], Some(TierFeed { tier: Some(wired_subscription()) }), 1700000000);
         match &rows[0].state {
             UsageRowState::Windows(windows, _) => {
                 let labels: Vec<String> = windows.iter().map(|w| w.label.to_string()).collect();
@@ -741,7 +742,7 @@ mod tests {
             }
             other => panic!("expected the tier card's bars, got {other:?}"),
         }
-        let rows = usage_rows(&[muse], Some(MuseFeed { tier: Some(subscription("Muse Code Power Usage", None, None)) }), 1700000000);
+        let rows = usage_rows(&[muse], Some(TierFeed { tier: Some(subscription("Muse Code Power Usage", None, None)) }), 1700000000);
         match &rows[0].state {
             UsageRowState::Windows(windows, _) => assert_eq!(windows[0].label.to_string(), "Session"),
             other => panic!("expected the snapshot's bar, got {other:?}"),

@@ -270,7 +270,7 @@ impl Harness {
     fn sidebar_usage(&self) -> Vec<ProviderUsage> {
         let signed_in = matches!(self.auth, Auth::SignedIn(_));
         let now = crate::account_usage::now_secs();
-        let muse_feed = signed_in.then(|| crate::account_usage::MuseFeed { tier: self.tier.clone() });
+        let muse_feed = signed_in.then(|| crate::account_usage::TierFeed { tier: self.tier.clone() });
         crate::account_usage::usage_rows(&crate::provider_status::live_statuses(), muse_feed, now)
             .into_iter()
             .enumerate()
