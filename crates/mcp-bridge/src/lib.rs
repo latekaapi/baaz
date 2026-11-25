@@ -267,7 +267,7 @@ impl ToolRegistry {
             })
             .filter(|(score, _)| *score > 0)
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         scored.into_iter().take(TOOL_SEARCH_HITS).map(|(_, t)| t).collect()
     }
 }
