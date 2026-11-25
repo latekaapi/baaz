@@ -148,7 +148,20 @@ pub struct ToolRegistry {
     tools: Vec<ToolDef>,
     index: HashMap<String, usize>,
     instructions: Option<String>,
+    /// docs/85 13.7: the tool-search mode's always-on tools. `Some`, the
+    /// list shows only these plus [`TOOL_SEARCH`]; every tool still runs.
+    always_on: Option<Vec<String>>,
 }
+
+/// docs/85 13.7 (T3's pattern): the one tool that finds and runs the rest
+/// when a provider loads every tool up front and the list costs too much.
+pub const TOOL_SEARCH: &str = "tool_search";
+
+/// The tools a tool-search bridge always lists: what a person asks for most.
+pub const ALWAYS_ON_TOOL_NAMES: [&str; 5] = ["pane_show", "terminal_run", "session_search", "memory_save", "browser_navigate"];
+
+/// What a `tool_search` query answers at most.
+const TOOL_SEARCH_HITS: usize = 6;
 
 impl fmt::Debug for ToolRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -226,6 +239,54 @@ impl ToolRegistry {
     pub fn set_instructions(&mut self, instructions: impl Into<String>) {
         self.instructions = Some(instructions.into());
     }
+
+    /// docs/85 13.7: list only `always_on` (those registered) and
+    /// [`TOOL_SEARCH`], which finds the rest by words and runs any by name.
+    pub fn set_tool_search(&mut self, always_on: &[&str]) {
+        self.always_on = Some(always_on.iter().map(|name| (*name).to_owned()).collect());
+    }
+
+    /// The tools a `tools/list` names, in registration order.
+    fn listed(&self) -> impl Iterator<Item = &ToolDef> {
+        self.tools.iter().filter(|t| self.always_on.as_ref().is_none_or(|on| on.contains(&t.name)))
+    }
+
+    /// The `tool_search` matches for `query`: tools ranked by the query's
+    /// words found in the name and the description (name hits count
+    /// double), the always-on ones left out.
+    fn search(&self, query: &str) -> Vec<&ToolDef> {
+        let words: Vec<String> = query.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() > 2).map(str::to_owned).collect();
+        let mut scored: Vec<(usize, &ToolDef)> = self
+            .tools
+            .iter()
+            .filter(|t| self.always_on.as_ref().is_none_or(|on| !on.contains(&t.name)))
+            .map(|t| {
+                let (name, text) = (t.name.replace('_', " "), t.description.to_lowercase());
+                let score = words.iter().map(|w| usize::from(text.contains(w.as_str())) + 2 * usize::from(name.contains(w.as_str()))).sum();
+                (score, t)
+            })
+            .filter(|(score, _)| *score > 0)
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.into_iter().take(TOOL_SEARCH_HITS).map(|(_, t)| t).collect()
+    }
+}
+
+/// `tool_search`'s own advertisement.
+fn tool_search_def() -> Value {
+    json!({
+        "name": TOOL_SEARCH,
+        "description": "Find and run Baaz's other tools: the right pane (show a file at a line, a diff, what changed, \
+            revert, comment, commit, the pull request's checks), the terminal (read the screen, send keys, list or close \
+            tabs), the browser (read, click, type, screenshot), past sessions (read one), memory notes (edit), and code \
+            search (where something is defined or used). Pass query to list matching tools with their arguments; \
+            pass call (a tool's name) and arguments to run it.",
+        "inputSchema": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "What you want to do, in a few words."},
+            "call": {"type": "string", "description": "A tool's name to run."},
+            "arguments": {"type": "object", "description": "That tool's arguments."},
+        }},
+    })
 }
 
 /// Build the `{"mcpServers":{...}}` config value for this server.
@@ -342,7 +403,7 @@ fn initialize_result(registry: &ToolRegistry) -> Value {
 /// The same split as Claude Code's Read-only deny list
 /// (`provider_claude_code::argv::READ_ONLY_DENIED_BRIDGE_TOOLS`). Named,
 /// never defaulted: a new tool is acting until it is listed here.
-pub const READ_ONLY_TOOL_NAMES: [&str; 13] = [
+pub const READ_ONLY_TOOL_NAMES: [&str; 16] = [
     "terminal_list",
     "terminal_read",
     "terminal_screen",
@@ -356,6 +417,10 @@ pub const READ_ONLY_TOOL_NAMES: [&str; 13] = [
     "browser_console",
     "browser_network",
     "browser_errors",
+    // docs/85 13.1, 13.2, 13.4: show in the pane, read Changes, read the PR.
+    "pane_show",
+    "changes_read",
+    "pr_status",
 ];
 
 /// The bridge tools that can change something beyond the page's view, advertised
@@ -363,9 +428,8 @@ pub const READ_ONLY_TOOL_NAMES: [&str; 13] = [
 pub const DESTRUCTIVE_TOOL_NAMES: [&str; 3] = ["browser_act", "browser_run", "browser_upload"];
 
 fn tools_list_result(registry: &ToolRegistry) -> Value {
-    let tools: Vec<Value> = registry
-        .tools()
-        .iter()
+    let mut tools: Vec<Value> = registry
+        .listed()
         .map(|t| {
             let mut tool = json!({
                 "name": t.name,
@@ -381,6 +445,9 @@ fn tools_list_result(registry: &ToolRegistry) -> Value {
             tool
         })
         .collect();
+    if registry.always_on.is_some() {
+        tools.push(tool_search_def());
+    }
     json!({"tools": tools})
 }
 
@@ -389,13 +456,37 @@ fn call_tool(id: &Value, params: &Value, registry: &ToolRegistry) -> String {
     let Some(name) = name else {
         return error_reply(id, -32602, "invalid params: missing tool name");
     };
-    let Some(tool) = registry.get(name) else {
-        return error_reply(id, -32602, &format!("unknown tool: {name}"));
-    };
-    let arguments = params
+    let mut arguments = params
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    let mut name = name.to_owned();
+    if registry.always_on.is_some() && name == TOOL_SEARCH {
+        match arguments.get("call").and_then(Value::as_str).map(str::to_owned) {
+            Some(target) => {
+                arguments = arguments.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                name = target;
+            }
+            None => {
+                let query = arguments.get("query").and_then(Value::as_str).unwrap_or("");
+                let found: Vec<Value> = registry
+                    .search(query)
+                    .into_iter()
+                    .map(|t| json!({"name": t.name, "description": t.description, "arguments": t.input_schema}))
+                    .collect();
+                let text = if found.is_empty() {
+                    "No tool matches; try other words.".to_owned()
+                } else {
+                    format!("Run one with tool_search {{call: <name>, arguments: {{...}}}}.\n{}", serde_json::to_string(&found).unwrap_or_default())
+                };
+                return success_reply(id, &serde_json::to_value(ToolOutcome::text(text)).unwrap_or_else(|_| json!({"content": []})));
+            }
+        }
+    }
+    let name = name.as_str();
+    let Some(tool) = registry.get(name) else {
+        return error_reply(id, -32602, &format!("unknown tool: {name}"));
+    };
     if let Err(detail) = validate_against_schema(&tool.input_schema, &arguments) {
         return error_reply(id, -32602, &format!("invalid params: {detail}"));
     }
@@ -522,4 +613,55 @@ fn error_reply(id: &Value, code: i64, message: &str) -> String {
         &json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}),
     )
     .expect("reply serializes")
+}
+
+#[cfg(test)]
+mod tool_search_tests {
+    use super::*;
+
+    /// A registry of every tool family's names, each answering its own name.
+    fn full() -> ToolRegistry {
+        let mut registry = ToolRegistry::new();
+        let any = json!({"type": "object", "properties": {}});
+        for (name, description, schema) in crate::pane::tool_defs().into_iter().chain(crate::memory::tool_defs()) {
+            let answer = name.clone();
+            registry.register(name, description, schema, move |_| Ok(ToolOutcome::text(answer.clone()))).unwrap();
+        }
+        for name in ["terminal_run", "terminal_read", "browser_navigate", "browser_act"] {
+            let answer = name.to_owned();
+            registry.register(name, format!("{name} tool"), any.clone(), move |_| Ok(ToolOutcome::text(answer.clone()))).unwrap();
+        }
+        registry
+    }
+
+    fn call(registry: &ToolRegistry, request: Value) -> Value {
+        serde_json::from_str(&handle_line(&request.to_string(), registry).expect("a reply")).unwrap()
+    }
+
+    /// docs/85 13.7: in tool-search mode the list is the five always-on
+    /// tools plus tool_search; a query finds the rest by the words a person
+    /// says; a call by name runs a tool the list does not show, through its
+    /// own schema check. Without the mode the list is everything.
+    #[test]
+    fn tool_search_lists_five_finds_the_rest_and_runs_them() {
+        let mut registry = full();
+        let all = call(&registry, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}));
+        assert_eq!(all["result"]["tools"].as_array().unwrap().len(), registry.len());
+        registry.set_tool_search(&ALWAYS_ON_TOOL_NAMES);
+        let listed = call(&registry, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}));
+        let names: Vec<&str> = listed["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["pane_show", "session_search", "memory_save", "terminal_run", "browser_navigate", "tool_search"]);
+        let found = call(&registry, json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "tool_search", "arguments": {"query": "commit and push"}}}));
+        let text = found["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"changes_commit\""), "{text}");
+        assert!(!text.contains("\"pane_show\""), "always-on tools are not search results");
+        let ran = call(&registry, json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "tool_search", "arguments": {"call": "pr_status", "arguments": {}}}}));
+        assert_eq!(ran["result"]["content"][0]["text"], "pr_status");
+        let checked = call(&registry, json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "tool_search", "arguments": {"call": "changes_comment", "arguments": {"path": "a"}}}}));
+        assert!(checked["error"]["message"].as_str().unwrap().contains("invalid params"), "the hidden tool's own schema holds: {checked}");
+        let direct = call(&registry, json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "changes_read", "arguments": {}}}));
+        assert_eq!(direct["result"]["content"][0]["text"], "changes_read", "a name the agent already knows still runs");
+        let none = call(&registry, json!({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "tool_search", "arguments": {"query": "zzz qqq"}}}));
+        assert!(none["result"]["content"][0]["text"].as_str().unwrap().contains("No tool matches"));
+    }
 }

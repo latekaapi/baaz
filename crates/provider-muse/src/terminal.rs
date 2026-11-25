@@ -39,8 +39,10 @@ pub struct TerminalRelay {
 
 impl TerminalRelay {
     /// The bridge's argv tail for `session_id`: `--terminal --socket
-    /// <sock> --session <id>`, exactly what `mcp-bridge --terminal`
-    /// parses.
+    /// <sock> --session <id> --tool-search`, exactly what `mcp-bridge
+    /// --terminal` parses. Muse loads every MCP tool up front, and the
+    /// whole list cost 4,887 tokens at session start (docs/85 13.7), so
+    /// its bridge lists five tools plus `tool_search`.
     pub fn bridge_args(&self, session_id: &str) -> Vec<String> {
         vec![
             "--terminal".to_owned(),
@@ -48,6 +50,7 @@ impl TerminalRelay {
             self.socket.to_string_lossy().into_owned(),
             "--session".to_owned(),
             session_id.to_owned(),
+            "--tool-search".to_owned(),
         ]
     }
 
@@ -168,7 +171,8 @@ mod tests {
                         "--socket",
                         "/tmp/baaz/run/terminal-1.sock",
                         "--session",
-                        "s-1"
+                        "s-1",
+                        "--tool-search"
                     ]
                 );
                 assert_eq!(*mode, Some(SessionMcpServerMode::Required));

@@ -15,7 +15,11 @@ How it works, per provider:
     is given the way Baaz gives it (Claude: --append-system-prompt; Codex:
     developer_instructions; Muse: the prompt's preface, Muse has no channel);
   * a phrasing passes when the first Baaz tool the agent calls is one of the
-    expected ones.
+    expected ones, read from the CLI's own event stream;
+  * nothing can write: Claude in its default permission mode (headless, so
+    any call that needs an approval is denied), Codex read-only with its own
+    approvals (an MCP call is cancelled), Muse in its default profile. The
+    choice is what is measured, not the outcome.
 
 Usage:
   python3 scripts/tool_choice_eval.py --work <scratch dir> [--providers claude,codex,muse]
@@ -24,7 +28,7 @@ Usage:
 Writes <work>/results-<provider>.jsonl and prints a table. Exit 0 always
 (a rate is a measurement, not a gate).
 """
-import argparse, json, os, re, shutil, socket, subprocess, sys, threading, time
+import argparse, json, os, re, shutil, socket, subprocess, sys, tempfile, threading, time
 
 HARNESS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BRIDGE = os.path.join(HARNESS, "target", "debug", "mcp-bridge")
@@ -176,9 +180,9 @@ def run_claude(case_i, phrase, repo, work, sock, model, note):
     json.dump({"mcpServers": {"baaz": {"type": "stdio", "command": BRIDGE, "args": bridge_args(sock, session), "env": {"BAAZ_BRIDGE_TOKEN": "eval"}}}}, open(mcp, "w"))
     env = dict(os.environ, CLAUDE_CONFIG_DIR=home, CLAUDE_SECURESTORAGE_CONFIG_DIR="")
     argv = ["claude", "-p", phrase, "--output-format", "stream-json", "--verbose", "--model", model,
-            "--permission-mode", "bypassPermissions", "--mcp-config", mcp, "--strict-mcp-config",
+            "--permission-mode", "default", "--mcp-config", mcp, "--strict-mcp-config",
             "--append-system-prompt", note, "--max-turns", "4"]
-    out = subprocess.run(argv, cwd=repo, env=env, capture_output=True, text=True, timeout=300)
+    out = subprocess.run(argv, cwd=repo, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
     cost = None
     for line in out.stdout.splitlines():
         try:
@@ -198,7 +202,7 @@ def run_codex(case_i, phrase, repo, work, sock, model, note):
         os.symlink(os.path.expanduser("~/.codex/auth.json"), auth)
     session = f"eval-codex-{case_i}"
     toml_list = "[" + ",".join(json.dumps(a) for a in bridge_args(sock, session)) + "]"
-    argv = ["codex", "exec", "--json", "--skip-git-repo-check", "-s", "workspace-write",
+    argv = ["codex", "exec", "--json", "--skip-git-repo-check", "-s", "read-only",
             "-c", f"mcp_servers.baaz.command={json.dumps(BRIDGE)}",
             "-c", f"mcp_servers.baaz.args={toml_list}",
             "-c", 'mcp_servers.baaz.env={BAAZ_BRIDGE_TOKEN="eval"}',
@@ -207,19 +211,51 @@ def run_codex(case_i, phrase, repo, work, sock, model, note):
         argv += ["-m", model]
     argv.append(phrase)
     env = dict(os.environ, CODEX_HOME=home)
-    out = subprocess.run(argv, cwd=repo, env=env, capture_output=True, text=True, timeout=300)
+    out = subprocess.run(argv, cwd=repo, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
     return session, out.stdout + out.stderr[-2000:], None
 
 
 def run_muse(case_i, phrase, repo, work, sock, model, note):
     session = f"eval-muse-{case_i}"
-    servers = {"baaz": {"command": BRIDGE, "args": bridge_args(sock, session), "env": {"BAAZ_BRIDGE_TOKEN": "eval"}}}
-    argv = ["muse", "exec", "--json", "--workspace", repo, "-c", f"mcpServers={json.dumps(servers)}", "--max-model-steps", "4"]
+    # Muse takes a secret only as a whole `${VAR}` naming a set variable.
+    # Baaz launches Muse's bridge in tool-search mode (docs/85 13.7).
+    server = {"command": BRIDGE, "args": bridge_args(sock, session) + ["--tool-search"], "env": {"BAAZ_BRIDGE_TOKEN": "${BAAZ_EVAL_TOKEN}"}}
+    argv = ["muse", "exec", "--json", "--trust-workspace", "--workspace", repo, "-c", f"mcpServers.baaz={json.dumps(server)}", "--max-model-steps", "4"]
     if model:
         argv += ["--model", model]
     argv.append(f"{note}\n\n{phrase}")
-    out = subprocess.run(argv, cwd=repo, capture_output=True, text=True, timeout=300)
+    env = dict(os.environ, BAAZ_EVAL_TOKEN="eval")
+    out = subprocess.run(argv, cwd=repo, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
     return session, out.stdout + out.stderr[-2000:], None
+
+
+BAAZ_TOOLS = {"pane_show", "changes_read", "changes_revert", "changes_comment", "changes_commit", "pr_status",
+              "session_search", "session_read", "memory_save", "memory_edit", "code_find"}
+
+
+def first_called(provider, raw):
+    """The first Baaz tool the agent called, from its own event stream (an
+    MCP call the CLI cancelled still counts: the choice is what is measured)."""
+    for line in raw.splitlines():
+        try:
+            m = json.loads(line)
+        except Exception:
+            continue
+        blob = json.dumps(m)
+        if provider == "claude" and m.get("type") == "assistant":
+            for part in m.get("message", {}).get("content", []):
+                name = part.get("name", "") if part.get("type") == "tool_use" else ""
+                if name.startswith("mcp__baaz__"):
+                    return name[len("mcp__baaz__"):]
+        elif provider == "codex":
+            item = m.get("item", {})
+            if item.get("type") == "mcp_tool_call" and item.get("server") == "baaz":
+                return item.get("tool")
+        elif provider == "muse" and "baaz" in blob:
+            found = re.search(r'"(?:tool|tool_name|name)":\s*"(?:mcp__)?(?:baaz(?:__|\.|/))?([a-z_]+)"', blob)
+            if found and (found.group(1) in BAAZ_TOOLS or found.group(1).startswith(("terminal_", "browser_"))):
+                return found.group(1)
+    return None
 
 
 RUNNERS = {"claude": run_claude, "codex": run_codex, "muse": run_muse}
@@ -242,7 +278,8 @@ def main():
         lo, _, hi = args.only.partition("-")
         cases = [c for c in cases if int(lo) <= c[0] <= int(hi or lo)]
     note = note_text()
-    sock = os.path.join(args.work, "baaz-stub.sock")
+    # A Unix socket path must stay under 104 bytes: a short temp folder.
+    sock = os.path.join(tempfile.mkdtemp(prefix="bz-eval-"), "s.sock")
     stub = Stub(sock)
     summary = {}
     for provider in [p for p in args.providers.split(",") if p]:
@@ -258,6 +295,7 @@ def main():
                 except subprocess.TimeoutExpired:
                     session, raw, cost = f"eval-{provider}-{i}", "TIMEOUT", None
                 tool, params = stub.first(session)
+                tool = tool or first_called(provider, raw)
                 ok = tool in expected
                 passed += ok
                 total += 1

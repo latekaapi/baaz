@@ -145,8 +145,8 @@ fn granted_open_and_resume_carry_the_bridge() {
     let args: Vec<String> = serde_json::from_value(server["args"].clone()).expect("args array");
     assert_eq!(
         args,
-        vec!["--terminal", "--socket", "/tmp/baaz/run/terminal-9.sock", "--session", "cmd-open"],
-        "the bridge answers for the minted session: {params}"
+        vec!["--terminal", "--socket", "/tmp/baaz/run/terminal-9.sock", "--session", "cmd-open", "--tool-search"],
+        "the bridge answers for the minted session, in tool-search mode (docs/85 13.7): {params}"
     );
     assert_eq!(server["mode"], "required", "a broken bridge fails loud: {params}");
 

@@ -146,7 +146,7 @@ pub const READ_ONLY_DENIED_TOOLS: [&str; 25] = [
 
 /// The Baaz bridge tools Read-only denies (served as
 /// `mcp__baaz__<tool>`): those that type, run, open or close.
-pub const READ_ONLY_DENIED_BRIDGE_TOOLS: [&str; 9] = [
+pub const READ_ONLY_DENIED_BRIDGE_TOOLS: [&str; 12] = [
     "terminal_open",
     "terminal_run",
     "terminal_send",
@@ -156,6 +156,10 @@ pub const READ_ONLY_DENIED_BRIDGE_TOOLS: [&str; 9] = [
     "browser_emulate",
     "browser_upload",
     "browser_ask",
+    // docs/85 13.3–13.4: the pane tools that change the repository.
+    "changes_revert",
+    "changes_comment",
+    "changes_commit",
 ];
 
 /// The settings layer that makes Read-only read-only: `permissions.deny`
