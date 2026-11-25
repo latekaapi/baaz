@@ -28,10 +28,11 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
     vec![
         def(
             "pane_show",
-            "Show the person something in Baaz's right pane: open a file in the preview (at a line), reveal it in the file tree, \
-             show the diff of a file, show what changed (all, this session, the last turn, turn N), switch to the terminal, \
-             the browser or Tasks, or show the pull request. Use for \"open X in the preview\", \"show me the diff in X\", \
-             \"show what you changed last turn\", \"switch to the terminal\", \"show me the PR\". Changes nothing.",
+            "Whenever the person says \"show me\", \"open\" or \"switch to\": put it on their screen in Baaz's right pane — a file \
+             in the preview (at a line), a file in the tree, one file's diff, what changed (all, this session, the last \
+             turn, turn N), the terminal, the browser, Tasks, or the pull request. Use for \"open X in the preview\", \"show \
+             me the diff in X\", \"show what you changed last turn\", \"show me X at line N\", \"switch to the terminal\", \
+             \"show me the PR\". Reading it yourself is changes_read; showing it is this. Changes nothing.",
             json!({"type": "object", "required": ["view"], "properties": {
                 "view": {"type": "string", "enum": ["files", "file", "changes", "diff", "browser", "terminal", "tasks", "pr"],
                     "description": "file: preview one file (path, line); files: the tree (path reveals); diff: one file's diff (path, scope); changes: the list (scope)."},
@@ -42,7 +43,8 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
         ),
         def(
             "changes_read",
-            "What changed, as Baaz's Changes pane shows it — use this instead of git diff or git status: a diff stat (files, \
+            "What changed, for you to read and answer from (to put it on the person's screen use pane_show) — use this \
+             instead of git diff or git status: a diff stat (files, \
              +added −removed) by default, one file's diff when file is given. Scopes include this session, the last turn and \
              turn N, which plain git cannot tell apart. Use for \"what did the last turn change?\", \"what have you changed \
              in this session?\", \"what changed in turn 2?\". Read-only.",
