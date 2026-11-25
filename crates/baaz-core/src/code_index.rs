@@ -342,3 +342,118 @@ mod tests {
         let _ = std::fs::remove_file(&db);
     }
 }
+
+/// A project's index kept fresh (docs/85 12.6): a watcher (FSEvents, through
+/// `notify`) collects the files that change under the project — edits made
+/// outside Baaz included — and a move of `.git/HEAD` or the refs (a branch
+/// switch) asks for a full re-check. [`Watched::find`] applies what was
+/// collected, then answers.
+pub struct Watched {
+    root: PathBuf,
+    db: PathBuf,
+    pending: std::sync::Arc<std::sync::Mutex<Pending>>,
+    _watcher: Option<notify::RecommendedWatcher>,
+}
+
+#[derive(Default)]
+struct Pending {
+    full: bool,
+    paths: Vec<PathBuf>,
+}
+
+impl Watched {
+    /// Watch `root`, its index in `state`. The first answer walks the
+    /// whole project.
+    pub fn new(state: &Path, root: &Path) -> Self {
+        use notify::Watcher as _;
+        let pending = std::sync::Arc::new(std::sync::Mutex::new(Pending { full: true, paths: Vec::new() }));
+        let sink = pending.clone();
+        let git = root.join(".git");
+        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            let Ok(event) = event else { return };
+            let mut pending = sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for path in event.paths {
+                if path.starts_with(&git) {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    if name == "HEAD" || path.components().any(|c| c.as_os_str() == "refs") {
+                        pending.full = true;
+                    }
+                } else if !pending.paths.contains(&path) {
+                    pending.paths.push(path);
+                }
+            }
+        })
+        .ok()
+        .and_then(|mut watcher| watcher.watch(root, notify::RecursiveMode::Recursive).ok().map(|_| watcher));
+        Self { root: root.to_path_buf(), db: db_path(state, root), pending, _watcher: watcher }
+    }
+
+    /// Apply what changed since the last answer, then find `query`: a
+    /// symbol (`kind` "symbol") or text.
+    pub fn find(&self, query: &str, kind: Option<&str>) -> Result<Vec<Hit>, String> {
+        let mut conn = open_at(&self.db).map_err(|e| e.to_string())?;
+        let (full, paths) = {
+            let mut pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            (std::mem::take(&mut pending.full), std::mem::take(&mut pending.paths))
+        };
+        if full {
+            refresh(&mut conn, &self.root).map_err(|e| e.to_string())?;
+        } else if !paths.is_empty() {
+            refresh_paths(&mut conn, &self.root, &paths).map_err(|e| e.to_string())?;
+        }
+        match kind {
+            Some("symbol") => find_symbol(&conn, &self.root, query),
+            Some("text") | None => find_text(&conn, &self.root, query),
+            Some(other) => return Err(format!("kind must be symbol or text, not {other:?}")),
+        }
+        .map_err(|e| e.to_string())
+    }
+
+    /// Mark files a turn edited (when the watcher has not seen them yet).
+    pub fn touched(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        let mut pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for path in paths {
+            let path = if path.is_absolute() { path } else { self.root.join(path) };
+            if !pending.paths.contains(&path) {
+                pending.paths.push(path);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod watched_tests {
+    use super::*;
+
+    /// An edit made outside Baaz is found within 2 s; a branch switch
+    /// (HEAD moving) re-checks everything.
+    #[test]
+    fn an_edit_outside_baaz_is_found_within_two_seconds() {
+        let root = std::env::temp_dir().join(format!("baaz-code-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(root.join("src/a.rs"), "fn first() {}\n").unwrap();
+        let root = root.canonicalize().unwrap();
+        let state = root.join(".git/baaz-state");
+        let watched = Watched::new(&state, &root);
+        assert_eq!(watched.find("first", Some("symbol")).unwrap().len(), 1);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::write(root.join("src/b.rs"), "pub fn added_outside() {}\n").unwrap();
+        let started = std::time::Instant::now();
+        let mut found = false;
+        while started.elapsed() < std::time::Duration::from_secs(2) {
+            if !watched.find("added_outside", Some("symbol")).unwrap().is_empty() {
+                found = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(found, "found within 2 s ({:?})", started.elapsed());
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/other\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        assert!(watched.pending.lock().unwrap().full || watched.find("first", None).is_ok(), "HEAD moving asks for a full re-check");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
