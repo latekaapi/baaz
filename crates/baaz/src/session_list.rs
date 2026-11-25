@@ -495,8 +495,14 @@ impl SessionList {
         }
         let at = std::time::Instant::now();
         let was_boot = !self.sessions_loaded || !self.index_loaded;
+        // docs/85 14.9: a worker whose lead is listed sits under that lead,
+        // never in a group of its own, so it is kept out of the grouping
+        // (a project's five recent rows were being spent on rows that then
+        // moved away: Gate 15's workers-sidebar capture) and attached after.
+        let (grouped, workers) = sidebar::split_workers(visible.as_slice(), &self.worker_leads);
+        let rows: &[SessionEntry] = grouped.as_deref().unwrap_or(visible.as_slice());
         let grouping = match Self::effective_group_by(cx) {
-            crate::layout::GroupBy::Date => sidebar::grouping_at(&visible, now),
+            crate::layout::GroupBy::Date => sidebar::grouping_at(rows, now),
             crate::layout::GroupBy::Project if self.index_loaded => {
                 let closed: HashSet<String> = crate::layout::Layout::get(cx).closed_groups.iter().cloned().collect();
                 let expanded: HashSet<String> =
@@ -515,7 +521,7 @@ impl SessionList {
                     pending: facts.pending.as_deref(),
                 };
                 sidebar::grouping_by_project(
-                    &visible,
+                    rows,
                     &self.projects,
                     &self.branches,
                     &view,
@@ -530,11 +536,12 @@ impl SessionList {
             // content on its first frame instead of opening from an empty
             // box it never re-measures, and the grouping already has its
             // final shape when the wire rows replace them.
-            crate::layout::GroupBy::Project => sidebar::grouping_at(&visible, now),
+            crate::layout::GroupBy::Project => sidebar::grouping_at(rows, now),
         };
         // A lead's workers nest under it (docs/85 14.9), then the v2
         // sidebar lists pinned rows in their own section (D3).
-        let grouping = sidebar::nest_workers(grouping, &self.worker_leads);
+        let workers: Vec<_> = workers.into_iter().map(|e| sidebar::SessionRow::summary(e, now)).collect();
+        let grouping = sidebar::nest_workers(grouping, &self.worker_leads, workers);
         let (grouping, pinned) = sidebar::lift_pinned(grouping);
         let grouping = Rc::new(grouping);
         crate::log::boot_mark(&format!(
