@@ -308,6 +308,9 @@ pub enum StoreProblem {
     /// `baaz.db` would not open (a newer build's schema, a failed import,
     /// the disk): nothing is read or written this run.
     DatabaseUnavailable { error: String },
+    /// `baaz.db` was damaged after Baaz did not quit cleanly, and the
+    /// backup `from` was put in its place (docs/85 11.4).
+    DatabaseRestored { from: String },
 }
 
 static PROBLEMS: std::sync::Mutex<Vec<StoreProblem>> = std::sync::Mutex::new(Vec::new());

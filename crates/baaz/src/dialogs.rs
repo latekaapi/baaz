@@ -1122,6 +1122,32 @@ impl Harness {
         });
     }
 
+    /// Transcript retention (docs/85 11.4), once per launch off the UI
+    /// thread: a session archived and untouched for more than six months
+    /// gives up its stored turns when its provider can still reopen it.
+    pub(crate) fn prune_old_transcripts(&mut self, cx: &mut Context<Self>) {
+        if cfg!(all(test, feature = "probe")) || crate::runtime::captures() {
+            return;
+        }
+        let cutoff = chrono::Utc::now().timestamp_millis() - crate::transcripts::KEEP_ARCHIVED_DAYS * 24 * 3600 * 1000;
+        let list = self.session_list.read(cx);
+        let old: Vec<(String, String, Option<i64>)> = list
+            .sessions
+            .iter()
+            .filter(|entry| list.reads_archived(entry) && entry.updated.timestamp_millis() < cutoff)
+            .map(|entry| (entry.provider.as_str().to_owned(), entry.id.clone(), list.index.get(&entry.id).and_then(|e| e.updated_at_us)))
+            .collect();
+        if old.is_empty() {
+            return;
+        }
+        let state = crate::store::support_dir();
+        self.wire_call(cx, move || crate::transcripts::prune_archived(&state, &old), |_this, pruned, _cx| {
+            if pruned > 0 {
+                crate::baaz_log!("transcripts: pruned {pruned} long-archived session(s)");
+            }
+        });
+    }
+
     /// The notice itself: "Show report" reveals `report` in Finder.
     pub(crate) fn show_crash_notice(&mut self, report: &std::path::Path, cx: &mut Context<Self>) {
         self.set_dialog(

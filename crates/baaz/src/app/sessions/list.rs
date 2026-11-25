@@ -431,6 +431,12 @@ impl Harness {
             // no rejoin, no regroup, no title reads, no search rebuild.
             let already = this.session_list.read(cx).sessions_loaded;
             this.session_list.update(cx, |list, _| list.sessions_loaded = true);
+            // Long-archived transcripts give up their stored turns, once a
+            // run, now that the list knows what is archived (docs/85 11.4).
+            static PRUNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !PRUNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                this.prune_old_transcripts(cx);
+            }
             crate::log::boot_mark("sessions-loaded");
             if let Ok((sessions, branches, availability, mut canon, held)) = result {
                 if held.is_some() {

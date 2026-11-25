@@ -4217,6 +4217,10 @@ impl Harness {
                             if count == 1 { "entry was" } else { "entries were" },
                         ),
                     ),
+                    StoreProblem::DatabaseRestored { from } => (
+                        "Restored Baaz's database from its backup".to_owned(),
+                        format!("Baaz did not quit cleanly and the database was damaged, so {from} was used. The damaged file was kept beside it."),
+                    ),
                     StoreProblem::DatabaseUnavailable { error } => (
                         "Couldn't open Baaz's database".to_owned(),
                         format!("{error}. Changes made now will not be saved."),

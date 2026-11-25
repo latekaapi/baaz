@@ -204,6 +204,32 @@ pub fn kept_if_fresh(state: &Path, provider: &str, session_id: &str, muse_stamp:
     .ok()?
 }
 
+/// How long an archived session keeps its stored turns (docs/85 11.4).
+pub const KEEP_ARCHIVED_DAYS: i64 = 183;
+
+/// Retention (docs/85 11.4): forget the stored turns of `sessions` (each
+/// archived for longer than [`KEEP_ARCHIVED_DAYS`], the caller's choice) —
+/// but only those whose provider record is still there to reopen from
+/// ([`source_now`] names it); any other keeps its turns. Their digest and
+/// search rows are not touched. Returns how many were pruned. Blocking.
+pub fn prune_archived(state: &Path, sessions: &[(String, String, Option<i64>)]) -> usize {
+    let reopenable: Vec<&(String, String, Option<i64>)> =
+        sessions.iter().filter(|(provider, id, stamp)| !source_now(provider, id, *stamp).is_empty()).collect();
+    if reopenable.is_empty() {
+        return 0;
+    }
+    with_store(state, |conn| {
+        let mut pruned = 0;
+        for (provider, id, _) in reopenable {
+            if stored(conn, provider, id).ok().flatten().is_some() && forget(conn, provider, id).is_ok() {
+                pruned += 1;
+            }
+        }
+        pruned
+    })
+    .unwrap_or(0)
+}
+
 /// Forget one session's turns (it is rebuilt from its provider next time).
 pub fn forget(conn: &Connection, provider: &str, session_id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM turn WHERE provider = ?1 AND session_id = ?2", params![provider, session_id])?;
@@ -320,6 +346,26 @@ mod tests {
         let at = std::time::Instant::now();
         assert_eq!(read(&conn, "claude-code", "long").unwrap().map(|t| t.len()), Some(1000));
         eprintln!("read 1,000 turns in {:?}", at.elapsed());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// docs/85 11.4: a long-archived session gives up its turns only when
+    /// its provider record is there to reopen from.
+    #[test]
+    fn pruning_keeps_what_the_provider_could_not_give_back() {
+        let dir = temp("prune");
+        with_store(&dir, |conn| {
+            write_from(conn, "muse", "m-old", "muse:7", &[turn(0)], 0).unwrap();
+            write_from(conn, "codex", "c-gone", "1:1", &[turn(0)], 0).unwrap();
+        })
+        .unwrap();
+        let pruned = prune_archived(&dir, &[("muse".into(), "m-old".into(), Some(7)), ("codex".into(), "c-gone".into(), None)]);
+        assert_eq!(pruned, 1, "the Muse one (its index still names it) goes; the Codex one has no file and stays");
+        with_store(&dir, |conn| {
+            assert!(read(conn, "muse", "m-old").unwrap().is_none());
+            assert!(read(conn, "codex", "c-gone").unwrap().is_some());
+        })
+        .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

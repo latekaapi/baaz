@@ -1152,6 +1152,9 @@ fn main() {
                                             this.flush_stores();
                                             this.browser.update(cx, |browser, cx| browser.flush_at_quit(cx));
                                             crate::layout::Layout::save(cx);
+                                            // A clean quit: the database's
+                                            // open marker goes (docs/85 11.4).
+                                            baaz_core::db::mark_clean_exit();
                                         })
                                     })
                                     .unwrap_or(())

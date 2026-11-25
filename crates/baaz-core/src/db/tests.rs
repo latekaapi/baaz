@@ -355,6 +355,41 @@ fn an_unknown_cost_is_null_not_zero() {
     assert_eq!(super::turns::cost(&conn, "s-a", "t-1"), Some((Some(0.0), "reported".to_owned())));
 }
 
+/// docs/85 11.4: Baaz did not quit cleanly and baaz.db is damaged — the
+/// next open restores the rolling backup on its own and says so once.
+#[test]
+fn a_damaged_database_after_an_unclean_exit_opens_from_its_backup() {
+    let dir = temp("unclean");
+    let path = super::path_in(&dir);
+    super::as_writer(|| {
+        let conn = super::open_at(&path).expect("first open");
+        conn.execute_batch("INSERT INTO meta(key, value) VALUES ('probe', 'kept')").unwrap();
+        // The rolling backup holds this state; the run then dies (no clean
+        // exit: the open marker stays).
+        drop(conn);
+        let _ = std::fs::remove_file(super::integrity::rolling_backup(&path));
+        let conn = super::open_at(&path).expect("second open takes a backup");
+        drop(conn);
+    });
+    assert!(super::integrity::last_exit_unclean(&path));
+    let mut bytes = std::fs::read(&path).unwrap();
+    for byte in bytes.iter_mut().skip(100) {
+        *byte = 0x5A;
+    }
+    std::fs::write(&path, bytes).unwrap();
+    for side in ["db-wal", "db-shm"] {
+        let _ = std::fs::remove_file(path.with_extension(side));
+    }
+    super::as_writer(|| {
+        let conn = super::open_at(&path).expect("opens from the backup");
+        assert_eq!(super::schema::meta(&conn, "probe").unwrap().as_deref(), Some("kept"));
+    });
+    assert!(
+        crate::store::take_problems().iter().any(|p| matches!(p, crate::store::StoreProblem::DatabaseRestored { .. })),
+        "one toast says so"
+    );
+}
+
 /// docs/85 11.2: baaz.db is the one list source. The old list and index
 /// cache files are imported at the first open and removed; Muse rows never
 /// opened in Baaz get session rows of their own (with `created_by`); the
