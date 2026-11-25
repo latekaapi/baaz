@@ -551,17 +551,36 @@ impl Harness {
             }
         }
         let rows: Vec<Value> = tasks.iter().map(|t| task_summary(t, None)).collect();
-        cx.background_spawn(async move {
-            with_db(move |conn| {
-                for task in &tasks {
-                    // A watched session already idle is checked at once (14.5).
-                    let effect = (task.status == Status::Reported).then_some(Effect::Check);
-                    let _ = crate::db::tasks::save_with(conn, task, effect.as_ref());
+        call.answer(Ok(json!({"watching": rows})));
+        let lead = call.session.clone();
+        cx.spawn(async move |this, cx| {
+            let saved = cx
+                .background_spawn(async move {
+                    let state = crate::store::support_dir();
+                    let mut saved = Vec::new();
+                    for mut task in tasks {
+                        // A watched worktree counts its commits from where it
+                        // was cut.
+                        if let Some(folder) = &task.worktree {
+                            task.base = baaz_core::worktrees::by_path(&state, std::path::Path::new(folder)).map(|w| w.base);
+                        }
+                        let effect = (task.status == Status::Reported).then_some(Effect::Check);
+                        let row = task.clone();
+                        with_db(move |conn| crate::db::tasks::save_with(conn, &row, effect.as_ref()).ok());
+                        saved.push(task);
+                    }
+                    saved
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.refresh_workers(&lead, cx);
+                // A watched session already idle is checked at once (14.5).
+                for task in saved.into_iter().filter(|t| t.status == Status::Reported) {
+                    this.check_task(task, cx);
                 }
             });
         })
         .detach();
-        call.answer(Ok(json!({"watching": rows})));
     }
 
     /// `task_wait`: up to 60 seconds for a task to settle (short only: a

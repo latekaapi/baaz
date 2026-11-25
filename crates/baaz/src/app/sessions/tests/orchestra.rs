@@ -369,3 +369,63 @@ fn task_land_merges_passed_work_and_stops_at_a_conflict(cx: &mut gpui::TestAppCo
     assert!(error_text(&out).starts_with("[wrong_state]"), "{out}");
     cleanup(&root, state);
 }
+
+/// Gate 14's second example on the scripted provider: three sessions the
+/// person started in their own worktrees, then "land them and push". The
+/// lead watches them (session_watch), Baaz checks each, task_land merges
+/// all three one at a time, and the lead's push (its own terminal, here
+/// git) reaches a local bare remote.
+#[gpui::test]
+fn three_sessions_then_land_and_push(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("orchestra-watch-land");
+    let root = folder(&state.2, true);
+    let bare = root.with_file_name(format!("{}-remote.git", root.file_name().unwrap().to_string_lossy()));
+    let _ = std::fs::remove_dir_all(&bare);
+    super::checkpoints::git(&root, &["init", "-q", "--bare", "-b", "main", &bare.to_string_lossy()]);
+    super::checkpoints::git(&root, &["remote", "add", "origin", &bare.to_string_lossy()]);
+    super::checkpoints::git(&root, &["push", "-q", "origin", "main"]);
+    let (factory, _) = recording_factory_numbered(true);
+    let (baaz, vc, lead) = session_with(cx, &root, factory);
+    // Three sessions, each in a worktree of its own, each with a commit.
+    let mut sessions = Vec::new();
+    for n in 0..3 {
+        let worktree = baaz_core::worktrees::create(&baaz_core::worktrees::CreateSpec {
+            state_dir: &crate::store::support_dir(),
+            project_root: &root,
+            project_id: None,
+            branch_prefix: "baaz/",
+            name: Some(&format!("watch-{n}")),
+        })
+        .expect("a worktree");
+        let folder = worktree.path.to_string_lossy().into_owned();
+        commit_in(&folder, &format!("part-{n}.txt"), "done\n");
+        let opened = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let slot = opened.clone();
+        vc.update(|window, cx| {
+            baaz.update(cx, |h, cx| {
+                h.open_worker(ProviderId::Codex, None, aui_protocol::PermissionMode::OnRequest, None, folder.clone(), move |_, id, _| *slot.borrow_mut() = Some(id), window, cx)
+            })
+        });
+        vc.run_until_parked();
+        sessions.push(opened.borrow_mut().take().expect("opened").expect("a session"));
+    }
+    let out = reply(&pane_call(&baaz, vc, &lead, &root, "session_watch", serde_json::json!({"sessions": sessions, "check": "true"})));
+    let tasks: Vec<String> = out["result"]["watching"].as_array().unwrap().iter().map(|t| t["task"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(tasks.len(), 3, "{out}");
+    settle(vc);
+    for task in &tasks {
+        assert_eq!(status_of(task).status, baaz_core::tasks::Status::Passed, "{:?}", status_of(task).verdict);
+    }
+    let out = reply(&pane_call(&baaz, vc, &lead, &root, "task_land", serde_json::json!({"tasks": tasks})));
+    let steps = out["result"]["steps"].as_array().unwrap();
+    assert!(steps.iter().all(|s| s["landed"].is_string()), "{out}");
+    for n in 0..3 {
+        assert!(root.join(format!("part-{n}.txt")).exists());
+    }
+    // The lead pushes from its own terminal (git here).
+    super::checkpoints::git(&root, &["push", "-q", "origin", "main"]);
+    let pushed = super::checkpoints::git(&bare, &["log", "--format=%s", "main"]);
+    assert_eq!(pushed.lines().filter(|l| l.starts_with("Land baaz/watch-")).count(), 3, "{pushed}");
+    let _ = std::fs::remove_dir_all(&bare);
+    cleanup(&root, state);
+}
