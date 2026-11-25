@@ -1033,8 +1033,14 @@ impl SessionRuntime {
         };
         let context = self.context().map_or_else(|| "not reported".to_owned(), |meter| meter.label());
         let cost = if cost > 0.0 { format!("\nCost: ${cost:.4}") } else { String::new() };
+        // docs/85 16.1: the one usage line this sheet gains — the rest is
+        // Settings › Usage.
+        let cache = match self.cache_pct() {
+            Some(pct) => format!("\nCache: {pct}% of input read from cache (Settings › Usage has every session)"),
+            None => String::new(),
+        };
         format!(
-            "Model: {}\nApproval mode: {}\nReasoning effort: {}\nPlan mode: {}\nContext: {context}\nSession tokens: {prompt} prompt · {output} output · {total} total{cost}\nQueued: {queued}\nSession: {}\nWorkspace: {}\nBranch: {branch}",
+            "Model: {}\nApproval mode: {}\nReasoning effort: {}\nPlan mode: {}\nContext: {context}\nSession tokens: {prompt} prompt · {output} output · {total} total{cost}{cache}\nQueued: {queued}\nSession: {}\nWorkspace: {}\nBranch: {branch}",
             self.model(),
             self.mode_label(),
             crate::overlays::effort_label(self.effort),

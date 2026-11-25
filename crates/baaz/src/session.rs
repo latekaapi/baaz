@@ -1858,6 +1858,20 @@ impl SessionRuntime {
         (prompt_tokens, output_tokens, cost)
     }
 
+    /// docs/85 16.1: this session's cached input as a share of its input,
+    /// 0–100, from its turns (cache reads on Claude Code, cached tokens on
+    /// Codex); `None` before any input.
+    pub(crate) fn cache_pct(&self) -> Option<u32> {
+        let (mut input, mut cached) = (0u64, 0u64);
+        for turn in self.session()?.turns.iter() {
+            if let Turn::Assistant { meta, .. } = turn {
+                input += meta.tokens_in;
+                cached += meta.cache_read_tokens.unwrap_or(0) + meta.cached_tokens;
+            }
+        }
+        (input.max(cached) > 0).then(|| ((cached as f64 / input.max(cached) as f64) * 100.0).round() as u32)
+    }
+
     /// The approval mode chip's label: the provider's own word for the
     /// mode in force (docs/82 5.5), the protocol's for one it does not
     /// declare.
