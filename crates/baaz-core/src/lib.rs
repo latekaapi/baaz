@@ -59,6 +59,7 @@ pub mod sessions;
 pub mod sidebar;
 pub mod skills;
 pub mod store;
+pub mod tasks;
 pub mod system_open;
 pub mod terminal_relay;
 pub mod transcripts;

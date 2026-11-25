@@ -40,6 +40,7 @@ pub mod json_import;
 pub mod listing;
 pub mod schema;
 pub mod sessions;
+pub mod tasks;
 pub mod turns;
 pub mod worktrees;
 

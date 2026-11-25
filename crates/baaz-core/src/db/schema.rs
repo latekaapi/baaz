@@ -47,6 +47,8 @@
 //!   that has not landed yet.
 //! * `migration_journal`: the session migration's crash-resume record.
 //! * `meta`: key/value (`json_import`: when the JSON stores were imported).
+//! * `task` / `task_outbox` (version 6, docs/85 14.1): orchestration's task
+//!   record and the side effects its changes still owe ([`super::tasks`]).
 //!
 //! Not here: `projects.json` (projects are not keyed by session, and the
 //! plan row moves only the session stores), the regenerable caches and
@@ -56,7 +58,7 @@
 use rusqlite::{params, Connection, Transaction};
 
 /// The schema this build writes.
-pub const VERSION: i32 = 5;
+pub const VERSION: i32 = 6;
 
 /// Step 1: every table.
 const V1: &str = "
@@ -298,6 +300,12 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
             }
         }
         tx.pragma_update(None, "user_version", 5)?;
+        tx.commit()?;
+    }
+    if version < 6 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(super::tasks::V6)?;
+        tx.pragma_update(None, "user_version", 6)?;
         tx.commit()?;
     }
     Ok(())
