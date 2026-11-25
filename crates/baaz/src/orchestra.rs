@@ -125,6 +125,8 @@ impl Harness {
             }
             "session_watch" => self.session_watch_call(call, cx),
             "task_wait" => self.task_wait_call(call, cx),
+            "report" => self.report_call(call, cx),
+            "escalate" => self.escalate_call(call, cx),
             other => call.answer(Err(refuse(Refusal::new(Code::NotFound, format!("{other} is not built yet"))))),
         }
     }
@@ -216,6 +218,8 @@ impl Harness {
             after: texts(&params, "after"),
             watched: false,
             past_workers: Vec::new(),
+            base: None,
+            fixups: 0,
             created_at: now(),
             updated_at: now(),
             started_at: None,
@@ -297,6 +301,7 @@ impl Harness {
                                 Ok(worktree) => {
                                     let folder = worktree.path.to_string_lossy().into_owned();
                                     task.worktree = Some(folder.clone());
+                                    task.base = Some(worktree.base.clone());
                                     let saved = task.clone();
                                     with_db(move |conn| crate::db::tasks::save(conn, &saved));
                                     (task, folder, Some(worktree))
@@ -524,6 +529,8 @@ impl Harness {
                 after: Vec::new(),
                 watched: true,
                 past_workers: Vec::new(),
+                base: None,
+                fixups: 0,
                 created_at: now(),
                 updated_at: now(),
                 started_at: Some(now()),
@@ -577,6 +584,333 @@ impl Harness {
         })
         .detach();
     }
+}
+
+/// How long a check may run before it fails (docs/85 14.5).
+const CHECK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
+
+impl Harness {
+    /// The caller's task, as a worker: from the bridge's session (rule 20).
+    /// A worker of an earlier attempt is a stale generation.
+    fn worker_task(caller: String) -> Result<Task, Refusal> {
+        with_db(move |conn| -> Result<Task, Refusal> {
+            if let Some(task) = crate::db::tasks::for_worker(conn, &caller).ok().flatten() {
+                return Ok(task);
+            }
+            let all = crate::db::tasks::load_all(conn).unwrap_or_default();
+            if let Some(task) = all.iter().find(|t| t.past_workers.contains(&caller)) {
+                return Err(Refusal::new(Code::StaleGeneration, format!("task {} was retried; this session ran an earlier attempt", task.id)));
+            }
+            Err(Refusal::new(Code::NotFound, "this session was not given a task"))
+        })
+        .unwrap_or_else(|| Err(Refusal::new(Code::WrongState, "Baaz's database is not open")))
+    }
+
+    /// `report`: the worker says it is done; Baaz checks (14.5).
+    fn report_call(&mut self, call: PaneCall, cx: &mut Context<Self>) {
+        let caller = call.session.clone();
+        let params = call.params.clone();
+        cx.spawn(async move |this, cx| {
+            let reported = cx
+                .background_spawn(async move {
+                    let mut task = Self::worker_task(caller)?;
+                    task.accepts_report(task.generation)?;
+                    let claims: Vec<core::Claim> = params.get("criteria").and_then(|c| serde_json::from_value(c.clone()).ok()).unwrap_or_default();
+                    core::match_claims(&task.criteria, &claims)?;
+                    task.report = Some(json!({"result": params.get("result").cloned().unwrap_or(Value::Null), "criteria": claims}));
+                    task.move_to(Status::Reported, now())?;
+                    let saved = task.clone();
+                    with_db(move |conn| crate::db::tasks::save_with(conn, &saved, Some(&Effect::Check)).ok());
+                    Ok::<Task, Refusal>(task)
+                })
+                .await;
+            match reported {
+                Ok(task) => {
+                    call.answer(Ok(json!({"reported": task.id, "note": "Baaz checks the work now; you may be asked to fix something"})));
+                    let _ = this.update(cx, |this, cx| this.check_task(task, cx));
+                }
+                Err(refusal) => call.answer(Err(refuse(refusal))),
+            }
+        })
+        .detach();
+    }
+
+    /// `escalate`: the task pauses for the person; the question shows as a
+    /// card in the lead's transcript and the worker's.
+    fn escalate_call(&mut self, call: PaneCall, cx: &mut Context<Self>) {
+        let Some(question) = text(&call.params, "question") else {
+            return call.answer(Err(refuse(Refusal::new(Code::BadArgument, "ask a question"))));
+        };
+        let options = texts(&call.params, "options");
+        let caller = call.session.clone();
+        cx.spawn(async move |this, cx| {
+            let paused = cx
+                .background_spawn(async move {
+                    let mut task = Self::worker_task(caller)?;
+                    task.move_to(Status::NeedsYou, now())?;
+                    let saved = task.clone();
+                    with_db(move |conn| crate::db::tasks::save(conn, &saved).ok());
+                    Ok::<Task, Refusal>(task)
+                })
+                .await;
+            match paused {
+                Ok(task) => {
+                    call.answer(Ok(json!({"escalated": task.id, "note": "the person is asked; stop here and wait for their answer"})));
+                    let _ = this.update(cx, |this, cx| {
+                        let card = format!("escalation-{}-{}", task.id, task.updated_at);
+                        let header = format!("{} asks", task.title);
+                        for session in [Some(task.lead_session.clone()), task.worker_session.clone()].into_iter().flatten() {
+                            if let Some(runtime) = this.registry.find_runtime(this.active.as_ref(), &session, cx) {
+                                let (card, id, header, question, options) = (card.clone(), task.id.clone(), header.clone(), question.clone(), options.clone());
+                                runtime.update(cx, |rt, cx| rt.post_escalation(&card, &id, &header, &question, options, cx));
+                            }
+                        }
+                    });
+                }
+                Err(refusal) => call.answer(Err(refuse(refusal))),
+            }
+        })
+        .detach();
+    }
+
+    /// The person answered an escalation: both cards settle, the worker
+    /// hears the answer, the task runs again.
+    pub(crate) fn escalation_answered(&mut self, task_id: &str, card_id: &str, answer: &str, cx: &mut Context<Self>) {
+        let id = task_id.to_owned();
+        let (card, words) = (card_id.to_owned(), answer.to_owned());
+        cx.spawn(async move |this, cx| {
+            let task = cx
+                .background_spawn(async move {
+                    with_db(move |conn| {
+                        let mut task = crate::db::tasks::load(conn, &id).ok().flatten()?;
+                        task.move_to(Status::Running, now()).ok()?;
+                        crate::db::tasks::save(conn, &task).ok()?;
+                        Some(task)
+                    })
+                    .flatten()
+                })
+                .await;
+            let Some(task) = task else { return };
+            let _ = this.update(cx, |this, cx| {
+                for session in [Some(task.lead_session.clone()), task.worker_session.clone()].into_iter().flatten() {
+                    if let Some(runtime) = this.registry.find_runtime(this.active.as_ref(), &session, cx) {
+                        runtime.update(cx, |rt, _| rt.settle_escalation_card(&card, aui_protocol::Answer { selected: Vec::new(), other: Some(words.clone()) }));
+                    }
+                }
+                if let Some(runtime) = task.worker_session.as_deref().and_then(|w| this.registry.find_runtime(this.active.as_ref(), w, cx)) {
+                    runtime.update(cx, |rt, cx| rt.send_or_queue(format!("The person answered your question: {words}"), cx));
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The verdict (docs/85 14.5): for a writer, a commit exists, the diff
+    /// stays in scope, and the check passes; for a reviewer or helper, its
+    /// report is the verdict. A failing check gets one automatic fix-up
+    /// turn with the failing tail, then needs the person. Off the UI
+    /// thread; the check runs in the task's worktree (rule 29: under the
+    /// worker's own mode, which already ran its commands there).
+    pub(crate) fn check_task(&mut self, task: Task, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let (task, fixup) = cx.background_spawn(async move { judge(task) }).await;
+            let saved = task.clone();
+            cx.background_spawn(async move {
+                with_db(move |conn| {
+                    let _ = crate::db::tasks::save(conn, &saved);
+                    if let Ok(pending) = crate::db::tasks::pending(conn) {
+                        for item in pending.iter().filter(|i| i.task_id == saved.id && i.effect == Effect::Check) {
+                            let _ = crate::db::tasks::mark_done(conn, item.id);
+                        }
+                    }
+                });
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(text) = fixup {
+                    if let Some(runtime) = task.worker_session.as_deref().and_then(|w| this.registry.find_runtime(this.active.as_ref(), w, cx)) {
+                        runtime.update(cx, |rt, cx| rt.send_or_queue(text, cx));
+                    }
+                } else {
+                    this.task_settled(task, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// A task settled (docs/85 14.6): tasks waiting on it start without the
+    /// lead, carrying its report and branch; the lead is woken once — when
+    /// all its tasks have settled, or now when this one needs the person or
+    /// failed.
+    pub(crate) fn task_settled(&mut self, task: Task, cx: &mut Context<Self>) {
+        let lead = task.lead_session.clone();
+        let urgent = matches!(task.status, Status::NeedsYou | Status::Failed);
+        cx.spawn(async move |this, cx| {
+            let (released, wake) = cx
+                .background_spawn(async move {
+                    with_db(move |conn| {
+                        let all = crate::db::tasks::load_all(conn).unwrap_or_default();
+                        let mut released = Vec::new();
+                        for waiting in all.iter().filter(|t| t.status == Status::Waiting && t.after.contains(&task.id) && t.ready(&all)) {
+                            let mut t = waiting.clone();
+                            for id in t.after.clone() {
+                                if let Some(prev) = all.iter().find(|p| p.id == id) {
+                                    if let Some(result) = prev.report.as_ref().and_then(|r| r.get("result")).and_then(Value::as_str) {
+                                        t.inputs.push(format!("Result of \"{}\": {result}", prev.title));
+                                    }
+                                    if let Some(tree) = &prev.worktree {
+                                        let branch = baaz_core::git_ops::read_tree(std::path::Path::new(tree)).map(|g| g.branch).unwrap_or_default();
+                                        t.inputs.push(format!("\"{}\" is on branch {branch} in {tree}", prev.title));
+                                    }
+                                }
+                            }
+                            if t.move_to(Status::Queued, now()).is_ok() && crate::db::tasks::save_with(conn, &t, Some(&Effect::Start { generation: t.generation })).is_ok() {
+                                released.push(t);
+                            }
+                        }
+                        let mine = crate::db::tasks::for_lead(conn, &lead).unwrap_or_default();
+                        let all_settled = !mine.is_empty() && mine.iter().all(|t| t.status.settled());
+                        let wake = (urgent || all_settled).then(|| (lead.clone(), mine));
+                        (released, wake)
+                    })
+                    .unwrap_or_default()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                for t in released {
+                    let root = this.session_workspace(&t.lead_session, cx);
+                    let mode = this
+                        .registry
+                        .find_runtime(this.active.as_ref(), &t.lead_session, cx)
+                        .map(|rt| core::child_mode(rt.read(cx).mode(), t.role))
+                        .unwrap_or(aui_protocol::PermissionMode::DenyUnmatched);
+                    this.start_worker(t, mode, root, cx);
+                }
+                if let Some((lead, tasks)) = wake {
+                    this.wake_lead(&lead, &tasks, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// One message to the lead: each task's state, per criterion.
+    fn wake_lead(&mut self, lead: &str, tasks: &[Task], cx: &mut Context<Self>) {
+        let Some(runtime) = self.registry.find_runtime(self.active.as_ref(), lead, cx) else { return };
+        runtime.update(cx, |rt, cx| rt.send_or_queue(wake_text(tasks), cx));
+    }
+}
+
+/// The verdict on `task` (blocking): the task with its new status and
+/// verdict, and — for the one automatic fix-up — the message to its worker.
+pub(crate) fn judge(mut task: Task) -> (Task, Option<String>) {
+    let at = now();
+    let _ = task.move_to(Status::Checking, at);
+    if !task.role.writes() {
+        let reviewer_ok = task.report.is_some();
+        let lines: Vec<Value> = task.criteria.iter().map(|c| core::criterion_line(c, None, None, Some(reviewer_ok))).collect();
+        task.verdict = Some(json!({"passed": reviewer_ok, "by": "the report", "criteria": lines}));
+        let _ = task.move_to(if reviewer_ok { Status::Passed } else { Status::Failed }, at);
+        return (task, None);
+    }
+    let folder = task.worktree.clone().unwrap_or_default();
+    let dir = std::path::Path::new(&folder);
+    let git = |args: &[&str]| {
+        std::process::Command::new("git").current_dir(dir).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+    };
+    let base = task.base.clone().unwrap_or_else(|| "HEAD~1".into());
+    let commits = git(&["rev-list", "--count", &format!("{base}..HEAD")]).and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
+    let dirty = git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
+    let changed: Vec<String> = git(&["diff", "--name-only", &format!("{base}..HEAD")]).map(|s| s.lines().map(str::to_owned).collect()).unwrap_or_default();
+    let check = match task.check.clone() {
+        Some(command) => baaz_core::checks::Check::Command(command),
+        None => baaz_core::checks::detect(dir),
+    };
+    let out_of_scope: Vec<String> = if task.scope.is_empty() { Vec::new() } else { changed.iter().filter(|f| !task.scope.iter().any(|s| f.starts_with(s.as_str()))).cloned().collect() };
+    let check_files: Vec<String> = changed.iter().filter(|f| touches_check(&check, f)).cloned().collect();
+    let mut failures: Vec<String> = Vec::new();
+    if commits == 0 {
+        failures.push(if dirty { "the work is not committed".into() } else { "there is no commit".into() });
+    }
+    if !out_of_scope.is_empty() {
+        failures.push(format!("files outside the task's scope changed: {}", out_of_scope.join(", ")));
+    }
+    let (passed, tail) = if commits == 0 {
+        (false, String::new())
+    } else {
+        match &check {
+            baaz_core::checks::Check::Command(command) => {
+                let outcome = baaz_core::checks::run(dir, command, CHECK_DEADLINE);
+                (outcome.passed, outcome.tail)
+            }
+            baaz_core::checks::Check::Parse => match baaz_core::checks::parse_files(dir, &changed) {
+                Ok(()) => (true, String::new()),
+                Err(why) => (false, why),
+            },
+        }
+    };
+    if commits > 0 && !passed {
+        failures.push(format!("{} failed", check.describe()));
+    }
+    let short_tail: String = tail.lines().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+    let claims: Vec<core::Claim> = task.report.as_ref().and_then(|r| r.get("criteria")).and_then(|c| serde_json::from_value(c.clone()).ok()).unwrap_or_default();
+    let matched = core::match_claims(&task.criteria, &claims).unwrap_or_else(|_| vec![None; task.criteria.len()]);
+    let ok = failures.is_empty();
+    let lines: Vec<Value> = task.criteria.iter().zip(&matched).map(|(c, claim)| core::criterion_line(c, claim.as_ref(), Some(ok), None)).collect();
+    task.verdict = Some(json!({
+        "passed": ok,
+        "check": check.describe(),
+        "commits": commits,
+        "failures": failures,
+        "check_files_touched": check_files,
+        "tail": if ok { Value::Null } else { json!(short_tail) },
+        "criteria": lines,
+    }));
+    if ok {
+        let _ = task.move_to(Status::Passed, at);
+        return (task, None);
+    }
+    if task.fixups == 0 {
+        task.fixups = 1;
+        let _ = task.move_to(Status::Running, at);
+        let tail_block = if short_tail.is_empty() { String::new() } else { format!("\nThe end of the check's output:\n```\n{short_tail}\n```") };
+        let message = format!("Baaz checked your work and it is not done yet:\n- {}{tail_block}\nFix it, commit, and call report again.", failures.join("\n- "));
+        return (task, Some(message));
+    }
+    let _ = task.move_to(Status::NeedsYou, at);
+    (task, None)
+}
+
+/// Whether a changed file is one the check itself runs from (flagged in
+/// the verdict: a worker could make a check pass by editing it).
+fn touches_check(check: &baaz_core::checks::Check, file: &str) -> bool {
+    let baaz_core::checks::Check::Command(command) = check else { return false };
+    let first = command.split_whitespace().next().unwrap_or_default();
+    file == ".baaz/project.toml"
+        || (["npm", "pnpm", "yarn", "bun"].contains(&first) && file == "package.json")
+        || (first == "make" && file == "Makefile")
+        || first.trim_start_matches("./") == file
+}
+
+/// The lead's wake-up: its tasks, each with its state and criteria.
+pub(crate) fn wake_text(tasks: &[Task]) -> String {
+    let mut out = String::from("From Baaz (not the user): your delegated tasks settled.\n");
+    for task in tasks {
+        out.push_str(&format!("\n- {} ({}, {}): {}", task.title, task.provider, task.role.as_str(), task.status.as_str()));
+        if let Some(verdict) = &task.verdict {
+            if let Some(lines) = verdict.get("criteria").and_then(Value::as_array) {
+                for line in lines {
+                    out.push_str(&format!("\n    · {} — {} ({})", line["criterion"].as_str().unwrap_or_default(), line["state"].as_str().unwrap_or_default(), line["by"].as_str().unwrap_or_default()));
+                }
+            }
+            if let Some(failures) = verdict.get("failures").and_then(Value::as_array).filter(|f| !f.is_empty()) {
+                out.push_str(&format!("\n    failed: {}", failures.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; ")));
+            }
+        }
+    }
+    out.push_str("\n\nSummarise for the person per criterion (what is proven, what is not), then land passed work with task_land if they asked for it.");
+    out
 }
 
 /// A message from another session, as its receiver reads it: from an

@@ -391,6 +391,10 @@ impl Harness {
             SessionEvent::UndoLanded { session_id, title, body, undo } => {
                 self.undo_landed(session_id, title, body, *undo, cx);
             }
+            // docs/85 14.2: the person answered a worker's escalation.
+            SessionEvent::EscalationAnswered { task_id, card_id, answer } => {
+                self.escalation_answered(task_id, card_id, answer, cx);
+            }
         }
         cx.notify();
     }

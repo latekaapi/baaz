@@ -220,6 +220,13 @@ pub struct Task {
     /// Workers of earlier attempts: their report is a stale generation's.
     #[serde(default)]
     pub past_workers: Vec<String>,
+    /// The commit a writer's worktree was cut from (the verdict's "a
+    /// commit exists" counts from here).
+    #[serde(default)]
+    pub base: Option<String>,
+    /// Automatic fix-up turns spent on a failing check (one, 14.5).
+    #[serde(default)]
+    pub fixups: u8,
     pub created_at: i64,
     pub updated_at: i64,
     pub started_at: Option<i64>,
@@ -378,6 +385,52 @@ pub fn worker_prompt(task: &Task) -> String {
     out
 }
 
+/// One criterion as the worker reported it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Claim {
+    pub criterion: String,
+    pub met: bool,
+    #[serde(default)]
+    pub evidence: String,
+}
+
+/// A worker's claims, checked against the frozen criteria (docs/85 14.4):
+/// a claim may name a criterion by its text or its number; one that names
+/// no frozen criterion is an amendment, refused.
+pub fn match_claims(criteria: &[Criterion], claims: &[Claim]) -> Result<Vec<Option<Claim>>, Refusal> {
+    let mut out: Vec<Option<Claim>> = vec![None; criteria.len()];
+    for claim in claims {
+        let key = claim.criterion.trim();
+        let by_number = key.trim_start_matches('#').trim_end_matches('.').parse::<usize>().ok().filter(|n| *n >= 1 && *n <= criteria.len()).map(|n| n - 1);
+        let by_text = criteria.iter().position(|c| c.text.eq_ignore_ascii_case(key) || key.to_lowercase().contains(&c.text.to_lowercase()));
+        match by_number.or(by_text) {
+            Some(i) => out[i] = Some(claim.clone()),
+            None => return Err(Refusal::new(Code::CriteriaFrozen, format!("\"{key}\" is not one of this task's criteria; they are fixed (report against them as given)"))),
+        }
+    }
+    Ok(out)
+}
+
+/// One criterion's line in the lead's summary: met and proven, met by the
+/// worker's word only (not proven), or not met.
+pub fn criterion_line(criterion: &Criterion, claim: Option<&Claim>, check_passed: Option<bool>, reviewer_ok: Option<bool>) -> serde_json::Value {
+    let (state, by) = match criterion.proof {
+        Proof::Check => match check_passed {
+            Some(true) => ("met", "the check"),
+            Some(false) => ("not met", "the check"),
+            None => ("not proven", "no check ran"),
+        },
+        Proof::Reviewer => match reviewer_ok {
+            Some(true) => ("met", "the reviewer"),
+            Some(false) => ("not met", "the reviewer"),
+            None => ("not proven", "no reviewer yet"),
+        },
+        Proof::User => ("for you to judge", "you"),
+        Proof::NotProven => ("not proven", "nothing checks it"),
+    };
+    serde_json::json!({"criterion": criterion.text, "state": state, "by": by, "worker_says": claim.map(|c| if c.met { "met" } else { "not met" }), "evidence": claim.map(|c| c.evidence.clone())})
+}
+
 /// A side effect a status change needs, carried out by the app.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -498,6 +551,8 @@ pub(crate) fn sample(id: &str, status: Status) -> Task {
         after: Vec::new(),
         watched: false,
         past_workers: Vec::new(),
+        base: None,
+        fixups: 0,
         created_at: 1,
         updated_at: 1,
         started_at: None,
@@ -620,6 +675,20 @@ mod tests {
         assert!(text.contains("1. tests pass") && text.contains("`cargo test`") && text.contains("commit your work") && text.contains("branch baaz/q-1"));
         t.role = Role::Reviewer;
         assert!(worker_prompt(&t).contains("Change nothing"));
+    }
+
+    /// docs/85 14.4: a worker reports against the frozen criteria, by text
+    /// or number; anything else is an amendment, refused.
+    #[test]
+    fn a_worker_cannot_amend_the_criteria() {
+        let criteria = vec![Criterion { text: "tests pass".into(), proof: Proof::Check }, Criterion { text: "README updated".into(), proof: Proof::NotProven }];
+        let claims = vec![Claim { criterion: "2".into(), met: true, evidence: "added a section".into() }, Claim { criterion: "Tests pass".into(), met: true, evidence: String::new() }];
+        let matched = match_claims(&criteria, &claims).unwrap();
+        assert!(matched.iter().all(Option::is_some));
+        let amended = vec![Claim { criterion: "it compiles, which is enough".into(), met: true, evidence: String::new() }];
+        assert_eq!(match_claims(&criteria, &amended).unwrap_err().code, Code::CriteriaFrozen);
+        assert_eq!(criterion_line(&criteria[0], None, Some(true), None)["state"], "met");
+        assert_eq!(criterion_line(&criteria[1], matched[0].as_ref(), Some(true), None)["state"], "not proven", "a worker's word alone proves nothing");
     }
 
     #[test]

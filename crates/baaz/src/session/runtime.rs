@@ -167,6 +167,9 @@ pub struct SessionRuntime {
     /// `userInputId` then `questionId`. MSP settles the whole prompt at once, so
     /// the app holds the earlier answers until the last question is answered.
     pub(super) answers: HashMap<String, HashMap<String, provider::QuestionAnswer>>,
+    /// docs/85 14.2: escalation cards Baaz put up (card id → task id and
+    /// the offered options): answered here, never sent to the provider.
+    pub(super) escalations: HashMap<String, (String, Vec<String>)>,
     /// When each pending question's auto-resolution clock started, keyed by
     /// `userInputId`. MSP sends a duration, never a deadline.
     pub(super) question_started: HashMap<String, Instant>,
@@ -455,6 +458,7 @@ impl SessionRuntime {
             billing_hold: None,
             shared_child_starting: false,
             answers: HashMap::new(),
+            escalations: HashMap::new(),
             question_started: HashMap::new(),
             retry_started: None,
             countdown: None,

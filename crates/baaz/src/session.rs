@@ -439,6 +439,9 @@ pub(crate) struct Draft {
 
 /// What the session needs the application to do about something.
 pub enum SessionEvent {
+    /// docs/85 14.2: the person answered an escalation card (Baaz's own
+    /// question, put up for a worker's `escalate`).
+    EscalationAnswered { task_id: String, card_id: String, answer: String },
     /// Show this in a modal dialog: an identity or protocol failure.
     Dialog {
         /// Dialog heading.
@@ -1337,6 +1340,14 @@ impl SessionRuntime {
     /// Replace the first block of a client-authored turn.
     pub(crate) fn replace_client_block(&mut self, id: &str, block: Block) -> Vec<Delta> {
         self.store.replace_client_block(id, block)
+    }
+
+    /// The first block of the client-authored turn `id`, if there is one.
+    pub(crate) fn client_block(&self, id: &str) -> Option<Block> {
+        self.session()?.turns.iter().find(|turn| turn.id() == id).and_then(|turn| match turn {
+            Turn::Assistant { blocks, .. } => blocks.first().cloned(),
+            Turn::User { .. } => None,
+        })
     }
 
     /// Tests: fold one Muse wire frame ([`wire_note`]) through the same
