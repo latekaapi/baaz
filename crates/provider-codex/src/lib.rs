@@ -336,6 +336,13 @@ impl CodexAdapter {
         // argv, never in the linked config.toml (rule 26).
         args.extend(claude_md_fallback());
         args.extend(tool_output_limit());
+        // docs/85 16.2: the skills the person switched off on the Skills
+        // page, on the argv (rule 26; probed: `skills.config` turns a
+        // skill off in `skills/list`).
+        let off = provider::skill_switches::load(&provider::child_env::state_dir()).off_for("codex");
+        if let Some(config) = provider::skill_switches::codex_config_arg(&off) {
+            args.extend(["-c".to_owned(), config]);
+        }
         if !use_own {
             args.extend(crate::terminal::disable_overrides(
                 crate::terminal::inherited_servers().iter().map(String::as_str),
