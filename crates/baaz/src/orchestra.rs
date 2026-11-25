@@ -72,7 +72,7 @@ fn texts(params: &Value, key: &str) -> Vec<String> {
 }
 
 /// Run `work` against baaz.db on the writer thread, from any thread.
-fn with_db<R: Send + 'static>(work: impl FnOnce(&mut rusqlite::Connection) -> R + Send + 'static) -> Option<R> {
+fn with_db<R: Send + 'static>(work: impl FnOnce(&mut crate::db::Connection) -> R + Send + 'static) -> Option<R> {
     crate::db::call(crate::db::path(), move |opened| work(&mut opened.conn))
 }
 

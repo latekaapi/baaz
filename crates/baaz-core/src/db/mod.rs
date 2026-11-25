@@ -30,7 +30,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Mutex, OnceLock};
 
-use rusqlite::Connection;
+/// The database connection, as the app names it (the app never names the
+/// SQLite crate itself: `tests/db_ratchet.rs`).
+pub use rusqlite::Connection;
 
 pub mod attachments;
 pub mod history;
