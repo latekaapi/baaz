@@ -1166,6 +1166,15 @@ impl Harness {
         // The window's lifecycle runs from its causes, never from a frame
         // (task 4.9): the settle, the floats, the title, focus, activation.
         this.install_window_sync(window, cx);
+        // docs/85 14.1: tasks left mid-flight by the last run are carried on
+        // once the window has its sessions (a short wait for the boot's own
+        // opens; never in a capture or a test that drives it itself).
+        if !cfg!(all(test, feature = "probe")) {
+            this.tasks.push(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                let _ = this.update(cx, |this, cx| this.reconcile_tasks_on_open(cx));
+            }));
+        }
         // The two capture boots (`probe` builds only: without it neither
         // flag parses).
         #[cfg(feature = "probe")]

@@ -37,6 +37,11 @@ pub(super) fn recording_factory_numbered(numbered: bool) -> (crate::providers::R
             self.inner.capabilities()
         }
         fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
+            // A resume (docs/85 14.1's restart) echoes the session.
+            if let provider::Command::ResumeSession { session_id, .. } = &command {
+                self.sent.lock().expect("sent").push((format!("resumed:{session_id}"), String::new()));
+                return Ok(provider::Ack::Session { session_id: session_id.clone(), title: None });
+            }
             let steered = match &command {
                 provider::Command::SteerInput { parts, .. } => Some(parts),
                 _ => None,

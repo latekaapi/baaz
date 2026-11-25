@@ -934,3 +934,114 @@ pub(crate) fn proof_for(text: &str) -> Proof {
         Proof::NotProven
     }
 }
+
+/// What a resumed worker is told after a restart (docs/85 14.1, 15.6):
+/// never the original prompt again.
+pub(crate) const CONTINUE_TEXT: &str = "Baaz restarted while you were working. Continue from where you stopped.";
+
+impl Harness {
+    /// docs/85 14.1: the reconcile when the app opens — every pending
+    /// outbox item is carried out again, a running task whose worker is not
+    /// live is resumed from the provider's own files and told to continue,
+    /// and a waiting task whose links passed meanwhile starts. Off the UI
+    /// thread for the read; never in a capture.
+    pub(crate) fn reconcile_tasks_on_open(&mut self, cx: &mut Context<Self>) {
+        if crate::runtime::captures() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let read = cx
+                .background_spawn(async move {
+                    with_db(|conn| (crate::db::tasks::load_all(conn).unwrap_or_default(), crate::db::tasks::pending(conn).unwrap_or_default())).unwrap_or_default()
+                })
+                .await;
+            let (tasks, pending) = read;
+            if tasks.is_empty() {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                let live = |session: &str| this.registry.find_runtime(this.active.as_ref(), session, cx).is_some();
+                let actions = core::reconcile(&tasks, &pending, &live);
+                crate::baaz_log!("orchestra: reconcile on open: {} task(s), {} action(s)", tasks.len(), actions.len());
+                for action in actions {
+                    this.carry_out(action, &tasks, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn carry_out(&mut self, action: core::Reconcile, tasks: &[Task], cx: &mut Context<Self>) {
+        let find = |id: &str| tasks.iter().find(|t| t.id == id).cloned();
+        let lead_mode = |this: &Self, task: &Task, cx: &gpui::App| {
+            let parent = this.registry.find_runtime(this.active.as_ref(), &task.lead_session, cx).map(|rt| rt.read(cx).mode()).unwrap_or_default();
+            core::child_mode(parent, task.role)
+        };
+        match action {
+            core::Reconcile::Replay(item) => {
+                let Some(task) = find(&item.task_id) else { return };
+                match item.effect {
+                    Effect::Start { .. } if task.status == Status::Queued => {
+                        let (mode, root) = (lead_mode(self, &task, cx), self.session_workspace(&task.lead_session, cx));
+                        self.start_worker(task, mode, root, cx);
+                    }
+                    Effect::Start { .. } => {}
+                    Effect::Check => self.check_task(task, cx),
+                    Effect::WakeLead { lead_session } => {
+                        let mine: Vec<Task> = tasks.iter().filter(|t| t.lead_session == lead_session).cloned().collect();
+                        self.wake_lead(&lead_session, &mine, cx);
+                    }
+                    Effect::Send { text } => {
+                        if let Some(worker) = task.worker_session.clone() {
+                            let _ = self.deliver_from(&task.lead_session, &worker, &text, cx);
+                        }
+                    }
+                    Effect::Stop => {}
+                }
+                let id = item.id;
+                cx.background_spawn(async move {
+                    with_db(move |conn| crate::db::tasks::mark_done(conn, id).ok());
+                })
+                .detach();
+            }
+            core::Reconcile::Resume { task_id } => {
+                let Some(task) = find(&task_id) else { return };
+                let Some(worker) = task.worker_session.clone() else { return };
+                let mode = lead_mode(self, &task, cx);
+                self.run_on_main(cx, move |this, window, cx| {
+                    this.reopen_worker(&worker, mode, move |this, resumed, cx| match resumed {
+                        Ok(session) => {
+                            this.registry.orchestra.workers.insert(session.clone(), task.id.clone());
+                            if let Some(runtime) = this.registry.find_runtime(this.active.as_ref(), &session, cx) {
+                                runtime.update(cx, |rt, cx| rt.send_or_queue(CONTINUE_TEXT.to_owned(), cx));
+                            }
+                        }
+                        Err(why) => {
+                            crate::baaz_log!("orchestra: {} could not resume ({why}); it needs the person", task.id);
+                            let mut task = task;
+                            let _ = task.move_to(Status::NeedsYou, now());
+                            task.verdict = Some(json!({"needs_you": format!("the worker could not resume after a restart: {why}")}));
+                            cx.background_spawn(async move {
+                                with_db(move |conn| crate::db::tasks::save(conn, &task).ok());
+                            })
+                            .detach();
+                        }
+                    }, window, cx);
+                });
+            }
+            core::Reconcile::Release { task_id } => {
+                let Some(mut task) = find(&task_id) else { return };
+                if task.move_to(Status::Queued, now()).is_err() {
+                    return;
+                }
+                let (mode, root) = (lead_mode(self, &task, cx), self.session_workspace(&task.lead_session, cx));
+                let saved = task.clone();
+                cx.background_spawn(async move {
+                    with_db(move |conn| crate::db::tasks::save_with(conn, &saved, Some(&Effect::Start { generation: saved.generation })).ok());
+                })
+                .detach();
+                self.start_worker(task, mode, root, cx);
+            }
+        }
+    }
+}

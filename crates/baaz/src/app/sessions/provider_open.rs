@@ -330,6 +330,54 @@ impl Harness {
         }, window, cx);
     }
 
+    /// docs/85 14.1: resume a worker's session after a restart, in the
+    /// background like [`Self::open_worker`] — the provider's own files are
+    /// the authority (rule 18), and nothing is activated. `then` hears the
+    /// session id, or why it could not resume.
+    pub(crate) fn reopen_worker(
+        &mut self,
+        session_id: &str,
+        mode: aui_protocol::PermissionMode,
+        then: impl FnOnce(&mut Self, Result<String, String>, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let record = self.session_list.read(cx).provider_sessions.get(session_id).cloned();
+        let Some(record) = record else {
+            then(self, Err(format!("no record of session {session_id}")), cx);
+            return;
+        };
+        let Some(provider_id) = ProviderId::parse_known(&record.provider) else {
+            then(self, Err(format!("unknown provider {}", record.provider)), cx);
+            return;
+        };
+        let factory = self.lane_factory(provider_id);
+        let inline = factory.lands_inline();
+        self.ensure_provider_started(provider_id, cx);
+        let workspace = record.workspace.clone().unwrap_or_else(|| self.workspace(cx));
+        self.register_terminal_session(&record.session_id, std::path::PathBuf::from(workspace.clone()), record.provider.as_str(), cx);
+        let project = self.session_list.read(cx).overrides.get(&record.session_id).and_then(|meta| meta.project.clone());
+        let work = move || -> Result<ProviderOpen, crate::app::OpenFailed> {
+            let provider = factory.open(provider_id)?;
+            #[cfg(not(all(test, feature = "probe")))]
+            let (provider, events) = conn::gate(provider);
+            let env = baaz_core::worktrees::env_for_folder(&crate::store::support_dir(), std::path::Path::new(&workspace));
+            let session_id = crate::provider_sessions::send_resume(&provider, &record, &provider::new_request_id(), Some(mode), env, false)
+                .map_err(|error| crate::app::OpenFailed { error, stderr: provider.stderr_tail() })?;
+            #[cfg(feature = "probe")]
+            #[cfg(test)]
+            let (provider, events) = conn::gate_sync(provider);
+            Ok(ProviderOpen { provider_id, provider, events, session_id, project, workspace, title: None, epoch: 0, lease_held: false, stored_turns: None })
+        };
+        self.run_open(inline, work, move |this, result, window, cx| match result {
+            Ok(open) => {
+                let id = this.finish_worker_open(open, None, window, cx);
+                then(this, Ok(id), cx);
+            }
+            Err(error) => then(this, Err(error.error.to_string()), cx),
+        }, window, cx);
+    }
+
     /// Land a worker's lane: its view, record and row, parked live.
     fn finish_worker_open(&mut self, open: ProviderOpen, model: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> String {
         let ProviderOpen { provider_id, provider, events, session_id, project, workspace, title, .. } = open;

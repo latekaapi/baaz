@@ -260,3 +260,34 @@ fn the_verdict_catches_a_false_done_and_a_pipeline_wakes_the_lead_once(cx: &mut 
     assert!(error_text(&out).starts_with("[stale_generation]"), "{out}");
     cleanup(&root, state);
 }
+
+/// docs/85 14.1: a restart mid-task resumes. The worker's session is gone
+/// from the window (as after a quit); the reconcile on open resumes it from
+/// the provider's own record in the background and tells it to continue;
+/// a pending start replays; the person's view never moves.
+#[gpui::test]
+fn a_restart_mid_task_resumes_its_worker(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("orchestra-restart");
+    let root = folder(&state.2, true);
+    let (factory, sent) = recording_factory_numbered(true);
+    let (baaz, vc, lead) = session_with(cx, &root, factory);
+    let out = reply(&pane_call(&baaz, vc, &lead, &root, "delegate", serde_json::json!({"task": "long job", "provider": "codex"})));
+    let task = out["result"]["task"].as_str().unwrap().to_owned();
+    vc.run_until_parked();
+    let worker = worker_of(&baaz, vc, &task);
+    // The app "quits": the worker's live session goes; the task row stays running.
+    vc.update(|_, cx| baaz.update(cx, |h, _| {
+        h.registry.forget_where(|id| id == worker);
+        h.registry.orchestra.workers.clear();
+    }));
+    assert_eq!(status_of(&task).status, baaz_core::tasks::Status::Running);
+    vc.update(|_, cx| baaz.update(cx, |h, cx| h.reconcile_tasks_on_open(cx)));
+    settle(vc);
+    let seen = sent.lock().unwrap().clone();
+    assert!(seen.iter().any(|s| s.0 == format!("resumed:{worker}")), "resumed from the provider's record: {seen:#?}");
+    assert!(seen.iter().any(|s| s.0 == crate::orchestra::CONTINUE_TEXT), "told to continue, not the task again");
+    assert_eq!(worker_of(&baaz, vc, &task), worker, "the same session, live again");
+    let active = vc.update(|_, cx| baaz.read(cx).active.clone().unwrap().read(cx).rt(cx).session_id.clone());
+    assert_eq!(active, lead);
+    cleanup(&root, state);
+}
