@@ -1364,7 +1364,7 @@ impl Harness {
         let project = self.session_list.read(cx).sessions.iter().find(|row| row.id == lead).and_then(|row| row.project.clone());
         let workspace = self.current_project(cx).map(|p| p.root.to_string_lossy().into_owned());
         let now = baaz_core::clock::now_local();
-        let workers = [("fixture-worker-write", "Write 15 questions · Sonnet"), ("fixture-worker-review", "Review them · Codex"), ("fixture-worker-import", "Import approved ones · Muse")];
+        let workers = [("fixture-worker-write", "Write 15 questions"), ("fixture-worker-review", "Review them"), ("fixture-worker-import", "Import the approved ones")];
         for (id, label) in workers {
             if !self.session_list.read(cx).sessions.iter().any(|row| row.id == id) {
                 let row = crate::sidebar::local_started_row(id, label.to_owned(), project.clone(), workspace.clone(), now);
@@ -1459,13 +1459,45 @@ impl Harness {
                 }
                 this.session_list.update(cx, |list, _| {
                     if !list.sessions.iter().any(|row| row.id == id) {
-                        list.sessions.push(crate::sidebar::local_started_row(&id, "Review them · Codex".into(), None, None, baaz_core::clock::now_local()));
+                        list.sessions.push(crate::sidebar::local_started_row(&id, "Review them".into(), None, None, baaz_core::clock::now_local()));
                     }
                 });
                 this.open_worker_beside(&id, cx);
             }
             Err(why) => crate::baaz_log!("workers-pane: the stand-in did not open ({why})"),
         }, window, cx);
+        Ok(())
+    }
+}
+
+impl Harness {
+    /// `workers-unfold`: unfold the open session's Workers block (a live
+    /// run's capture of its rows after they settled).
+    #[cfg(feature = "probe")]
+    pub(crate) fn step_workers_unfold(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let view = self.active.clone().ok_or("no open session")?;
+        let runtime = view.read(cx).runtime().clone();
+        if runtime.read(cx).workers.is_empty() {
+            return Err("the open session has no workers".into());
+        }
+        runtime.update(cx, |rt, cx| {
+            rt.workers_open = Some(true);
+            cx.emit(crate::session::RuntimeEvent::BannerChanged);
+        });
+        Ok(())
+    }
+
+    /// `worker-beside:<n>`: open the open session's nth worker (from 1)
+    /// beside it, as its row's ↗ does.
+    #[cfg(feature = "probe")]
+    pub(crate) fn step_worker_beside(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let n: usize = rest.trim().parse().map_err(|_| format!("worker-beside wants a number, got `{rest}`"))?;
+        let view = self.active.clone().ok_or("no open session")?;
+        let id = view.read(cx).rt(cx).workers.get(n.saturating_sub(1)).map(|row| row.id.to_string()).ok_or_else(|| format!("no worker {n}"))?;
+        if self.registry.parked(&id).is_none() {
+            return Err(format!("worker {n} is not live"));
+        }
+        self.open_worker_beside(&id, cx);
         Ok(())
     }
 }

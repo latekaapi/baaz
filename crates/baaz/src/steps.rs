@@ -166,6 +166,8 @@
 //! | `pane-push-ask:<branch>` | the approval an agent's `changes_commit {push: true}` raises (docs/85 13.4, rule 29), with no ask behind it: its Push pushes nothing; no session or no branch fails the step, free |
 //! | `workers-fixture:<running\|settled>` | the open session as the lead of three fixture workers (docs/85 14.9): their rows nested under it in the sidebar (local rows, nothing runs), its Workers block open, and settled the per-criterion summary; no task row is written; no open session fails the step, free |
 //! | `workers-pane` | a stand-in worker (the window's scripted lane, Read-only) opened beside the open session as the block's ↗ opens one — captures only (fails the step otherwise), free |
+//! | `workers-unfold` | unfold the open session's Workers block (its rows after every worker settled); no workers fails the step, free |
+//! | `worker-beside:<n>` | open the open session's nth worker (from 1) beside it, as its row's ↗ does; no such live worker fails the step, free |
 //! | `run` | press Run on the open session (docs/82 7.4): the folder's `.baaz/project.toml` `run` starts in a terminal tab of the session's own, listed in Tasks; a Run that still runs is shown, not started again; no session or no `run` declared fails the step — **starts a real process** (captures: a static server in a fixture folder only) |
 //! | `run-stop` | Stop run on the open session: its process group ends; nothing running fails the step |
 //! | `run-wait-preview` (or `run-wait-preview:<s>`) | the runner waits up to that many seconds (30) while the Run's preview port has not answered, then the step checks the session's Page opened on it; gave up, run ended, moved on or no Run fails the step |
@@ -489,6 +491,8 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "pane-push-ask", run: |this, rest, _, cx| this.step_pane_push_ask(rest, cx) },
     WindowVerb { verb: "workers-fixture", run: |this, rest, _, cx| this.step_workers_fixture(rest, cx) },
     WindowVerb { verb: "workers-pane", run: |this, _, window, cx| this.step_workers_pane(window, cx) },
+    WindowVerb { verb: "workers-unfold", run: |this, _, _, cx| this.step_workers_unfold(cx) },
+    WindowVerb { verb: "worker-beside", run: |this, rest, _, cx| this.step_worker_beside(rest, cx) },
     WindowVerb { verb: "tick", run: |this, rest, _, cx| this.step_changes_tick(rest, true, cx) },
     WindowVerb { verb: "untick", run: |this, rest, _, cx| this.step_changes_tick(rest, false, cx) },
     WindowVerb { verb: "changes-branch", run: |this, rest, _, cx| this.step_changes_branch(rest, cx) },

@@ -400,8 +400,8 @@ impl SessionRuntime {
 impl SessionView {
     /// docs/85 14.9: the Workers block pinned at the foot of the transcript
     /// (on the composer band), with the per-criterion summary above it once
-    /// every worker has settled and the block is open. `None` with nothing
-    /// delegated.
+    /// every worker has settled (the rows fold then; the summary stays).
+    /// `None` with nothing delegated.
     pub(crate) fn render_workers_block(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let rt = self.runtime.read(cx);
         if rt.workers.is_empty() {
@@ -417,7 +417,8 @@ impl SessionView {
             }),
             aui::transcript::WorkersAction::OpenBeside(worker) => runtime.update(cx, |_, cx| cx.emit(SessionEvent::OpenWorker { worker: worker.to_string() })),
         });
-        let summary = (settled && open && !rt.delegated.is_empty()).then(|| aui::transcript::criteria_card("workers-summary", rt.delegated.clone()));
+        // At the end the summary shows by itself; only the rows fold.
+        let summary = (settled && !rt.delegated.is_empty()).then(|| aui::transcript::criteria_card("workers-summary", rt.delegated.clone()));
         // On the transcript's measure, like the composer under it.
         Some(
             gpui::div()

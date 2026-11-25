@@ -1047,21 +1047,6 @@ impl Harness {
     }
 }
 
-#[cfg(feature = "probe")]
-#[cfg(test)]
-mod tests {
-    use super::lower_drag_share;
-
-    /// docs/82 8.1: the divider follows the pointer and holds to 0.25–0.75.
-    #[test]
-    fn the_lower_divider_follows_and_clamps() {
-        assert_eq!(lower_drag_share(0.5, 400.0, 480.0, 800.0), 0.6);
-        assert_eq!(lower_drag_share(0.5, 400.0, 0.0, 800.0), crate::layout::SPLIT_MIN);
-        assert_eq!(lower_drag_share(0.5, 400.0, 2000.0, 800.0), crate::layout::SPLIT_MAX);
-        assert_eq!(lower_drag_share(0.9, 0.0, 0.0, 0.0), crate::layout::SPLIT_MAX, "no measured height: the start, held");
-    }
-}
-
 impl RightPane {
     /// docs/85 14.9: a worker beside its lead — a header (its title, its
     /// provider and mode, Open in centre, ✕) over the worker's own view and
@@ -1115,5 +1100,20 @@ impl RightPane {
             .child(gpui::div().flex_1().min_h(px(0.0)).relative().child(worker.into_any_element()))
             .child(gpui::div().flex_none().w_full().bg(p.surface_1).child(band))
             .into_any_element()
+    }
+}
+
+#[cfg(feature = "probe")]
+#[cfg(test)]
+mod tests {
+    use super::lower_drag_share;
+
+    /// docs/82 8.1: the divider follows the pointer and holds to 0.25–0.75.
+    #[test]
+    fn the_lower_divider_follows_and_clamps() {
+        assert_eq!(lower_drag_share(0.5, 400.0, 480.0, 800.0), 0.6);
+        assert_eq!(lower_drag_share(0.5, 400.0, 0.0, 800.0), crate::layout::SPLIT_MIN);
+        assert_eq!(lower_drag_share(0.5, 400.0, 2000.0, 800.0), crate::layout::SPLIT_MAX);
+        assert_eq!(lower_drag_share(0.9, 0.0, 0.0, 0.0), crate::layout::SPLIT_MAX, "no measured height: the start, held");
     }
 }

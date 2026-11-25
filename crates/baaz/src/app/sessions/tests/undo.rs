@@ -77,7 +77,7 @@ pub(super) fn recording_factory_numbered(numbered: bool) -> (crate::providers::R
     let opened = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let factory = crate::providers::Registry::test(move |_: ProviderId| {
         let n = opened.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        let inner = if numbered && n > 1 { provider::scripted::ScriptedProvider::with_session_id(&format!("s-scripted-{n}")) } else { provider::scripted::ScriptedProvider::new() };
+        let inner = if numbered && n > 1 { provider::scripted::ScriptedProvider::with_session_id(format!("s-scripted-{n}")) } else { provider::scripted::ScriptedProvider::new() };
         let mut adapter = Recording { inner, sent: factory_sent.clone() };
         adapter.connect(&conn::connect_info())?;
         Ok(provider::Provider::new(adapter))
