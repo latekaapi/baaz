@@ -1107,7 +1107,11 @@ impl Harness {
         crate::baaz_log!("crash: looking for a report Baaz has not told of");
         let work = move || {
             if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
-                baaz_core::crash::collect_system_reports(&state, &home.join("Library/Logs/DiagnosticReports"));
+                baaz_core::crash::collect_system_reports(
+                    &state,
+                    &home.join("Library/Logs/DiagnosticReports"),
+                    baaz_core::crash::own_bundle_id().as_deref(),
+                );
             }
             let unseen = baaz_core::crash::unseen(&state);
             if let Some(report) = &unseen {
