@@ -999,7 +999,12 @@ def _memory_state():
     """docs/85 12.3b: a state dir whose redirected memory holds three notes
     for the throwaway `acme-web` project and one personal note, each with
     a fixed file time so the page's dates never move."""
-    state = tempfile.mkdtemp(prefix="uiprobe-memory-page-state-")
+    # A fixed folder: the page names each project's memory folder, so a
+    # random one would change the capture run to run.
+    # Idempotent (every file is rewritten): two processes may import this
+    # module at once, and removing the folder first raced.
+    state = os.path.join(REAL_TMP, "baaz-uiprobe-memory-page-state")
+    os.makedirs(state, exist_ok=True)
     notes = [("GB postcode rule", "gb-postcode-rule", "project", "Postcodes are validated per country"),
              ("Release day", "release-day", "project", "When releases go out"),
              ("Payments sandbox keys live in 1Password", "payments-sandbox-keys", "reference", "Where the keys are")]

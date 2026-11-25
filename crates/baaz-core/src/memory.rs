@@ -59,10 +59,14 @@ impl Scope {
 pub fn project_dir(workspace: &Path) -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     // Rule 25: a redirected state dir, a capture or a test build never
-    // writes the owner's `~/.claude`.
-    let redirected = crate::store::state_dir_override().or_else(|| {
-        (crate::runtime::captures() || cfg!(any(test, feature = "test-support"))).then(crate::store::support_dir)
-    });
+    // writes the owner's `~/.claude`. A test build pins one folder for the
+    // process: tests that point BAAZ_STATE_DIR elsewhere while they run must
+    // not move another test's notes between its save and its edit.
+    let redirected = if cfg!(any(test, feature = "test-support")) {
+        Some(std::env::temp_dir().join(format!("baaz-test-memory-{}", std::process::id())))
+    } else {
+        crate::store::state_dir_override().or_else(|| crate::runtime::captures().then(crate::store::support_dir))
+    };
     crate::providers::claude_memory_dir(workspace, &home, redirected.as_deref())
 }
 

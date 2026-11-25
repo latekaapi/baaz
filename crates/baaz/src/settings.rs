@@ -2622,7 +2622,7 @@ impl SettingsPage {
             } else if group.name == "Personal" {
                 "Notes about you, in every project.".to_owned()
             } else {
-                tilde_path(&group.dir)
+                "Shared by every agent in this project.".to_owned()
             };
             stack = stack.child(section(group.name.clone()).rows(rows).note(note));
         }
@@ -3063,7 +3063,7 @@ impl Harness {
                     })
                     .collect();
             }
-            "memory" => facts.memory = memory_groups(self.session_list.read(cx).projects.sorted().into_iter().map(|p| (p.name.clone(), p.root.clone()))),
+            "memory" => facts.memory = memory_groups_cached(self.session_list.read(cx).projects.sorted().into_iter().map(|p| (p.name.clone(), p.root.clone()))),
             "data" => {
                 facts.history_pages = self.browser.read(cx).data.read(cx).history_len();
                 facts.storage = baaz_core::store::storage_size_cached();
@@ -3134,6 +3134,8 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The arms that change only what the page shows repaint once, here.
+        let mut repaint = false;
         match event {
             SettingsEvent::Navigate(target) => self.open_settings_page(target, cx),
             SettingsEvent::Close => self.close_settings(cx),
@@ -3146,7 +3148,7 @@ impl Harness {
             SettingsEvent::SetDefaultProvider(id) => {
                 let id = *id;
                 self.provider_model.update(cx, |model, _| model.choose_new_provider(id));
-                cx.notify();
+                repaint = true;
             }
             SettingsEvent::OpenConnect => self.open_connect_screen(cx),
             SettingsEvent::MigrateSessions => self.confirm_session_migration(cx),
@@ -3164,7 +3166,8 @@ impl Harness {
                 if let Err(error) = baaz_core::memory::edit(dir, title, &change) {
                     self.overlays.update(cx, |overlays, cx| overlays.toast("Memory", error, cx));
                 }
-                cx.notify();
+                forget_memory_groups();
+                repaint = true;
             }
             SettingsEvent::ImportChrome => self.open_chrome_import(cx),
             SettingsEvent::IncludeSite(site) => {
@@ -3195,6 +3198,9 @@ impl Harness {
             }
             SettingsEvent::OpenChromiumSettings => self.open_chromium_settings(window, cx),
         }
+        if repaint {
+            cx.notify();
+        }
     }
 }
 
@@ -3209,7 +3215,33 @@ pub(crate) fn data_folder_label() -> String {
     }
 }
 
-/// A page's sections, [`SETTINGS_SECTION_GAP`] apart.
+/// The Memory page's groups, read at most every two seconds: the page's
+/// facts are asked for on every frame, and the notes are files.
+/// [`forget_memory_groups`] drops the copy after a delete.
+fn memory_groups_cached(projects: impl Iterator<Item = (String, std::path::PathBuf)>) -> Vec<MemoryGroup> {
+    use std::sync::Mutex;
+    type Kept = (std::time::Instant, Vec<(String, std::path::PathBuf)>, Vec<MemoryGroup>);
+    static KEPT: Mutex<Option<Kept>> = Mutex::new(None);
+    let projects: Vec<(String, std::path::PathBuf)> = projects.collect();
+    let mut kept = KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, for_projects, groups)) = kept.as_ref() {
+        if *for_projects == projects && at.elapsed() < std::time::Duration::from_secs(2) && !MEMORY_STALE.load(std::sync::atomic::Ordering::Relaxed) {
+            return groups.clone();
+        }
+    }
+    MEMORY_STALE.store(false, std::sync::atomic::Ordering::Relaxed);
+    let groups = memory_groups(projects.clone().into_iter());
+    *kept = Some((std::time::Instant::now(), projects, groups.clone()));
+    groups
+}
+
+static MEMORY_STALE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A note was deleted: the next frame reads the notes again.
+fn forget_memory_groups() {
+    MEMORY_STALE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The Memory page's groups: each adopted project's notes (shared with its
 /// worktrees), then the personal notes. Each note's type is read from its
 /// file and its day from the file's time.
@@ -3231,7 +3263,12 @@ fn memory_groups(projects: impl Iterator<Item = (String, std::path::PathBuf)>) -
         MemoryGroup { name, dir, notes }
     };
     let mut seen = std::collections::HashSet::new();
+    // By name: the page is a reference list, and recency would reorder it
+    // under the person's eye.
+    let mut projects: Vec<(String, std::path::PathBuf)> = projects.collect();
+    projects.sort_by_key(|project| project.0.to_lowercase());
     let mut groups: Vec<MemoryGroup> = projects
+        .into_iter()
         .filter_map(|(name, root)| {
             let dir = baaz_core::memory::project_dir(&root);
             seen.insert(dir.clone()).then(|| read(name, dir))
@@ -3241,6 +3278,7 @@ fn memory_groups(projects: impl Iterator<Item = (String, std::path::PathBuf)>) -
     groups
 }
 
+/// A page's sections, [`SETTINGS_SECTION_GAP`] apart.
 fn settings_sections_stack() -> gpui::Div {
     v_flex().w_full().gap(px(SETTINGS_SECTION_GAP))
 }
