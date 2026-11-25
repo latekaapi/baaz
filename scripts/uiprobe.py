@@ -1068,7 +1068,12 @@ ENTRIES.update({
 
 ENTRIES.update({
     "jump-pill":               _jump_entry("--tier", "subscription"),
-    "jump-pill-plan-banner":   _jump_entry("--tier", "unknown"),
+    # docs/85 11.6: the Muse-only "plan unknown" banner is gone; the banner
+    # under the pill is now the one billing hold (the tier went unknown
+    # since a send on a subscription). Rebaseline on main after merge.
+    "jump-pill-plan-banner":   _jump_entry("--tier", "unknown",
+                                           steps="wait:1500;billing-last:muse:subscription;"
+                                                 "send-held:Ship it;wait:800;wheel:300;wait:800"),
     "jump-pill-signed-out":    _jump_entry("--tier", "subscription",
                                            # One wheel once the banner has settled: two
                                            # wheels while it was still growing landed ~10 px
