@@ -145,6 +145,7 @@ pub fn insert_fixture(conn: &Connection, now: i64) -> rusqlite::Result<()> {
 mod tests {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
     fn turn(conn: &Connection, session: &str, id: &str, at: i64, provider: &str, model: &str, tin: i64, tout: i64, cache: i64, cost: f64) {
         conn.execute(
             "INSERT INTO turn(session_id, turn_id, finished_at, model, tokens_in, tokens_out, cache_read, cost_usd, provider)
