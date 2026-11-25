@@ -261,9 +261,11 @@ impl Goal {
         (self.tokens >= self.limits.tokens).then(|| format!("{} tokens of the goal's {}", self.tokens, self.limits.tokens))
     }
 
-    /// Time on the goal as the pill shows it: `12m`, `1h 4m`.
+    /// Time on the goal as the pill shows it: `12m`, `1h 4m` — up to now
+    /// while it is pursued, up to its last change once it settled.
     pub fn elapsed(&self, now: i64) -> String {
-        let m = (now - self.started_at).max(0) / 60_000;
+        let end = if self.state.active() { now } else { self.updated_at };
+        let m = (end - self.started_at).max(0) / 60_000;
         if m < 60 { format!("{m}m") } else { format!("{}h {}m", m / 60, m % 60) }
     }
 
@@ -361,6 +363,9 @@ mod tests {
         assert!(g.over_limit(0).unwrap().contains("tokens"));
         assert_eq!(g.native_text(), "tests pass (verified by `cargo test` exiting 0)");
         assert_eq!(g.elapsed(65 * 60_000), "1h 5m");
+        g.state = GoalState::Met;
+        g.updated_at = 5 * 60_000;
+        assert_eq!(g.elapsed(65 * 60_000), "5m", "a settled goal's time stops");
     }
 
     #[test]

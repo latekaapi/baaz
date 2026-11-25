@@ -27,6 +27,20 @@ fn now() -> i64 {
     baaz_core::clock::now_ms() as i64
 }
 
+/// When this run began: a goal last changed before it was left by an
+/// earlier run (15.6); one changed since is this run's own.
+static BOOT_MS: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+
+/// Stamp this run's start (the window's first build), before any goal can
+/// change.
+pub(crate) fn note_boot() {
+    BOOT_MS.get_or_init(now);
+}
+
+fn boot_ms() -> i64 {
+    *BOOT_MS.get_or_init(now)
+}
+
 /// The last `n` lines of `text`.
 fn last_lines(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
@@ -240,7 +254,11 @@ impl Harness {
                 .background_spawn(async move { crate::db::call(crate::db::path(), |opened| baaz_core::db::goals::active(&opened.conn).unwrap_or_default()).unwrap_or_default() })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                for goal in goals.into_iter().filter(|g| !g.resent) {
+                // Only what an earlier run left: a goal this run already
+                // changed is live here (Gate 15 live: a goal set in the
+                // boot's first seconds was resent to itself).
+                let boot = boot_ms();
+                for goal in goals.into_iter().filter(|g| !g.resent && g.updated_at < boot) {
                     this.resume_goal_after_restart(goal, cx);
                 }
             });
@@ -301,6 +319,7 @@ impl Harness {
             g.tokens = 212_400;
             g.last_check = Some(check.to_owned());
             g.reason = reason.map(str::to_owned);
+            g.updated_at = at;
             g
         };
         let (goal, offer) = match rest.trim() {

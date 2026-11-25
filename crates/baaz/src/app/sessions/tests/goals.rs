@@ -184,8 +184,13 @@ fn a_relaunch_resends_a_running_goal_once(cx: &mut gpui::TestAppContext) {
     with_check(&root, "true");
     let (factory, sent) = recording_factory_numbered(true);
     let (baaz, vc, session) = session_with(cx, &root, factory);
-    let goal = baaz_core::goals::Goal::new(&session, "codex", "all 15 imported", Some("true".into()), true, baaz_core::goals::limits_for(provider::BillingMode::Subscription), baaz_core::clock::now_ms() as i64);
+    // Left by an earlier run: last changed before this one began.
+    let goal = baaz_core::goals::Goal::new(&session, "codex", "all 15 imported", Some("true".into()), true, baaz_core::goals::limits_for(provider::BillingMode::Subscription), 1);
     crate::db::call(crate::db::path(), move |opened| baaz_core::db::goals::save(&opened.conn, &goal).unwrap());
+    // And one this run set (another session's): never resent.
+    let mut own = baaz_core::goals::Goal::new("s-this-run", "codex", "x", None, true, baaz_core::goals::limits_for(provider::BillingMode::Subscription), baaz_core::clock::now_ms() as i64);
+    own.updated_at = baaz_core::clock::now_ms() as i64 + 1;
+    crate::db::call(crate::db::path(), move |opened| baaz_core::db::goals::save(&opened.conn, &own).unwrap());
     for _ in 0..2 {
         vc.update(|_, cx| baaz.update(cx, |h, cx| h.resume_goals_on_open(cx)));
         vc.run_until_parked();

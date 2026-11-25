@@ -1166,6 +1166,9 @@ impl Harness {
         // The window's lifecycle runs from its causes, never from a frame
         // (task 4.9): the settle, the floats, the title, focus, activation.
         this.install_window_sync(window, cx);
+        // docs/85 15.6: this run's start, which tells a goal an earlier run
+        // left from one this run sets.
+        crate::goals::note_boot();
         // docs/85 14.1: tasks left mid-flight by the last run are carried on
         // once the window has its sessions (a short wait for the boot's own
         // opens; never in a capture or a test that drives it itself).
