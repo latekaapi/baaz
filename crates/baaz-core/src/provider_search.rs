@@ -89,6 +89,19 @@ pub fn read_bodies_in(sources: &[BodySource], homes: &Homes) -> HashMap<String, 
     out
 }
 
+/// Where `(provider, session_id)`'s stored transcript is, when there is one
+/// (docs/85 11.1: the transcript store's freshness check). Blocking: it
+/// lists the homes' transcript folders.
+pub fn stored_file(provider: &str, session_id: &str) -> Option<PathBuf> {
+    let homes = Homes::for_app();
+    let (dirs, walk): (&[PathBuf], fn(&Path) -> HashMap<String, PathBuf>) = match provider {
+        providers_ids::CLAUDE => (&homes.claude, provider_claude_code::history::stored_transcripts),
+        providers_ids::CODEX => (&homes.codex, provider_codex::rollout::stored_rollouts),
+        _ => return None,
+    };
+    dirs.iter().find_map(|dir| walk(dir).remove(session_id))
+}
+
 /// The wire ids this module dispatches on.
 mod providers_ids {
     pub const CLAUDE: &str = "claude-code";

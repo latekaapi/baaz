@@ -94,6 +94,7 @@ use baaz_core::provider_search;
 mod provider_model;
 use baaz_core::provider_sessions;
 use baaz_core::provider_status;
+use baaz_core::transcripts;
 mod providers;
 mod quit_signals;
 mod region;

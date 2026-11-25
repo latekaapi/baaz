@@ -51,6 +51,7 @@ pub mod skills;
 pub mod store;
 pub mod system_open;
 pub mod terminal_relay;
+pub mod transcripts;
 pub mod tier;
 pub mod titles;
 pub mod undo;

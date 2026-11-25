@@ -544,6 +544,25 @@ impl Harness {
         // a replayed turn a no-op insert rather than a duplicate, and a
         // batch is one write.
         self.wire_call(cx, move || crate::usage::record_backfilled(&rows), |_this, (), _cx| {});
+        // Baaz's own transcript store (docs/85 11.1): the session's turns
+        // from the earliest settled one's ask on — only that tail is cloned
+        // off the UI thread, and the store writes it when it already holds
+        // everything before it (a reopen's replayed history settles from
+        // the first turn, which is the import).
+        if let Some(session) = runtime.read(cx).session() {
+            let first = turns
+                .iter()
+                .filter_map(|(turn_id, _)| session.turns.iter().position(|turn| turn.id() == turn_id))
+                .min();
+            if let Some(first) = first {
+                let start = if first > 0 && matches!(session.turns[first - 1], aui_protocol::Turn::User { .. }) { first - 1 } else { first };
+                let start = if turns.len() > 1 { 0 } else { start };
+                let tail = session.turns[start..].to_vec();
+                let muse_stamp = self.session_list.read(cx).index.get(&session_id).and_then(|entry| entry.updated_at_us);
+                let (state, provider, id) = (crate::store::support_dir(), provider.clone(), session_id.clone());
+                self.wire_call(cx, move || crate::transcripts::record_settled(&state, &provider, &id, muse_stamp, start, &tail), |_this, (), _cx| {});
+            }
+        }
         // A compaction alone: the row re-reads (and repaints) through its
         // own sync; nothing else moves.
         if turns.iter().all(|(turn_id, _)| compactions.contains(turn_id)) {
