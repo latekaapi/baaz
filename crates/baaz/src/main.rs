@@ -134,6 +134,7 @@ mod session;
 mod session_migration;
 use baaz_core::sessions;
 mod settings;
+mod skill_folders;
 mod usage_page;
 mod settings_providers;
 mod setup;

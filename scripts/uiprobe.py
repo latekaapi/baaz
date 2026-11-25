@@ -694,6 +694,10 @@ ENTRIES = {
                                       "--steps", "skills:page"]},
     "skills-empty":         {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "skills:empty"]},
+    # docs/85 16.2: the shared skill folders across providers (fixture
+    # skills, never the machine's own folders).
+    "skills-folders":       {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "skills-folders-fixture;skills:page"]},
     # The K3 dialogs over the page fixture (no CLI, deterministic,
     # offline): the Add menu with its cached trails, the import preview
     # over fixed rows, and the New dialog with empty fields. Each steps

@@ -1705,6 +1705,12 @@ impl SkillsPage {
             );
         }
 
+        // docs/85 16.2: the shared skill folders, every provider at once —
+        // each provider's own switch, or "pasted" where one loads none.
+        if let Some(section) = self.render_folder_skills(cx) {
+            column = column.child(section);
+        }
+
         // The error banner, with the CLI's message and Try again (S1).
         if let Some(error) = self.error.clone() {
             let retry = cx.listener(|this: &mut Self, _, _window: &mut Window, cx| {
@@ -1937,6 +1943,70 @@ impl SkillsPage {
     /// popover layer, right-aligned under the header — never in the page
     /// column, so opening it cannot move the page's layout. Every row
     /// carries its menu role and label from the library component.
+    /// docs/85 16.2: "In skill folders" — one row per skill in the shared
+    /// folders, where it lives, and each provider's own switch (or
+    /// "pasted"). A switch writes the provider's switch file; it applies to
+    /// sessions that start after it. `None` with no folder skills.
+    fn render_folder_skills(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let folders = crate::skill_folders::catalog(&self.root());
+        if folders.is_empty() {
+            return None;
+        }
+        let p = cx.aui().colors;
+        let switches = provider::skill_switches::load(&provider::child_env::state_dir());
+        let mut list = v_flex().w_full();
+        for (i, skill) in folders.iter().enumerate() {
+            let providers: Vec<aui::skills::CatalogProvider> = crate::providers::ProviderId::all()
+                .into_iter()
+                .filter_map(|id| {
+                    let wire = id.as_str();
+                    let reach = if skill.seen_by().contains(&wire) {
+                        aui::skills::CatalogReach::Loads { on: switches.is_on(wire, &crate::skill_folders::switch_key(wire, skill)) }
+                    } else if !crate::skill_folders::loads_folders(wire) {
+                        aui::skills::CatalogReach::Pasted
+                    } else {
+                        return None;
+                    };
+                    Some(aui::skills::CatalogProvider { id: wire.into(), name: id.label().into(), reach })
+                })
+                .collect();
+            let skill_key = skill.path.to_string_lossy().into_owned();
+            let model = aui::skills::CatalogRowModel {
+                id: skill_key.clone().into(),
+                name: skill.name.clone().into(),
+                description: skill.description.clone().unwrap_or_default().into(),
+                place: skill.source.label().into(),
+                providers,
+            };
+            let found = skill.clone();
+            let page = cx.entity().downgrade();
+            let row = aui::skills::catalog_row(model).on_intent(move |intent, _, cx| {
+                let key = crate::skill_folders::switch_key(&intent.provider, &found);
+                if let Err(why) = provider::skill_switches::set(&provider::child_env::state_dir(), &intent.provider, &key, intent.on) {
+                    crate::baaz_log!("skills: the switch was not saved ({why})");
+                }
+                // The page's own re-list redraws it (no notify of its own).
+                let _ = page.update(cx, |page, cx| page.relist_skills(cx));
+            });
+            list = list.child(div().w_full().px(px(SKILLS_ROW_INSET)).when(i > 0, |d| d.border_t_1().border_color(p.line)).child(row));
+        }
+        Some(
+            v_flex()
+                .flex_none()
+                .w_full()
+                .pt(px(scale::SP_4))
+                .child(
+                    v_flex()
+                        .px(px(SKILLS_ROW_INSET))
+                        .gap(px(scale::SP_1))
+                        .child(div().role_in(TextRole::Body, cx).text_color(p.ink).child("In skill folders"))
+                        .child(div().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child("Every provider's view of the shared skill folders. A switch applies to sessions you start after it.")),
+                )
+                .child(list)
+                .into_any_element(),
+        )
+    }
+
     fn render_add_menu(&self, column_max: f32, column_pad: f32, cx: &mut Context<Self>) -> AnyElement {
         // One listener per row: the rows share nothing, so no handler
         // moves twice.

@@ -260,7 +260,13 @@ impl SessionView {
                 if let Some(command) = commands.get(selected).copied() {
                     self.run_command(command, window, cx);
                 } else if let Some(skill) = skill_rows.get(selected.saturating_sub(commands.len())) {
-                    let insertion = format!("/{} ", skill.name);
+                    // docs/85 16.2: a provider that loads no skill folder
+                    // gets the skill itself, pasted (capped).
+                    let insertion = if skill.scope.as_deref() == Some(crate::skill_folders::PASTE_SCOPE) {
+                        crate::skill_folders::paste_for(skill).unwrap_or_else(|| format!("/{} ", skill.name))
+                    } else {
+                        format!("/{} ", skill.name)
+                    };
                     self.replace_token(&insertion, window, cx);
                 }
             }

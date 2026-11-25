@@ -2430,13 +2430,18 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// 5.5) — the managed catalog for a provider whose skills the Skills
     /// page manages (Muse), else what the provider itself listed (Claude
     /// Code's `init`), else none. Never another provider's list.
+    ///
+    /// docs/85 16.2: plus the shared skill folders — the ones this
+    /// provider loads, described and minus the switched-off; on a provider
+    /// that loads no folder, the same skills to paste.
     pub(super) fn menu_skills(&self, cx: &gpui::App) -> Vec<skills::Skill> {
         let rt = self.runtime.read(cx);
-        if rt.provider_kind().has(provider::ProviderTrait::ManagedSkills) {
+        let base = if rt.provider_kind().has(provider::ProviderTrait::ManagedSkills) {
             self.overlays.read(cx).skills_for(&rt.workspace).to_vec()
         } else {
             rt.provider_skills.clone()
-        }
+        };
+        crate::skill_folders::menu_rows(rt.provider_kind().as_str(), &rt.workspace, base)
     }
 
     pub(super) fn command_rows(&self, filter: &str, cx: &gpui::App) -> (Vec<Command>, Vec<skills::Skill>) {
