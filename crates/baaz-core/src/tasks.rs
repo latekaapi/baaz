@@ -217,6 +217,9 @@ pub struct Task {
     /// A watched session (`session_watch`): the task wraps a session the
     /// lead did not start.
     pub watched: bool,
+    /// Workers of earlier attempts: their report is a stale generation's.
+    #[serde(default)]
+    pub past_workers: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub started_at: Option<i64>,
@@ -243,7 +246,9 @@ impl Task {
         self.generation += 1;
         self.report = None;
         self.verdict = None;
-        self.worker_session = None;
+        if let Some(old) = self.worker_session.take() {
+            self.past_workers.push(old);
+        }
         self.started_at = None;
         Ok(())
     }
@@ -263,6 +268,90 @@ impl Task {
     pub fn ready(&self, all: &[Task]) -> bool {
         self.after.iter().all(|id| all.iter().any(|t| &t.id == id && t.status.unblocks()))
     }
+}
+
+/// The deepest a task may sit: a lead's worker (1) may delegate once more (2).
+pub const MAX_DEPTH: u8 = 2;
+/// Writers at work at once, across every lead (fixed for now).
+pub const MAX_WRITERS: usize = 4;
+
+/// The depth a new task gets when the session `caller` delegates: 1 from a
+/// lead, one more from a worker, refused past [`MAX_DEPTH`].
+pub fn child_depth(caller_task: Option<&Task>) -> Result<u8, Refusal> {
+    let depth = caller_task.map_or(1, |task| task.depth + 1);
+    if depth > MAX_DEPTH {
+        return Err(Refusal::new(Code::TooDeep, format!("a worker at depth {MAX_DEPTH} cannot delegate further")));
+    }
+    Ok(depth)
+}
+
+/// Writers running or about to (queued, running, reported, checking).
+pub fn active_writers(tasks: &[Task]) -> usize {
+    tasks.iter().filter(|t| t.role.writes() && matches!(t.status, Status::Queued | Status::Running | Status::Reported | Status::Checking)).count()
+}
+
+/// Refuse a fifth writer.
+pub fn room_for(role: Role, tasks: &[Task]) -> Result<(), Refusal> {
+    if role.writes() && active_writers(tasks) >= MAX_WRITERS {
+        return Err(Refusal::new(Code::TooManyWriters, format!("{MAX_WRITERS} writers are already at work; wait for one (task_wait) or stop one")));
+    }
+    Ok(())
+}
+
+/// How permitted a mode is: Full access above Auto above Ask above Read-only.
+fn permission_rank(mode: aui_protocol::PermissionMode) -> u8 {
+    use aui_protocol::PermissionMode::*;
+    match mode {
+        AllowAll => 3,
+        OnRequest => 2,
+        PromptUnmatched => 1,
+        DenyUnmatched => 0,
+    }
+}
+
+/// The worker's mode: never more permitted than its parent's, and
+/// Read-only for a reviewer or a helper (docs/85 14.2, 14.3).
+pub fn child_mode(parent: aui_protocol::PermissionMode, role: Role) -> aui_protocol::PermissionMode {
+    let cap = if role.writes() { aui_protocol::PermissionMode::AllowAll } else { aui_protocol::PermissionMode::DenyUnmatched };
+    if permission_rank(cap) < permission_rank(parent) { cap } else { parent }
+}
+
+/// Over its ceiling: tokens used, or minutes since it started.
+pub fn over_budget(task: &Task, now: i64) -> Option<String> {
+    if task.used_tokens >= task.budget.tokens {
+        return Some(format!("used {} tokens of its {}", task.used_tokens, task.budget.tokens));
+    }
+    let minutes = task.started_at.map(|at| (now - at).max(0) / 60_000).unwrap_or(0);
+    (minutes >= i64::from(task.budget.minutes)).then(|| format!("ran {minutes} minutes of its {}", task.budget.minutes))
+}
+
+/// What the worker is told: the task, its inputs, its frozen criteria and
+/// how to finish (rule 20: it never says who it is; Baaz knows).
+pub fn worker_prompt(task: &Task) -> String {
+    let mut out = String::new();
+    out.push_str(&task.prompt);
+    if !task.inputs.is_empty() {
+        out.push_str("\n\nInputs:\n");
+        for input in &task.inputs {
+            out.push_str(&format!("- {input}\n"));
+        }
+    }
+    if !task.criteria.is_empty() {
+        out.push_str("\n\nAcceptance criteria (fixed; you cannot change them):\n");
+        for (i, c) in task.criteria.iter().enumerate() {
+            out.push_str(&format!("{}. {}\n", i + 1, c.text));
+        }
+    }
+    if let Some(check) = &task.check {
+        out.push_str(&format!("\nBaaz runs `{check}` after you report; it must pass.\n"));
+    }
+    let finish = if task.role.writes() {
+        "When you are done, commit your work, then call the `report` tool with your result and, for each criterion, how you met it. If you are blocked or need a decision, call `escalate` with your question instead of guessing."
+    } else {
+        "Change nothing. When you are done, call the `report` tool with your findings and, for each criterion, your verdict. If you are blocked, call `escalate` with your question."
+    };
+    out.push_str(&format!("\n{finish}"));
+    out
 }
 
 /// A side effect a status change needs, carried out by the app.
@@ -384,6 +473,7 @@ pub(crate) fn sample(id: &str, status: Status) -> Task {
         generation: 0,
         after: Vec::new(),
         watched: false,
+        past_workers: Vec::new(),
         created_at: 1,
         updated_at: 1,
         started_at: None,
@@ -453,6 +543,43 @@ mod tests {
                 Reconcile::Release { task_id: "second".into() },
             ]
         );
+    }
+
+    /// docs/85 14.2's limits: depth 2, four writers, a child never more
+    /// permitted than its parent, the ceiling.
+    #[test]
+    fn the_limits_hold() {
+        use aui_protocol::PermissionMode::*;
+        assert_eq!(child_depth(None).unwrap(), 1);
+        let mut worker = sample("w", Status::Running);
+        assert_eq!(child_depth(Some(&worker)).unwrap(), 2);
+        worker.depth = 2;
+        assert_eq!(child_depth(Some(&worker)).unwrap_err().code, Code::TooDeep);
+        let tasks: Vec<Task> = (0..4).map(|i| sample(&format!("t{i}"), Status::Running)).collect();
+        assert_eq!(room_for(Role::Writer, &tasks).unwrap_err().code, Code::TooManyWriters);
+        assert!(room_for(Role::Reviewer, &tasks).is_ok(), "readers are not counted");
+        assert!(room_for(Role::Writer, &tasks[..3]).is_ok());
+        assert_eq!(child_mode(OnRequest, Role::Writer), OnRequest);
+        assert_eq!(child_mode(PromptUnmatched, Role::Writer), PromptUnmatched, "never more permitted than the parent");
+        assert_eq!(child_mode(AllowAll, Role::Reviewer), DenyUnmatched, "a reviewer reads");
+        assert_eq!(child_mode(DenyUnmatched, Role::Writer), DenyUnmatched);
+        let mut t = sample("b", Status::Running);
+        t.started_at = Some(0);
+        assert!(over_budget(&t, 59 * 60_000).is_none());
+        assert!(over_budget(&t, 60 * 60_000).unwrap().contains("60 minutes"));
+        t.used_tokens = 2_000_000;
+        assert!(over_budget(&t, 0).unwrap().contains("tokens"));
+    }
+
+    #[test]
+    fn the_worker_is_told_its_criteria_check_and_how_to_finish() {
+        let mut t = sample("p", Status::Queued);
+        t.inputs = vec!["branch baaz/q-1".into()];
+        let text = worker_prompt(&t);
+        assert!(text.starts_with("do it"));
+        assert!(text.contains("1. tests pass") && text.contains("`cargo test`") && text.contains("commit your work") && text.contains("branch baaz/q-1"));
+        t.role = Role::Reviewer;
+        assert!(worker_prompt(&t).contains("Change nothing"));
     }
 
     #[test]

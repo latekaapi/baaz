@@ -55,6 +55,8 @@ pub(crate) struct SessionRegistry {
     /// One subscription per live runtime and one per live view; rebuilt by
     /// [`Self::resubscribe`].
     subscriptions: Vec<Subscription>,
+    /// docs/85 Stage 14: which live sessions are tasks' workers.
+    pub(crate) orchestra: crate::orchestra::Orchestra,
 }
 
 impl SessionRegistry {

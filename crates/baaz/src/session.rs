@@ -2523,6 +2523,12 @@ impl SessionRuntime {
     pub(crate) fn is_sending(&self) -> bool {
         self.submitting || self.running.is_some()
     }
+
+    /// Whether the server says a turn runs now (accepted, not finished):
+    /// what a steer needs (docs/85 14.2 delivers into it).
+    pub(crate) fn turn_running(&self) -> bool {
+        self.running.is_some()
+    }
 }
 
 impl SessionView {

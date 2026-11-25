@@ -21,6 +21,8 @@ pub mod browser;
 pub mod memory;
 /// The pane relay: show things in the right pane, read and act on Changes.
 pub mod pane;
+/// The orchestration relay: delegate to other agents; workers report back.
+pub mod orchestra;
 
 /// Protocol version the probe server answered with, and this bridge keeps.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -403,7 +405,7 @@ fn initialize_result(registry: &ToolRegistry) -> Value {
 /// The same split as Claude Code's Read-only deny list
 /// (`provider_claude_code::argv::READ_ONLY_DENIED_BRIDGE_TOOLS`). Named,
 /// never defaulted: a new tool is acting until it is listed here.
-pub const READ_ONLY_TOOL_NAMES: [&str; 16] = [
+pub const READ_ONLY_TOOL_NAMES: [&str; 21] = [
     "terminal_list",
     "terminal_read",
     "terminal_screen",
@@ -421,6 +423,13 @@ pub const READ_ONLY_TOOL_NAMES: [&str; 16] = [
     "pane_show",
     "changes_read",
     "pr_status",
+    // docs/85 14.2: the reads, and a worker's own report and escalation
+    // (a reviewer in Read-only must still be able to finish its task).
+    "agents_available",
+    "task_status",
+    "task_wait",
+    "report",
+    "escalate",
 ];
 
 /// The bridge tools that can change something beyond the page's view, advertised

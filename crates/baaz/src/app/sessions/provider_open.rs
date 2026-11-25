@@ -119,7 +119,7 @@ fn provider_open_work(
 /// the host's default posture should stand.
 pub(crate) struct OpenExtras {
     model_provider: Option<String>,
-    mode: Option<aui_protocol::PermissionMode>,
+    pub(crate) mode: Option<aui_protocol::PermissionMode>,
 }
 
 /// Whether a finished turn's model report seeds the next fresh Claude
@@ -285,6 +285,72 @@ impl Harness {
                 this.fail_provider_open(provider_id, error, retry_new, None, window, cx);
             }
         }, window, cx);
+    }
+
+    /// docs/85 14.2: open a worker's session in the background — the
+    /// lane connects and opens like any new session (on `model`, in `mode`,
+    /// in `workspace`), gets its record and sidebar row, and is parked live
+    /// in the registry, never activated: what the person is looking at stays
+    /// on screen. `then` hears the session id (or why it failed).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_worker(
+        &mut self,
+        provider_id: ProviderId,
+        model: Option<String>,
+        mode: aui_protocol::PermissionMode,
+        project: Option<String>,
+        workspace: String,
+        then: impl FnOnce(&mut Self, Result<String, String>, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !crate::provider_status::provider_enabled(provider_id) {
+            then(self, Err(format!("{} is switched off in Settings", provider_id.label())), cx);
+            return;
+        }
+        let factory = self.providers.clone();
+        let inline = factory.lands_inline();
+        let request_id = provider::new_request_id();
+        self.register_terminal_session(&request_id, std::path::PathBuf::from(workspace.clone()), provider_id.as_str(), cx);
+        let mut extras = self.open_extras(provider_id, mode, Some(&workspace), project.as_deref(), cx);
+        extras.mode = Some(mode);
+        let alias_from = request_id.clone();
+        let (workspace_bg, model_bg) = (workspace.clone(), model.clone());
+        let work = move || {
+            let open = provider_open_work(factory, provider_id, request_id, workspace_bg, extras, project, workspace, 0, None);
+            (open, model_bg)
+        };
+        self.run_open(inline, work, move |this, (result, model), window, cx| match result {
+            Ok(open) => {
+                this.terminal_service.alias_session(&alias_from, &open.session_id, cx);
+                let id = this.finish_worker_open(open, model, window, cx);
+                then(this, Ok(id), cx);
+            }
+            Err(error) => then(this, Err(error.error.to_string()), cx),
+        }, window, cx);
+    }
+
+    /// Land a worker's lane: its view, record and row, parked live.
+    fn finish_worker_open(&mut self, open: ProviderOpen, model: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> String {
+        let ProviderOpen { provider_id, provider, events, session_id, project, workspace, title, .. } = open;
+        self.register_terminal_session(&session_id, std::path::PathBuf::from(workspace.clone()), provider_id.as_str(), cx);
+        let host = SessionHost {
+            provider_id: provider_id.as_str().to_owned(),
+            workspace: workspace.clone(),
+            overlays: self.overlays.clone(),
+            capture: self.capture.clone(),
+            terminal_host: Some(self.terminal_host(cx)),
+        };
+        let view = cx.new(|cx| SessionView::new_on_provider(session_id.clone(), provider, events, host, window, cx));
+        crate::baaz_log!("worker lane open provider={} session={session_id} workspace={workspace}", provider_id.as_str());
+        self.record_provider_open(provider_id, &session_id, project, workspace, title, cx);
+        if let Some(model) = model.filter(|m| !m.is_empty()) {
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model(&model, cx)));
+        }
+        self.registry.park(session_id.clone(), view, cx);
+        self.registry.resubscribe(self.active.as_ref(), cx);
+        cx.notify();
+        session_id
     }
 
     /// The factory an open on `provider_id` runs through: the window's, or

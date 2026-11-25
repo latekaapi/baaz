@@ -18,5 +18,6 @@ mod worktree;
 mod new_row;
 mod checkpoints;
 mod undo;
+mod orchestra;
 mod one_ask;
 mod page_moves;

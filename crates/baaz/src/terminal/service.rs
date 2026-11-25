@@ -798,7 +798,7 @@ impl TerminalService {
             return;
         }
         // docs/85 13.1–13.4: the pane tools, answered by the harness.
-        if PANE_TOOL_NAMES.contains(&job.tool.as_str()) {
+        if PANE_TOOL_NAMES.contains(&job.tool.as_str()) || crate::orchestra::ORCHESTRA_TOOL_NAMES.contains(&job.tool.as_str()) {
             let Job { id, tool, params, reply, .. } = job;
             let call = PaneCall { tool, session, root, params, id, reply };
             match self.shared.pane.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {

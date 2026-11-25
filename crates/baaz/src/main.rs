@@ -86,6 +86,7 @@ mod perf_budget;
 mod picker;
 #[cfg(feature = "probe")]
 mod perf_turn;
+mod orchestra;
 mod palette;
 mod pane_tools;
 use baaz_core::plan;

@@ -146,7 +146,7 @@ pub const READ_ONLY_DENIED_TOOLS: [&str; 25] = [
 
 /// The Baaz bridge tools Read-only denies (served as
 /// `mcp__baaz__<tool>`): those that type, run, open or close.
-pub const READ_ONLY_DENIED_BRIDGE_TOOLS: [&str; 12] = [
+pub const READ_ONLY_DENIED_BRIDGE_TOOLS: [&str; 18] = [
     "terminal_open",
     "terminal_run",
     "terminal_send",
@@ -160,6 +160,13 @@ pub const READ_ONLY_DENIED_BRIDGE_TOOLS: [&str; 12] = [
     "changes_revert",
     "changes_comment",
     "changes_commit",
+    // docs/85 14.2: the lead tools that start, steer, stop or merge work.
+    "delegate",
+    "task_send",
+    "task_stop",
+    "task_land",
+    "session_send",
+    "session_watch",
 ];
 
 /// The settings layer that makes Read-only read-only: `permissions.deny`
