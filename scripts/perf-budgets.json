@@ -11,10 +11,6 @@
           "budget": 20,
           "measured": 0.85
         },
-        "store.index_cache_load_ms": {
-          "budget": 50,
-          "measured": 1.1
-        },
         "store.search_sync_unchanged_ms": {
           "budget": 25,
           "measured": 0.7
@@ -30,10 +26,6 @@
         "store.provider_bodies_ms": {
           "budget": 150,
           "measured": 23
-        },
-        "store.list_cache_load_ms": {
-          "budget": 30,
-          "measured": 2.8
         },
         "store.list_newer_ms": {
           "budget": 40,
@@ -120,7 +112,15 @@
         },
         "store.transcript_reopen_1000_ms": {
           "budget": 50,
-          "measured": null
+          "measured": 1.2
+        },
+        "store.index_kept_load_ms": {
+          "budget": 50,
+          "measured": 1.3
+        },
+        "store.list_kept_load_ms": {
+          "budget": 30,
+          "measured": 7.3
         }
       }
     },
@@ -133,10 +133,6 @@
         "store.index_refresh_one_ms": {
           "budget": 20,
           "measured": 0.8
-        },
-        "store.index_cache_load_ms": {
-          "budget": 50,
-          "measured": 1.0
         },
         "store.search_sync_unchanged_ms": {
           "budget": 25,
@@ -153,10 +149,6 @@
         "store.provider_bodies_ms": {
           "budget": 150,
           "measured": 21
-        },
-        "store.list_cache_load_ms": {
-          "budget": 30,
-          "measured": 2.45
         },
         "store.list_newer_ms": {
           "budget": 40,
@@ -243,7 +235,15 @@
         },
         "store.transcript_reopen_1000_ms": {
           "budget": 50,
-          "measured": null
+          "measured": 1.2
+        },
+        "store.index_kept_load_ms": {
+          "budget": 50,
+          "measured": 1.3
+        },
+        "store.list_kept_load_ms": {
+          "budget": 30,
+          "measured": 7.3
         }
       }
     }

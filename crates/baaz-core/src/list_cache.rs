@@ -15,7 +15,7 @@
 //! [`FULL_EVERY`], and whenever a filtered listing fails.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
@@ -224,10 +224,6 @@ pub struct Listing<R> {
     pub save: Option<ListCache<R>>,
 }
 
-/// `session-list-cache.json` in Baaz's state dir.
-pub fn cache_path() -> PathBuf {
-    crate::store::support_dir().join("session-list-cache.json")
-}
 
 /// The kept Muse list from baaz.db (docs/85 11.2: the one list source),
 /// `None` when none was kept. Blocking: it waits on the database writer.
@@ -252,7 +248,9 @@ pub fn load<R: Row>(path: &Path) -> Option<ListCache<R>> {
     (cache.version == VERSION).then_some(cache)
 }
 
-/// Save a copy. Blocking; call it off the UI thread.
+/// Save a copy as the old `session-list-cache.json` did: the tests' way to
+/// make a pre-11.2 file (docs/85 11.2 keeps the list in baaz.db).
+#[cfg(any(test, feature = "test-support"))]
 pub fn save<R: Row>(path: &Path, cache: &ListCache<R>) {
     if let Ok(bytes) = serde_json::to_vec(cache) {
         let _ = crate::store::write_atomic(path, &bytes);
