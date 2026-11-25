@@ -22,6 +22,7 @@ pub mod crash;
 pub mod data_export;
 pub mod db;
 pub mod details;
+pub mod digest;
 pub mod editors;
 pub mod files;
 pub mod full_output;

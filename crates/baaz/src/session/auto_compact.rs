@@ -28,6 +28,9 @@ pub(crate) struct AutoCompact {
     sent: bool,
     /// The one timer: looks again at the decision's time.
     timer: Option<Task<()>>,
+    /// The digest's timer (docs/85 12.4): ten minutes after the last live
+    /// turn, the application is told the session went idle.
+    digest_timer: Option<Task<()>>,
 }
 
 impl SessionRuntime {
@@ -63,6 +66,14 @@ impl SessionRuntime {
         }
         state.compacted_since_turn = false;
         state.typed_since_turn = false;
+        state.digest_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(baaz_core::digest::IDLE).await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.busy() {
+                    cx.emit(super::SessionEvent::DigestDue { session_id: this.session_id.clone() });
+                }
+            });
+        }));
         let now = crate::clock::now_ms() as i64;
         state.last_turn_ended_ms = Some(now);
         let wait = auto_compact::SUBSCRIPTION_CACHE.saturating_sub(auto_compact::LEAD);
@@ -161,6 +172,17 @@ impl SessionRuntime {
             });
         })
         .detach();
+    }
+
+    /// `digest-now` (probe): tell the application this session went idle,
+    /// as the ten-minute timer would (docs/85 12.4).
+    #[cfg(feature = "probe")]
+    pub(crate) fn step_digest_now(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        if self.busy() {
+            return Err("digest-now: a turn is running".into());
+        }
+        cx.emit(super::SessionEvent::DigestDue { session_id: self.session_id.clone() });
+        Ok(())
     }
 
     /// `auto-compact:<seconds>` (probe): run the decision as if `seconds`

@@ -34,15 +34,37 @@ fn search(params: &Value, root: &str) -> Result<Value, String> {
     let all = params.get("scope").and_then(Value::as_str) == Some("all");
     let project = baaz_core::providers::main_repo_root(Path::new(root));
     let in_project = move |folder: &str| baaz_core::providers::main_repo_root(Path::new(folder)) == project;
-    let run = |query: &str| crate::search::with_reader(|conn| crate::search::query_sessions(conn, query, 20)).unwrap_or_default();
+    // Each phrasing's words, then the digests that mention them (12.4).
+    let state = crate::store::support_dir();
+    let run = |query: &str| {
+        let mut hits = crate::search::with_reader(|conn| crate::search::query_sessions(conn, query, 20)).unwrap_or_default();
+        let digests = baaz_core::transcripts::with_store(&state, |conn| baaz_core::digest::matching(conn, query, 10))
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        for hit in digests {
+            if !hits.iter().any(|known| known.session_id == hit.session_id) {
+                hits.push(hit);
+            }
+        }
+        hits
+    };
     let facts = |id: &str| {
-        let id = id.to_owned();
-        baaz_core::db::read(baaz_core::db::path(), move |opened| baaz_core::session_tools::facts_from_db(&opened.conn, &id)).flatten()
+        let lookup = id.to_owned();
+        let mut facts =
+            baaz_core::db::read(baaz_core::db::path(), move |opened| baaz_core::session_tools::facts_from_db(&opened.conn, &lookup)).flatten()?;
+        let digest = baaz_core::transcripts::with_store(&state, |conn| baaz_core::digest::load(conn, &facts.provider, id))
+            .ok()
+            .and_then(Result::ok)
+            .flatten();
+        if let Some((text, _)) = digest {
+            facts.digest = text;
+        }
+        Some(facts)
     };
     let found = baaz_core::session_tools::search(&queries, (!all).then_some(&in_project as &dyn Fn(&str) -> bool), &run, &facts)?;
     // Each result carries a read-only preview the transcript row opens in
     // the right pane, written here, off the UI thread.
-    let state = crate::store::support_dir();
     let results: Vec<Value> = found
         .iter()
         .map(|result| {

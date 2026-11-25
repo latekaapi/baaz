@@ -58,6 +58,7 @@
 //! | `submenu` | open the open model menu's highlighted row's submenu (as →); fails when the model menu is closed, free |
 //! | `seteffort:<level>` | the effort menu's row as a verb (`default` clears); an unknown spelling fails, free |
 //! | `compact` | `session/compact` |
+//! | `digest-now` | this session went idle: the application writes its digest when one is due (docs/85 12.4) |
 //! | `auto-compact:<seconds>` | the automatic-compaction decision as if `<seconds>` passed since the last turn, acted on (docs/85 12.1) |
 //! | `meter` | pin the context meter's breakdown open |
 //! | `context:<used>/<window>/<level>` | a synthetic `session/contextUsage` |
@@ -1172,6 +1173,7 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "seteffort", run: |v, rest, _, cx| v.step_seteffort(rest, cx) },
     // docs/85 12.1: run the automatic-compaction decision as if
     // `<seconds>` had passed since the last turn, and act on it.
+    SessionVerb { verb: "digest-now", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_digest_now(cx)) },
     SessionVerb { verb: "auto-compact", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_auto_compact(rest, cx)) },
     SessionVerb { verb: "compact", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_compact(cx)) },
     SessionVerb { verb: "meter", run: |v, _, _, cx| v.step_meter(cx) },

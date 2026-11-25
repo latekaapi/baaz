@@ -679,3 +679,64 @@ impl Harness {
     }
 
 }
+
+impl Harness {
+    /// docs/85 12.4: `session_id` went idle — write its digest when one is
+    /// due. Its own provider writes it on its cheapest model (Muse through
+    /// a hidden side session, as titles are), from the handoff pack, only
+    /// on a subscription (rule 27; skipped and logged otherwise), never for
+    /// a side session or a browser chat, at most once per five new turns.
+    pub(crate) fn run_digest(&mut self, session_id: String, runtime: Entity<crate::session::SessionRuntime>, cx: &mut Context<Self>) {
+        let Some(provider) = self.session_lane_provider(&session_id, cx) else { return };
+        let rt = runtime.read(cx);
+        let Some(session) = rt.transcript_session().cloned() else { return };
+        let running = rt.busy();
+        let workspace = rt.workspace_path().to_owned();
+        let turns = session.turns.len();
+        let excluded = self
+            .session_list
+            .read(cx)
+            .overrides
+            .get(&session_id)
+            .is_some_and(|meta| meta.side_session || meta.browser_chat);
+        let subscription = baaz_core::billing::mode(provider) == baaz_core::billing::BillingMode::Subscription;
+        if !subscription {
+            crate::baaz_log!("digest for {session_id} skipped: {} does not bill by subscription (rule 27)", provider.label());
+            return;
+        }
+        let pack = baaz_core::handoff::pack_text(&baaz_core::handoff::build_pack(&session, &workspace), provider);
+        let state = crate::store::support_dir();
+        let key = provider.as_str().to_owned();
+        let (load_state, load_key, load_id) = (state.clone(), key.clone(), session_id.clone());
+        let load = move || {
+            baaz_core::transcripts::with_store(&load_state, |conn| baaz_core::digest::load(conn, &load_key, &load_id))
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+                .map(|(_, at)| at)
+        };
+        self.wire_call(cx, load, move |this, digested, cx| {
+            let idle_ms = baaz_core::digest::IDLE.as_millis() as i64;
+            if !baaz_core::digest::due(idle_ms, running, excluded, subscription, turns, digested) {
+                return;
+            }
+            let prompt = baaz_core::digest::prompt(&pack);
+            let model = this.utility_model(&session_id, cx);
+            let muse = this.muse_side(provider, "baaz digest", cx);
+            let work = move || {
+                let answer = crate::utility::complete(provider, model.as_deref(), &prompt, muse)?;
+                let digest = baaz_core::digest::clean(&answer).ok_or_else(|| "an empty digest".to_owned())?;
+                baaz_core::transcripts::with_store(&state, |conn| {
+                    baaz_core::digest::save(conn, &key, &session_id, &digest, turns, crate::clock::now_ms() as i64)
+                })
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+                Ok::<String, String>(session_id)
+            };
+            this.wire_call(cx, work, |_, written: Result<String, String>, _| match written {
+                Ok(id) => crate::baaz_log!("digest written for {id}"),
+                Err(reason) => crate::baaz_log!("digest not written: {reason}"),
+            });
+        });
+    }
+}
