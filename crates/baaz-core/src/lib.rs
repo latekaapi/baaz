@@ -16,6 +16,7 @@ pub mod billing;
 pub mod browser_prefs;
 pub mod byline;
 pub mod checkpoints;
+pub mod checks;
 pub mod clock;
 pub mod code_index;
 pub mod code_symbols;
