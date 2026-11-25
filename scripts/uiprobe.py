@@ -1263,7 +1263,7 @@ ENTRIES.update({
     # docs/85 13.1: an agent's `pane_show`, one entry per view, through the
     # bridge call's own handler (`pane-show:` builds the call's arguments).
     # Scoped views load the fixture checkpoint index, as `changes-scope:`.
-    "pane-show-file":          _populated("right-width:440;pane-show:view=file,path=crates/baaz/src/layout.rs,line=154", replay=True),
+    "pane-show-file":          _populated("right-width:440;pane-show:view=file,path=src/lib.rs,line=6", replay=True, workspace=_REPO_ACME),
     "pane-show-files":         _populated("right-width:440;pane-show:view=files", replay=True),
     "pane-show-diff":          _populated("right-width:440;pane-show:view=diff,path=crates/baaz/src/right.rs", replay=True),
     "pane-show-diff-last":     _populated("right-width:440;pane-show:view=diff,path=crates/baaz/src/layout.rs,scope=last_turn", replay=True),
