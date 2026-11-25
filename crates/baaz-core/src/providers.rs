@@ -328,6 +328,20 @@ pub fn claude_memory_dir(workspace: &std::path::Path, home: &std::path::Path, re
     provider_claude_code::home::memory_dir(workspace, &provider_claude_code::home::owner_config_dir(home), redirected)
 }
 
+/// The main repository a folder belongs to: a subfolder walks up to its
+/// repo, a linked worktree resolves to its main repo (the rule Claude
+/// Code's memory folder follows, so every provider means the same project).
+pub fn main_repo_root(folder: &std::path::Path) -> PathBuf {
+    provider_claude_code::home::project_root(folder)
+}
+
+/// Whether `id` reads the project's `MEMORY.md` index by itself (Claude
+/// Code's auto memory does). Every other provider gets it from Baaz with
+/// the session's first message (docs/85 12.3).
+pub fn loads_memory_index_itself(id: ProviderId) -> bool {
+    id == ProviderId::ClaudeCode
+}
+
 /// `baaz --tool-output-hook`: Claude Code's `PostToolUse` hook (docs/85
 /// 12.2), stdin to stdout, before anything else in the process starts.
 pub fn run_tool_output_hook(args: &[String]) {

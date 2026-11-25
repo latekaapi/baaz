@@ -4202,6 +4202,41 @@ mod tests {
         }
     }
 
+    /// docs/85 12.3: the project's memory index rides the first message
+    /// of a Codex session as a Baaz notice, once; Claude Code loads
+    /// MEMORY.md itself and never gets it from Baaz.
+    #[gpui::test]
+    fn the_memory_index_rides_the_first_message_once_where_the_provider_needs_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let dir = baaz_core::memory::project_dir(std::path::Path::new("/tmp/w3-lane"));
+        let note = baaz_core::memory::Note { title: "Release day".into(), description: "When releases go out".into(), kind: "project".into(), body: "Thursdays.".into() };
+        baaz_core::memory::save(&dir, &note).expect("saved in the test's redirected folder");
+        let words = |handle: &RecordingHandle| -> Vec<String> {
+            handle.received().into_iter().filter_map(|command| match command {
+                provider::Command::SubmitInput { parts, .. } => Some(parts.iter().filter_map(|part| match part {
+                    provider::SubmissionPart::Text(text) => Some(text.clone()),
+                    _ => None,
+                }).collect::<String>()),
+                _ => None,
+            }).collect()
+        };
+        for (provider, gets_it) in [("codex", true), ("claude-code", false)] {
+            let vc = cx.add_empty_window();
+            let (adapter, handle) = RecordingProvider::new();
+            let (view, tx) = open_recording_view(vc, "s-1", provider, adapter);
+            for text in ["first", "second"] {
+                vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text(text.to_owned(), cx))));
+                vc.run_until_parked();
+                drain_recording(&view, &tx, vc);
+            }
+            let sent = words(&handle);
+            assert_eq!(sent.len(), 2, "{provider}: {sent:?}");
+            assert_eq!(sent[0].contains("[Release day](release-day.md)"), gets_it, "{provider} first: {}", sent[0]);
+            assert!(!sent[1].contains("Release day"), "{provider}: once, never again");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// docs/85 12.1: automatic compaction on a long, idle Claude Code
     /// session on a subscription — once, at the decision's moment, with a
     /// focus line; never after a key in the composer; and a topic switch

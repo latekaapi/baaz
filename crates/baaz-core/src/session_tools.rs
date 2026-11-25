@@ -86,11 +86,12 @@ pub fn merge(lists: &[Vec<SessionHit>]) -> Vec<(SessionHit, f64)> {
     merged.into_iter().map(|(score, _, hit)| (hit, score)).collect()
 }
 
-/// The search: phrasings run with `run`, merged, scoped to `project_root`
-/// unless it is `None`, each result filled from `facts`.
+/// The search: phrasings run with `run`, merged, kept when `in_scope`
+/// takes the session's folder (`None`: every project), each result filled
+/// from `facts`.
 pub fn search(
     phrasings: &[String],
-    project_root: Option<&str>,
+    in_scope: Option<&dyn Fn(&str) -> bool>,
     run: &dyn Fn(&str) -> Vec<SessionHit>,
     facts: &dyn Fn(&str) -> Option<Facts>,
 ) -> Result<Vec<Found>, String> {
@@ -106,8 +107,8 @@ pub fn search(
             continue;
         }
         let workspace = facts.workspace.clone().or(hit.workspace.clone());
-        if let Some(root) = project_root {
-            if !workspace.as_deref().is_some_and(|w| w == root || w.starts_with(&format!("{root}/"))) {
+        if let Some(in_scope) = in_scope {
+            if !workspace.as_deref().is_some_and(in_scope) {
                 continue;
             }
         }
@@ -272,7 +273,8 @@ mod tests {
         };
         let facts = |id: &str| sessions.get(id).map(|(facts, _, _)| facts.clone());
         let phrasings = ["how we validate UK postcodes", "postcode regex decision", "GB post code spaces"].map(String::from);
-        let found = search(&phrasings, Some("/repo"), &run, &facts).unwrap();
+        let in_repo = |w: &str| w == "/repo" || w.starts_with("/repo/");
+        let found = search(&phrasings, Some(&in_repo), &run, &facts).unwrap();
         assert_eq!(found.len(), 1, "this project only, never a side session: {found:?}");
         assert_eq!(found[0].session, "old");
         assert_eq!(found[0].provider, "claude-code");

@@ -3,9 +3,9 @@
 //! **Where.** A project's notes live in the folder Claude Code's auto
 //! memory uses for that repo (docs/85 10.1): `~/.claude/projects/<main
 //! repo slug>/memory` for the owner's own run, and
-//! `<state dir>/claude-memory/<slug>` whenever the state dir is redirected
-//! or the run is a capture (rule 25: then nothing is written into the
-//! owner's `~/.claude`). That folder is the canonical memory for every
+//! `<state dir>/claude-memory/<slug>` whenever the state dir is redirected,
+//! the run is a capture or the build is a test build (rule 25: then nothing
+//! is written into the owner's `~/.claude`). That folder is the canonical memory for every
 //! provider. Personal notes — about the person, across projects — live in
 //! Baaz's own folder, `<state dir>/memory`.
 //!
@@ -58,8 +58,11 @@ impl Scope {
 /// The project memory folder for a session in `workspace`.
 pub fn project_dir(workspace: &Path) -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    let redirected = crate::store::state_dir_override()
-        .or_else(|| crate::runtime::captures().then(crate::store::support_dir));
+    // Rule 25: a redirected state dir, a capture or a test build never
+    // writes the owner's `~/.claude`.
+    let redirected = crate::store::state_dir_override().or_else(|| {
+        (crate::runtime::captures() || cfg!(any(test, feature = "test-support"))).then(crate::store::support_dir)
+    });
     crate::providers::claude_memory_dir(workspace, &home, redirected.as_deref())
 }
 

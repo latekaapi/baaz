@@ -200,6 +200,24 @@ impl SessionRuntime {
     /// onto `turn/start`'s `effort`, and Claude Code onto its `--effort`
     /// launch flag (relaunching with `--resume` when the pick changed).
     /// `None` is Default: the field is omitted and the provider decides.
+    /// The project's memory index as a notice for this session's first
+    /// message (docs/85 12.3): only on a provider that does not load
+    /// `MEMORY.md` itself, only before the session has any turn, and only
+    /// when the project has notes.
+    fn memory_index_notice(&self) -> Option<String> {
+        if baaz_core::providers::loads_memory_index_itself(self.provider_kind()) {
+            return None;
+        }
+        if self.store.session().is_some_and(|session| !session.turns.is_empty()) {
+            return None;
+        }
+        let workspace = self.workspace_path();
+        if workspace.is_empty() {
+            return None;
+        }
+        baaz_core::memory::index_for_prompt(&baaz_core::memory::project_dir(std::path::Path::new(workspace)))
+    }
+
     pub(super) fn submit_on_provider(&mut self, text: String, cx: &mut Context<Self>) {
         self.banner = None;
         self.submitting = true;
@@ -225,10 +243,12 @@ impl SessionRuntime {
         // person's words), and never in the bubble. A send that never
         // leaves puts the notes back.
         let preface = self.take_undo_preface();
-        let model_text = match &preface {
-            Some(notes) => provider::note::notice_suffix(&model_text, &notes.iter().map(|(_, note)| note.clone()).collect::<Vec<_>>()),
-            None => model_text,
-        };
+        let mut notices: Vec<String> = preface.iter().flatten().map(|(_, note)| note.clone()).collect();
+        // docs/85 12.3: the project's memory index rides the first message
+        // of a session whose provider does not load it itself — once, so
+        // the session's prefix never changes after.
+        notices.extend(self.memory_index_notice());
+        let model_text = provider::note::notice_suffix(&model_text, &notices);
         // The provider echoes the whole model-visible input; the bubble
         // shows what the person typed, including across a restart (the
         // record mirrors the map for replayed histories).

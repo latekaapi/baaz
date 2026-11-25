@@ -22,10 +22,11 @@
 use std::path::{Path, PathBuf};
 
 /// Which of Baaz's tool families this build serves the agent: the note names
-/// only tools that exist (12.3 and 13.1 each add their own line).
+/// only tools that exist (12.3 added the memory line; 13.1 adds its own).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NoteTools {
-    /// `terminal_*` and `browser_*` over the bridge.
+    /// `terminal_*`, `browser_*` and the session and memory tools over the
+    /// bridge.
     pub bridge: bool,
 }
 
@@ -41,6 +42,7 @@ pub fn compose(tools: NoteTools) -> String {
              for long-running or interactive commands, and for anything they should see. Use your own shell tool for quick checks.",
         );
         lines.push("Baaz's browser tools (browser_*) open and drive pages in the person's browser pane.");
+        lines.push("Baaz keeps every past session and a shared project memory: look before redoing work (session_search, session_read) and save what a later session needs (memory_save).");
     }
     lines.push("When you need the person to choose or answer, ask with your question tool rather than in prose.");
     lines.join("\n")
@@ -112,6 +114,7 @@ mod tests {
             assert!(!note.to_lowercase().contains(word), "{word} in the note");
         }
         assert!(note.contains("terminal_"));
+        assert!(note.contains("session_search") && note.contains("memory_save"), "12.3's tools are named");
         assert!(!compose(NoteTools { bridge: false }).contains("terminal_"), "no tools named that do not exist");
     }
 

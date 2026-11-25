@@ -749,6 +749,16 @@ impl TerminalService {
             self.browser_tool(&session, &job.tool, &job.params, &job.id, job.reply, cx);
             return;
         }
+        // docs/85 12.3: past sessions and memory notes, answered on a worker
+        // thread (search.db, baaz.db and the store stay off this one).
+        if super::memory_tools::MEMORY_TOOL_NAMES.contains(&job.tool.as_str()) {
+            let Job { id, tool, params, reply, .. } = job;
+            std::thread::spawn(move || match super::memory_tools::handle(&tool, &params, &root.to_string_lossy(), &session) {
+                Ok(result) => send(&reply, &id, true, result),
+                Err(error) => send(&reply, &id, false, json!({"error": error})),
+            });
+            return;
+        }
         let outcome: Result<Value, String> = match job.tool.as_str() {
             "terminal_list" => self.list(&root, cx),
             "terminal_open" => self.open(&root, Some(session.clone()), &job.params, cx),
