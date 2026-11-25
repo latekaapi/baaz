@@ -42,7 +42,7 @@ pub fn compose(tools: NoteTools) -> String {
              for long-running or interactive commands, and for anything they should see. Use your own shell tool for quick checks.",
         );
         lines.push("Baaz's browser tools (browser_*) open and drive pages in the person's browser pane.");
-        lines.push("Baaz keeps every past session and a shared project memory: look before redoing work (session_search, session_read) and save what a later session needs (memory_save).");
+        lines.push("Baaz keeps every past session and a shared project memory: look before redoing work (session_search, session_read) and save what a later session needs (memory_save). code_find finds definitions and uses in the project.");
     }
     lines.push("When you need the person to choose or answer, ask with your question tool rather than in prose.");
     lines.join("\n")

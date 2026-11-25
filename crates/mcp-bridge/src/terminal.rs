@@ -26,13 +26,13 @@ pub const UNAVAILABLE: &str = "Baaz isn't running; the terminal is unavailable";
 pub const BROWSER_UNAVAILABLE: &str = "Baaz isn't running; the browser is unavailable";
 
 /// What a session or memory tool reports when the socket is gone.
-pub const MEMORY_UNAVAILABLE: &str = "Baaz isn't running; past sessions and memory are unavailable";
+pub const MEMORY_UNAVAILABLE: &str = "Baaz isn't running; past sessions, memory and code search are unavailable";
 
 /// The unavailable answer for `tool`.
 pub fn unavailable_for(tool: &str) -> &'static str {
     if tool.starts_with("browser_") {
         BROWSER_UNAVAILABLE
-    } else if tool.starts_with("session_") || tool.starts_with("memory_") {
+    } else if tool.starts_with("session_") || tool.starts_with("memory_") || tool == "code_find" {
         MEMORY_UNAVAILABLE
     } else {
         UNAVAILABLE

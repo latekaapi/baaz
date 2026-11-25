@@ -11,7 +11,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 /// The tools this module answers.
-pub const MEMORY_TOOL_NAMES: [&str; 4] = ["session_search", "session_read", "memory_save", "memory_edit"];
+pub const MEMORY_TOOL_NAMES: [&str; 5] = ["session_search", "session_read", "memory_save", "memory_edit", "code_find"];
 
 /// Answer one call. `root` is the calling session's project root and
 /// `session` its id.
@@ -21,6 +21,7 @@ pub fn handle(tool: &str, params: &Value, root: &str, session: &str) -> Result<V
         "session_read" => read(params, session),
         "memory_save" => save(params, root),
         "memory_edit" => edit(params, root),
+        "code_find" => code_find(params, root),
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -115,6 +116,26 @@ fn read(params: &Value, current: &str) -> Result<Value, String> {
     Ok(json!({"session": session, "title": facts.title, "provider": facts.provider, "turns": baaz_core::session_tools::read(&turns, query.as_deref())}))
 }
 
+/// docs/85 12.6: one watched index per project (by main repo), made on the
+/// first `code_find` and kept for the run.
+fn code_find(params: &Value, root: &str) -> Result<Value, String> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    static WATCHED: Mutex<Option<HashMap<std::path::PathBuf, Arc<baaz_core::code_index::Watched>>>> = Mutex::new(None);
+    let query = text(params, "query").ok_or("give a query")?;
+    let kind = text(params, "kind");
+    let project = baaz_core::providers::main_repo_root(Path::new(root));
+    let watched = WATCHED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_or_insert_with(HashMap::new)
+        .entry(project.clone())
+        .or_insert_with(|| Arc::new(baaz_core::code_index::Watched::new(&crate::store::support_dir(), &project)))
+        .clone();
+    let hits = watched.find(query, kind)?;
+    Ok(json!({"results": hits, "more": hits.len() == baaz_core::code_index::MAX_HITS}))
+}
+
 fn text<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
     params.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
 }
@@ -174,6 +195,13 @@ mod tests {
         assert!(!path.exists());
         assert!(handle("memory_save", &json!({"title": "x", "type": "gossip", "body": "y"}), &root, "s").is_err());
         assert!(handle("session_search", &json!({"queries": []}), &root, "s").is_err(), "phrasings are required");
+        // code_find over the same throwaway repo (12.6).
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "pub fn release_day() -> u8 { 4 }\n").unwrap();
+        let found = handle("code_find", &json!({"query": "release_day", "kind": "symbol"}), &root, "s").unwrap();
+        assert_eq!(found["results"][0]["path"], "src/lib.rs");
+        assert!(found["results"][0]["kind"].as_str().unwrap().starts_with("definition"), "{found}");
+        assert!(handle("code_find", &json!({"query": "x", "kind": "regex"}), &root, "s").is_err());
         let _ = std::fs::remove_dir_all(&repo);
     }
 }
