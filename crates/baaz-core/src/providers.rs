@@ -321,6 +321,12 @@ fn env_override(id: ProviderId) -> Option<&'static str> {
     binary_name(id).and_then(|_| id.descriptor().env_overrides.first().copied())
 }
 
+/// `baaz --tool-output-hook`: Claude Code's `PostToolUse` hook (docs/85
+/// 12.2), stdin to stdout, before anything else in the process starts.
+pub fn run_tool_output_hook(args: &[String]) {
+    provider_claude_code::hook::run(args);
+}
+
 /// Whether `id`'s installed CLI compacts idle sessions itself, so Baaz's
 /// automatic compaction (docs/85 12.1) leaves it alone: claude from
 /// 2.1.290 (`idleCompaction`, which its adapter turns on).

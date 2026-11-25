@@ -16,6 +16,7 @@
 
 pub mod account;
 pub mod argv;
+pub mod hook;
 pub mod auth_status;
 pub mod caps;
 pub mod child;
@@ -1096,7 +1097,9 @@ impl ClaudeCodeAdapter {
     /// [`argv::with_settings`]) `autoMemoryDirectory`, the project memory
     /// the terminal's `claude` shares (docs/85 10.1,
     /// [`crate::home::memory_dir`]; skipped without a known folder);
-    /// `idleCompaction` on a claude that has it (docs/85 12.1); and
+    /// `idleCompaction` on a claude that has it (docs/85 12.1); the
+    /// output-trimming `PostToolUse` hook, Baaz's own binary (12.2,
+    /// [`hook`]); and
     /// `--append-system-prompt` with the session's stored note (docs/85
     /// 10.5, [`Self::note_for`]).
     fn with_session_settings(&self, launch: SessionLaunch) -> SessionLaunch {
@@ -1114,8 +1117,14 @@ impl ClaudeCodeAdapter {
         }
         // docs/85 12.1: a claude that compacts idle sessions itself does
         // it on the 1 h cache; Baaz runs no timer of its own for it.
-        if argv::compacts_idle_itself(self.version.lock().expect("version mutex").as_deref()) {
+        let version = self.version.lock().expect("version mutex").clone();
+        if argv::compacts_idle_itself(version.as_deref()) {
             extra.extend(argv::idle_compaction_settings());
+        }
+        // docs/85 12.2: Baaz's own binary is the PostToolUse hook that trims
+        // long Bash output (and, from 2.1.317, stubs a repeated read).
+        if let Ok(exe) = std::env::current_exe() {
+            extra.extend(hook::hook_settings(&exe, hook::wants_read_stub(version.as_deref())));
         }
         extra.extend(argv::token_settings());
         let mut launch = argv::with_token_flags(argv::with_settings(launch, extra));
@@ -3229,6 +3238,13 @@ mod tests {
             assert_eq!(settings["autoMemoryDirectory"], serde_json::json!(expected.to_string_lossy()), "{settings}");
             assert!(!expected.to_string_lossy().contains("-src"), "the main repo's slug, not the subfolder's: {}", expected.display());
             assert_eq!(settings.get("disableSkillShellExecution").is_some(), mode.is_some(), "Read-only rides the same layer: {settings}");
+            // docs/85 12.2: the output hook is this binary, on Bash, in the
+            // same one layer.
+            let hook = &settings["hooks"]["PostToolUse"][0];
+            assert_eq!(hook["matcher"], "Bash", "{settings}");
+            let command = hook["hooks"][0]["command"].as_str().expect("hook command");
+            assert!(command.ends_with(" --tool-output-hook"), "{command}");
+            assert!(command.contains(&*std::env::current_exe().unwrap().to_string_lossy()), "the running binary: {command}");
         }
     }
 
