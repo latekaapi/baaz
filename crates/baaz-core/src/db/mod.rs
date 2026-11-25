@@ -320,7 +320,7 @@ pub fn open_at(path: &Path) -> rusqlite::Result<Connection> {
     conn.set_prepared_statement_cache_capacity(64);
     // A migration ahead: room on the disk, and a copy first (11.4).
     let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if !fresh_file && version >= 1 && version < schema::VERSION {
+    if !fresh_file && (1..schema::VERSION).contains(&version) {
         if let Err(why) = integrity::before_migration(path, version, integrity::free_bytes(path)) {
             return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL), Some(why)));
         }

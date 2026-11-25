@@ -99,10 +99,13 @@ pub fn load_index(conn: &Connection) -> rusqlite::Result<HashMap<String, IndexEn
     Ok(out)
 }
 
+/// The kept Muse list (`None` when none was kept) and the index facts.
+pub type ListAndIndex = (Option<ListCache<ListedRow>>, HashMap<String, IndexEntry>);
+
 /// What a boot paints the sidebar from, in one query over the session table
 /// (docs/85 11.2): the kept Muse list (`None` when none was kept) and the
 /// index facts.
-pub fn load_both(conn: &Connection) -> rusqlite::Result<(Option<ListCache<ListedRow>>, HashMap<String, IndexEntry>)> {
+pub fn load_both(conn: &Connection) -> rusqlite::Result<ListAndIndex> {
     super::check_writer("load list and index");
     let version = meta_get(conn, "listing_version").and_then(|v| v.parse::<u32>().ok());
     let mut statement = conn.prepare_cached(

@@ -66,7 +66,7 @@ pub fn newest_good_backup(path: &Path) -> Option<PathBuf> {
         })
         .filter_map(|candidate| std::fs::metadata(&candidate).and_then(|m| m.modified()).ok().map(|at| (at, candidate)))
         .collect();
-    backups.sort_by(|a, b| b.0.cmp(&a.0));
+    backups.sort_by_key(|backup| std::cmp::Reverse(backup.0));
     backups.into_iter().map(|(_, candidate)| candidate).find(|candidate| quick_check(candidate))
 }
 
