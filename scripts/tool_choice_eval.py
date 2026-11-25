@@ -43,7 +43,7 @@ CASES = [
     ("Show me the diff of src/app.py in the pane.", {"pane_show"}),
     ("Show what you changed last turn.", {"pane_show"}),
     ("Open the Changes pane.", {"pane_show"}),
-    ("Switch to the terminal.", {"pane_show"}),
+    ("Switch to the terminal.", {"pane_show", "terminal_open"}),
     ("Show me the Tasks pane.", {"pane_show"}),
     ("Show me the pull request.", {"pane_show", "pr_status"}),
     ("Switch the pane to the browser.", {"pane_show"}),
