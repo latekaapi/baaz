@@ -2824,6 +2824,14 @@ pub enum BannerAction {
         /// The draft can move into a worktree.
         worktree: bool,
     },
+    /// docs/85 12.5: five sessions used this memory note — add it to the
+    /// repo's `AGENTS.md` (a visible edit Baaz never commits).
+    AddToAgentsMd {
+        /// The note's file.
+        note: std::path::PathBuf,
+        /// The repo whose `AGENTS.md` gains it.
+        repo: std::path::PathBuf,
+    },
 }
 
 /// The shared-folder warning's words (docs/82 6.2). No provider name

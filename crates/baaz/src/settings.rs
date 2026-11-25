@@ -3643,7 +3643,7 @@ mod tests {
     #[test]
     fn browser_section_is_registered() {
         let ids: Vec<&str> = SETTINGS_SECTIONS.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, ["general", "appearance", "sidebar", "notifications", "git", "browser", "providers", "mcp", "shortcuts", "data", "archived"]);
+        assert_eq!(ids, ["general", "appearance", "sidebar", "notifications", "git", "browser", "providers", "mcp", "shortcuts", "memory", "data", "archived"]);
         assert_eq!(normalize_settings_target("browser", ""), "browser");
         assert_eq!(normalize_settings_target("BROWSER", ""), "browser");
         assert_eq!(normalize_settings_target("search-engine", ""), "browser");

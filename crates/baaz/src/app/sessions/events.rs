@@ -142,7 +142,8 @@ impl Harness {
             // the lane's `turn/completed`.
             SessionEvent::DigestDue { session_id } => self.run_digest(session_id.clone(), runtime.clone(), cx),
             SessionEvent::ProviderTurnFinished { session_id, turn_id, meta } => {
-                self.settle_turns(runtime, session_id, &[(turn_id.clone(), meta.clone())], cx)
+                self.note_memory_uses(runtime.clone(), cx);
+                self.settle_turns(runtime, session_id, &[(turn_id.clone(), meta.clone())], cx);
             }
             // A reopen's replayed history: the same settle, once for the
             // whole batch (docs/81 A F14).

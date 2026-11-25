@@ -61,6 +61,15 @@ impl SessionRuntime {
         }
     }
 
+    /// `agents-md-suggest` (probe): the one-line suggestion to add a
+    /// well-used memory note to AGENTS.md (docs/85 12.5), for a note
+    /// "GB postcode rule"; nothing is written unless it is pressed.
+    pub(crate) fn step_agents_md_suggest(&mut self, cx: &mut Context<Self>) -> StepResult {
+        let repo = std::path::PathBuf::from(self.workspace_path());
+        self.suggest_agents_md("GB postcode rule", repo.join("gb-postcode-rule.md"), repo, cx);
+        Ok(())
+    }
+
     /// `memory-rows` (probe): a settled turn whose agent found two past
     /// sessions, saved a note and removed one (docs/85 12.3), loaded into
     /// this session as its history — the rows those three outcomes draw.

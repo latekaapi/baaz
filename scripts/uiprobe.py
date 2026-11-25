@@ -1032,6 +1032,11 @@ def _memory_state():
 ENTRIES.update({
     # docs/85 12.3b: Settings › Memory — a project's notes, a project with
     # none, the personal note.
+    # docs/85 12.5: the one-line suggestion to add a well-used note to
+    # AGENTS.md (nothing is pressed, nothing written).
+    "agents-md-suggestion": {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", f"project:{_NEW_ROW_REPO};new;setprovider:claude-code;wait:300;agents-md-suggest;wait:300"],
+                             "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-agents-md-state-")}},
     "settings-memory": {"shot": ["--no-connect", "--login", "signed-in",
                                  "--steps", f"project:{_NEW_ROW_REPO};settings:memory;wait:300"],
                         "env": {"BAAZ_STATE_DIR": _memory_state()}},

@@ -124,8 +124,31 @@ fn index_line(note: &Note, file: &str) -> String {
     format!("- [{}]({file}) — {}", note.title.replace(['\n', '[', ']'], " "), note.description.replace('\n', " "))
 }
 
+/// The append-only record of memory changes beside the notes (docs/85
+/// 12.5, from the LLM wiki): one entry per save, change or removal, with
+/// the old text of a note that changed or went.
+pub const LOG: &str = "log.md";
+
+/// Append one entry to `dir`'s log.
+pub fn append_log(dir: &Path, action: &str, title: &str, old: Option<&str>) {
+    use std::io::Write as _;
+    let when = chrono::Local::now().format("%Y-%m-%d %H:%M");
+    let mut entry = format!("## {when} · {action} · {title}\n");
+    if let Some(old) = old {
+        entry.push_str("\nWas:\n\n");
+        for line in old.lines() {
+            entry.push_str(&format!("> {line}\n"));
+        }
+    }
+    entry.push('\n');
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(LOG)) {
+        let _ = file.write_all(entry.as_bytes());
+    }
+}
+
 /// Save `note` into `dir`, replacing a note of the same title; the index
-/// gains (or updates) its line. Returns the note's path.
+/// gains (or updates) its line, and the log an entry. Returns the note's
+/// path.
 pub fn save(dir: &Path, note: &Note) -> Result<PathBuf, String> {
     if note.title.trim().is_empty() || note.body.trim().is_empty() {
         return Err("a note needs a title and a body".into());
@@ -137,8 +160,10 @@ pub fn save(dir: &Path, note: &Note) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
     let file = format!("{}.md", slug(&note.title));
     let path = dir.join(&file);
+    let old = std::fs::read_to_string(&path).ok();
     std::fs::write(&path, render(note)).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     set_index_line(dir, &file, Some(&index_line(note, &file)))?;
+    append_log(dir, if old.is_some() { "replaced" } else { "saved" }, &note.title, old.as_deref());
     Ok(path)
 }
 
@@ -167,6 +192,7 @@ pub fn edit(dir: &Path, name: &str, change: &Change) -> Result<String, String> {
     if change.delete {
         std::fs::remove_file(&path).map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
         set_index_line(dir, &file, None)?;
+        append_log(dir, "removed", &note.title, Some(&text));
         return Ok(note.title);
     }
     if let Some(body) = &change.body {
@@ -177,6 +203,7 @@ pub fn edit(dir: &Path, name: &str, change: &Change) -> Result<String, String> {
     }
     std::fs::write(&path, render(&note)).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     set_index_line(dir, &file, Some(&index_line(&note, &file)))?;
+    append_log(dir, "changed", &note.title, Some(&text));
     Ok(note.title)
 }
 
@@ -286,6 +313,9 @@ mod tests {
         assert!(std::fs::read_to_string(&path).unwrap().contains("Only CA now."));
         edit(&dir, "Postcode rules", &Change { delete: true, ..Change::default() }).expect("forgotten");
         assert!(!path.exists() && list(&dir).is_empty(), "forget removes the note and its line");
+        let log = std::fs::read_to_string(dir.join(LOG)).unwrap();
+        assert_eq!(log.matches("## ").count(), 4, "saved, replaced, changed, removed:\n{log}");
+        assert!(log.contains("· removed · Postcode rules") && log.contains("> Only CA now."), "the old text is kept:\n{log}");
         assert!(edit(&dir, "nothing", &Change::default()).is_err());
         assert!(save(&dir, &Note { kind: "gossip".into(), ..note("x") }).is_err(), "Claude's four types only");
         let _ = std::fs::remove_dir_all(&dir);

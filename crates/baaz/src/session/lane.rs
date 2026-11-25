@@ -4202,6 +4202,37 @@ mod tests {
         }
     }
 
+    /// docs/85 12.5: the suggestion's yes appends the note, under its
+    /// title, to the repo's AGENTS.md — a plain edit, nothing committed;
+    /// "Not now" writes nothing.
+    #[gpui::test]
+    fn the_agents_md_suggestion_appends_the_note_on_yes_only(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let repo = std::env::temp_dir().join(format!("baaz-agents-md-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let dir = baaz_core::memory::project_dir(&repo);
+        let note = baaz_core::memory::Note { title: "GB postcode rule".into(), description: "d".into(), kind: "project".into(), body: "Never strip spaces.".into() };
+        let path = baaz_core::memory::save(&dir, &note).unwrap();
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        let rt = vc.update(|_, cx| view.read(cx).runtime().clone());
+        vc.update(|_, cx| rt.update(cx, |rt, cx| {
+            rt.suggest_agents_md("GB postcode rule", path.clone(), repo.clone(), cx);
+            rt.dismiss_banner(cx);
+        }));
+        assert!(!repo.join("AGENTS.md").exists(), "Not now writes nothing");
+        vc.update(|_, cx| rt.update(cx, |rt, cx| {
+            rt.suggest_agents_md("GB postcode rule", path.clone(), repo.clone(), cx);
+            assert!(rt.banner_text().is_some_and(|text| text.contains("Add it to AGENTS.md?")));
+            rt.run_banner_action(cx);
+        }));
+        assert_eq!(std::fs::read_to_string(repo.join("AGENTS.md")).unwrap(), "\n## GB postcode rule\n\nNever strip spaces.\n");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
     /// docs/85 12.3: the project's memory index rides the first message
     /// of a Codex session as a Baaz notice, once; Claude Code loads
     /// MEMORY.md itself and never gets it from Baaz.
