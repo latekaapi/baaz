@@ -168,6 +168,7 @@
 //! | `workers-pane` | a stand-in worker (the window's scripted lane, Read-only) opened beside the open session as the block's ↗ opens one — captures only (fails the step otherwise), free |
 //! | `workers-unfold` | unfold the open session's Workers block (its rows after every worker settled); no workers fails the step, free |
 //! | `worker-beside:<n>` | open the open session's nth worker (from 1) beside it, as its row's ↗ does; no such live worker fails the step, free |
+//! | `goal-fixture:<running\|met\|paused\|offer>` | the open session's goal pill in that state (docs/85 15.2), or the offer chip (15.1): a fixture goal (14 minutes, 6 turns, 212k tokens, `cargo test`), no turn sent, no row written; keep-awake follows as it would (15.5; held only outside a capture); no open session or an unknown word fails the step, free |
 //! | `run` | press Run on the open session (docs/82 7.4): the folder's `.baaz/project.toml` `run` starts in a terminal tab of the session's own, listed in Tasks; a Run that still runs is shown, not started again; no session or no `run` declared fails the step — **starts a real process** (captures: a static server in a fixture folder only) |
 //! | `run-stop` | Stop run on the open session: its process group ends; nothing running fails the step |
 //! | `run-wait-preview` (or `run-wait-preview:<s>`) | the runner waits up to that many seconds (30) while the Run's preview port has not answered, then the step checks the session's Page opened on it; gave up, run ended, moved on or no Run fails the step |
@@ -493,6 +494,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "workers-pane", run: |this, _, window, cx| this.step_workers_pane(window, cx) },
     WindowVerb { verb: "workers-unfold", run: |this, _, _, cx| this.step_workers_unfold(cx) },
     WindowVerb { verb: "worker-beside", run: |this, rest, _, cx| this.step_worker_beside(rest, cx) },
+    WindowVerb { verb: "goal-fixture", run: |this, rest, _, cx| this.step_goal_fixture(rest, cx) },
     WindowVerb { verb: "tick", run: |this, rest, _, cx| this.step_changes_tick(rest, true, cx) },
     WindowVerb { verb: "untick", run: |this, rest, _, cx| this.step_changes_tick(rest, false, cx) },
     WindowVerb { verb: "changes-branch", run: |this, rest, _, cx| this.step_changes_branch(rest, cx) },

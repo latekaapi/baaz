@@ -324,6 +324,14 @@ pub enum ProviderTrait {
     /// recorded the session: Claude Code's transcript store is keyed by
     /// the folder, Codex's thread and Muse's session keep their own.
     ResumesInNamedFolder,
+    /// It holds a goal natively and takes it as a command
+    /// ([`crate::Command::SetGoal`]): it keeps working toward it and
+    /// reports its own progress (docs/85 15.1).
+    GoalCommand,
+    /// It takes a goal as its own `/goal <condition>` message and keeps
+    /// working until it judges it met; nothing on its stream says so, so
+    /// the app checks after each turn (docs/85 15.1).
+    GoalSlashCommand,
 }
 
 /// A stdio MCP server every session of a window gets: the terminal relay's

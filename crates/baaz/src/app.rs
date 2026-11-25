@@ -1172,13 +1172,21 @@ impl Harness {
         if !cfg!(all(test, feature = "probe")) {
             this.tasks.push(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
-                let _ = this.update(cx, |this, cx| this.reconcile_tasks_on_open(cx));
+                let _ = this.update(cx, |this, cx| {
+                    this.reconcile_tasks_on_open(cx);
+                    // docs/85 15.6: goals the last run left running.
+                    this.resume_goals_on_open(cx);
+                });
             }));
             // docs/85 14.7: the stall rules, once a minute.
             this.tasks.push(cx.spawn(async move |this, cx| loop {
                 cx.background_executor().timer(std::time::Duration::from_secs(60)).await;
                 let now = baaz_core::clock::now_ms() as i64;
-                if this.update(cx, |this, cx| this.stall_tick(now, cx)).is_err() {
+                if this.update(cx, |this, cx| {
+                    this.stall_tick(now, cx);
+                    // docs/85 15.4: goal waits, stalls and keep-awake.
+                    this.goal_tick(now, cx);
+                }).is_err() {
                     return;
                 }
             }));
@@ -3878,6 +3886,9 @@ impl Harness {
                 // docs/85 14.9: a lead's Workers block rides the band, at the
                 // transcript's foot, above the composer.
                 let workers = view.update(cx, |view, cx| view.render_workers_block(cx));
+                // docs/85 15.2: the goal pill (or the offer chip), right above
+                // the composer.
+                let goal = view.update(cx, |view, cx| view.render_goal(cx));
                 // The composer floats over the transcript (owner 2026-10-15:
                 // "it's not floating on top of the transcript"): the band is
                 // absolute at the column's bottom and the list runs under it.
@@ -3913,6 +3924,7 @@ impl Harness {
                                     .w_full()
                                     .relative()
                                     .children(workers)
+                                    .children(goal)
                                     .children(provider_banner.take())
                                     .child(band)
                                     // Off this column's top, so it clears the

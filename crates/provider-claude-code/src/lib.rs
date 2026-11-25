@@ -2181,6 +2181,12 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             // the mode the session was in. The child's `status` frame then
             // reports the move, and the pump says so with
             // `PlanModeChanged`.
+            // Claude Code takes its goal as its own `/goal` message
+            // (`ProviderTrait::GoalSlashCommand`): the app sends the words.
+            Command::SetGoal { .. } => Err(ProviderError::unsupported(
+                "set-goal",
+                "Claude Code takes a goal as its own `/goal` message, sent as a turn",
+            )),
             Command::SetPlanMode { session_id, on, .. } => {
                 self.check_session(&session_id)?;
                 let back = self.fold.lock().expect("fold mutex").permission_mode().unwrap_or_default();

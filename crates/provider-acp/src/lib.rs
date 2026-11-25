@@ -544,6 +544,7 @@ impl ProviderAdapter for AcpAdapter {
             | Command::SelectModel { .. }
             | Command::SelectApprovalMode { .. }
             | Command::SetPlanMode { .. }
+            | Command::SetGoal { .. }
             | Command::RunShell { .. }
             | Command::SteerInput { .. }
             | Command::ListModels { .. }

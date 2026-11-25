@@ -41,6 +41,7 @@ pub mod editors;
 pub mod files;
 pub mod full_output;
 pub mod git_ops;
+pub mod goals;
 pub mod handoff;
 pub mod handoff_snapshot;
 pub mod history;

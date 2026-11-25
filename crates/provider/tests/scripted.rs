@@ -129,7 +129,8 @@ fn refused_commands() -> Vec<(Command, &'static str)> {
             | Command::FollowSession { .. }
             | Command::SelectModel { .. }
             | Command::SelectApprovalMode { .. }
-            | Command::SetPlanMode { .. } => None,
+            | Command::SetPlanMode { .. }
+            | Command::SetGoal { .. } => None,
             command @ Command::ResumeSession { .. } => Some((command, "resume-session")),
             command @ Command::ForkSession { .. } => Some((command, "fork-session")),
             command @ Command::ListSessions { .. } => Some((command, "list-sessions")),
