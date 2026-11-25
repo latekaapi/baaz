@@ -1492,7 +1492,7 @@ impl Harness {
         self.wire = Wire::Down(reason);
         // A Muse draft waiting on the start stops saying "Starting Muse…".
         if let Some(view) = self.active.clone() {
-            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_muse_starting(false, cx)));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_shared_child_starting(false, cx)));
         }
         if !self.session_list.read(cx).sessions_loaded {
             self.session_list.update(cx, |list, _| list.sessions_loaded = true);

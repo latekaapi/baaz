@@ -423,7 +423,7 @@ impl Harness {
         let starting = !self.providers.lands_inline()
             && !self.providers.shared_ready()
             && matches!(self.wire, crate::app::Wire::Connecting | crate::app::Wire::Reconnecting);
-        view.read(cx).runtime().clone().update(cx, |rt, cx| rt.set_muse_starting(starting, cx));
+        view.read(cx).runtime().clone().update(cx, |rt, cx| rt.set_shared_child_starting(starting, cx));
         // A waiting parcel's session is this draft: key the parcel to it
         // before the view lands, so `activate` hands it over here — and
         // only here.

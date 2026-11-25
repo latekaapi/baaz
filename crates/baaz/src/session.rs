@@ -1721,7 +1721,7 @@ impl SessionRuntime {
         let id = self.model_id();
         // Nothing names a model yet while Muse (or this draft's session on
         // it) is still starting: say so, never the bare lane name "Muse".
-        if self.muse_starting || (matches!(self.start, StartState::Starting(_)) && id == self.provider_id) {
+        if self.shared_child_starting || (matches!(self.start, StartState::Starting(_)) && id == self.provider_id) {
             return format!("Starting {}\u{2026}", self.provider_kind().label());
         }
         if let Some(label) =
@@ -1745,10 +1745,12 @@ impl SessionRuntime {
         }
     }
 
-    /// Say whether Muse is still starting under this (live, local) draft.
-    pub(crate) fn set_muse_starting(&mut self, starting: bool, cx: &mut Context<Self>) {
-        if self.muse_starting != starting {
-            self.muse_starting = starting;
+    /// Say whether the shared child (a provider with
+    /// `ProviderTrait::SharedChild`) is still starting under this live,
+    /// local draft.
+    pub(crate) fn set_shared_child_starting(&mut self, starting: bool, cx: &mut Context<Self>) {
+        if self.shared_child_starting != starting {
+            self.shared_child_starting = starting;
             cx.emit(RuntimeEvent::MenusStale);
         }
     }
