@@ -44,7 +44,12 @@ const ADAPTER_CRATES: [&str; 6] =
 /// written, why it is not a store Baaz keeps by session)`. A new one is a
 /// new store until it is listed here with its reason — and one keyed by
 /// session id belongs in `baaz.db` instead.
-const ADAPTER_JSON: [(&str, &str, &str); 11] = [
+const ADAPTER_JSON: [(&str, &str, &str); 12] = [
+    (
+        "provider-claude-code/src/hook.rs",
+        "{safe}.json",
+        "the PostToolUse hook's read-stub cache in the temp folder: the hook is a fresh process per call outside Baaz, so it cannot reach baaz.db; mtimes only, off until claude 2.1.317 (docs/85 12.2)",
+    ),
     (
         "provider-claude-code/src/terminal.rs",
         "{session_id}.json",
