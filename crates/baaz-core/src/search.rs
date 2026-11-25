@@ -41,7 +41,13 @@ pub const LIMIT: usize = 12;
 /// project's name found anything was that its path happened to appear in
 /// transcript text, so it worked in some sessions and not others for no
 /// reason a person could see.
-const SCHEMA_VERSION: u32 = 3;
+///
+/// 4 (docs/85 11.3): `sessions_fts` stems its words (Porter: "questions"
+/// finds "question"), and `sessions_tri` holds each row's names and code
+/// identifiers under a trigram tokenizer, so a part of a name finds it
+/// (`DateRange` finds `parseDateRange`). Trigram rows share their session's
+/// `sessions_fts` rowid.
+const SCHEMA_VERSION: u32 = 4;
 
 /// One session row to index.
 pub struct SessionRow {
@@ -201,7 +207,9 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
              DROP TABLE IF EXISTS files_fts;
              DROP TABLE IF EXISTS files_seen;
              DROP TABLE IF EXISTS sessions_state;
-             CREATE VIRTUAL TABLE sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, project, workspace UNINDEXED);
+             DROP TABLE IF EXISTS sessions_tri;
+             CREATE VIRTUAL TABLE sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, project, workspace UNINDEXED, tokenize='porter unicode61');
+             CREATE VIRTUAL TABLE sessions_tri USING fts5(session_id UNINDEXED, words, tokenize='trigram');
              CREATE VIRTUAL TABLE files_fts USING fts5(path, session_id UNINDEXED, kind, project, workspace UNINDEXED);
              CREATE TABLE files_seen (path TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY (path, session_id)) WITHOUT ROWID;",
         )?;
@@ -213,7 +221,8 @@ pub fn open_at(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
         connection.execute("DELETE FROM meta WHERE key = 'sessions_fingerprint'", [])?;
     } else {
         connection.execute_batch(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, project, workspace UNINDEXED);
+            "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, project, workspace UNINDEXED, tokenize='porter unicode61');
+             CREATE VIRTUAL TABLE IF NOT EXISTS sessions_tri USING fts5(session_id UNINDEXED, words, tokenize='trigram');
              CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(path, session_id UNINDEXED, kind, project, workspace UNINDEXED);",
         )?;
     }
@@ -281,12 +290,14 @@ pub fn rebuild_compact(path: &std::path::Path) -> Result<(), rusqlite::Error> {
         connection.execute_batch(&format!(
             "PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_size_limit={JOURNAL_SIZE_LIMIT};
              CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
-             CREATE VIRTUAL TABLE sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, project, workspace UNINDEXED);
+             CREATE VIRTUAL TABLE sessions_fts USING fts5(session_id UNINDEXED, label, title, first_prompt, body, project, workspace UNINDEXED, tokenize='porter unicode61');
+             CREATE VIRTUAL TABLE sessions_tri USING fts5(session_id UNINDEXED, words, tokenize='trigram');
              CREATE VIRTUAL TABLE files_fts USING fts5(path, session_id UNINDEXED, kind, project, workspace UNINDEXED);
              CREATE TABLE files_seen (path TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY (path, session_id)) WITHOUT ROWID;
              CREATE TABLE sessions_state (session_id TEXT PRIMARY KEY, fts_rowid INTEGER NOT NULL, fingerprint INTEGER NOT NULL) WITHOUT ROWID;
              INSERT INTO sessions_fts(sessions_fts, rank) VALUES ('automerge', 8);
-             INSERT INTO files_fts(files_fts, rank) VALUES ('automerge', 8);"
+             INSERT INTO files_fts(files_fts, rank) VALUES ('automerge', 8);
+             INSERT INTO sessions_tri(sessions_tri, rank) VALUES ('automerge', 8);"
         ))?;
         connection.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)",
@@ -321,13 +332,22 @@ pub fn rebuild_compact(path: &std::path::Path) -> Result<(), rusqlite::Error> {
 }
 
 /// After a sync (docs/85 10.7): after a big one, merge the FTS segments
-/// into one (`optimize`); after any, give freed pages back to the disk
-/// (`incremental_vacuum`). Best-effort: a failure leaves the index as it
+/// into one (`optimize`); after any, a bounded merge and freed pages back
+/// to the disk (`incremental_vacuum`). Best-effort: a failure leaves the index as it
 /// was, only larger.
 pub fn tidy_after_sync(connection: &Connection, written: usize) {
     if written >= OPTIMIZE_AFTER {
-        let _ = connection.execute_batch("INSERT INTO sessions_fts(sessions_fts) VALUES ('optimize');");
+        let _ = connection.execute_batch(
+            "INSERT INTO sessions_fts(sessions_fts) VALUES ('optimize'); INSERT INTO sessions_tri(sessions_tri) VALUES ('optimize');",
+        );
     }
+    // A bounded merge after any sync (FTS5 `merge` with -64: up to 64 pages
+    // of work, merging across levels):
+    // one-row syncs otherwise pile up small segments faster than automerge
+    // folds them.
+    let _ = connection.execute_batch(
+        "INSERT INTO sessions_fts(sessions_fts, rank) VALUES ('merge', -64); INSERT INTO sessions_tri(sessions_tri, rank) VALUES ('merge', -64);",
+    );
     let _ = connection.execute_batch("PRAGMA incremental_vacuum;");
 }
 
@@ -370,6 +390,7 @@ pub fn rebuild_sessions(connection: &mut Connection, rows: &[SessionRow]) -> Res
     {
         let transaction = connection.transaction()?;
         transaction.execute("DELETE FROM sessions_fts", [])?;
+        transaction.execute("DELETE FROM sessions_tri", [])?;
         transaction.execute("DELETE FROM sessions_state", [])?;
         transaction.commit()?;
     }
@@ -470,12 +491,16 @@ fn sync_sessions_inner(
     // address by rowid: clear them once, and this sync writes every row.
     if state.is_empty() && prune {
         transaction.execute("DELETE FROM sessions_fts", [])?;
+        transaction.execute("DELETE FROM sessions_tri", [])?;
     }
     {
         let mut delete_row = transaction.prepare("DELETE FROM sessions_fts WHERE rowid = ?1")?;
+        let mut delete_tri = transaction.prepare("DELETE FROM sessions_tri WHERE rowid = ?1")?;
+        let mut insert_tri = transaction.prepare("INSERT INTO sessions_tri(rowid, session_id, words) VALUES (?1, ?2, ?3)")?;
         let mut delete_state = transaction.prepare("DELETE FROM sessions_state WHERE session_id = ?1")?;
         for (id, rowid) in &gone {
             delete_row.execute(params![rowid])?;
+            delete_tri.execute(params![rowid])?;
             delete_state.execute(params![id])?;
             stats.removed += 1;
         }
@@ -489,6 +514,7 @@ fn sync_sessions_inner(
             let row = sync.row;
             if let Some((rowid, _)) = state.get(&row.session_id) {
                 delete_row.execute(params![rowid])?;
+                delete_tri.execute(params![rowid])?;
             }
             let mut parts: Vec<&str> =
                 sync.body_ids.iter().filter_map(|id| fetched.get(id).map(String::as_str)).collect();
@@ -505,7 +531,9 @@ fn sync_sessions_inner(
                 row.project,
                 row.workspace
             ])?;
-            record.execute(params![row.session_id, transaction.last_insert_rowid(), sync.fingerprint])?;
+            let rowid = transaction.last_insert_rowid();
+            insert_tri.execute(params![rowid, row.session_id, trigram_words(row, &body)])?;
+            record.execute(params![row.session_id, rowid, sync.fingerprint])?;
             stats.written += 1;
         }
     }
@@ -562,8 +590,10 @@ pub fn record_files(connection: &Connection, records: &[FileRecord]) -> Result<(
 /// Sessions matching `query`, best first (bm25), at most `limit`.
 pub fn query_sessions(connection: &Connection, query: &str, limit: usize) -> Vec<SessionHit> {
     let Some(matched) = fts_query(query) else { return Vec::new() };
-    // The snippet comes from FTS5 itself (docs/85 10.8): a window of words
-    // around the match, never the whole transcript body pulled per hit.
+    // Words first (stemmed, prefix), ranked by bm25; then, when the words
+    // left room, parts of names (trigram, docs/85 11.3). The snippet comes
+    // from FTS5 itself around the match.
+    let mut hits: Vec<SessionHit> = Vec::new();
     let mut statement = match connection.prepare_cached(
         "SELECT session_id, label, snippet(sessions_fts, 4, '', '', ' … ', 48), workspace FROM sessions_fts
          WHERE sessions_fts MATCH ?1 ORDER BY bm25(sessions_fts) LIMIT ?2",
@@ -571,25 +601,77 @@ pub fn query_sessions(connection: &Connection, query: &str, limit: usize) -> Vec
         Ok(statement) => statement,
         Err(_) => return Vec::new(),
     };
-    let rows = statement.query_map(params![matched, limit as i64], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-        ))
-    });
-    let Ok(rows) = rows else { return Vec::new() };
-    rows.filter_map(Result::ok)
-        .map(|(session_id, label, body, workspace)| {
-            // The indexed body is Muse's raw `search_text`: unit-separated
-            // header segments (ids, status, paths) ahead of the transcript.
-            // The row shows words, so the snippet is cut from the cleaned
-            // text, never from the raw envelope.
+    if let Ok(rows) = statement.query_map(params![matched, limit as i64], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?))
+    }) {
+        for (session_id, label, body, workspace) in rows.filter_map(Result::ok) {
+            // The indexed body may be Muse's raw `search_text`, header
+            // segments and all: the row shows words, so the snippet is cut
+            // from the cleaned text.
             let snippet = snippet_for(&clean_search_text(&body), query);
-            SessionHit { session_id, label, snippet, workspace }
-        })
-        .collect()
+            hits.push(SessionHit { session_id, label, snippet, workspace });
+        }
+    }
+    if hits.len() < limit {
+        if let Some(part) = trigram_query(query) {
+            if let Ok(mut statement) = connection.prepare_cached(
+                "SELECT f.session_id, f.label, f.workspace, t.words FROM sessions_tri t JOIN sessions_fts f ON f.rowid = t.rowid
+                 WHERE sessions_tri MATCH ?1 ORDER BY bm25(sessions_tri) LIMIT ?2",
+            ) {
+                if let Ok(rows) = statement.query_map(params![part, limit as i64], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?))
+                }) {
+                    for (session_id, label, workspace, words) in rows.filter_map(Result::ok) {
+                        if hits.len() >= limit || hits.iter().any(|hit| hit.session_id == session_id) {
+                            continue;
+                        }
+                        let snippet = snippet_for(&words, query);
+                        hits.push(SessionHit { session_id, label, snippet, workspace });
+                    }
+                }
+            }
+        }
+    }
+    hits
+}
+
+/// A trigram `MATCH` for a part of a name: the query's words of three
+/// characters or more, each quoted (a trigram tokenizer matches the
+/// substring), joined with AND. `None` when no word is long enough.
+fn trigram_query(query: &str) -> Option<String> {
+    let parts: Vec<String> = query
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|part| part.chars().count() >= 3)
+        .map(|part| format!("\"{part}\""))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" AND "))
+}
+
+/// How many code identifiers one row's trigram entry keeps.
+const MAX_IDENTIFIERS: usize = 400;
+
+/// What a row's trigram entry holds: its names (label, title, first prompt,
+/// project) and the code identifiers in its body — words with an inner
+/// capital, an underscore or a digit after a letter, five characters or
+/// more, once each. Never the whole body: a trigram index of every
+/// transcript would be several times their size.
+fn trigram_words(row: &SessionRow, body: &str) -> String {
+    let mut out = vec![row.label.clone(), row.title.clone(), row.first_prompt.clone(), row.project.clone()];
+    let mut seen = std::collections::HashSet::new();
+    for word in body.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+        if word.chars().count() < 5 || word.chars().count() > 64 || !seen.insert(word) {
+            continue;
+        }
+        let inner_capital = word.chars().skip(1).any(char::is_uppercase) && word.chars().any(char::is_lowercase);
+        let code = inner_capital || word.contains('_') || word.chars().any(|c| c.is_ascii_digit());
+        if code {
+            out.push(word.to_owned());
+            if out.len() >= 4 + MAX_IDENTIFIERS {
+                break;
+            }
+        }
+    }
+    out.join(" ")
 }
 
 /// Created files matching `query`, newest records first.
@@ -810,6 +892,40 @@ pub fn relativize(root: &str, target: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plain_row(id: &str, label: &str, body: &str) -> SessionRow {
+        SessionRow {
+            session_id: id.into(),
+            label: label.into(),
+            title: String::new(),
+            first_prompt: String::new(),
+            body: body.into(),
+            project: String::new(),
+            workspace: None,
+        }
+    }
+
+    /// docs/85 11.3: words are stemmed ("questions" finds "question"), a
+    /// half-typed name still finds it by prefix, and a part from the middle
+    /// of a code name finds it through the trigram table.
+    #[test]
+    fn stems_prefixes_and_parts_of_names_are_found() {
+        let mut connection = open_at(std::path::Path::new(":memory:")).expect("opens");
+        rebuild_sessions(
+            &mut connection,
+            &[
+                plain_row("s-q", "Ask", "I have one question about the parser."),
+                plain_row("s-d", "Dates", "We renamed parseDateRange and fixed the tests."),
+                plain_row("s-x", "Other", "Nothing to see."),
+            ],
+        )
+        .expect("rows");
+        let ids = |query: &str| query_sessions(&connection, query, 12).into_iter().map(|hit| hit.session_id).collect::<Vec<_>>();
+        assert_eq!(ids("questions"), ["s-q"], "stemmed");
+        assert_eq!(ids("parseDate"), ["s-d"], "prefix");
+        assert_eq!(ids("DateRange"), ["s-d"], "a part of a code name");
+        assert!(ids("zebra").is_empty());
+    }
 
     /// docs/85 10.7 on real data: `BAAZ_SEARCH_DB_COPY` names a COPY of an
     /// owner's search.db; opening it rebuilds it compact. Run by hand:
