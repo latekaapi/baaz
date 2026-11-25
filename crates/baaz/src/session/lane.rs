@@ -1149,6 +1149,8 @@ impl SessionRuntime {
                     // where they settle in one `HistoryReplayed` (docs/81 A
                     // F14), not one settle each.
                     if !replaying {
+                        // docs/85 12.1: a new idle stretch, and its timer.
+                        self.auto_compact_turn_ended(cx);
                         cx.emit(super::SessionEvent::ProviderTurnFinished {
                             session_id: self.session_id.clone(),
                             turn_id: turn_id.clone(),
@@ -4198,6 +4200,142 @@ mod tests {
                 assert!(commands.iter().all(|command| command.offered_on(id)), "{}: the menu lists only offered commands", id.as_str());
             });
         }
+    }
+
+    /// docs/85 12.5: the suggestion's yes appends the note, under its
+    /// title, to the repo's AGENTS.md — a plain edit, nothing committed;
+    /// "Not now" writes nothing.
+    #[gpui::test]
+    fn the_agents_md_suggestion_appends_the_note_on_yes_only(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let repo = std::env::temp_dir().join(format!("baaz-agents-md-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let dir = baaz_core::memory::project_dir(&repo);
+        let note = baaz_core::memory::Note { title: "GB postcode rule".into(), description: "d".into(), kind: "project".into(), body: "Never strip spaces.".into() };
+        let path = baaz_core::memory::save(&dir, &note).unwrap();
+        let vc = cx.add_empty_window();
+        let (adapter, _handle) = RecordingProvider::new();
+        let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
+        let rt = vc.update(|_, cx| view.read(cx).runtime().clone());
+        vc.update(|_, cx| rt.update(cx, |rt, cx| {
+            rt.suggest_agents_md("GB postcode rule", path.clone(), repo.clone(), cx);
+            rt.dismiss_banner(cx);
+        }));
+        assert!(!repo.join("AGENTS.md").exists(), "Not now writes nothing");
+        vc.update(|_, cx| rt.update(cx, |rt, cx| {
+            rt.suggest_agents_md("GB postcode rule", path.clone(), repo.clone(), cx);
+            assert!(rt.banner_text().is_some_and(|text| text.contains("Add it to AGENTS.md?")));
+            rt.run_banner_action(cx);
+        }));
+        assert_eq!(std::fs::read_to_string(repo.join("AGENTS.md")).unwrap(), "\n## GB postcode rule\n\nNever strip spaces.\n");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// docs/85 12.3: the project's memory index rides the first message
+    /// of a Codex session as a Baaz notice, once; Claude Code loads
+    /// MEMORY.md itself and never gets it from Baaz.
+    #[gpui::test]
+    fn the_memory_index_rides_the_first_message_once_where_the_provider_needs_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let dir = baaz_core::memory::project_dir(std::path::Path::new("/tmp/w3-lane"));
+        let note = baaz_core::memory::Note { title: "Release day".into(), description: "When releases go out".into(), kind: "project".into(), body: "Thursdays.".into() };
+        baaz_core::memory::save(&dir, &note).expect("saved in the test's redirected folder");
+        let words = |handle: &RecordingHandle| -> Vec<String> {
+            handle.received().into_iter().filter_map(|command| match command {
+                provider::Command::SubmitInput { parts, .. } => Some(parts.iter().filter_map(|part| match part {
+                    provider::SubmissionPart::Text(text) => Some(text.clone()),
+                    _ => None,
+                }).collect::<String>()),
+                _ => None,
+            }).collect()
+        };
+        for (provider, gets_it) in [("codex", true), ("claude-code", false)] {
+            let vc = cx.add_empty_window();
+            let (adapter, handle) = RecordingProvider::new();
+            let (view, tx) = open_recording_view(vc, "s-1", provider, adapter);
+            for text in ["first", "second"] {
+                vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text(text.to_owned(), cx))));
+                vc.run_until_parked();
+                drain_recording(&view, &tx, vc);
+            }
+            let sent = words(&handle);
+            assert_eq!(sent.len(), 2, "{provider}: {sent:?}");
+            assert_eq!(sent[0].contains("[Release day](release-day.md)"), gets_it, "{provider} first: {}", sent[0]);
+            assert!(!sent[1].contains("Release day"), "{provider}: once, never again");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// docs/85 12.1: automatic compaction on a long, idle Claude Code
+    /// session on a subscription — once, at the decision's moment, with a
+    /// focus line; never after a key in the composer; and a topic switch
+    /// above the threshold compacts before the message goes.
+    #[gpui::test]
+    fn automatic_compaction_runs_once_at_its_moment_and_never_while_typing(cx: &mut gpui::TestAppContext) {
+        use baaz_core::billing::{self, BillingMode};
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let (adapter, handle) = RecordingProvider::new();
+        let (view, _tx) = open_recording_view(vc, "s-1", "claude-code", adapter);
+        let id = vc.update(|_, cx| view.read(cx).rt(cx).provider_kind());
+        billing::reset();
+        billing::report(id, Some(BillingMode::Subscription));
+        let long = provider::facts::ContextReading::measured(412_000, Some(1_000_000));
+        let rt = vc.update(|_, cx| view.read(cx).runtime().clone());
+        vc.update(|_, cx| rt.update(cx, |rt, _| rt.fake_context = Some(long.clone())));
+        let compacts = || handle.received().into_iter().filter_map(|command| match command {
+            provider::Command::CompactSession { focus, .. } => Some(focus),
+            _ => None,
+        }).collect::<Vec<_>>();
+
+        // 30 minutes idle: not yet. 58 minutes: now, once.
+        vc.update(|_, cx| rt.update(cx, |rt, cx| rt.step_auto_compact("1800", cx).unwrap()));
+        vc.run_until_parked();
+        assert!(compacts().is_empty(), "not before the cache's last two minutes");
+        vc.update(|_, cx| rt.update(cx, |rt, cx| rt.step_auto_compact("3480", cx).unwrap()));
+        vc.run_until_parked();
+        let sent = compacts();
+        assert_eq!(sent.len(), 1, "one compaction");
+        assert!(sent[0].as_deref().is_some_and(|focus| focus.starts_with("Keep every instruction the user gave, word for word.")), "{sent:?}");
+        vc.update(|_, cx| rt.update(cx, |rt, cx| rt.step_auto_compact("3500", cx).unwrap()));
+        vc.run_until_parked();
+        assert_eq!(compacts().len(), 1, "once per idle stretch");
+
+        // A new stretch where the person typed: never.
+        vc.update(|_, cx| rt.update(cx, |rt, cx| {
+            rt.auto_compact = Default::default();
+            rt.auto_compact_typed();
+            rt.step_auto_compact("3480", cx).unwrap();
+        }));
+        vc.run_until_parked();
+        assert_eq!(compacts().len(), 1, "a key in the composer cancels it");
+
+        // Per-token billing (a 5-minute cache): left to the vendor.
+        vc.update(|_, cx| rt.update(cx, |rt, cx| {
+            rt.auto_compact = Default::default();
+            billing::report(id, Some(BillingMode::PerToken));
+            rt.step_auto_compact("3480", cx).unwrap();
+        }));
+        vc.run_until_parked();
+        assert_eq!(compacts().len(), 1, "no timer on a 5-minute cache");
+
+        // The topic switch: NEW compacts first, then the message goes.
+        billing::report(id, Some(BillingMode::Subscription));
+        billing::note_sent(id);
+        baaz_core::utility::set_test_completer(|_, _| Ok("NEW".to_owned()));
+        vc.update(|_, cx| rt.update(cx, |rt, cx| rt.send_text("Now write the release notes".to_owned(), cx)));
+        vc.run_until_parked();
+        assert_eq!(compacts().len(), 2, "a new topic above the threshold compacts first");
+        assert_eq!(handle.commands_of("submit-input").len(), 1, "and the message still goes");
+        // SAME: the message goes as it is.
+        baaz_core::utility::set_test_completer(|_, _| Ok("SAME".to_owned()));
+        vc.update(|_, cx| rt.update(cx, |rt, cx| { rt.running = None; rt.submitting = false; rt.send_text("And the changelog".to_owned(), cx) }));
+        vc.run_until_parked();
+        assert_eq!(compacts().len(), 2, "the same topic sends as it is");
+        assert_eq!(handle.commands_of("submit-input").len(), 2);
+        billing::reset();
     }
 
     /// docs/82 5.5: a typed escape the provider cannot run is not

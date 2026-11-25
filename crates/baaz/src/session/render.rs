@@ -2062,6 +2062,18 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         if let Some(crate::session::BannerAction::SharedFolder { worktree }) = self.runtime.read(cx).banner_action {
             return Some(self.render_shared_folder(&message, worktree, cx));
         }
+        // docs/85 12.5: the one-line AGENTS.md suggestion — a question, not
+        // an error: the quiet banner, its yes and its "Not now".
+        if matches!(self.runtime.read(cx).banner_action, Some(crate::session::BannerAction::AddToAgentsMd { .. })) {
+            let press = cx.listener(|this: &mut Self, _: &(), _, cx| this.runtime.update(cx, |rt, cx| rt.run_banner_action(cx)));
+            let dismiss = cx.listener(|this: &mut Self, _: &(), _, cx| this.runtime.update(cx, |rt, cx| rt.dismiss_banner(cx)));
+            let row = banner("session-banner-agents-md", BannerKind::Info, vec![BannerRun::Text(message.clone().into())])
+                .action("Add to AGENTS.md", BannerActionStyle::Ghost)
+                .on_action(move |window, cx| press(&(), window, cx))
+                .secondary_action("Not now", BannerActionStyle::Ghost)
+                .on_secondary(move |window, cx| dismiss(&(), window, cx));
+            return Some(div().w_full().px(px(TRANSCRIPT_PAD_X)).pb(px(scale::SP_3)).child(centred(row)).into_any_element());
+        }
         let label = match self.runtime.read(cx).banner_action {
             Some(crate::session::BannerAction::OpenProviders) => "Enable",
             Some(crate::session::BannerAction::RetryNow) => "Retry now",

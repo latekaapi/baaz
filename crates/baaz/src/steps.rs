@@ -39,6 +39,8 @@
 //! | `draft:<text>` | put text in the composer |
 //! | `send:<text>` | send a turn — **costs a turn** |
 //! | `steer:<text>` | steer the running turn — **costs a turn** |
+//! | `agents-md-suggest` | the one-line suggestion to add a well-used memory note to AGENTS.md (docs/85 12.5) |
+//! | `memory-rows` | a settled turn with the session/memory tools' three outcome rows (docs/85 12.3) |
 //! | `send-held:<text>` | a send the billing rule must hold (docs/85 11.6); fails when it left |
 //! | `send-anyway` | the billing hold's "Send anyway": sends what the hold kept back — **costs a turn** |
 //! | `billing-last:<provider>:<mode>` | the last send on that provider's account was in `mode` (`subscription`, `perToken`) |
@@ -57,6 +59,8 @@
 //! | `submenu` | open the open model menu's highlighted row's submenu (as →); fails when the model menu is closed, free |
 //! | `seteffort:<level>` | the effort menu's row as a verb (`default` clears); an unknown spelling fails, free |
 //! | `compact` | `session/compact` |
+//! | `digest-now` | this session went idle: the application writes its digest when one is due (docs/85 12.4) |
+//! | `auto-compact:<seconds>` | the automatic-compaction decision as if `<seconds>` passed since the last turn, acted on (docs/85 12.1) |
 //! | `meter` | pin the context meter's breakdown open |
 //! | `context:<used>/<window>/<level>` | a synthetic `session/contextUsage` |
 //! | `plan` | turn plan mode on |
@@ -1135,6 +1139,8 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "transcript-find-next", run: |v, _, _, cx| if v.find_step(true, cx) { Ok(()) } else { Err("transcript-find-next: no bar or no match".into()) } },
     SessionVerb { verb: "transcript-find-prev", run: |v, _, _, cx| if v.find_step(false, cx) { Ok(()) } else { Err("transcript-find-prev: no bar or no match".into()) } },
     SessionVerb { verb: "transcript-find-close", run: |v, _, window, cx| if v.close_find(window, cx) { Ok(()) } else { Err("transcript-find-close: no bar open".into()) } },
+    SessionVerb { verb: "agents-md-suggest", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_agents_md_suggest(cx)) },
+    SessionVerb { verb: "memory-rows", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_memory_rows(cx)) },
     SessionVerb { verb: "send-held", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_send_held(rest, cx)) },
     SessionVerb { verb: "send", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_send(rest, cx)) },
     // The billing hold's "Send anyway", as a verb: sends what the hold
@@ -1167,6 +1173,10 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     // pick) record a step failure and change nothing.
     SessionVerb { verb: "handoff", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_handoff(rest, cx)) },
     SessionVerb { verb: "seteffort", run: |v, rest, _, cx| v.step_seteffort(rest, cx) },
+    // docs/85 12.1: run the automatic-compaction decision as if
+    // `<seconds>` had passed since the last turn, and act on it.
+    SessionVerb { verb: "digest-now", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_digest_now(cx)) },
+    SessionVerb { verb: "auto-compact", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_auto_compact(rest, cx)) },
     SessionVerb { verb: "compact", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_compact(cx)) },
     SessionVerb { verb: "meter", run: |v, _, _, cx| v.step_meter(cx) },
     SessionVerb { verb: "context", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_context(rest, cx)) },

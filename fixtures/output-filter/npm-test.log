@@ -1,0 +1,121 @@
+
+up to date in 108ms
+
+> web@1.0.0 test
+> node --test
+
+✔ chunk 0 (1.298417ms)
+✔ chunk 1 (0.058458ms)
+✔ chunk 2 (0.042708ms)
+✔ chunk 3 (0.047542ms)
+✔ chunk 4 (0.039667ms)
+✔ chunk 5 (0.034084ms)
+✔ chunk 6 (0.036042ms)
+✔ chunk 7 (0.035709ms)
+✔ chunk 8 (0.048583ms)
+✔ chunk 9 (0.068542ms)
+✔ chunk 10 (0.0415ms)
+✔ chunk 11 (0.03225ms)
+✔ chunk 12 (0.025083ms)
+✔ chunk 13 (0.022125ms)
+✔ chunk 14 (0.02425ms)
+✔ chunk 15 (0.02225ms)
+✔ chunk 16 (0.020167ms)
+✔ chunk 17 (0.019791ms)
+✔ chunk 18 (0.019917ms)
+✔ chunk 19 (0.019833ms)
+✔ chunk 20 (0.022125ms)
+✔ chunk 21 (0.025959ms)
+✔ chunk 22 (0.039458ms)
+✔ chunk 23 (0.03175ms)
+✔ chunk 24 (0.02175ms)
+✔ chunk 25 (0.019542ms)
+✔ chunk 26 (0.026125ms)
+✔ chunk 27 (0.020542ms)
+✔ chunk 28 (0.026ms)
+✔ chunk 29 (0.020667ms)
+✔ chunk 30 (0.020208ms)
+✔ chunk 31 (0.018875ms)
+✔ chunk 32 (0.0225ms)
+✔ chunk 33 (0.022834ms)
+✔ chunk 34 (0.018583ms)
+✔ chunk 35 (0.017916ms)
+✔ chunk 36 (0.018041ms)
+✔ chunk 37 (0.022584ms)
+✔ chunk 38 (0.027791ms)
+✔ chunk 39 (0.022375ms)
+✔ chunk 40 (0.024625ms)
+✔ chunk 41 (0.02675ms)
+✔ chunk 42 (0.017291ms)
+✔ chunk 43 (0.018542ms)
+✔ chunk 44 (0.016917ms)
+✔ chunk 45 (0.016708ms)
+✔ chunk 46 (0.016625ms)
+✔ chunk 47 (0.018209ms)
+✔ chunk 48 (0.016791ms)
+✔ chunk 49 (0.016708ms)
+✔ chunk 50 (0.016833ms)
+✔ chunk 51 (0.017125ms)
+✔ chunk 52 (0.0165ms)
+✔ chunk 53 (0.017208ms)
+✔ chunk 54 (0.019417ms)
+✔ chunk 55 (0.021875ms)
+✔ chunk 56 (0.018125ms)
+✔ chunk 57 (0.020209ms)
+✔ chunk 58 (0.017333ms)
+✔ chunk 59 (0.016584ms)
+✔ chunk 60 (0.016666ms)
+✔ chunk 61 (0.016458ms)
+✔ chunk 62 (0.01625ms)
+✔ chunk 63 (0.036958ms)
+✔ chunk 64 (0.018959ms)
+✔ chunk 65 (0.021167ms)
+✔ chunk 66 (0.017875ms)
+✔ chunk 67 (0.024166ms)
+✔ chunk 68 (0.024ms)
+✔ chunk 69 (0.0205ms)
+✔ chunk 70 (0.0205ms)
+✔ chunk 71 (0.016875ms)
+✔ chunk 72 (0.026083ms)
+✔ chunk 73 (0.016084ms)
+✔ chunk 74 (0.015917ms)
+✔ chunk 75 (0.017459ms)
+✔ chunk 76 (0.017417ms)
+✔ chunk 77 (0.017125ms)
+✔ chunk 78 (0.023875ms)
+✔ chunk 79 (0.017959ms)
+✖ sum of prices (0.594667ms)
+ℹ tests 81
+ℹ suites 0
+ℹ pass 80
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 66.878542
+
+✖ failing tests:
+
+test at test/all.test.js:84:1
+✖ sum of prices (0.594667ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 3.3000000000000003
+  - 3.3
+       ^
+  
+      at TestContext.<anonymous> (/tmp/work/web/test/all.test.js:84:38)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 3.3000000000000003,
+    expected: 3.3,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

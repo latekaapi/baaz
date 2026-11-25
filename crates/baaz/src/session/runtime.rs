@@ -272,6 +272,8 @@ pub struct SessionRuntime {
     /// A synthetic `session/contextUsage`, for a scripted capture of a pressure
     /// state the echo provider cannot reach.
     pub(super) fake_context: Option<provider::facts::ContextReading>,
+    /// Automatic compaction's state and its one timer (docs/85 12.1).
+    pub(super) auto_compact: super::auto_compact::AutoCompact,
     /// Held only while a turn runs, so the elapsed time advances.
     pub(super) ticker: Option<Task<()>>,
     /// `BAAZ_TRACE` send trace: the turn count when the traced send left, so
@@ -487,6 +489,7 @@ impl SessionRuntime {
             unqueueing: HashMap::new(),
             full_outputs: HashMap::new(),
             fake_context: None,
+            auto_compact: Default::default(),
             ticker: None,
             send_trace_turns: None,
             handoff_card: None,

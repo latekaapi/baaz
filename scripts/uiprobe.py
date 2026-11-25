@@ -995,7 +995,61 @@ def _billing_entry(steps):
                     "BAAZ_PROVIDER_STATUS_SCRIPT": _p6_statuses(_BILLING_KEY)}}
 
 
+def _memory_state():
+    """docs/85 12.3b: a state dir whose redirected memory holds three notes
+    for the throwaway `acme-web` project and one personal note, each with
+    a fixed file time so the page's dates never move."""
+    # A fixed folder: the page names each project's memory folder, so a
+    # random one would change the capture run to run.
+    # Idempotent (every file is rewritten): two processes may import this
+    # module at once, and removing the folder first raced.
+    state = os.path.join(REAL_TMP, "baaz-uiprobe-memory-page-state")
+    os.makedirs(state, exist_ok=True)
+    notes = [("GB postcode rule", "gb-postcode-rule", "project", "Postcodes are validated per country"),
+             ("Release day", "release-day", "project", "When releases go out"),
+             ("Payments sandbox keys live in 1Password", "payments-sandbox-keys", "reference", "Where the keys are")]
+    stamp = 1795564800  # 25 Nov 2026, 00:00 UTC
+    roots = {_NEW_ROW_REPO, os.path.realpath(_NEW_ROW_REPO)}
+    for root in roots:
+        slug = "".join(c if c.isalnum() else "-" for c in root)
+        folder = os.path.join(state, "claude-memory", slug)
+        os.makedirs(folder, exist_ok=True)
+        index = []
+        for i, (title, file, kind, desc) in enumerate(notes):
+            path = os.path.join(folder, file + ".md")
+            with open(path, "w") as f:
+                f.write(f"---\nname: {file}\ndescription: \"{desc}\"\nmetadata:\n  type: {kind}\n---\n\n{desc}.\n")
+            os.utime(path, (stamp - i * 86400 * 3, stamp - i * 86400 * 3))
+            index.append(f"- [{title}]({file}.md) — {desc}")
+        with open(os.path.join(folder, "MEMORY.md"), "w") as f:
+            f.write("\n".join(index) + "\n")
+    personal = os.path.join(state, "memory")
+    os.makedirs(personal, exist_ok=True)
+    path = os.path.join(personal, "short-answers.md")
+    with open(path, "w") as f:
+        f.write("---\nname: short-answers\ndescription: \"Prefers short answers\"\nmetadata:\n  type: user\n---\n\nKeep answers short.\n")
+    os.utime(path, (stamp - 5 * 86400, stamp - 5 * 86400))
+    with open(os.path.join(personal, "MEMORY.md"), "w") as f:
+        f.write("- [Prefers short answers](short-answers.md) — Keep answers short\n")
+    return state
+
+
 ENTRIES.update({
+    # docs/85 12.3b: Settings › Memory — a project's notes, a project with
+    # none, the personal note.
+    # docs/85 12.5: the one-line suggestion to add a well-used note to
+    # AGENTS.md (nothing is pressed, nothing written).
+    "agents-md-suggestion": {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", f"project:{_NEW_ROW_REPO};new;setprovider:claude-code;wait:300;agents-md-suggest;wait:300"],
+                             "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-agents-md-state-")}},
+    "settings-memory": {"shot": ["--no-connect", "--login", "signed-in",
+                                 "--steps", f"project:{_NEW_ROW_REPO};settings:memory;wait:300"],
+                        "env": {"BAAZ_STATE_DIR": _memory_state()}},
+    # docs/85 12.3: found sessions, a saved note, a removed one — the rows
+    # stay out of the settled turn's fold.
+    "memory-rows": {"shot": ["--no-connect", "--login", "signed-in",
+                             "--steps", f"project:{_NEW_ROW_REPO};new;setprovider:claude-code;wait:300;memory-rows;wait:300"],
+                    "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-memory-state-")}},
     "billing-chip": _billing_entry(""),
     "billing-hold": _billing_entry(";billing-last:claude-code:subscription;send-held:Ship the fix;wait:200"),
 })

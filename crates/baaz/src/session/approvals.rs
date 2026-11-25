@@ -181,6 +181,10 @@ impl SessionRuntime {
                 cx.emit(RuntimeEvent::BannerChanged);
                 cx.emit(SessionEvent::RunInWorktree);
             }
+            Some(BannerAction::AddToAgentsMd { note, repo }) => {
+                self.add_note_to_agents_md(&note, &repo);
+                cx.emit(RuntimeEvent::BannerChanged);
+            }
             Some(BannerAction::SharedFolder { worktree: false }) | None => cx.emit(RuntimeEvent::BannerChanged),
         }
     }
@@ -227,6 +231,31 @@ impl SessionRuntime {
 
     /// One place that writes the banner, so its message and its action can never
     /// disagree.
+    /// docs/85 12.5: the suggestion's yes — the note, under its title, at
+    /// the end of the repo's `AGENTS.md` (made when missing). A normal
+    /// visible edit; Baaz never commits it (rule 21).
+    fn add_note_to_agents_md(&mut self, note: &std::path::Path, repo: &std::path::Path) {
+        use std::io::Write as _;
+        let file = note.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let Ok(text) = std::fs::read_to_string(note) else { return };
+        let parsed = baaz_core::memory::parse(&text, &file);
+        let title = note
+            .parent()
+            .and_then(|dir| baaz_core::memory::list(dir).into_iter().find(|(_, listed, _)| *listed == file).map(|(title, _, _)| title))
+            .unwrap_or(parsed.title);
+        let section = baaz_core::memory_lint::agents_md_section(&title, &parsed.body);
+        if let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(repo.join("AGENTS.md")) {
+            let _ = out.write_all(section.as_bytes());
+        }
+    }
+
+    /// docs/85 12.5: ask once, in one line, to add a well-used note to
+    /// `AGENTS.md`.
+    pub(crate) fn suggest_agents_md(&mut self, title: &str, note: std::path::PathBuf, repo: std::path::PathBuf, cx: &mut Context<Self>) {
+        let message = format!("\u{201C}{title}\u{201D} has helped five sessions. Add it to AGENTS.md?");
+        self.set_banner(&message, Some(BannerAction::AddToAgentsMd { note, repo }), cx);
+    }
+
     pub(super) fn set_banner(&mut self, message: &str, action: Option<BannerAction>, cx: &mut Context<Self>) {
         // Another banner replaces a grown lost one: its failure goes too.
         if action != Some(BannerAction::RetryNow) {

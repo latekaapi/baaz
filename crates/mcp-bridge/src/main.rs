@@ -14,7 +14,7 @@
 use std::io::{BufReader, stdin, stdout};
 use std::path::PathBuf;
 
-use mcp_bridge::{ToolOutcome, ToolRegistry, browser, serve_loop, terminal};
+use mcp_bridge::{ToolOutcome, ToolRegistry, browser, memory, serve_loop, terminal};
 use mcp_bridge::terminal::TerminalTarget;
 use serde_json::json;
 
@@ -49,11 +49,12 @@ fn main() {
         let (Some(socket), Some(session)) = (socket, session) else {
             usage("--terminal needs --socket <path> and --session <id>");
         };
-        registry.set_instructions(format!("{}\n{}", terminal::INSTRUCTIONS, browser::INSTRUCTIONS));
+        registry.set_instructions(format!("{}\n{}\n{}", terminal::INSTRUCTIONS, browser::INSTRUCTIONS, memory::INSTRUCTIONS));
         let token = std::env::var(terminal::TOKEN_ENV).ok().filter(|token| !token.is_empty());
         let target = TerminalTarget { socket, session, token };
         terminal::register_terminal_tools(&mut registry, &target);
         browser::register_browser_tools(&mut registry, &target);
+        memory::register_memory_tools(&mut registry, &target);
     }
     registry
         .register(

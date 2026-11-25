@@ -10,6 +10,7 @@
 pub mod dock;
 pub mod host;
 pub mod intents;
+mod memory_tools;
 mod place;
 pub mod run;
 pub mod service;

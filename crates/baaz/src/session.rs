@@ -211,6 +211,7 @@ const CARET_MENU_CHROME: f32 = 56.0 + 140.0 + 50.0;
 const SKILL_ROWS: usize = 8;
 
 mod approvals;
+mod auto_compact;
 mod checkpoints;
 mod clocks;
 mod commands;
@@ -551,6 +552,13 @@ pub enum SessionEvent {
         turn_id: String,
         /// The turn's final counters, carrying the adapter-reported cost.
         meta: aui_protocol::TurnMeta,
+    },
+    /// Ten minutes passed since this session's last live turn ended
+    /// (docs/85 12.4): the application decides whether a digest is due
+    /// and writes it.
+    DigestDue {
+        /// The lane session gone idle.
+        session_id: String,
     },
     /// A turn's checkpoint refs landed (docs/82 6.3): an open Changes
     /// screen on this session re-reads which scopes it can offer.
@@ -2815,6 +2823,14 @@ pub enum BannerAction {
     SharedFolder {
         /// The draft can move into a worktree.
         worktree: bool,
+    },
+    /// docs/85 12.5: five sessions used this memory note — add it to the
+    /// repo's `AGENTS.md` (a visible edit Baaz never commits).
+    AddToAgentsMd {
+        /// The note's file.
+        note: std::path::PathBuf,
+        /// The repo whose `AGENTS.md` gains it.
+        repo: std::path::PathBuf,
     },
 }
 

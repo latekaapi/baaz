@@ -641,6 +641,7 @@ impl Driver {
             request_id: provider::new_request_id(),
             session_id: self.session.clone(),
             through_turn: None,
+            focus: None,
         };
         match self.send(Sent::Compact, command) {
             Ok(Ack::Accepted) => self.settle(),

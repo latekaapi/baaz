@@ -303,7 +303,7 @@ pub fn dispatch(
                 first_shell_command,
             })
         }
-        Command::CompactSession { request_id, session_id, through_turn } => {
+        Command::CompactSession { request_id, session_id, through_turn, .. } => {
             let result = client
                 .session_compact(&SessionCompactParams {
                     command_id: request_id,

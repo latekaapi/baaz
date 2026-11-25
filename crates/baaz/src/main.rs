@@ -882,6 +882,15 @@ fn open_shell_window(args: &Args, cx: &mut App) -> (WindowHandle<Root>, crate::r
 }
 
 fn main() {
+    // docs/85 12.2: Claude Code's PostToolUse hook runs as this binary,
+    // once per tool call: answer and leave before anything else starts.
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().map(String::as_str) == Some("--tool-output-hook") {
+            baaz_core::providers::run_tool_output_hook(&args[1..]);
+            return;
+        }
+    }
     crate::log::boot_init();
     crate::log::boot_mark("process-start");
     // `--perf-store <dir>`: the per-turn store budgets (docs/51 step M),

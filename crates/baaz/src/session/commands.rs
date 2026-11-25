@@ -180,6 +180,12 @@ impl SessionRuntime {
         if self.billing_hold.take().is_some() {
             cx.emit(RuntimeEvent::BannerChanged);
         }
+        // docs/85 12.1: a message on another topic, above the threshold,
+        // compacts first; a check that takes over 2 s sends it as it is.
+        if self.topic_check_applies() {
+            self.submit_after_topic_check(text, cx);
+            return;
+        }
         // Text plus the composer's attachments travel as one `SubmitInput`,
         // queued behind a running turn by the provider itself.
         self.submit_on_provider(text, cx);
@@ -194,7 +200,25 @@ impl SessionRuntime {
     /// onto `turn/start`'s `effort`, and Claude Code onto its `--effort`
     /// launch flag (relaunching with `--resume` when the pick changed).
     /// `None` is Default: the field is omitted and the provider decides.
-    fn submit_on_provider(&mut self, text: String, cx: &mut Context<Self>) {
+    /// The project's memory index as a notice for this session's first
+    /// message (docs/85 12.3): only on a provider that does not load
+    /// `MEMORY.md` itself, only before the session has any turn, and only
+    /// when the project has notes.
+    fn memory_index_notice(&self) -> Option<String> {
+        if baaz_core::providers::loads_memory_index_itself(self.provider_kind()) {
+            return None;
+        }
+        if self.store.session().is_some_and(|session| !session.turns.is_empty()) {
+            return None;
+        }
+        let workspace = self.workspace_path();
+        if workspace.is_empty() {
+            return None;
+        }
+        baaz_core::memory::index_for_prompt(&baaz_core::memory::project_dir(std::path::Path::new(workspace)))
+    }
+
+    pub(super) fn submit_on_provider(&mut self, text: String, cx: &mut Context<Self>) {
         self.banner = None;
         self.submitting = true;
         crate::log::send_reset();
@@ -219,10 +243,12 @@ impl SessionRuntime {
         // person's words), and never in the bubble. A send that never
         // leaves puts the notes back.
         let preface = self.take_undo_preface();
-        let model_text = match &preface {
-            Some(notes) => provider::note::notice_suffix(&model_text, &notes.iter().map(|(_, note)| note.clone()).collect::<Vec<_>>()),
-            None => model_text,
-        };
+        let mut notices: Vec<String> = preface.iter().flatten().map(|(_, note)| note.clone()).collect();
+        // docs/85 12.3: the project's memory index rides the first message
+        // of a session whose provider does not load it itself — once, so
+        // the session's prefix never changes after.
+        notices.extend(self.memory_index_notice());
+        let model_text = provider::note::notice_suffix(&model_text, &notices);
         // The provider echoes the whole model-visible input; the bubble
         // shows what the person typed, including across a restart (the
         // record mirrors the map for replayed histories).
@@ -893,6 +919,12 @@ impl SessionRuntime {
     /// `/compact`, Codex `thread/compact/start` (docs/85 10.4); either way
     /// the session shows one "Context compacted" row.
     pub(crate) fn compact(&mut self, cx: &mut Context<Self>) {
+        self.compact_with(None, cx);
+    }
+
+    /// [`Self::compact`] with a focus line for the summary (docs/85 12.1:
+    /// Baaz's own automatic compaction names what to keep).
+    pub(crate) fn compact_with(&mut self, focus: Option<String>, cx: &mut Context<Self>) {
         if !crate::providers::capability_state(self.provider_kind(), provider::Capability::CompactSession)
             .allows_attempt()
         {
@@ -908,6 +940,7 @@ impl SessionRuntime {
             request_id: provider::new_request_id(),
             session_id: self.session_id.clone(),
             through_turn: None,
+            focus,
         };
         self.provider_send(command, cx, move |this, result, cx| match result {
             Ok(provider::Ack::Noop { reason }) => cx.emit(RuntimeEvent::Toast { title: "Nothing to compact".to_owned(), body: reason }),

@@ -17,6 +17,8 @@ use serde_json::{Value, json};
 pub mod terminal;
 /// The browser relay: the browser tools as MCP, over the same socket.
 pub mod browser;
+/// The memory relay: past sessions and memory notes, over the same socket.
+pub mod memory;
 
 /// Protocol version the probe server answered with, and this bridge keeps.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";

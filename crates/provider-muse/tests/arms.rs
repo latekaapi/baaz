@@ -300,6 +300,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                 request_id: "cmd-compact".into(),
                 session_id: "s-1".into(),
                 through_turn: Some("t-9".into()),
+                focus: None,
             }),
             expected_params: params_of!(SessionCompactParams {
                 command_id: "cmd-compact".into(),

@@ -25,9 +25,18 @@ pub const UNAVAILABLE: &str = "Baaz isn't running; the terminal is unavailable";
 /// terminal is unavailable" and it apologised for the wrong thing.
 pub const BROWSER_UNAVAILABLE: &str = "Baaz isn't running; the browser is unavailable";
 
+/// What a session or memory tool reports when the socket is gone.
+pub const MEMORY_UNAVAILABLE: &str = "Baaz isn't running; past sessions, memory and code search are unavailable";
+
 /// The unavailable answer for `tool`.
 pub fn unavailable_for(tool: &str) -> &'static str {
-    if tool.starts_with("browser_") { BROWSER_UNAVAILABLE } else { UNAVAILABLE }
+    if tool.starts_with("browser_") {
+        BROWSER_UNAVAILABLE
+    } else if tool.starts_with("session_") || tool.starts_with("memory_") || tool == "code_find" {
+        MEMORY_UNAVAILABLE
+    } else {
+        UNAVAILABLE
+    }
 }
 
 /// The `instructions` string: steering per D50, shared with the tool

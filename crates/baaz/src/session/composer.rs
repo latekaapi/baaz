@@ -16,6 +16,7 @@ impl SessionView {
     /// history.
     pub(super) fn on_draft_changed(&mut self, cx: &mut Context<Self>) {
         self.note_draft(cx);
+        self.runtime.as_mut(cx).auto_compact_typed();
         if self.runtime.read(cx).history.walking() {
             self.runtime.as_mut(cx).history.reset();
         }

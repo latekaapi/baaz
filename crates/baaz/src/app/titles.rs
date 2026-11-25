@@ -679,3 +679,135 @@ impl Harness {
     }
 
 }
+
+impl Harness {
+    /// docs/85 12.4: `session_id` went idle — write its digest when one is
+    /// due. Its own provider writes it on its cheapest model (Muse through
+    /// a hidden side session, as titles are), from the handoff pack, only
+    /// on a subscription (rule 27; skipped and logged otherwise), never for
+    /// a side session or a browser chat, at most once per five new turns.
+    pub(crate) fn run_digest(&mut self, session_id: String, runtime: Entity<crate::session::SessionRuntime>, cx: &mut Context<Self>) {
+        let Some(provider) = self.session_lane_provider(&session_id, cx) else { return };
+        let rt = runtime.read(cx);
+        let Some(session) = rt.transcript_session().cloned() else { return };
+        let running = rt.busy();
+        let workspace = rt.workspace_path().to_owned();
+        let turns = session.turns.len();
+        let excluded = self
+            .session_list
+            .read(cx)
+            .overrides
+            .get(&session_id)
+            .is_some_and(|meta| meta.side_session || meta.browser_chat);
+        let subscription = baaz_core::billing::mode(provider) == baaz_core::billing::BillingMode::Subscription;
+        if !subscription {
+            crate::baaz_log!("digest for {session_id} skipped: {} does not bill by subscription (rule 27)", provider.label());
+            return;
+        }
+        // The project went idle with it: its memory's daily lint (12.5).
+        if !excluded && !workspace.is_empty() {
+            self.run_memory_lint(provider, &session_id, &workspace, cx);
+        }
+        let pack = baaz_core::handoff::pack_text(&baaz_core::handoff::build_pack(&session, &workspace), provider);
+        let state = crate::store::support_dir();
+        let key = provider.as_str().to_owned();
+        let (load_state, load_key, load_id) = (state.clone(), key.clone(), session_id.clone());
+        let load = move || {
+            baaz_core::transcripts::with_store(&load_state, |conn| baaz_core::digest::load(conn, &load_key, &load_id))
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+                .map(|(_, at)| at)
+        };
+        self.wire_call(cx, load, move |this, digested, cx| {
+            let idle_ms = baaz_core::digest::IDLE.as_millis() as i64;
+            if !baaz_core::digest::due(idle_ms, running, excluded, subscription, turns, digested) {
+                return;
+            }
+            let prompt = baaz_core::digest::prompt(&pack);
+            let model = this.utility_model(&session_id, cx);
+            let muse = this.muse_side(provider, "baaz digest", cx);
+            let work = move || {
+                let answer = crate::utility::complete(provider, model.as_deref(), &prompt, muse)?;
+                let digest = baaz_core::digest::clean(&answer).ok_or_else(|| "an empty digest".to_owned())?;
+                baaz_core::transcripts::with_store(&state, |conn| {
+                    baaz_core::digest::save(conn, &key, &session_id, &digest, turns, crate::clock::now_ms() as i64)
+                })
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+                Ok::<String, String>(session_id)
+            };
+            this.wire_call(cx, work, |_, written: Result<String, String>, _| match written {
+                Ok(id) => crate::baaz_log!("digest written for {id}"),
+                Err(reason) => crate::baaz_log!("digest not written: {reason}"),
+            });
+        });
+    }
+}
+
+impl Harness {
+    /// docs/85 12.5: the memory notes this session's last turn read count
+    /// as used; at the fifth session using one, its row asks once to add it
+    /// to `AGENTS.md`.
+    pub(crate) fn note_memory_uses(&mut self, runtime: Entity<crate::session::SessionRuntime>, cx: &mut Context<Self>) {
+        let rt = runtime.read(cx);
+        let workspace = rt.workspace_path().to_owned();
+        let session_id = rt.session_id.clone();
+        let Some(turn) = rt.transcript_session().and_then(|session| session.turns.last().cloned()) else { return };
+        if workspace.is_empty() {
+            return;
+        }
+        let repo = baaz_core::providers::main_repo_root(std::path::Path::new(&workspace));
+        let dir = baaz_core::memory::project_dir(&repo);
+        let read = baaz_core::memory_lint::notes_read(&turn, &dir);
+        if read.is_empty() {
+            return;
+        }
+        let state = crate::store::support_dir();
+        let work = move || {
+            read.into_iter().find(|note| {
+                baaz_core::transcripts::with_store(&state, |conn| baaz_core::memory_lint::record_use(conn, note, &session_id))
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or(false)
+            })
+        };
+        self.wire_call(cx, work, move |_, due, cx| {
+            let Some(note) = due else { return };
+            let file = note.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let title = baaz_core::memory::list(&dir).into_iter().find(|(_, listed, _)| *listed == file).map_or(file, |(title, ..)| title);
+            runtime.update(cx, |rt, cx| rt.suggest_agents_md(&title, note, repo, cx));
+        });
+    }
+
+    /// docs/85 12.5: when a project goes idle, at most daily, a cheap model
+    /// reads its memory notes (and the paths they name that are gone) and
+    /// fixes one note, the old text going to the log. Rule 27: the caller
+    /// checked the subscription.
+    pub(crate) fn run_memory_lint(&mut self, provider: crate::providers::ProviderId, session_id: &str, workspace: &str, cx: &mut Context<Self>) {
+        let repo = baaz_core::providers::main_repo_root(std::path::Path::new(workspace));
+        let dir = baaz_core::memory::project_dir(&repo);
+        let stamp = baaz_core::memory_lint::stamp_path(&crate::store::support_dir(), &dir);
+        if !baaz_core::memory_lint::lint_due(&stamp) {
+            return;
+        }
+        let Some(prompt) = baaz_core::memory_lint::lint_prompt(&dir, &repo) else { return };
+        if let Some(parent) = stamp.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&stamp, "");
+        let model = self.utility_model(session_id, cx);
+        let muse = self.muse_side(provider, "baaz memory lint", cx);
+        let work = move || {
+            let answer = crate::utility::complete(provider, model.as_deref(), &prompt, muse)?;
+            match baaz_core::memory_lint::parse_fix(&answer) {
+                Some(fix) => baaz_core::memory_lint::apply(&dir, &fix).map(|title| format!("fixed {title}")),
+                None => Ok("nothing to fix".to_owned()),
+            }
+        };
+        self.wire_call(cx, work, |_, result: Result<String, String>, _| match result {
+            Ok(what) => crate::baaz_log!("memory lint: {what}"),
+            Err(reason) => crate::baaz_log!("memory lint did not run: {reason}"),
+        });
+    }
+}

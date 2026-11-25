@@ -52,6 +52,7 @@ mod error;
 mod event;
 pub mod facts;
 pub mod note;
+pub mod output_filter;
 pub mod registry;
 pub mod scripted;
 mod traits;

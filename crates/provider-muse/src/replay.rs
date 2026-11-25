@@ -282,7 +282,7 @@ mod tests {
     fn the_read_only_lane_answers_pulls_and_refuses_acts() {
         let lane = provider::Provider::new(ReadOnly::new("a replayed capture is read-only"));
         assert!(lane.send(Command::ListModels { session: None }).is_ok());
-        let refused = lane.send(Command::CompactSession { request_id: "r".into(), session_id: "s".into(), through_turn: None });
+        let refused = lane.send(Command::CompactSession { request_id: "r".into(), session_id: "s".into(), through_turn: None, focus: None });
         assert!(matches!(refused, Err(ProviderError::Unsupported { ref reason, .. }) if reason.contains("read-only")));
     }
 }
