@@ -564,6 +564,53 @@ impl RightPane {
     }
 }
 
+impl RightPane {
+    /// `pane_show`'s Changes half (docs/85 13.1): the list on `scope` with
+    /// `files` opened. All opens the rows at once; a scoped list opens them
+    /// when it lands. `Err` when the index cannot answer the scope (the
+    /// scope row's own refusals).
+    pub(crate) fn show_scope(&mut self, root: &Path, scope: ChangesScope, files: Vec<String>, cx: &mut Context<Self>) -> Result<(), String> {
+        if scope == ChangesScope::All {
+            if self.changes_ui(root).scopes.scope != ChangesScope::All {
+                self.switch_scope(root, ChangesScope::All, cx);
+            }
+            if !files.is_empty() {
+                self.open_turn_files(root, &files, cx);
+            }
+            return Ok(());
+        }
+        if let ChangesScope::Turn(turn_id) = &scope {
+            // The chip's own path: it reads the index first when it has none.
+            self.open_turn(root, turn_id, files, cx);
+            return Ok(());
+        }
+        self.set_scope(root, scope, cx)?;
+        if !files.is_empty() {
+            self.changes_ui(root).scopes.open_when_listed = Some(files);
+        }
+        Ok(())
+    }
+
+    /// The last finished turn the loaded index knows (`pane_show`'s
+    /// `last_turn`): its id. `None` before the index is read.
+    pub(crate) fn last_indexed_turn(&mut self, root: &Path) -> Option<String> {
+        self.changes_ui(root).scopes.index.as_ref().and_then(|index| index.last()).map(|turn| turn.turn_id.clone())
+    }
+
+    /// Load the fixture index in a capture (as `changes-scope:` does), so a
+    /// scripted `pane_show` on a scope has turns to show. Free outside one.
+    #[cfg(feature = "probe")]
+    pub(crate) fn fixture_scopes_for_capture(&mut self, root: &Path, cx: &mut Context<Self>) {
+        if crate::runtime::captures() && !self.changes_ui(root).scopes.fixture {
+            if self.cache.git_for(root).is_none() {
+                self.refresh_now(cx);
+            }
+            self.changes_ui(root).scopes.fixture = true;
+            self.read_index(root, cx);
+        }
+    }
+}
+
 impl ScopeState {
     /// Whether a probe step loaded the fixture index.
     fn fixture_on(&self) -> bool {

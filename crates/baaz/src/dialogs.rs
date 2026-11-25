@@ -246,6 +246,7 @@ impl Render for DialogView {
                 | DialogAction::TrashTranscript
                 | DialogAction::DeleteSession
                 | DialogAction::UndoChanges
+                | DialogAction::AgentPush
         );
         // A dialog whose primary already dismisses it carries no second
         // button: "Dismiss  Dismiss" was what a screenshot showed. The danger
@@ -299,7 +300,18 @@ impl Harness {
         // Dismissing it (Escape, the scrim) runs what `close_dialog` does:
         // the handoff confirm's facts leave with it.
         let entry = crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::Dialog(dialog))
-            .on_close(|_, this: &mut Harness, _| this.handoff_state.confirm = None)
+            .on_close(|layer, this: &mut Harness, cx| {
+                this.handoff_state.confirm = None;
+                // docs/85 13.3: an agent waiting on an undo confirm hears no.
+                if let crate::overlay_stack::Layer::Dialog(dialog) = layer {
+                    if dialog.action == DialogAction::UndoChanges {
+                        this.decline_undo_dialog(dialog.archive_target.as_deref(), cx);
+                    }
+                    if dialog.action == DialogAction::AgentPush {
+                        this.decline_agent_push(dialog.archive_target.as_deref(), cx);
+                    }
+                }
+            })
             .keep(pressed);
         self.push_overlay_view(entry, &view, cx);
     }
@@ -914,6 +926,14 @@ impl Harness {
             DialogEvent::Secondary { action } => {
                 if action == DialogAction::MigrateSessions {
                     self.dismiss_session_migration(cx);
+                } else if action == DialogAction::UndoChanges {
+                    let target = self.overlays.read(cx).dialog().and_then(|d| d.archive_target.clone());
+                    self.close_dialog(cx);
+                    self.decline_undo_dialog(target.as_deref(), cx);
+                } else if action == DialogAction::AgentPush {
+                    let target = self.overlays.read(cx).dialog().and_then(|d| d.archive_target.clone());
+                    self.close_dialog(cx);
+                    self.decline_agent_push(target.as_deref(), cx);
                 } else {
                     self.close_dialog(cx);
                 }
@@ -995,6 +1015,12 @@ impl Harness {
             self.confirm_undo_dialog(target, cx);
             return;
         }
+        // An agent's push (docs/85 13.4): the ask's number rode the dialog.
+        if action == DialogAction::AgentPush {
+            self.close_dialog(cx);
+            self.confirm_agent_push(target.as_deref(), cx);
+            return;
+        }
         // Confirmed through its own path, like Archive: the tab id rode
         // the dialog, so closing any other way already dropped it.
         if action == DialogAction::CloseTerminalTab {
@@ -1043,6 +1069,7 @@ impl Harness {
             | DialogAction::TrashTranscript
             | DialogAction::DeleteSession
             | DialogAction::UndoChanges
+            | DialogAction::AgentPush
             | DialogAction::HandoffConfirm => {}
         }
     }

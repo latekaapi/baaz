@@ -966,6 +966,15 @@ impl Harness {
                 });
             });
         });
+        // docs/85 13.1–13.4: the pane tools, answered on the UI thread
+        // after the drain that queued them (same re-entrancy rule).
+        let pane_harness = cx.entity();
+        this.terminal_service.set_pane_hook(move |cx: &mut App, call| {
+            let harness = pane_harness.clone();
+            cx.defer(move |cx| {
+                harness.update(cx, |harness, cx| harness.pane_tool_call(call, cx));
+            });
+        });
         let tabs_harness = cx.entity();
         this.terminal_service.set_browser_tabs_hook(move |cx: &mut App, call| {
             let harness = tabs_harness.clone();
@@ -2127,6 +2136,9 @@ impl Harness {
         // a deferred task with the window — never as a render side effect.
         self.defer_browser_prewarm(cx);
         self.refresh_right_now(cx);
+        // docs/85 13.1: what the agent asked to show while this session
+        // was in the background shows now.
+        self.show_pending_pane(session_id, cx);
     }
 
     /// The project the right pane reads for: root plus display name, from the

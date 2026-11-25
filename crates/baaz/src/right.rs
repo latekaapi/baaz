@@ -245,6 +245,9 @@ pub(crate) struct RightCache {
     /// whenever the tree changes (docs/51 P1 #8: never the whole tree).
     /// `None` while the read is out.
     pub file_diffs: HashMap<String, Option<std::sync::Arc<Diff>>>,
+    /// docs/85 13.3: agents' line comments (`changes_comment`), by root
+    /// then path, drawn under that file's diff in Changes. Kept for the run.
+    pub agent_comments: crate::pane_tools::Comments,
     /// D6: unchanged runs a diff row expanded: (path, hunk index) → lines.
     pub gap_lines: HashMap<(String, usize), std::sync::Arc<Vec<String>>>,
     /// D6: the Changes screen's commit box, PR and form state.

@@ -300,3 +300,152 @@ fn revert_file_through_the_confirm_and_the_toasts_undo(cx: &mut gpui::TestAppCon
     assert_eq!(read(&root, "a.txt"), lines(&[(2, "TURN"), (11, "MINE")]), "the first, dismissed confirm's number runs nothing");
     cleanup(&root, state);
 }
+
+/// One pane tool call through the harness's hook, as the service hands it
+/// over (docs/85 13.3); the reply's channel.
+fn pane_call(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContext, session: &str, root: &std::path::Path, tool: &str, params: serde_json::Value) -> std::sync::mpsc::Receiver<String> {
+    let (reply, rx) = std::sync::mpsc::channel();
+    let call = crate::terminal::service::PaneCall { tool: tool.into(), session: session.into(), root: root.to_path_buf(), params, id: serde_json::json!(1), reply };
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| harness.pane_tool_call(call, cx)));
+    vc.run_until_parked();
+    rx
+}
+
+fn reply(rx: &std::sync::mpsc::Receiver<String>) -> serde_json::Value {
+    let text = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the tool answered");
+    serde_json::from_str(&text).expect("json")
+}
+
+/// docs/85 13.3: `changes_revert` goes through the person's confirm and
+/// answers what happened — reverted (and the provider is told nothing more:
+/// the agent asked), declined (Cancel / Escape), or one turn's part only;
+/// it may ask while the agent's turn runs. `changes_comment` lands under the
+/// file in Changes.
+#[gpui::test]
+fn the_agents_revert_waits_for_the_confirm_and_answers_what_happened(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("pane-revert");
+    let root = folder(&state.2, true);
+    let (factory, sent) = recording_factory();
+    let lines = |edits: &[(usize, &str)]| -> String {
+        (1..=12).map(|n| edits.iter().find(|(at, _)| *at == n).map_or(format!("l{n}\n"), |(_, text)| format!("{text}\n"))).collect()
+    };
+    std::fs::write(root.join("a.txt"), lines(&[])).expect("twelve lines");
+    git(&root, &["commit", "-qam", "twelve"]);
+    let (baaz, vc, id) = session_with(cx, &root, factory);
+    turn(&baaz, vc, &id, "h-1", || std::fs::write(root.join("a.txt"), lines(&[(2, "TURN")])).expect("turn edits"));
+    std::fs::write(root.join("fresh.txt"), "untracked\n").expect("an untracked file");
+
+    // Reverted: the confirm is the person's, the answer names the file.
+    let rx = pane_call(&baaz, vc, &id, &root, "changes_revert", serde_json::json!({"path": "fresh.txt"}));
+    let (title, ..) = dialog(&baaz, vc).expect("the person's confirm is up");
+    assert_eq!(title, "Revert fresh.txt?");
+    assert!(rx.try_recv().is_err(), "no answer before the person's");
+    confirm(&baaz, vc);
+    let out = reply(&rx);
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(out["result"]["reverted"], serde_json::json!(["fresh.txt"]));
+    assert!(!root.join("fresh.txt").exists());
+    send(&baaz, vc, "hello");
+    assert_eq!(sent.lock().expect("sent").last().map(|s| s.0.clone()).as_deref(), Some("hello"), "the agent asked: no preface tells it again");
+
+    // Turns are numbered as the pane numbers them: the session's agent turns.
+    let rt = runtime(&baaz, vc);
+    let n = vc.update(|_, cx| rt.read(cx).assistant_turn_ids().iter().position(|t| t == "h-1").expect("h-1 is an agent turn") + 1);
+    let turn_n = format!("turn_{n}");
+    // Declined: the dismissal (Cancel, Escape and the scrim all land here).
+    let rx = pane_call(&baaz, vc, &id, &root, "changes_revert", serde_json::json!({"path": "a.txt", "scope": turn_n}));
+    let (title, detail, .., target) = dialog(&baaz, vc).expect("up");
+    assert_eq!(title, "Revert a.txt?");
+    assert!(detail.contains(&format!("turn {n}")), "that turn's part: {detail}");
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| {
+        harness.close_dialog(cx);
+        harness.decline_undo_dialog(target.as_deref(), cx);
+    }));
+    let out = reply(&rx);
+    assert_eq!(out["result"]["declined"], true, "{out}");
+    assert_eq!(read(&root, "a.txt"), lines(&[(2, "TURN")]), "nothing changed");
+
+    // That turn, confirmed: only its line goes.
+    std::fs::write(root.join("a.txt"), lines(&[(2, "TURN"), (11, "MINE")])).expect("the person's edit");
+    let rx = pane_call(&baaz, vc, &id, &root, "changes_revert", serde_json::json!({"path": root.join("a.txt").to_string_lossy(), "scope": turn_n}));
+    confirm(&baaz, vc);
+    assert_eq!(reply(&rx)["ok"], true);
+    assert_eq!(read(&root, "a.txt"), lines(&[(11, "MINE")]));
+
+    // Refusals say why, at once.
+    let out = reply(&pane_call(&baaz, vc, &id, &root, "changes_revert", serde_json::json!({"path": "a.txt", "scope": "session"})));
+    assert_eq!(out["ok"], false);
+    let out = reply(&pane_call(&baaz, vc, &id, &root, "changes_revert", serde_json::json!({"path": "a.txt", "scope": "turn_9"})));
+    assert!(out["error"]["error"].as_str().unwrap_or_default().contains("agent turns"), "{out}");
+
+    // A comment lands under the file in Changes, by the session's agent.
+    let out = reply(&pane_call(&baaz, vc, &id, &root, "changes_comment", serde_json::json!({"path": "a.txt", "line": 11, "text": "Why MINE?"})));
+    assert_eq!(out["result"]["commented"], "a.txt:11");
+    let held = vc.update(|_, cx| baaz.read(cx).right_pane.read(cx).cache.agent_comments.get(&root).and_then(|by| by.get("a.txt")).cloned());
+    let held = held.expect("kept for Changes");
+    assert_eq!((held[0].line, held[0].text.as_str()), (11, "Why MINE?"));
+    assert!(!held[0].author.is_empty());
+    assert_eq!(reply(&pane_call(&baaz, vc, &id, &root, "changes_comment", serde_json::json!({"path": "a.txt", "text": "x"})))["ok"], false, "a line is required");
+    cleanup(&root, state);
+}
+
+/// docs/85 13.4: `changes_commit` commits through the commit box's flow
+/// in a temp repository; `push: true` raises Baaz's own approval (the
+/// session is not in Full access, rule 29) and pushes to a local bare
+/// remote only on the person's yes; a dismissed approval pushes nothing.
+#[gpui::test]
+fn the_agents_commit_goes_through_the_box_and_its_push_waits_for_the_person(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("pane-commit");
+    let root = folder(&state.2, true);
+    let bare = root.with_file_name(format!("{}-remote.git", root.file_name().expect("named").to_string_lossy()));
+    let _ = std::fs::remove_dir_all(&bare);
+    git(&root, &["init", "-q", "--bare", "-b", "main", &bare.to_string_lossy()]);
+    git(&root, &["remote", "add", "origin", &bare.to_string_lossy()]);
+    let (factory, _) = recording_factory();
+    let (baaz, vc, id) = session_with(cx, &root, factory);
+
+    // A commit alone: the message given, the changed file in it.
+    std::fs::write(root.join("a.txt"), "one\nTWO\n").expect("edit");
+    let out = reply(&pane_call(&baaz, vc, &id, &root, "changes_commit", serde_json::json!({"message": "Shout two"})));
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(out["result"]["committed"], serde_json::json!(["a.txt"]));
+    assert_eq!(git(&root, &["log", "-1", "--format=%s"]), "Shout two");
+    assert!(dialog(&baaz, vc).is_none(), "no push asked, no approval");
+
+    // A commit and push: the approval is Baaz's own; Push pushes.
+    std::fs::write(root.join("b.txt"), "b\n").expect("new file");
+    let rx = pane_call(&baaz, vc, &id, &root, "changes_commit", serde_json::json!({"message": "Add b", "push": true}));
+    let (title, _, primary, action, target) = dialog(&baaz, vc).expect("the push approval is up");
+    assert_eq!((title.as_str(), primary, action), ("Push main?", "Push", DialogAction::AgentPush));
+    assert!(git(&bare, &["log", "--oneline", "--all"]).is_empty(), "nothing pushed before the yes");
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| {
+        harness.close_dialog(cx);
+        harness.confirm_agent_push(target.as_deref(), cx);
+    }));
+    vc.run_until_parked();
+    let out = reply(&rx);
+    assert_eq!(out["result"]["push"]["pushed"], "main", "{out}");
+    assert_eq!(git(&bare, &["log", "-1", "--format=%s", "main"]), "Add b");
+
+    // Dismissed: committed, not pushed.
+    std::fs::write(root.join("c.txt"), "c\n").expect("another");
+    let rx = pane_call(&baaz, vc, &id, &root, "changes_commit", serde_json::json!({"message": "Add c", "push": true}));
+    let (.., target) = dialog(&baaz, vc).expect("up");
+    vc.update(|_, cx| baaz.update(cx, |harness, cx| {
+        harness.close_dialog(cx);
+        harness.decline_agent_push(target.as_deref(), cx);
+    }));
+    let out = reply(&rx);
+    assert_eq!(out["result"]["push"]["pushed"], false, "{out}");
+    assert_eq!(git(&root, &["log", "-1", "--format=%s"]), "Add c");
+    assert_eq!(git(&bare, &["log", "-1", "--format=%s", "main"]), "Add b", "the remote is where it was");
+
+    // Nothing to commit, and no message, are refusals in words.
+    let out = reply(&pane_call(&baaz, vc, &id, &root, "changes_commit", serde_json::json!({"message": "Empty"})));
+    assert!(out["error"]["error"].as_str().unwrap_or_default().contains("nothing to commit"), "{out}");
+    std::fs::write(root.join("d.txt"), "d\n").expect("d");
+    let out = reply(&pane_call(&baaz, vc, &id, &root, "changes_commit", serde_json::json!({})));
+    assert!(out["error"]["error"].as_str().unwrap_or_default().contains("message"), "{out}");
+    let _ = std::fs::remove_dir_all(&bare);
+    cleanup(&root, state);
+}

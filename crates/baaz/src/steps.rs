@@ -161,6 +161,9 @@
 //! | `commit:<message>` | commit the ticked files with `<message>` through the Commit button's own path — for real, so **never in a capture** (fails the step); no message, no ticked file or a git operation already running fails the step; the commit lands off the UI thread, so a script `wait:`s and checks git (Gate 7's scripted live run) |
 //! | `branch:<name>` | New branch… with `<name>` typed and ⏎ (`git switch -c`, the working tree carried) — for real, **never in a capture** (fails the step); off the default branch, an empty name or a git operation already running fails the step; git's refusal is the toast, so a script checks git after |
 //! | `changes-scope:<all\|session\|last>` | the Changes pane on that scope (docs/82 6.3): a capture loads the fixture checkpoint index (two finished turns over the fixture tree) — no refs are read or written; no open session or an unknown word fails the step, free |
+//! | `pane-show:view=<v>[,path=<p>][,line=<n>][,scope=<s>]` | the open session's `pane_show` (docs/85 13.1) through the bridge call's own handler: `files`, `file`, `changes`, `diff`, `browser`, `terminal`, `tasks`, `pr`; a capture loads the fixture checkpoint index for a scoped view; a refusal (no session, no such file, a scope with no checkpoints) fails the step, free |
+//! | `pane-comment:path=<p>,line=<n>,text=<words>` | the open session's `changes_comment` (docs/85 13.3) through the tool's own handler: the comment kept for Changes and, the session being on screen, Changes open on that file; no session, no line or no text fails the step, free |
+//! | `pane-push-ask:<branch>` | the approval an agent's `changes_commit {push: true}` raises (docs/85 13.4, rule 29), with no ask behind it: its Push pushes nothing; no session or no branch fails the step, free |
 //! | `run` | press Run on the open session (docs/82 7.4): the folder's `.baaz/project.toml` `run` starts in a terminal tab of the session's own, listed in Tasks; a Run that still runs is shown, not started again; no session or no `run` declared fails the step — **starts a real process** (captures: a static server in a fixture folder only) |
 //! | `run-stop` | Stop run on the open session: its process group ends; nothing running fails the step |
 //! | `run-wait-preview` (or `run-wait-preview:<s>`) | the runner waits up to that many seconds (30) while the Run's preview port has not answered, then the step checks the session's Page opened on it; gave up, run ended, moved on or no Run fails the step |
@@ -479,6 +482,9 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "select-lines", run: |this, rest, _, cx| this.with_right_pane(cx, |pane, cx| pane.step_select_lines(rest, cx)) },
     WindowVerb { verb: "quote-lines", run: |this, _, _, cx| this.with_right_pane(cx, |pane, cx| pane.quote_held_lines(cx)) },
     WindowVerb { verb: "changes-scope", run: |this, rest, _, cx| this.step_changes_scope(rest, cx) },
+    WindowVerb { verb: "pane-show", run: |this, rest, _, cx| this.step_pane_show(rest, cx) },
+    WindowVerb { verb: "pane-comment", run: |this, rest, _, cx| this.step_pane_comment(rest, cx) },
+    WindowVerb { verb: "pane-push-ask", run: |this, rest, _, cx| this.step_pane_push_ask(rest, cx) },
     WindowVerb { verb: "tick", run: |this, rest, _, cx| this.step_changes_tick(rest, true, cx) },
     WindowVerb { verb: "untick", run: |this, rest, _, cx| this.step_changes_tick(rest, false, cx) },
     WindowVerb { verb: "changes-branch", run: |this, rest, _, cx| this.step_changes_branch(rest, cx) },

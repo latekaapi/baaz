@@ -1855,7 +1855,7 @@ impl SessionRuntime {
     /// The approval mode the server says the session is in — or, while the
     /// start is on the wire, the pick waiting to be applied when it lands,
     /// else the mode an opening provider view asked its child for.
-    fn mode(&self) -> PermissionMode {
+    pub(crate) fn mode(&self) -> PermissionMode {
         if let StartState::Starting(StartQueue { mode: Some(mode), .. }) = &self.start {
             return *mode;
         }

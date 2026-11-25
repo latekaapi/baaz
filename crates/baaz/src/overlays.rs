@@ -104,6 +104,10 @@ pub enum DialogAction {
     /// this button runs the action; dismissing any other way changes
     /// nothing.
     UndoChanges,
+    /// An agent's `changes_commit {push: true}` (docs/85 13.4, rule 29):
+    /// Baaz's own approval for the push. The ask's number rides
+    /// `archive_target`; dismissing any other way pushes nothing.
+    AgentPush,
 }
 
 /// Which popover is open over the composer.

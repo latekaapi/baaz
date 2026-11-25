@@ -4,7 +4,7 @@
 //!
 //! ```bash
 //! mcp-bridge # one built-in `ping` tool on real stdin/stdout
-//! mcp-bridge --terminal --socket <path> --session <id> # + the seven terminal and six browser tools
+//! mcp-bridge --terminal --socket <path> --session <id> # + the terminal, browser, memory and pane tools
 //! ```
 //!
 //! Pipe NDJSON requests in, read NDJSON replies out. The terminal and
@@ -14,7 +14,7 @@
 use std::io::{BufReader, stdin, stdout};
 use std::path::PathBuf;
 
-use mcp_bridge::{ToolOutcome, ToolRegistry, browser, memory, serve_loop, terminal};
+use mcp_bridge::{ToolOutcome, ToolRegistry, browser, memory, pane, serve_loop, terminal};
 use mcp_bridge::terminal::TerminalTarget;
 use serde_json::json;
 
@@ -22,12 +22,13 @@ fn usage(error: &str) -> ! {
     if !error.is_empty() {
         eprintln!("error: {error}");
     }
-    eprintln!("usage: mcp-bridge [--terminal --socket <path> --session <id>]");
+    eprintln!("usage: mcp-bridge [--terminal --socket <path> --session <id> [--tool-search]]");
     std::process::exit(if error.is_empty() { 0 } else { 2 });
 }
 
 fn main() {
     let mut terminal = false;
+    let mut tool_search = false;
     let mut socket: Option<PathBuf> = None;
     let mut session: Option<String> = None;
     let mut args = std::env::args().skip(1);
@@ -40,6 +41,9 @@ fn main() {
             "--session" => {
                 session = Some(args.next().unwrap_or_else(|| usage("--session needs an id")));
             }
+            // docs/85 13.7: list five tools plus tool_search (a provider
+            // that loads every tool up front, over the 4k-token line).
+            "--tool-search" => tool_search = true,
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown argument `{other}`")),
         }
@@ -49,12 +53,16 @@ fn main() {
         let (Some(socket), Some(session)) = (socket, session) else {
             usage("--terminal needs --socket <path> and --session <id>");
         };
-        registry.set_instructions(format!("{}\n{}\n{}", terminal::INSTRUCTIONS, browser::INSTRUCTIONS, memory::INSTRUCTIONS));
+        registry.set_instructions(format!("{}\n{}\n{}\n{}", terminal::INSTRUCTIONS, browser::INSTRUCTIONS, memory::INSTRUCTIONS, pane::INSTRUCTIONS));
         let token = std::env::var(terminal::TOKEN_ENV).ok().filter(|token| !token.is_empty());
         let target = TerminalTarget { socket, session, token };
         terminal::register_terminal_tools(&mut registry, &target);
         browser::register_browser_tools(&mut registry, &target);
         memory::register_memory_tools(&mut registry, &target);
+        pane::register_pane_tools(&mut registry, &target);
+        if tool_search {
+            registry.set_tool_search(&mcp_bridge::ALWAYS_ON_TOOL_NAMES);
+        }
     }
     registry
         .register(

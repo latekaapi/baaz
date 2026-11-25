@@ -741,6 +741,115 @@ impl RightPane {
         }
     }
 
+    /// docs/85 13.4: `changes_commit`'s pane half — the commit box's flow
+    /// for an agent: the files the box would commit (its ticks and its
+    /// default, for the session on screen; every changed file for one in
+    /// the background), `message` or the box's own, the box cleared after
+    /// as a person's commit clears it. `done` hears the outcome. The tree is
+    /// read fresh (the pane may never have read this root). Never in a
+    /// capture.
+    pub(crate) fn commit_for_agent(&mut self, root: &Path, message: Option<String>, in_front: bool, done: futures::channel::oneshot::Sender<Result<serde_json::Value, String>>, cx: &mut Context<Self>) {
+        if crate::runtime::captures() {
+            let _ = done.send(Err("a capture commits nothing".into()));
+            return;
+        }
+        self.settle_commit_message(root, cx);
+        let ui = self.changes_ui(root);
+        if ui.busy.is_some() {
+            let _ = done.send(Err("a git operation is already running in Changes; try again when it ends".into()));
+            return;
+        }
+        let message = message.map(|m| m.trim().to_owned()).filter(|m| !m.is_empty()).unwrap_or_else(|| ui.message.trim().to_owned());
+        if message.is_empty() {
+            let _ = done.send(Err("give a commit message (the commit box is empty)".into()));
+            return;
+        }
+        let ticks = if in_front { ui.ticks.clone() } else { Default::default() };
+        let session_edits = if in_front { self.session_edits(cx) } else { Vec::new() };
+        self.set_git_busy(root, Some(GitBusy::Committing), cx);
+        let root = root.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let (r, words) = (root.clone(), message.clone());
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    let tree = git_ops::read_tree(&r).ok_or_else(|| "this folder is not a git checkout".to_owned())?;
+                    let paths = ticked_paths(&tree.files, &session_edits, &r, &ticks);
+                    if paths.is_empty() {
+                        return Err("nothing to commit: no changed file".to_owned());
+                    }
+                    Ok((git_ops::commit_paths(&r, &words, &paths), paths, tree.branch))
+                })
+                .await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                let answer = match outcome {
+                    Err(why) => Err(why),
+                    Ok((CommitOutcome::Done, paths, branch)) => {
+                        let ui = this.changes_ui(&root);
+                        ui.message.clear();
+                        ui.message_edited = false;
+                        ui.drafted_for = None;
+                        ui.unpushed_without_upstream = None;
+                        ui.ticks.clear();
+                        ui.hook_failure = None;
+                        Ok(serde_json::json!({"committed": paths, "message": message, "branch": branch}))
+                    }
+                    Ok((CommitOutcome::HookFailed(lines), ..)) => {
+                        let tail: Vec<String> = lines.iter().rev().take(20).rev().cloned().collect();
+                        this.changes_ui(&root).hook_failure = Some(lines);
+                        Err(format!("the commit hook refused (nothing was committed):\n{}", tail.join("\n")))
+                    }
+                    Ok((CommitOutcome::Failed(reason), ..)) => {
+                        this.toast("Commit", reason.clone(), cx);
+                        Err(reason)
+                    }
+                };
+                let _ = done.send(answer);
+                this.refresh_now(cx);
+                this.set_git_busy(&root, None, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// docs/85 13.4: push for an agent, after the person approved (or in
+    /// Full access): the branch read fresh, its upstream set the first
+    /// time, a refusal a toast in git's words. `done` hears the outcome.
+    pub(crate) fn push_for_agent(&mut self, root: &Path, done: std::sync::mpsc::Sender<Result<serde_json::Value, String>>, cx: &mut Context<Self>) {
+        if self.changes_ui(root).busy.is_some() {
+            let _ = done.send(Err("a git operation is already running in Changes".into()));
+            return;
+        }
+        self.set_git_busy(root, Some(GitBusy::Pushing), cx);
+        let root = root.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let r = root.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let tree = git_ops::read_tree(&r).ok_or_else(|| "this folder is not a git checkout".to_owned())?;
+                    git_ops::push(&r, &tree.branch, tree.upstream.is_some()).map(|()| tree.branch)
+                })
+                .await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                let ui = this.changes_ui(&root);
+                ui.unpushed_without_upstream = None;
+                ui.pr_read_at = None;
+                let answer = match result {
+                    Ok(branch) => Ok(serde_json::json!({"pushed": branch})),
+                    Err(reason) => {
+                        this.toast("Push", reason.clone(), cx);
+                        Err(format!("committed, but the push failed: {reason}"))
+                    }
+                };
+                let _ = done.send(answer);
+                this.refresh_now(cx);
+                this.set_git_busy(&root, None, cx);
+            });
+        })
+        .detach();
+    }
+
     /// Push the branch (setting its upstream the first time).
     pub(crate) fn push_branch(&mut self, root: &Path, cx: &mut Context<Self>) {
         let Some(Some(tree)) = self.cache.git_for(root) else { return };
@@ -1443,6 +1552,8 @@ pub(crate) fn changes_screen(
             let weak = cx.weak_entity();
             let gaps = gaps.clone();
             let muted = cx.aui().colors.fg_muted;
+            let notes = cache.agent_comments.get(&root_buf).and_then(|by_path| by_path.get(&change.path)).cloned().unwrap_or_default();
+            let (note_line, note_fg) = (cx.aui().colors.line, cx.aui().colors.fg);
             // docs/82 7.1: the diff's lines select, for the quote bar.
             let target = crate::right_quote::diff_target(&root_buf, &change.path);
             let held = cache.line_select.range_for(&target);
@@ -1461,11 +1572,17 @@ pub(crate) fn changes_screen(
                             }
                         }
                         let (p2, r2, w2) = (path.clone(), gap_root.clone(), weak.clone());
-                        b.on_gap(move |i, _, cx| {
-                            let range = unchanged_between(&d, i);
-                            let _ = w2.update(cx, |this, cx| this.expand_diff_gap(&r2, p2.clone(), i, range, cx));
-                        })
-                        .into_any_element()
+                        let diff_el = b
+                            .on_gap(move |i, _, cx| {
+                                let range = unchanged_between(&d, i);
+                                let _ = w2.update(cx, |this, cx| this.expand_diff_gap(&r2, p2.clone(), i, range, cx));
+                            })
+                            .into_any_element();
+                        if notes.is_empty() {
+                            diff_el
+                        } else {
+                            div().flex().flex_col().w_full().child(diff_el).child(comment_block(&path, &notes, note_line, note_fg, muted)).into_any_element()
+                        }
                     }
                     // Live 2026-10-19: a binary file opened onto an empty box.
                     None if unreadable => div()
@@ -1953,6 +2070,26 @@ fn pr_form_view(ui: &ChangesUi, root: &Path, tree: &GitTree, menu: bool, window:
 }
 
 /// The line a Changes row's "Open in …" lands on (docs/82 7.5): the new
+/// docs/85 13.3: agents' comments on lines of `path`, under its diff: one
+/// row each, "Line N · author" over the text, a hairline at the left (flat
+/// spec: lines, not cards).
+fn comment_block(path: &str, notes: &[crate::pane_tools::LineComment], line: gpui::Hsla, fg: gpui::Hsla, muted: gpui::Hsla) -> AnyElement {
+    let mut block = div().id(SharedString::from(format!("right-comments:{path}"))).flex().flex_col().gap(px(scale::SP_2)).px(px(scale::SP_6)).py(px(scale::SP_2));
+    for note in notes {
+        block = block.child(
+            div()
+                .flex()
+                .flex_col()
+                .pl(px(scale::SP_3))
+                .border_l_1()
+                .border_color(line)
+                .child(div().text_role(TextRole::Caption).text_color(muted).child(format!("Line {} · {}", note.line, note.author)))
+                .child(div().text_role(TextRole::Body).text_color(fg).child(note.text.clone())),
+        );
+    }
+    block.into_any_element()
+}
+
 /// side's start of the diff's first hunk; `None` opens at the top.
 pub(crate) fn change_open_line(diff: &aui_protocol::Diff) -> Option<u32> {
     diff.hunks.first().and_then(|hunk| aui::workbench::hunk_new_start(&hunk.header)).filter(|n| *n > 0)

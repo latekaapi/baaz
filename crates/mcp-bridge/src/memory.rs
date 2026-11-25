@@ -40,7 +40,8 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
         ),
         def(
             "memory_save",
-            "Save one memory note that later sessions will see: a decision, a convention, a fact about the person. Project notes are shared by every agent in this project; personal notes go with the person across projects. Saving a title again replaces that note.",
+            "Remember something for later sessions (\"remember that…\", \"save a note…\"): one memory note that every agent in \
+             this project will see — a decision, a convention, a fact about the person. Project notes are shared by every agent in this project; personal notes go with the person across projects. Saving a title again replaces that note.",
             json!({"type": "object", "required": ["title", "description", "type", "body"], "properties": {
                 "title": {"type": "string", "description": "A short name for the note."},
                 "description": {"type": "string", "description": "One line: what the note is about."},
@@ -51,7 +52,7 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
         ),
         def(
             "code_find",
-            "Find code in this project: kind symbol gives a name's definitions first (Rust, TypeScript/JavaScript, Python, Go), then its uses; kind text gives every line containing the query. Honours .gitignore. Answers path:line and the line. Read-only.",
+            "Find code in this project — use this before grep or rg: kind symbol gives a name's definitions first (Rust, TypeScript/JavaScript, Python, Go), then its uses; kind text gives every line containing the query. Honours .gitignore. Answers path:line and the line. Read-only.",
             json!({"type": "object", "required": ["query"], "properties": {
                 "query": {"type": "string", "description": "A symbol name or the text to find."},
                 "kind": {"type": "string", "enum": ["symbol", "text"], "description": "Default text."},
@@ -59,7 +60,8 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
         ),
         def(
             "memory_edit",
-            "Change or delete one memory note by its title. Use delete when the person asks to forget something.",
+            "Forget or change a memory note: \"forget the note about X\", \"forget that…\", \"that note is wrong, it is…\". \
+             Delete (delete: true) or rewrite one note by its title; Baaz's notes are changed only through this tool.",
             json!({"type": "object", "required": ["title"], "properties": {
                 "title": {"type": "string"},
                 "body": {"type": "string", "description": "The new body."},
