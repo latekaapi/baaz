@@ -169,6 +169,7 @@ pub(crate) const SETTINGS_SECTIONS: &[(&str, &str)] = &[
     ("providers", "Providers"),
     ("mcp", "MCP"),
     ("shortcuts", "Shortcuts"),
+    ("memory", "Memory"),
     ("data", "Data"),
     ("archived", "Archived"),
 ];
@@ -185,6 +186,7 @@ pub(crate) fn settings_blurb(section: &str) -> &'static str {
         "providers" => "Turn providers on or off and manage their accounts.",
         "mcp" => "The MCP servers each provider's sessions can reach. Read from each provider's own files.",
         "shortcuts" => "Click a keycap to rebind it, or edit the keymap file. Changes apply live.",
+        "memory" => "What your agents remember, per project. Every provider reads the same notes.",
         "data" => "Where Baaz keeps your data, a copy of it, and the histories you can clear.",
         "archived" => "Sessions you archived, grouped by project.",
         _ if is_provider_subpage(section) => "Account and sign-in for this provider.",
@@ -294,6 +296,7 @@ pub(crate) fn settings_breadcrumb(section: &str) -> Vec<String> {
         "providers" => crumbs.push("Providers".to_owned()),
         "mcp" => crumbs.push("MCP".to_owned()),
         "shortcuts" => crumbs.push("Shortcuts".to_owned()),
+        "memory" => crumbs.push("Memory".to_owned()),
         "data" => crumbs.push("Data".to_owned()),
         "archived" => crumbs.push("Archived".to_owned()),
         _ => crumbs.push("General".to_owned()),
@@ -617,6 +620,28 @@ pub(crate) struct SettingsFacts {
     pub migration: Option<MigrationRow>,
     /// A provider sub-page: the import offer under its card.
     pub import_line: Option<crate::import_ui::CardLine>,
+    /// Memory: each project's notes, then the personal ones (docs/85 12.3b).
+    pub memory: Vec<MemoryGroup>,
+}
+
+/// One project's memory notes (or the personal ones) on the Memory page.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MemoryGroup {
+    /// The section heading: the project's name, or "Personal".
+    pub name: String,
+    /// The folder the notes live in.
+    pub dir: std::path::PathBuf,
+    /// The notes, in the index's order.
+    pub notes: Vec<MemoryNoteRow>,
+}
+
+/// One note row: its title, type and day.
+#[derive(Clone, Debug)]
+pub(crate) struct MemoryNoteRow {
+    pub title: String,
+    pub file: String,
+    pub kind: String,
+    pub date: String,
 }
 
 /// What the page asks of the root: everything that reaches past the
@@ -654,6 +679,10 @@ pub(crate) enum SettingsEvent {
     ClearHistory,
     /// Data › History › Prompt history: Clear… (its own confirm).
     ClearPromptHistory,
+    /// Memory: show a note in the right pane.
+    OpenNote(std::path::PathBuf),
+    /// Memory: delete a note (its file and its index line).
+    DeleteNote { dir: std::path::PathBuf, title: String },
     /// Browser › Your data: Import from Chrome.
     ImportChrome,
     /// Browser › Your data: record this site again.
@@ -1331,6 +1360,7 @@ impl SettingsPage {
             "providers" => self.settings_providers_overview(window, cx),
             "mcp" => self.settings_mcp_page(cx),
             "shortcuts" => self.settings_shortcuts_page(window, cx),
+            "memory" => self.settings_memory_page(cx),
             "data" => self.settings_data_page(cx),
             "archived" => self.settings_archived_page(cx),
             _ if is_provider_subpage(&section) => self.settings_provider_subpage(window, cx),
@@ -2552,6 +2582,53 @@ impl SettingsPage {
 
     /// Archived: archived sessions grouped by project, each with
     /// Unarchive. Empty state: one muted line.
+    /// Memory (docs/85 12.3b): per project, a plain list of the notes its
+    /// agents share — title, type and day; the title opens the note in the
+    /// right pane, the bin deletes it. No editor.
+    fn settings_memory_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut stack = settings_sections_stack();
+        for (g, group) in self.facts.memory.iter().enumerate() {
+            let rows: Vec<AnyElement> = group
+                .notes
+                .iter()
+                .enumerate()
+                .map(|(n, note)| {
+                    let path = group.dir.join(&note.file);
+                    let open = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| cx.emit(SettingsEvent::OpenNote(path.clone())));
+                    let (dir, title) = (group.dir.clone(), note.title.clone());
+                    let delete = cx.listener(move |_: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                        cx.emit(SettingsEvent::DeleteNote { dir: dir.clone(), title: title.clone() })
+                    });
+                    let kind = if note.kind.is_empty() { "note".to_owned() } else { note.kind.clone() };
+                    settings_row(note.title.clone())
+                        .description(format!("{kind} \u{b7} {}", note.date))
+                        .control(
+                            h_flex()
+                                .gap(px(scale::SP_2))
+                                .child(button(format!("memory-open-{g}-{n}"), "Open").accessibility_label(format!("Open the note {}", note.title)).on_click(open))
+                                .child(
+                                    icon_button(format!("memory-delete-{g}-{n}"), IconName::Trash)
+                                        .ghost()
+                                        .muted()
+                                        .accessibility_label(format!("Delete the note {}", note.title))
+                                        .on_click(delete),
+                                ),
+                        )
+                        .into_any_element()
+                })
+                .collect();
+            let note = if group.notes.is_empty() {
+                if group.name == "Personal" { "No personal notes yet. Agents save notes about you here." } else { "No notes yet. Agents save notes here as they learn." }.to_owned()
+            } else if group.name == "Personal" {
+                "Notes about you, in every project.".to_owned()
+            } else {
+                tilde_path(&group.dir)
+            };
+            stack = stack.child(section(group.name.clone()).rows(rows).note(note));
+        }
+        stack.into_any_element()
+    }
+
     fn settings_archived_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let archived: Vec<&ArchivedRow> = self.facts.archived.iter().collect();
@@ -2986,6 +3063,7 @@ impl Harness {
                     })
                     .collect();
             }
+            "memory" => facts.memory = memory_groups(self.session_list.read(cx).projects.sorted().into_iter().map(|p| (p.name.clone(), p.root.clone()))),
             "data" => {
                 facts.history_pages = self.browser.read(cx).data.read(cx).history_len();
                 facts.storage = baaz_core::store::storage_size_cached();
@@ -3076,6 +3154,18 @@ impl Harness {
             SettingsEvent::Unarchive(id) => self.unarchive_session(id.clone(), cx),
             SettingsEvent::ClearHistory => self.ask_clear_history(cx),
             SettingsEvent::ClearPromptHistory => self.ask_clear_prompt_history(cx),
+            SettingsEvent::OpenNote(path) => {
+                if !self.show_text_file(path, cx) {
+                    self.overlays.update(cx, |overlays, cx| overlays.toast("Memory", "That note is gone.", cx));
+                }
+            }
+            SettingsEvent::DeleteNote { dir, title } => {
+                let change = baaz_core::memory::Change { delete: true, ..Default::default() };
+                if let Err(error) = baaz_core::memory::edit(dir, title, &change) {
+                    self.overlays.update(cx, |overlays, cx| overlays.toast("Memory", error, cx));
+                }
+                cx.notify();
+            }
             SettingsEvent::ImportChrome => self.open_chrome_import(cx),
             SettingsEvent::IncludeSite(site) => {
                 self.browser.read(cx).data.clone().update(cx, |data, cx| data.include(site, cx));
@@ -3120,6 +3210,37 @@ pub(crate) fn data_folder_label() -> String {
 }
 
 /// A page's sections, [`SETTINGS_SECTION_GAP`] apart.
+/// The Memory page's groups: each adopted project's notes (shared with its
+/// worktrees), then the personal notes. Each note's type is read from its
+/// file and its day from the file's time.
+fn memory_groups(projects: impl Iterator<Item = (String, std::path::PathBuf)>) -> Vec<MemoryGroup> {
+    let read = |name: String, dir: std::path::PathBuf| {
+        let notes = baaz_core::memory::list(&dir)
+            .into_iter()
+            .map(|(title, file, _)| {
+                let path = dir.join(&file);
+                let kind = std::fs::read_to_string(&path).map(|text| baaz_core::memory::parse(&text, &file).kind).unwrap_or_default();
+                let date = std::fs::metadata(&path)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .map(|at| chrono::DateTime::<chrono::Local>::from(at).format("%-d %b %Y").to_string())
+                    .unwrap_or_default();
+                MemoryNoteRow { title, file, kind, date }
+            })
+            .collect();
+        MemoryGroup { name, dir, notes }
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut groups: Vec<MemoryGroup> = projects
+        .filter_map(|(name, root)| {
+            let dir = baaz_core::memory::project_dir(&root);
+            seen.insert(dir.clone()).then(|| read(name, dir))
+        })
+        .collect();
+    groups.push(read("Personal".to_owned(), baaz_core::memory::personal_dir()));
+    groups
+}
+
 fn settings_sections_stack() -> gpui::Div {
     v_flex().w_full().gap(px(SETTINGS_SECTION_GAP))
 }
@@ -3555,6 +3676,32 @@ mod tests {
             })
             .collect();
         assert!(!general.contains(&"archive_on_merge".to_owned()), "the pull-request switch lives on Git & worktrees only");
+    }
+
+    /// docs/85 12.3b: Memory is a section, one group per project memory
+    /// folder (worktrees share their repo's), then the personal notes.
+    #[test]
+    fn memory_section_is_registered_and_lists_each_projects_notes() {
+        assert_eq!(normalize_settings_target("memory", ""), "memory");
+        assert_eq!(settings_breadcrumb("memory"), vec!["Settings".to_owned(), "Memory".to_owned()]);
+        assert!(settings_target_known("memory"));
+        // A throwaway repo's notes (the test build's redirected folder),
+        // then the personal group.
+        let repo = std::env::temp_dir().join(format!("baaz-settings-memory-{}", std::process::id()));
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let dir = baaz_core::memory::project_dir(&repo);
+        let note = baaz_core::memory::Note { title: "Release day".into(), description: "When".into(), kind: "project".into(), body: "Thursdays.".into() };
+        baaz_core::memory::save(&dir, &note).unwrap();
+        let groups = memory_groups([("shop".to_owned(), repo.clone()), ("shop again".to_owned(), repo.clone())].into_iter());
+        assert_eq!(groups.len(), 2, "one group per memory folder, then Personal: {groups:?}");
+        assert_eq!(groups[0].name, "shop");
+        assert_eq!(groups[0].notes.len(), 1);
+        assert_eq!(groups[0].notes[0].title, "Release day");
+        assert_eq!(groups[0].notes[0].kind, "project");
+        assert!(!groups[0].notes[0].date.is_empty());
+        assert_eq!(groups[1].name, "Personal");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     /// Task 8.8: Data is a section — the folder, Export and both

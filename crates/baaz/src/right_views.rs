@@ -128,6 +128,29 @@ impl Harness {
         );
     }
 
+    /// A small text file from outside any project — a memory note, a found
+    /// session's read-only copy (docs/85 12.3) — as a read-only text view
+    /// with Copy, titled by its file name. `false` when it is not one:
+    /// missing, not UTF-8, or over 256 KB.
+    pub(crate) fn show_text_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) -> bool {
+        let small = std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() <= 256 * 1024);
+        let Some(text) = small.then(|| std::fs::read_to_string(path).ok()).flatten() else { return false };
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+        self.push_right_view(
+            Pushed::Output(OutputPush {
+                command: name,
+                exit: None,
+                time: None,
+                running_since: None,
+                lines: OutputLines::Ready { lines: Arc::new(lines), capped: None },
+                source: None,
+            }),
+            cx,
+        );
+        true
+    }
+
     /// An image file or attachment in the image view.
     pub(crate) fn show_image(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

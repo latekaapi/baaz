@@ -971,7 +971,9 @@ impl Harness {
     /// is `None` when nothing exists there (a quiet toast, like the old
     /// link path); a folder selects and scrolls with no preview, a file
     /// previews banded on `highlight`. A path outside the project falls
-    /// back to the system opener with a toast — the tree cannot show it.
+    /// back to the system opener with a toast — the tree cannot show it —
+    /// except a small `.md`/`.txt` file (a memory note, a found session's
+    /// copy), which reads in the pane as text (docs/85 12.3).
     /// Never touches the filesystem itself.
     pub(crate) fn reveal_link_path(
         &mut self,
@@ -998,6 +1000,12 @@ impl Harness {
             return;
         }
         let Ok(rel) = abs.strip_prefix(root) else {
+            // A note or a session's copy outside the project reads in the
+            // pane (docs/85 12.3); anything else opens in its default app.
+            let text = abs.extension().is_some_and(|ext| ext == "md" || ext == "txt");
+            if !is_dir && text && self.show_text_file(abs, cx) {
+                return;
+            }
             cx.open_with_system(abs);
             self.overlays.update(cx, |overlays, cx| {
                 overlays.toast("Link", "Outside the project — opened in its default app.", cx);
