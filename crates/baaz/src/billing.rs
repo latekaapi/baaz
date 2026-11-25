@@ -1,15 +1,17 @@
-//! The billing-tier glue: the probe's lifecycle and the banner it produces.
+//! The billing-tier glue: the probe's lifecycle and the mode it reports.
 //!
 //! [`crate::tier`] owns the oracle — what the `muse` TUI's `/upgrade` card
 //! says, and the cache beside it. This module owns the application's half of
-//! it: when a probe runs, where its answer is kept, and how the answer reaches
-//! the open session as a [`TierBanner`]. [`Harness`] keeps only `tier` and
-//! `tier_probing`; nothing else in the app reads the probe's internals.
+//! it: when a probe runs, where its answer is kept, and how the answer
+//! reaches the one billing rule ([`baaz_core::billing::report`], docs/85
+//! 11.6) — the same rule every provider's sends go through. [`Harness`]
+//! keeps only `tier` and `tier_probing`; nothing else in the app reads the
+//! probe's internals.
 //!
 //! The rule the whole file exists for (`docs/06-billing.md`): **a probe that
 //! failed never stops the app**. A failure leaves a login whose plan kind is
-//! known as it was and a login never confirmed on [`Tier::Unavailable`], a
-//! quiet banner that blocks nothing ([`tier::settle_probe`]); both get
+//! known as it was and a login never confirmed on [`Tier::Unavailable`]
+//! ([`tier::settle_probe`]); both get
 //! another probe by themselves, bounded ([`tier::ProbeRetry`]).
 //!
 //! Why the bound and the keeping (2026-11-04): one failed boot probe set
@@ -21,18 +23,8 @@
 use gpui::Context;
 
 use crate::app::Harness;
-use crate::session::TierBanner;
 use crate::tier::{self, Tier};
 use crate::wire::WireCall;
-
-/// Whether `tier` refuses a send until "Send anyway" is pressed.
-///
-/// Pay-as-you-go is the one tier that blocks: every turn bills API usage, so
-/// the banner stops the person being billed by surprise. Everything else —
-/// a known subscription, or an unknown plan — sends normally.
-pub(crate) fn tier_blocks(tier: &Tier, send_anyway: bool) -> bool {
-    matches!(tier, Tier::PayAsYouGo) && !send_anyway
-}
 
 impl Harness {
     /// Find out what this login is entitled to (see `docs/06-billing.md`).
@@ -44,8 +36,7 @@ impl Harness {
     /// the `/upgrade` screen scrape on a cold host or any read failure — the
     /// scrape stays the only oracle for pay-as-you-go. A pay-as-you-go card
     /// answer is provisional until a second probe agrees, with the waits on
-    /// the background path; meanwhile the banner keeps the existing
-    /// probing/Checking state, never the pay-as-you-go banner. **A probe that
+    /// the background path; meanwhile the mode stays what it was. **A probe that
     /// fails never stops the app**: see [`Self::land_tier_probe`].
     pub(crate) fn probe_tier(&mut self, force: bool, cx: &mut Context<Self>) {
         // `--tier` fakes the probe for a screenshot, and nothing else.
@@ -71,8 +62,6 @@ impl Harness {
             return;
         }
         self.tier_probing = true;
-        // The banner answers at once: "Check again" reads "Checking…"
-        // while the probe runs.
         self.push_tier(cx);
         let program = self.args.program.clone();
         let slot = self.providers.clone();
@@ -83,7 +72,7 @@ impl Harness {
                 // decides from the already-read observation, which is what
                 // makes the decision reachable from a test without a live
                 // connection. A provisional pay-as-you-go re-probes here, on
-                // the background path, while the banner keeps Checking.
+                // the background path, while the mode stays what it was.
                 let read = read_usage(&slot);
                 tier::probe_primary_confirmed(
                     read.as_ref(),
@@ -98,7 +87,7 @@ impl Harness {
     }
 
     /// A finished probe. A verdict lands. No verdict changes nothing for a
-    /// login whose kind is known, raises the quiet banner on one that is
+    /// login whose kind is known, reports unknown for one that is
     /// not, and either way owes another probe.
     pub(crate) fn land_tier_probe(&mut self, answer: Result<Tier, String>, report: bool, cx: &mut Context<Self>) {
         self.tier_probing = false;
@@ -124,7 +113,7 @@ impl Harness {
         }
         self.push_tier(cx);
         // An asked-for probe reports back; a boot probe that found the
-        // plan simply clears its banner.
+        // plan simply reports its mode.
         if report {
             let (title, detail) = match (&settled.tier, &settled.unanswered) {
                 (Tier::Unavailable(reason), _) => ("Still unknown", format!("Still unknown: {reason}")),
@@ -176,7 +165,7 @@ impl Harness {
         }
     }
 
-    /// A Muse lane just opened: the person is looking at the banner's home,
+    /// A billing-tier lane just opened: the person is about to send there,
     /// so an owed probe past its gap runs now.
     pub(crate) fn tier_probe_on_muse_lane(&mut self, cx: &mut Context<Self>) {
         if self.tier_retry.occasion_due(tier::now_secs()) {
@@ -184,40 +173,17 @@ impl Harness {
         }
     }
 
-    /// The banner the open session should be drawing, given the tier and
-    /// whether "Send anyway" has been pressed. A known subscription draws
-    /// nothing — the banner leaves once the plan is known — and while a probe runs the unknown-plan banner's button reads
-    /// "Checking…".
-    pub(crate) fn tier_banner(&self) -> Option<TierBanner> {
-        match self.tier.as_ref()? {
-            Tier::Subscription { .. } => None,
-            Tier::PayAsYouGo => Some(payg_banner(self.send_anyway, self.tier_probing)),
-            // Only the provider that declares a billing tier has one: the
-            // banner names it from its descriptor (rule 14).
-            Tier::Unavailable(_) => Some(TierBanner {
-                text: format!(
-                    "{} did not say which plan this login is on, so Baaz cannot tell \
-                     whether turns bill API usage.",
-                    crate::providers::ProviderId::with(provider::ProviderTrait::BillingTier)
-                        .map_or("The agent", crate::providers::ProviderId::label),
-                ),
-                blocking: false,
-                checking: self.tier_probing,
-            }),
-        }
-    }
-
-    /// Hand the current banner to whatever session is open.
+    /// Hand the tier's billing mode to the one rule (docs/85 11.6): the
+    /// header chip and the next send's check read it from there.
     pub(crate) fn push_tier(&mut self, cx: &mut Context<Self>) {
-        let banner = self.tier_banner();
-        if let Some(view) = self.active.clone() {
-            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_tier_banner(banner, cx)));
+        if let Some(id) = crate::providers::ProviderId::with(provider::ProviderTrait::BillingTier) {
+            baaz_core::billing::report(id, self.tier.as_ref().map(Tier::billing_mode));
         }
         cx.notify();
     }
 
     /// Fold one usage reading (`UsageChanged`) into the tier in place: the
-    /// footer meter and the banner follow through [`Self::push_tier`].
+    /// footer meter and the billing mode follow through [`Self::push_tier`].
     ///
     /// A frame that does not decode keeps the known tier — it never clears
     /// it — and so does a frame stamped before the installed credential: the
@@ -316,6 +282,22 @@ fn run_probe(program: &str) -> Result<Tier, String> {
     }
 }
 
+impl Harness {
+    /// `billing-last:<provider>:<mode>`: the capture's last send on that
+    /// provider's account was in `mode` (docs/85 11.6).
+    #[cfg(feature = "probe")]
+    pub(crate) fn step_billing_last(&mut self, rest: &str) -> crate::steps::StepResult {
+        let (provider, mode) = rest.split_once(':').ok_or_else(|| format!("billing-last: want <provider>:<mode>, got {rest:?}"))?;
+        let id = crate::providers::ProviderId::parse_known(provider).ok_or_else(|| format!("billing-last: unknown provider {provider:?}"))?;
+        let mode = baaz_core::billing::BillingMode::parse(mode);
+        if !mode.is_known() {
+            return Err(format!("billing-last: want subscription or perToken, got {rest:?}"));
+        }
+        baaz_core::billing::fixture_last_send(id, mode);
+        Ok(())
+    }
+}
+
 /// Muse's latest usage reading over the control lane: `None` when Muse is
 /// not up, the read failed, or the host has observed nothing yet. Blocking:
 /// call it on a background thread. A failed read never stops the app and
@@ -334,56 +316,5 @@ fn read_usage(slot: &crate::providers::Registry) -> Option<provider::UsageReport
             crate::baaz_log!("usage read failed: {error}");
             None
         }
-    }
-}
-
-/// The pay-as-you-go banner. While a re-verify is in flight the answer is
-/// provisional (B7), so it reads "Checking…" and never blocks a send.
-fn payg_banner(send_anyway: bool, probing: bool) -> TierBanner {
-    TierBanner {
-        text: "This login is on pay-as-you-go: every turn bills API usage. \
-               Sign out and back in after subscribing, or send anyway."
-            .to_owned(),
-        blocking: tier_blocks(&Tier::PayAsYouGo, send_anyway) && !probing,
-        checking: probing,
-    }
-}
-
-#[cfg(feature = "probe")]
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn subscription() -> Tier {
-        Tier::Subscription {
-            plan: "Muse Code High Usage".into(),
-            current_pct: Some(2),
-            weekly_pct: Some(2),
-            resets: vec![],
-            usage_unavailable: false,
-        }
-    }
-
-    /// `--tier payg` still yields the blocking banner: pay-as-you-go is the
-    /// one tier that refuses a send until "Send anyway", and nothing else
-    /// does.
-    #[test]
-    fn pay_as_you_go_is_the_one_tier_that_blocks() {
-        // `--tier payg` fakes exactly this tier (`main.rs`), and the banner
-        // it draws blocks until "Send anyway".
-        assert!(tier_blocks(&Tier::PayAsYouGo, false));
-        assert!(!tier_blocks(&Tier::PayAsYouGo, true), "Send anyway lifts it for this run");
-        assert!(!tier_blocks(&subscription(), false));
-        assert!(!tier_blocks(&Tier::Unavailable("scripted".into()), false));
-    }
-
-    /// B7: a re-verify of a remembered pay-as-you-go runs with that tier
-    /// still in place; the banner then reads "Checking…" and blocks nothing.
-    #[test]
-    fn a_reverifying_pay_as_you_go_banner_checks_and_never_blocks() {
-        let checking = payg_banner(false, true);
-        assert!(checking.checking && !checking.blocking, "provisional while probing");
-        let settled = payg_banner(false, false);
-        assert!(settled.blocking && !settled.checking, "a confirmed answer blocks until Send anyway");
     }
 }

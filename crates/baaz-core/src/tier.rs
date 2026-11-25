@@ -253,6 +253,17 @@ pub enum Tier {
 }
 
 impl Tier {
+    /// The billing mode the tier probe reports (docs/85 11.6): a plan is a
+    /// subscription, pay-as-you-go bills per token, and a plan nobody named
+    /// is unknown.
+    pub fn billing_mode(&self) -> provider::BillingMode {
+        match self {
+            Tier::Subscription { .. } => provider::BillingMode::Subscription,
+            Tier::PayAsYouGo => provider::BillingMode::PerToken,
+            Tier::Unavailable(_) => provider::BillingMode::Unknown,
+        }
+    }
+
     /// The sidebar footer's third row.
     ///
     /// The plan drops a leading "Muse Code": the footer sits in a Muse client,
@@ -1430,7 +1441,7 @@ pub fn is_auth_fresh(auth_mtime_secs: Option<u64>, now_secs: u64) -> bool {
 /// any card answer probed within [`AUTH_FRESH_WINDOW_SECS`] of a credential
 /// refresh. A provisional answer re-probes on the caller's thread — the app
 /// calls this on the background path, where it keeps the existing
-/// probing/Checking state and never the pay-as-you-go banner — up to
+/// tier it had and never reports pay-as-you-go early — up to
 /// [`PAYG_CONFIRM_EXTRA_ATTEMPTS`] more times, [`PAYG_CONFIRM_INTERVAL`]
 /// apart (`sleep`, injected so tests never wait).
 ///
@@ -1668,7 +1679,7 @@ pub fn subs_active_in(auth_json: &str) -> Option<bool> {
 /// The card's answer checked against muse's own `subs_active` flag. A
 /// pay-as-you-go card on a credential muse itself marks as subscribed is
 /// the card answering before the subscription loaded — never a reason to
-/// raise the blocking pay-as-you-go banner over a subscribed login. It reads
+/// report per-token billing for a subscribed login. It reads
 /// as a subscription whose plan the card did not name. Every other answer
 /// stands: `subs_active: false` (or no flag) never overrides a subscription
 /// the card named.

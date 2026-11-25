@@ -271,8 +271,9 @@ pub enum ProviderTrait {
     /// It keeps its own session list, which the app reads and merges; the
     /// others' sessions are the app's own records.
     NativeSessionList,
-    /// The login's plan decides what a turn costs: its sessions carry the
-    /// billing banner and its send guard.
+    /// The login's plan decides what a turn costs, and the provider's own
+    /// tier probe (not its sign-in) reports its billing mode to the one
+    /// billing rule (docs/85 11.6).
     BillingTier,
     /// It reports the context window as it moves; the others' meters read
     /// the settled turns' totals.

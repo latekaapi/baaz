@@ -432,35 +432,21 @@ fn the_app_names_muse_only_in_its_tests() {
     );
 }
 
-/// The window-free core still names the variant where listed — each with
-/// a count that may only fall. The registry itself (`providers.rs`) is
-/// where the variant is defined and registered, so it is not counted.
-const CORE_MUSE_NAMES: [(&str, usize, &str); 4] = [
-    ("handoff.rs", 1, "the pack's token estimate is measured against one provider's header"),
-    ("projects.rs", 4, "the Muse-era defaults file migrates its single model/effort onto Muse's key"),
-    ("provider_status.rs", 12, "the shared child's live account and usage (docs/82 5.4: the probe is not yet a factory method)"),
-    ("sidebar.rs", 4, "rows built from that provider's own session list, captures and local drafts"),
-];
-
+/// docs/85 11.5: the window-free core names the variant nowhere either.
+/// The registry itself (`providers.rs`) is where the variant is defined and
+/// registered, so it is not counted; everything else reaches "the provider
+/// with a shared child" or "the provider that lists its own sessions"
+/// through [`ProviderId::shared_child`] / [`ProviderId::native_lister`] or
+/// a declared trait.
 #[test]
-fn the_core_names_muse_only_where_listed_and_never_more() {
+fn the_core_names_muse_only_in_the_registry() {
     let core = Path::new(env!("CARGO_MANIFEST_DIR")).join("../baaz-core/src");
-    let mut problems = Vec::new();
-    for (file, code) in shipped_files(&core) {
-        if file == "providers.rs" {
-            continue;
-        }
-        let count = whole_count(&code, "ProviderId::Muse");
-        match CORE_MUSE_NAMES.iter().find(|(listed, _, _)| *listed == file) {
-            None if count > 0 => problems.push(format!("{file}: {count} new — ask the registry for a trait")),
-            Some((_, allowed, _)) if count > *allowed => problems.push(format!("{file}: {count} > {allowed}")),
-            Some((_, allowed, _)) if count < *allowed => {
-                problems.push(format!("{file}: {count} < {allowed} — lower the ratchet in CORE_MUSE_NAMES"))
-            }
-            _ => {}
-        }
-    }
-    assert!(problems.is_empty(), "the core's `ProviderId::Muse` ratchet:\n  {}", problems.join("\n  "));
+    let hits: Vec<String> = shipped_files(&core)
+        .into_iter()
+        .filter(|(file, code)| file != "providers.rs" && whole_count(code, "ProviderId::Muse") > 0)
+        .map(|(file, code)| format!("{file} ({})", whole_count(&code, "ProviderId::Muse")))
+        .collect();
+    assert!(hits.is_empty(), "`ProviderId::Muse` in shipped baaz-core code: ask the registry for a trait instead.\n  {}", hits.join("\n  "));
 }
 
 /// The adapter crates, one per wire: Muse's (`provider-muse` over

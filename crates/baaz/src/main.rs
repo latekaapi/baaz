@@ -94,6 +94,7 @@ use baaz_core::provider_search;
 mod provider_model;
 use baaz_core::provider_sessions;
 use baaz_core::provider_status;
+use baaz_core::transcripts;
 mod providers;
 mod quit_signals;
 mod region;
@@ -246,8 +247,8 @@ pub struct Args {
     ///
     /// The probe drives the `muse` TUI in a pseudo-terminal, which takes
     /// seconds and depends on which login the machine is holding — neither of
-    /// which a reproducible capture of the pay-as-you-go banner can live with.
-    /// It fakes nothing else: the footer row, the banner and `/status` all read
+    /// which a reproducible capture of a pay-as-you-go login can live with.
+    /// It fakes nothing else: the footer row, the billing mode and `/status` all read
     /// the same [`tier::Tier`] the real probe returns.
     pub tier: Option<tier::Tier>,
     /// `--print-tier`: run the billing probe, print what it found and exit,
@@ -1151,6 +1152,9 @@ fn main() {
                                             this.flush_stores();
                                             this.browser.update(cx, |browser, cx| browser.flush_at_quit(cx));
                                             crate::layout::Layout::save(cx);
+                                            // A clean quit: the database's
+                                            // open marker goes (docs/85 11.4).
+                                            baaz_core::db::mark_clean_exit();
                                         })
                                     })
                                     .unwrap_or(())

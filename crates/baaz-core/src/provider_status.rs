@@ -39,7 +39,7 @@ pub fn provider_for_program(program: &str) -> ProviderId {
     } else if program.contains("claude") {
         ProviderId::ClaudeCode
     } else {
-        ProviderId::Muse
+        ProviderId::shared_child()
     }
 }
 
@@ -106,6 +106,26 @@ impl Auth {
                     })
             }
             _ => false,
+        }
+    }
+
+    /// How this login pays for turns (docs/85 11.6), from what it said of
+    /// itself: Claude Code's `auth status` and Codex's `account/read` both
+    /// land here. Anything but a sign-in is unknown.
+    pub fn billing_mode(&self) -> provider::BillingMode {
+        match self {
+            Auth::SignedIn { method, source, plan, .. } => {
+                provider::BillingMode::from_login(method.as_deref(), source.as_deref(), plan.as_deref())
+            }
+            _ => provider::BillingMode::Unknown,
+        }
+    }
+
+    /// The account's email, when the login named one.
+    pub fn email(&self) -> Option<&str> {
+        match self {
+            Auth::SignedIn { email, .. } => email.as_deref(),
+            _ => None,
         }
     }
 }
@@ -1070,7 +1090,7 @@ impl Service {
             // no-reading reason), which still counts as a change.
             if self
                 .statuses
-                .get(&ProviderId::Muse)
+                .get(&ProviderId::shared_child())
                 .and_then(|status| status.usage.as_ref())
                 .is_some_and(|held| !held.windows.is_empty())
             {
@@ -1078,7 +1098,7 @@ impl Service {
                 return false;
             }
             return self.record_usage(UsageSnapshot {
-                provider: ProviderId::Muse.as_str().into(),
+                provider: ProviderId::shared_child().as_str().into(),
                 plan,
                 windows: Vec::new(),
                 as_of: observed_at.unwrap_or_else(now_secs),
@@ -1086,7 +1106,7 @@ impl Service {
         };
         self.muse_unavailable_now = false;
         let candidate = UsageSnapshot {
-            provider: ProviderId::Muse.as_str().into(),
+            provider: ProviderId::shared_child().as_str().into(),
             plan,
             windows: vec![UsageWindow {
                 label: "Weekly".into(),
@@ -1095,7 +1115,7 @@ impl Service {
             }],
             as_of: observed_at.unwrap_or_else(now_secs),
         };
-        let Some(status) = self.statuses.get_mut(&ProviderId::Muse) else {
+        let Some(status) = self.statuses.get_mut(&ProviderId::shared_child()) else {
             return false;
         };
         if let Some(held) = status.usage.as_ref() {
@@ -1166,7 +1186,7 @@ fn probe_provider(
         return status;
     }
     match id {
-        ProviderId::Muse => {
+        id if id.has(provider::ProviderTrait::SharedChild) => {
             status.auth = match muse_auth {
                 MuseAuthRead::SignedIn(account) => Auth::SignedIn {
                     email: account.email,
@@ -1544,6 +1564,11 @@ pub fn live_statuses() -> Vec<ProviderStatus> {
     ProviderId::all().iter().map(|id| live.service.status(*id)).collect()
 }
 
+/// One provider's live auth: what the billing rule reads (docs/85 11.6).
+pub fn live_auth(id: ProviderId) -> Auth {
+    live_service().service.status(id).auth
+}
+
 /// Whether the account menu's usage refresh is due: at most every
 /// [`USAGE_REFRESH_THROTTLE`] per provider. Marks the refresh when due,
 /// so the caller that goes ahead owns exactly one refresh per window.
@@ -1598,7 +1623,7 @@ pub fn usage_refresh_targets(statuses: &[ProviderStatus]) -> Vec<ProviderId> {
             if !status.enabled {
                 return false;
             }
-            status.headline() == Headline::Connected || *id == ProviderId::Muse
+            status.headline() == Headline::Connected || id.has(provider::ProviderTrait::SharedChild)
         })
         .collect()
 }
@@ -1669,7 +1694,7 @@ pub fn note_muse_unavailable_now() {
     let mut live = live_service();
     if live
         .service
-        .status(ProviderId::Muse)
+        .status(ProviderId::shared_child())
         .usage
         .as_ref()
         .is_some_and(|held| !held.windows.is_empty())
@@ -1758,7 +1783,7 @@ pub fn record_refreshed_usage(
             if used_fraction.is_none()
                 && live
                     .service
-                    .status(ProviderId::Muse)
+                    .status(ProviderId::shared_child())
                     .usage
                     .as_ref()
                     .is_some_and(|held| !held.windows.is_empty())
@@ -1808,14 +1833,14 @@ pub fn provider_enabled(id: ProviderId) -> bool {
 /// last probe did not find it missing. A Claude- or Codex-only machine never
 /// spawns `muse serve` and never sees Muse's errors (docs/50 P1).
 pub fn muse_wanted() -> bool {
-    let status = live_service().service.status(ProviderId::Muse);
+    let status = live_service().service.status(ProviderId::shared_child());
     status.enabled && status.installed != Installed::No
 }
 
 /// Whether the last probe found Muse installed: its failure to start is then
 /// a real fault worth a dialog, not the ordinary absence of an unused app.
 pub fn muse_known_installed() -> bool {
-    matches!(live_service().service.status(ProviderId::Muse).installed, Installed::Yes { .. })
+    matches!(live_service().service.status(ProviderId::shared_child()).installed, Installed::Yes { .. })
 }
 
 /// Flip the person's Enabled switch and persist it through the cache.
@@ -2014,7 +2039,7 @@ pub fn refresh_muse_status() {
     if crate::runtime::providers_scripted() {
         return;
     }
-    refresh_in_background(vec![ProviderId::Muse]);
+    refresh_in_background(vec![ProviderId::shared_child()]);
 }
 
 /// Re-probe one provider now, off this thread (the connect screen's

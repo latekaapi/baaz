@@ -3,7 +3,7 @@
 //! The seam's account shape is [`provider::Ack::Account`]: `signed_in` plus
 //! a display label, never key material. This module keeps the latest meter
 //! reading beside that shape so `isUsingOverage` — the Claude Code analogue
-//! of the pay-as-you-go banner — stays reachable after the fold: a person is
+//! of a pay-as-you-go login — stays reachable after the fold: a person is
 //! entitled to know before they send.
 
 use serde_json::Value;

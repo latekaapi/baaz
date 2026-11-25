@@ -40,9 +40,11 @@ pub const COMPLETE_TIMEOUT: Duration = Duration::from_secs(60);
 /// The model Claude Code completions run on.
 pub const CLAUDE_UTILITY_MODEL: &str = "haiku";
 
-/// How long a Muse completion may run. Longer than the titler's watchdog
-/// on purpose: the turn is paid for, so a late answer still lands.
-pub const MUSE_COMPLETE_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long a side-session completion may run (a provider with
+/// [`provider::ProviderTrait::SideSessionCompletions`]). Longer than the
+/// titler's watchdog on purpose: the turn is paid for, so a late answer
+/// still lands.
+pub const SIDE_SESSION_COMPLETE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// What a side-session completion rides: the window's registry (its shared
 /// child), the side session the app minted and recorded for it, and the
@@ -68,17 +70,18 @@ pub fn supports(provider: ProviderId) -> bool {
 ///
 /// `model` is the session's own model, used by Codex (see the module docs);
 /// Claude Code always runs [`CLAUDE_UTILITY_MODEL`].
-/// `muse` is the side session a Muse completion rides; `None` for the CLIs
-/// (and a Muse completion without one fails: Muse is not up).
+/// `side` is the side session a side-session provider's completion rides;
+/// `None` for the CLIs (and such a completion without one fails: the
+/// provider is not up).
 pub fn complete(
     provider: ProviderId,
     model: Option<&str>,
     prompt: &str,
-    muse: Option<SideSession>,
+    side: Option<SideSession>,
 ) -> Result<String, String> {
     #[cfg(any(test, feature = "test-support"))]
     {
-        let _ = (model, muse);
+        let _ = (model, side);
         return TEST_COMPLETER.with(|slot| match slot.borrow().as_ref() {
             Some(fake) => fake(provider, prompt),
             None => Err("no completions in tests".into()),
@@ -89,11 +92,11 @@ pub fn complete(
         return Err("no completions in an offline, replayed or captured run".into());
     }
     if provider.has(provider::ProviderTrait::SideSessionCompletions) {
-        let side = muse.ok_or_else(|| format!("{} is not running", provider.label()))?;
+        let side = side.ok_or_else(|| format!("{} is not running", provider.label()))?;
         let shared = side.providers.shared().ok_or_else(|| format!("{} is not running", provider.label()))?;
         let workspace = crate::titles::side_workspace_dir().to_string_lossy().into_owned();
         return shared
-            .complete(&side.side_id, &workspace, prompt, side.label, MUSE_COMPLETE_TIMEOUT)
+            .complete(&side.side_id, &workspace, prompt, side.label, SIDE_SESSION_COMPLETE_TIMEOUT)
             .map_err(|error| error.to_string());
     }
     complete_real(provider, model, prompt)

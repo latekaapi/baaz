@@ -26,7 +26,7 @@ use aui_tokens::Palette;
 use gpui::{ElementId, ListOffset, WeakEntity};
 
 use crate::sidebar_view::{
-    browse_tab_id, browse_tab_key, footer_identity, muse_plan_label, task_face_for, SidebarEvent, SidebarFacts,
+    browse_tab_id, browse_tab_key, footer_identity, tier_plan_label, task_face_for, SidebarEvent, SidebarFacts,
     SidebarPane, NAV_NEEDS_YOU, NAV_PROJECTS, NAV_SKILLS,
 };
 use crate::sidebar::SessionRow as _;
@@ -248,9 +248,10 @@ impl Harness {
         // Every provider alike (owner, 2026-10-29: the footer read Muse's
         // sign-in as the app's): the account of the provider new sessions
         // start on when it is connected, else the first connected one in
-        // the one provider order. Muse's plan label still comes from its tier.
-        let muse_plan = || muse_plan_label(self.tier.as_ref()).unwrap_or_default();
-        let (name, email, initial, plan, status) = footer_identity(self.provider_statuses(cx), self.new_provider(cx), muse_plan);
+        // the one provider order. A billing-tier provider's plan label
+        // comes from its tier probe.
+        let tier_plan = || tier_plan_label(self.tier.as_ref()).unwrap_or_default();
+        let (name, email, initial, plan, status) = footer_identity(self.provider_statuses(cx), self.new_provider(cx), tier_plan);
         let usage = if menu_open { self.sidebar_usage() } else { Vec::new() };
         Account {
             name: name.into(),
@@ -269,7 +270,7 @@ impl Harness {
     fn sidebar_usage(&self) -> Vec<ProviderUsage> {
         let signed_in = matches!(self.auth, Auth::SignedIn(_));
         let now = crate::account_usage::now_secs();
-        let muse_feed = signed_in.then(|| crate::account_usage::MuseFeed { tier: self.tier.clone() });
+        let muse_feed = signed_in.then(|| crate::account_usage::TierFeed { tier: self.tier.clone() });
         crate::account_usage::usage_rows(&crate::provider_status::live_statuses(), muse_feed, now)
             .into_iter()
             .enumerate()

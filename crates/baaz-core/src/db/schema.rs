@@ -56,7 +56,7 @@
 use rusqlite::{params, Connection, Transaction};
 
 /// The schema this build writes.
-pub const VERSION: i32 = 4;
+pub const VERSION: i32 = 5;
 
 /// Step 1: every table.
 const V1: &str = "
@@ -210,6 +210,16 @@ CREATE INDEX IF NOT EXISTS turn_finished ON turn(finished_at);
 CREATE INDEX IF NOT EXISTS turn_provider_finished ON turn(provider, finished_at);
 ";
 
+/// Version 5 (docs/85 11.2): Muse's listing and index facts move into the
+/// `session` table ([`super::listing`]), so baaz.db is the one list source.
+/// Added only where missing, so the step is safe to run again.
+const V5: &[(&str, &str)] = &[
+    ("listing", "TEXT"),
+    ("listing_order", "INTEGER"),
+    ("index_facts", "TEXT"),
+    ("created_by", "TEXT"),
+];
+
 /// Drop the legacy `usage_turns` when nothing in it is missing from `turn`.
 /// A table of an unknown shape fails the check and is kept.
 fn drop_copied_ledger(tx: &Transaction) -> rusqlite::Result<()> {
@@ -273,6 +283,21 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         tx.execute_batch(V4)?;
         drop_copied_ledger(&tx)?;
         tx.pragma_update(None, "user_version", 4)?;
+        tx.commit()?;
+    }
+    if version < 5 {
+        let tx = conn.transaction()?;
+        let have: Vec<String> = {
+            let mut columns = tx.prepare("SELECT name FROM pragma_table_info('session')")?;
+            let names = columns.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            names
+        };
+        for (column, kind) in V5 {
+            if !have.iter().any(|name| name == column) {
+                tx.execute_batch(&format!("ALTER TABLE session ADD COLUMN {column} {kind};"))?;
+            }
+        }
+        tx.pragma_update(None, "user_version", 5)?;
         tx.commit()?;
     }
     Ok(())

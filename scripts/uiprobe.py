@@ -981,6 +981,25 @@ ENTRIES.update({
                                         "BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-first-run-state-")}},
 })
 
+# docs/85 11.6: one billing rule. A Claude Code login on an API key: the
+# header's "Per-token billing" chip. Then the same login whose last send
+# was on its subscription: the send is held with the one question.
+_BILLING_KEY = {"SignedIn": {"email": "ada@example.com", "plan": None, "method": "claude.ai",
+                             "source": "ANTHROPIC_API_KEY"}}
+
+
+def _billing_entry(steps):
+    return {"shot": ["--no-connect", "--login", "signed-in",
+                     "--steps", f"project:{_NEW_ROW_REPO};new;setprovider:claude-code;wait:300" + steps],
+            "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-billing-state-"),
+                    "BAAZ_PROVIDER_STATUS_SCRIPT": _p6_statuses(_BILLING_KEY)}}
+
+
+ENTRIES.update({
+    "billing-chip": _billing_entry(""),
+    "billing-hold": _billing_entry(";billing-last:claude-code:subscription;send-held:Ship the fix;wait:200"),
+})
+
 D5_ENTRIES = [
     "connect-first-run", "connect-checking", "connect-all-missing", "connect-all-signed-out",
     "connect-too-old", "connect-menu", "setup-sheet-install", "setup-sheet-signin",
@@ -1049,7 +1068,12 @@ ENTRIES.update({
 
 ENTRIES.update({
     "jump-pill":               _jump_entry("--tier", "subscription"),
-    "jump-pill-plan-banner":   _jump_entry("--tier", "unknown"),
+    # docs/85 11.6: the Muse-only "plan unknown" banner is gone; the banner
+    # under the pill is now the one billing hold (the tier went unknown
+    # since a send on a subscription). Rebaseline on main after merge.
+    "jump-pill-plan-banner":   _jump_entry("--tier", "unknown",
+                                           steps="wait:1500;billing-last:muse:subscription;"
+                                                 "send-held:Ship it;wait:800;wheel:300;wait:800"),
     "jump-pill-signed-out":    _jump_entry("--tier", "subscription",
                                            # One wheel once the banner has settled: two
                                            # wheels while it was still growing landed ~10 px

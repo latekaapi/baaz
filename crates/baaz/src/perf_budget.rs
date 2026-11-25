@@ -145,7 +145,6 @@ pub fn run(dir: &Path) -> serde_json::Value {
     let _ = std::fs::create_dir_all(dir);
     let index_path = dir.join("session-index.db");
     let search_path = dir.join("search.db");
-    let cache_path = dir.join("index-cache.json");
     let _ = std::fs::remove_file(&search_path);
     let _ = std::fs::remove_file(dir.join("search.db-wal"));
     let _ = std::fs::remove_file(dir.join("search.db-shm"));
@@ -158,15 +157,19 @@ pub fn run(dir: &Path) -> serde_json::Value {
         out.insert(key.to_owned(), serde_json::json!(value));
     };
 
-    // Boot: the full label read, then the cache the next boot paints from.
+    // Boot: the full label read, then the copy the next boot paints from —
+    // kept in baaz.db's session table since docs/85 11.2, not a file.
     let at = Instant::now();
     let mut index = crate::index::read_at(&index_path);
     put("index_full_read_ms", ms(at));
-    crate::index::save_cache(&cache_path, &index);
+    let db_path = dir.join("baaz.db");
+    let _ = std::fs::remove_file(&db_path);
+    let kept_index = index.clone();
+    crate::db::call(db_path.clone(), move |db| crate::db::listing::save_index(&mut db.conn, &kept_index)).expect("db").expect("index kept");
     let at = Instant::now();
-    let cached = crate::index::load_cache(&cache_path);
-    put("index_cache_load_ms", ms(at));
-    assert_eq!(cached.len(), SESSIONS, "the cache round-trips every row");
+    let cached = crate::db::call(db_path.clone(), |db| crate::db::listing::load_index(&db.conn)).expect("db").expect("index read");
+    put("index_kept_load_ms", ms(at));
+    assert_eq!(cached.len(), SESSIONS, "the kept facts round-trip every row");
 
     // A finished turn with nothing new in Muse's index, then with one row
     // moved: the stamp-only refresh.
@@ -216,6 +219,17 @@ pub fn run(dir: &Path) -> serde_json::Value {
     let at = Instant::now();
     let hits = crate::search::query_sessions(&connection, "freshword", crate::search::LIMIT);
     put("search_query_ms", ms(at));
+
+    // Baaz's own transcript store (docs/85 11.1): a reopen of a 1,000-turn
+    // session reads its folded turns from `transcript.db` instead of the
+    // provider re-folding its files.
+    let long: Vec<aui_protocol::Turn> = (0..1000).map(crate::transcripts::synthetic_turn).collect();
+    let mut transcripts = crate::transcripts::open_at(&dir.join("transcript.db")).expect("transcript store");
+    crate::transcripts::write_from(&mut transcripts, "claude-code", "perf-long", "1:1", &long, 0).expect("write");
+    let at = Instant::now();
+    let read = crate::transcripts::read(&transcripts, "claude-code", "perf-long").expect("read").expect("kept");
+    put("transcript_reopen_1000_ms", ms(at));
+    assert_eq!(read.len(), 1000, "every turn comes back");
     assert!(hits.iter().any(|hit| hit.session_id == session_id(SESSIONS / 2)), "the bumped row is findable");
 
     // Claude Code and Codex transcripts read for search (docs/50 P3): the
@@ -242,16 +256,31 @@ pub fn run(dir: &Path) -> serde_json::Value {
     put("import_scan_ms", ms(at));
     assert_eq!(scan.sessions.len(), IMPORT_SESSIONS, "every fixture session scans");
 
-    let list_path = dir.join("session-list-cache.json");
     let mut server = ListServer { rows: (0..SESSIONS).map(list_row).collect(), pages: 0 };
     let full = crate::list_cache::list(None, "perf", 0, &mut |ask| server.page(ask), &mut |_, _, _| {})
         .expect("the scripted listing");
     let saved = full.save.expect("a full listing is saved");
-    crate::list_cache::save(&list_path, &saved);
+    let loaded: crate::list_cache::ListCache<ListRow> = saved;
+    // The boot's read of the kept list, from baaz.db (docs/85 11.2): the
+    // same rows as session/list rows.
+    let kept = crate::list_cache::ListCache {
+        version: crate::list_cache::VERSION,
+        source: "perf".into(),
+        full_at_ms: 0,
+        sessions: loaded.sessions.iter().map(|row| crate::list_cache::ListedRow {
+            session_id: row.id.clone(),
+            title: Some(row.title.clone()),
+            first_user_prompt: Some(row.first_user_prompt.clone()),
+            updated_at: row.updated_at.clone(),
+            last_activity_at: Some(row.activity_at.clone()),
+            ..Default::default()
+        }).collect(),
+    };
+    crate::db::call(db_path.clone(), move |db| crate::db::listing::save_listing(&mut db.conn, &kept)).expect("db").expect("list kept");
     let at = Instant::now();
-    let loaded: crate::list_cache::ListCache<ListRow> =
-        crate::list_cache::load(&list_path).expect("the copy reads back");
-    put("list_cache_load_ms", ms(at));
+    let read = crate::db::call(db_path.clone(), |db| crate::db::listing::load_listing(&db.conn)).expect("db").expect("list read");
+    put("list_kept_load_ms", ms(at));
+    assert_eq!(read.map(|list| list.sessions.len()), Some(SESSIONS));
     assert_eq!(loaded.sessions.len(), SESSIONS);
     server.rows[SESSIONS / 2].updated_at = "2026-10-22T00:00:00Z".into();
     server.rows[SESSIONS / 2].activity_at = "2026-10-22T00:00:00Z".into();

@@ -355,6 +355,81 @@ fn an_unknown_cost_is_null_not_zero() {
     assert_eq!(super::turns::cost(&conn, "s-a", "t-1"), Some((Some(0.0), "reported".to_owned())));
 }
 
+/// docs/85 11.4: Baaz did not quit cleanly and baaz.db is damaged — the
+/// next open restores the rolling backup on its own and says so once.
+#[test]
+fn a_damaged_database_after_an_unclean_exit_opens_from_its_backup() {
+    let dir = temp("unclean");
+    let path = super::path_in(&dir);
+    super::as_writer(|| {
+        let conn = super::open_at(&path).expect("first open");
+        conn.execute_batch("INSERT INTO meta(key, value) VALUES ('probe', 'kept')").unwrap();
+        // The rolling backup holds this state; the run then dies (no clean
+        // exit: the open marker stays).
+        drop(conn);
+        let _ = std::fs::remove_file(super::integrity::rolling_backup(&path));
+        let conn = super::open_at(&path).expect("second open takes a backup");
+        drop(conn);
+    });
+    assert!(super::integrity::last_exit_unclean(&path));
+    let mut bytes = std::fs::read(&path).unwrap();
+    for byte in bytes.iter_mut().skip(100) {
+        *byte = 0x5A;
+    }
+    std::fs::write(&path, bytes).unwrap();
+    for side in ["db-wal", "db-shm"] {
+        let _ = std::fs::remove_file(path.with_extension(side));
+    }
+    super::as_writer(|| {
+        let conn = super::open_at(&path).expect("opens from the backup");
+        assert_eq!(super::schema::meta(&conn, "probe").unwrap().as_deref(), Some("kept"));
+    });
+    assert!(
+        crate::store::take_problems().iter().any(|p| matches!(p, crate::store::StoreProblem::DatabaseRestored { .. })),
+        "one toast says so"
+    );
+}
+
+/// docs/85 11.2: baaz.db is the one list source. The old list and index
+/// cache files are imported at the first open and removed; Muse rows never
+/// opened in Baaz get session rows of their own (with `created_by`); the
+/// kept list and index read back exactly as saved, in the server's order.
+#[test]
+fn the_list_and_index_live_in_the_session_table() {
+    let dir = temp("listing");
+    let listing = crate::list_cache::ListCache {
+        version: crate::list_cache::VERSION,
+        source: "/muse/session-index.db".into(),
+        full_at_ms: 1_700,
+        sessions: vec![
+            crate::list_cache::ListedRow { session_id: "m-2".into(), title: Some("Second".into()), updated_at: "2026-11-02T00:00:00Z".into(), ..Default::default() },
+            crate::list_cache::ListedRow { session_id: "m-1".into(), title: Some("First".into()), turn_count: 3, updated_at: "2026-11-01T00:00:00Z".into(), ..Default::default() },
+        ],
+    };
+    std::fs::write(dir.join("session-list-cache.json"), serde_json::to_vec(&listing).unwrap()).unwrap();
+    let mut index = std::collections::HashMap::new();
+    index.insert("m-1".to_owned(), crate::index::IndexEntry { title: "First".into(), created_by: Some("baaz".into()), ..Default::default() });
+    std::fs::write(dir.join("index-cache.json"), serde_json::to_vec(&index).unwrap()).unwrap();
+    let path = super::path_in(&dir);
+    super::as_writer(|| {
+        let mut conn = super::open_at(&path).expect("opens and imports");
+        assert!(!dir.join("session-list-cache.json").exists() && !dir.join("index-cache.json").exists(), "the old files are gone");
+        assert_eq!(super::listing::load_listing(&conn).unwrap(), Some(listing.clone()), "the list reads back in order");
+        assert_eq!(super::listing::load_index(&conn).unwrap(), index, "the index facts read back");
+        assert_eq!(super::listing::load_both(&conn).unwrap(), (Some(listing.clone()), index.clone()), "one query, both");
+        assert!(uuid_of(&conn, "muse", "m-2").is_some(), "a never-opened Muse row has a session row");
+        let created_by: Option<String> =
+            conn.query_row("SELECT created_by FROM session WHERE provider_session_id = 'm-1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(created_by.as_deref(), Some("baaz"));
+        // A newer list without m-2: it loses its listing, keeps its row.
+        let mut newer = listing.clone();
+        newer.sessions.remove(0);
+        super::listing::save_listing(&mut conn, &newer).unwrap();
+        assert_eq!(super::listing::load_listing(&conn).unwrap().map(|l| l.sessions.len()), Some(1));
+        assert!(uuid_of(&conn, "muse", "m-2").is_some());
+    });
+}
+
 /// docs/85 10.8 migration, from real-shaped data: a version-3 file that
 /// still holds the legacy `usage_turns` copy reaches version 4 with the
 /// ledger's time indexes, without the legacy table, and with every turn row
@@ -383,7 +458,7 @@ fn version_four_indexes_the_ledger_and_drops_the_legacy_copy() {
     super::as_writer(|| {
         let conn = super::open_at(&path).expect("reopens");
         let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, super::schema::VERSION, "every step from 3 on ran");
         let index = |name: &str| conn.query_row("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1", [name], |_| Ok(())).is_ok();
         assert!(index("turn_finished") && index("turn_provider_finished"), "the ledger's time indexes");
         assert!(conn.query_row("SELECT 1 FROM sqlite_master WHERE name = 'usage_turns'", [], |_| Ok(())).is_err(), "the legacy copy, fully copied, is gone");

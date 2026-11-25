@@ -110,15 +110,15 @@ impl<'de> Deserialize<'de> for ProjectDefaults {
         let mut models = raw.models;
         let mut efforts = raw.efforts;
         if let Some(legacy) = raw.model_id.map(|id| id.trim().to_owned()).filter(|id| !id.is_empty()) {
-            if !models.contains_key(crate::providers::ProviderId::Muse.as_str())
+            if !models.contains_key(crate::providers::ProviderId::shared_child().as_str())
                 && !looks_foreign_to_muse(&legacy)
             {
-                models.insert(crate::providers::ProviderId::Muse.as_str().to_owned(), legacy);
+                models.insert(crate::providers::ProviderId::shared_child().as_str().to_owned(), legacy);
             }
         }
         if let Some(legacy) = raw.effort.map(|id| id.trim().to_owned()).filter(|id| !id.is_empty()) {
-            if !efforts.contains_key(crate::providers::ProviderId::Muse.as_str()) {
-                efforts.insert(crate::providers::ProviderId::Muse.as_str().to_owned(), legacy);
+            if !efforts.contains_key(crate::providers::ProviderId::shared_child().as_str()) {
+                efforts.insert(crate::providers::ProviderId::shared_child().as_str().to_owned(), legacy);
             }
         }
         // One mode for every provider (before 5.5): it becomes each

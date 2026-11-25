@@ -163,21 +163,24 @@ impl Harness {
             move || {
                 let at = std::time::Instant::now();
                 crate::log::boot_mark("index-read-start");
-                let cache = index::cache_path();
-                let previous = if previous.is_empty() { std::sync::Arc::new(index::load_cache(&cache)) } else { previous };
+                // baaz.db holds the last read and the last list (docs/85
+                // 11.2), read together in one query on the first read.
+                let (kept_list, kept_index) = if first {
+                    crate::db::read(crate::db::path(), |db| crate::db::listing::load_both(&db.conn).ok()).flatten().unwrap_or_default()
+                } else {
+                    (None, std::collections::HashMap::new())
+                };
+                let previous = if previous.is_empty() { std::sync::Arc::new(kept_index) } else { previous };
                 let map = index::read_changed(&index::index_path(), &previous);
                 let changed = (!first).then(|| index::changed_ids(&previous, &map)).flatten();
                 if changed.as_ref().is_none_or(|ids| !ids.is_empty()) && map != *previous {
-                    index::save_cache(&cache, &map);
+                    index::save_saved(&map);
                 }
                 // The saved `session/list` too, on the first read: the boot
                 // rows join it exactly as the list reply will, so nothing
                 // (labels, search rows) changes when the reply lands.
-                let listed: Option<std::sync::Arc<crate::list_cache::ListCache<crate::list_cache::ListedRow>>> = if first {
-                    crate::list_cache::load(&crate::list_cache::cache_path()).map(std::sync::Arc::new)
-                } else {
-                    None
-                };
+                let listed: Option<std::sync::Arc<crate::list_cache::ListCache<crate::list_cache::ListedRow>>> =
+                    kept_list.map(std::sync::Arc::new);
                 // Warm the run's canonical-root memo here, off the UI
                 // thread: the provisional rows join on the UI thread and
                 // asked the disk once per distinct root, cold — ~2,100
@@ -231,10 +234,9 @@ impl Harness {
             },
             |this, index, cx| {
                 if index != *this.session_list.read(cx).index && !index.is_empty() {
-                    let cache = index::cache_path();
                     let index = std::sync::Arc::new(index);
                     let snapshot = std::sync::Arc::clone(&index);
-                    cx.background_spawn(async move { index::save_cache(&cache, &snapshot) }).detach();
+                    cx.background_spawn(async move { index::save_saved(&snapshot) }).detach();
                     this.apply_index_delta(index, None, cx);
                 }
             },
@@ -340,8 +342,7 @@ impl Harness {
             // (`list_cache`): one page instead of 27 at boot and after
             // every finished turn. The first listing of a launch may run
             // before the index read has loaded the copy; it reads it here.
-            let cache_path = crate::list_cache::cache_path();
-            let cached = cached.or_else(|| crate::list_cache::load(&cache_path).map(std::sync::Arc::new));
+            let cached = cached.or_else(|| crate::list_cache::load_saved().map(std::sync::Arc::new));
             let source = crate::index::index_path().to_string_lossy().into_owned();
             let now_ms = chrono::Utc::now().timestamp_millis();
             let lane = slot.control()?;
@@ -382,7 +383,7 @@ impl Harness {
             ));
             let held = match listing.save {
                 Some(copy) => {
-                    crate::list_cache::save(&cache_path, &copy);
+                    crate::list_cache::save_saved(&copy);
                     Some(std::sync::Arc::new(copy))
                 }
                 None => cached,
@@ -430,6 +431,12 @@ impl Harness {
             // no rejoin, no regroup, no title reads, no search rebuild.
             let already = this.session_list.read(cx).sessions_loaded;
             this.session_list.update(cx, |list, _| list.sessions_loaded = true);
+            // Long-archived transcripts give up their stored turns, once a
+            // run, now that the list knows what is archived (docs/85 11.4).
+            static PRUNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !PRUNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                this.prune_old_transcripts(cx);
+            }
             crate::log::boot_mark("sessions-loaded");
             if let Ok((sessions, branches, availability, mut canon, held)) = result {
                 if held.is_some() {

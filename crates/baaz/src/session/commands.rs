@@ -9,10 +9,6 @@
 use super::*;
 use aui_protocol::{Delta, Turn};
 
-/// What the notice over the composer says when the billing guard holds a
-/// send: the words are back in the composer, and this is the way through.
-pub(crate) const BILLING_HELD: &str = "Not sent: this login bills every turn. Press Send anyway to send it.";
-
 impl SessionView {
     // -------------------------------------------------------------- commands
 
@@ -158,14 +154,15 @@ impl SessionRuntime {
             self.restore_prompt(text, cx);
             return;
         }
-        // The billing guard holds the send while the pay-as-you-go banner
-        // stands (only a Muse session ever carries it): the person says once,
-        // out loud, that they meant it. The words go back, and the notice
-        // says why — a held send that only restored the draft read as a
-        // dead send button.
-        if self.tier_banner.as_ref().is_some_and(|b| b.blocking) {
-            self.banner = Some(BILLING_HELD.to_owned());
-            self.banner_action = None;
+        // One billing rule (docs/85 11.6): the send is held when the
+        // provider's billing mode changed since the last send on this
+        // account, or went unknown — the same question on every provider.
+        // The words go back, and the question itself says why — a held send
+        // that only restored the draft read as a dead send button.
+        let provider_id = self.provider_kind();
+        if let Some(hold) = baaz_core::billing::check(provider_id) {
+            self.billing_hold = Some(super::BillingHold { text: hold.question(provider_id.label()) });
+            cx.emit(RuntimeEvent::BannerChanged);
             self.restore_prompt(text, cx);
             return;
         }
@@ -176,6 +173,12 @@ impl SessionRuntime {
             self.refuse_images();
             self.restore_prompt(text, cx);
             return;
+        }
+        // The send leaves: its billing mode is the one the next send is
+        // compared against, and any hold is answered.
+        baaz_core::billing::note_sent(provider_id);
+        if self.billing_hold.take().is_some() {
+            cx.emit(RuntimeEvent::BannerChanged);
         }
         // Text plus the composer's attachments travel as one `SubmitInput`,
         // queued behind a running turn by the provider itself.

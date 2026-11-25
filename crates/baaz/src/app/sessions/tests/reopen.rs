@@ -46,14 +46,7 @@ fn z4_a_failed_reopen_lands_inline_on_the_clicked_session(cx: &mut gpui::TestApp
                 Some("s-codex-old"),
                 "the click's target stays selected"
             );
-            assert!(
-                harness.active.is_none(),
-                "no session view is shown — and no view's Muse tier banner with it"
-            );
-            assert!(
-                harness.tier_banner().is_some(),
-                "the tier would banner any view shown, so its absence is the failure state's"
-            );
+            assert!(harness.active.is_none(), "no session view is shown");
             let parked: Vec<String> =
                 harness.registry.parked_ids();
             assert_eq!(
@@ -494,6 +487,16 @@ fn a_provider_session_reopens_with_its_history_after_a_restart(cx: &mut gpui::Te
         assert_eq!(kept.cost_usd, 0.04);
         assert_eq!(crate::usage::count_recorded(&open_id), 1);
     });
+    // docs/85 11.1: the replayed history is the transcript store's import —
+    // the session's turns are kept, the replayed answer among them.
+    let support = crate::store::support_dir();
+    let kept = crate::transcripts::with_store(&support, |conn| crate::transcripts::read(conn, "codex", &open_id)).expect("store").expect("reads");
+    let kept = kept.expect("the replay was kept");
+    assert!(
+        kept.iter().any(|turn| turn.id() == "a-old"),
+        "the replayed turn is in the store: {:?}",
+        kept.iter().map(|turn| turn.id().to_owned()).collect::<Vec<_>>()
+    );
     lane_restore(state);
 }
 
@@ -722,6 +725,55 @@ fn a_muse_reopen_without_a_record_writes_one_from_its_row_then_reads_it(cx: &mut
         assert_eq!(view.read(cx).rt(cx).session_id, "s-muse-old");
         assert_eq!(harness.session_list.read(cx).provider_sessions.get("s-muse-old").map(|r| r.turns), Some(3));
     });
+    lane_restore(state);
+}
+
+/// docs/85 11.1: with a fresh copy in Baaz's own transcript store, a
+/// reopen shows it at once and pages nothing from the provider (the resume
+/// is metadata-only); when the provider's record moved since (another
+/// stamp), the store is not trusted and the history pages in as before.
+#[gpui::test]
+fn a_reopen_with_a_fresh_stored_transcript_pages_nothing(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("s11-store-reopen");
+    let vc = cx.add_empty_window();
+    let (baaz, commands) = p4b_harness(vc, &state.2, MuseResume::Ok);
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, cx| {
+            harness.session_list.update(cx, |list, _| {
+                std::sync::Arc::make_mut(&mut list.index).get_mut("s-muse-old").expect("row").updated_at_us = Some(42);
+            });
+        });
+    });
+    let turns: Vec<aui::protocol::Turn> = (0..6).map(crate::transcripts::synthetic_turn).collect();
+    let support = crate::store::support_dir();
+    crate::transcripts::with_store(&support, |conn| crate::transcripts::write_from(conn, "muse", "s-muse-old", "muse:42", &turns, 0))
+        .expect("store")
+        .expect("written");
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet("s-muse-old".into(), window, cx)));
+    vc.run_until_parked();
+    assert_eq!(resumes_of(&commands), vec![("s-muse-old".to_owned(), true)], "metadata-only");
+    assert_eq!(pages_of(&commands), 0, "nothing paged from the provider");
+    vc.update(|_, cx| {
+        let view = baaz.read(cx).active.clone().expect("opened");
+        let shown = view.read(cx).rt(cx).session().map(|session| session.turns.clone()).unwrap_or_default();
+        assert_eq!(shown, turns, "the stored turns are the history");
+    });
+    // The provider's record moved: the store is not trusted.
+    let mut forgotten = Vec::new();
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, cx| {
+            forgotten.extend(harness.active.take());
+            forgotten.extend(harness.registry.drain_parked());
+            harness.session_list.update(cx, |list, _| {
+                std::sync::Arc::make_mut(&mut list.index).get_mut("s-muse-old").expect("row").updated_at_us = Some(43);
+            });
+        });
+    });
+    let _forgotten = forgotten;
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.resume_quiet("s-muse-old".into(), window, cx)));
+    vc.run_until_parked();
+    assert!(pages_of(&commands) >= 1, "a stale copy pages from the provider");
     lane_restore(state);
 }
 

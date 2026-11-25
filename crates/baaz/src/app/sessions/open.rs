@@ -423,7 +423,7 @@ impl Harness {
         let starting = !self.providers.lands_inline()
             && !self.providers.shared_ready()
             && matches!(self.wire, crate::app::Wire::Connecting | crate::app::Wire::Reconnecting);
-        view.read(cx).runtime().clone().update(cx, |rt, cx| rt.set_muse_starting(starting, cx));
+        view.read(cx).runtime().clone().update(cx, |rt, cx| rt.set_shared_child_starting(starting, cx));
         // A waiting parcel's session is this draft: key the parcel to it
         // before the view lands, so `activate` hands it over here — and
         // only here.
@@ -1091,11 +1091,9 @@ impl Harness {
         if view.read(cx).rt(cx).provider_kind().has(provider::ProviderTrait::BillingTier) {
             self.tier_probe_on_muse_lane(cx);
         }
-        let tier_banner = self.tier_banner();
-        view.update(cx, |view, cx| {
+        view.update(cx, |view, _| {
             view.set_context(titles);
             view.set_at_rest(self.still());
-            view.runtime().clone().update(cx, |rt, cx| rt.set_tier_banner(tier_banner, cx));
         });
         // The swap must repaint the centre even when every push above was
         // `set` without `notify`: a parked view reuses its retained subtree

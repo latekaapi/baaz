@@ -39,7 +39,9 @@
 //! | `draft:<text>` | put text in the composer |
 //! | `send:<text>` | send a turn — **costs a turn** |
 //! | `steer:<text>` | steer the running turn — **costs a turn** |
-//! | `send-anyway` | the pay-as-you-go banner's "Send anyway": sends what the guard held back — **costs a turn** |
+//! | `send-held:<text>` | a send the billing rule must hold (docs/85 11.6); fails when it left |
+//! | `send-anyway` | the billing hold's "Send anyway": sends what the hold kept back — **costs a turn** |
+//! | `billing-last:<provider>:<mode>` | the last send on that provider's account was in `mode` (`subscription`, `perToken`) |
 //! | `model` | open the model picker |
 //! | `effort` | open the reasoning-effort picker |
 //! | `provider` | open the provider picker |
@@ -529,6 +531,10 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     // The forced crash of docs/82 9.5's check: a panic, on purpose.
     WindowVerb { verb: "crash-now", run: |_, _, _, _| panic!("crash-now: a crash the check asked for") },
     WindowVerb { verb: "crash-fixture", run: |this, rest, _, cx| this.step_crash_fixture(rest, cx) },
+    // docs/85 11.6: the last send's billing mode on a provider
+    // (`billing-last:<provider>:<subscription|perToken>`), so a capture
+    // can show the one hold.
+    WindowVerb { verb: "billing-last", run: |this, rest, _, _| this.step_billing_last(rest) },
     WindowVerb { verb: "toast", run: |this, rest, _, cx| this.step_toast(rest, cx) },
     WindowVerb { verb: "archive-confirm", run: |this, _, window, cx| { this.confirm_archive_dialog(window, cx); Ok(()) } },
     WindowVerb { verb: "undo-confirm", run: |this, _, _, cx| this.step_undo_confirm(cx) },
@@ -1129,9 +1135,10 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "transcript-find-next", run: |v, _, _, cx| if v.find_step(true, cx) { Ok(()) } else { Err("transcript-find-next: no bar or no match".into()) } },
     SessionVerb { verb: "transcript-find-prev", run: |v, _, _, cx| if v.find_step(false, cx) { Ok(()) } else { Err("transcript-find-prev: no bar or no match".into()) } },
     SessionVerb { verb: "transcript-find-close", run: |v, _, window, cx| if v.close_find(window, cx) { Ok(()) } else { Err("transcript-find-close: no bar open".into()) } },
+    SessionVerb { verb: "send-held", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_send_held(rest, cx)) },
     SessionVerb { verb: "send", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_send(rest, cx)) },
-    // The billing banner's "Send anyway", as a verb: sends what the guard
-    // held back — **costs a turn** when there is anything to send.
+    // The billing hold's "Send anyway", as a verb: sends what the hold
+    // kept back — **costs a turn** when there is anything to send.
     SessionVerb { verb: "send-anyway", run: |v, _, window, cx| v.step_send_anyway(window, cx) },
     SessionVerb { verb: "steer", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_steer(rest, cx)) },
     SessionVerb { verb: "model", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Model, cx); Ok(()) } },

@@ -1356,9 +1356,10 @@ impl Render for SidebarPane {
     }
 }
 
-/// The tier's plan label for the footer and its menu, or `None` while
+/// The billing-tier provider's plan label (`ProviderTrait::BillingTier`)
+/// for the footer and its menu, or `None` while
 /// the tier is unknown: the footer never reads "Plan unknown".
-pub(crate) fn muse_plan_label(tier: Option<&Tier>) -> Option<String> {
+pub(crate) fn tier_plan_label(tier: Option<&Tier>) -> Option<String> {
     match tier {
         Some(Tier::Unavailable(_)) | None => None,
         Some(tier) => Some(tier.footer_label()),

@@ -142,7 +142,7 @@ pub struct SessionEntry {
     /// as one of Baaz's throwaway title/summary side sessions — the
     /// side-session prompt prefix or the side workspace — with no local
     /// record — or, the same way, as a session another client made
-    /// ([`made_elsewhere`]). What keeps such a row hidden across a restart, a scratch
+    /// ([`made_by_another_client`]). What keeps such a row hidden across a restart, a scratch
     /// state dir, a relay lane, or a store that never saw it start:
     /// `hidden` is re-derived from this flag on every join and rejoin, and
     /// the app's side-session checks read it beside the explicit record.
@@ -307,7 +307,7 @@ pub fn label_ladder<'a>(
 /// — except the running Baaz's own state dir, so a check run still lists
 /// what it starts. A person's own session without a project runs in
 /// `~/baaz-sessions`, never a temp folder.
-pub fn made_elsewhere(index: Option<&IndexEntry>, workspace: Option<&str>, meta: Option<&SessionMeta>) -> bool {
+pub fn made_by_another_client(index: Option<&IndexEntry>, workspace: Option<&str>, meta: Option<&SessionMeta>) -> bool {
     let other_client = index.and_then(|i| i.created_by.as_deref()).is_some_and(|creator| !is_baaz_client(creator));
     if !other_client && !workspace.is_some_and(is_scripted_root) {
         return false;
@@ -420,7 +420,7 @@ impl SessionEntry {
         let side_marker = crate::titles::looks_like_side_session(
             session.first_user_prompt.as_deref(),
             session.workspace_root.as_deref(),
-        ) || made_elsewhere(index, session.workspace_root.as_deref(), meta);
+        ) || made_by_another_client(index, session.workspace_root.as_deref(), meta);
         Self {
             id: session.session_id.clone(),
             label: one_line(text),
@@ -446,7 +446,7 @@ impl SessionEntry {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
             replayed: false,
-            provider: ProviderId::Muse,
+            provider: ProviderId::native_lister(),
             named: name.is_some(),
             needs_title: label.is_none(),
             side_marker,
@@ -527,7 +527,7 @@ impl SessionEntry {
         let side_marker = crate::titles::looks_like_side_session(
             index.first_user_prompt.as_deref(),
             index.workspace_root.as_deref(),
-        ) || made_elsewhere(Some(index), index.workspace_root.as_deref(), meta);
+        ) || made_by_another_client(Some(index), index.workspace_root.as_deref(), meta);
         Some(Self {
             id: session_id.to_owned(),
             label: one_line(text),
@@ -548,7 +548,7 @@ impl SessionEntry {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
             replayed: false,
-            provider: ProviderId::Muse,
+            provider: ProviderId::native_lister(),
             named: name.is_some(),
             needs_title: false,
             side_marker,
@@ -696,7 +696,7 @@ impl SessionEntry {
             archived: false,
             description: String::new(),
             replayed: true,
-            provider: ProviderId::Muse,
+            provider: ProviderId::native_lister(),
             named: false,
             needs_title: false,
             side_marker,
@@ -892,7 +892,7 @@ pub fn local_started_row(
         archived: false,
         description: String::new(),
         replayed: false,
-        provider: ProviderId::Muse,
+        provider: ProviderId::native_lister(),
         named: false,
         needs_title: false,
         side_marker: false,
@@ -2144,7 +2144,7 @@ pub mod tests {
             archived: false,
             description: String::new(),
             replayed: false,
-            provider: ProviderId::Muse,
+            provider: ProviderId::native_lister(),
             named: false,
             needs_title: false,
             side_marker: false,
@@ -2383,7 +2383,7 @@ pub mod tests {
             let index = made_by(creator);
             let row = SessionEntry::join(&wire, Some(&index), None, &projects);
             assert!(row.hidden && row.side_marker, "{creator:?} made it: no row");
-            assert!(made_elsewhere(Some(&index), None, None));
+            assert!(made_by_another_client(Some(&index), None, None));
         }
         for creator in [Some("baaz"), Some("baaz_check"), Some("harness"), None] {
             let index = made_by(creator);
@@ -2403,25 +2403,25 @@ pub mod tests {
         // Archiving is not use, and neither is a byline: opening a row
         // used to write one, so the exam runs the owner clicked carried it.
         let archived = SessionMeta { archived: true, ..SessionMeta::default() };
-        assert!(made_elsewhere(Some(&cli), None, Some(&archived)));
+        assert!(made_by_another_client(Some(&cli), None, Some(&archived)));
         let clicked = SessionMeta {
             last_ask: Some("You are writing items".into()),
             last_summary: Some("[{\"level\": \"tgt_lt\"".into()),
             ..SessionMeta::default()
         };
-        assert!(made_elsewhere(Some(&cli), None, Some(&clicked)));
+        assert!(made_by_another_client(Some(&cli), None, Some(&clicked)));
         // A temp-folder run is scripted whoever made it — Baaz's own
         // test and check runs included — but this run's own state dir is not.
         let baaz = made_by(Some("baaz"));
-        assert!(made_elsewhere(Some(&baaz), Some("/private/var/folders/h8/x/T/exam-muse-dsyzyF"), None));
-        assert!(made_elsewhere(Some(&baaz), Some("/tmp/bz.kfMJ/side-sessions"), None));
-        assert!(!made_elsewhere(Some(&baaz), Some("/Users/me/baaz-sessions"), None));
+        assert!(made_by_another_client(Some(&baaz), Some("/private/var/folders/h8/x/T/exam-muse-dsyzyF"), None));
+        assert!(made_by_another_client(Some(&baaz), Some("/tmp/bz.kfMJ/side-sessions"), None));
+        assert!(!made_by_another_client(Some(&baaz), Some("/Users/me/baaz-sessions"), None));
         // Made first: a missing folder keeps its raw (`/var/…`) spelling
         // while the state dir above it resolves (`/private/var/…`), so the
         // answer would turn on whether another test had made it already.
         let own = crate::store::support_dir().join("workspace");
         let _ = std::fs::create_dir_all(&own);
-        assert!(!made_elsewhere(Some(&baaz), Some(&own.to_string_lossy()), None), "this run's own workspace");
+        assert!(!made_by_another_client(Some(&baaz), Some(&own.to_string_lossy()), None), "this run's own workspace");
         // Baaz's helper sessions, from any state dir, by their label.
         assert!(crate::titles::looks_like_side_session(Some("baaz auto-title"), Some("/Users/me/Projects/x")));
         assert!(!crate::titles::looks_like_side_session(Some("baaz draft of my essay"), None));

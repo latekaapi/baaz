@@ -44,7 +44,7 @@ pub struct IndexEntry {
     /// `Some("baaz")` for Baaz, `Some("")` for one with no client name — a
     /// `muse` CLI run, `muse exec` included — and `None` when the index
     /// cannot say (an older Muse, or a cached entry from before this field).
-    /// [`crate::sidebar::made_elsewhere`] reads it; unknown never hides.
+    /// [`crate::sidebar::made_by_another_client`] reads it; unknown never hides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
 }
@@ -312,10 +312,30 @@ fn has_column(connection: &Connection, column: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Where Baaz keeps its last read of the index: labels and stamps only, so
-/// the sidebar can paint from it before Muse's database is touched.
-pub fn cache_path() -> PathBuf {
-    crate::store::support_dir().join("index-cache.json")
+/// Keep `index` in baaz.db when it differs from what this process last
+/// kept (docs/85 10.7: the old file was rewritten on every refresh).
+/// Returns whether it wrote.
+pub fn save_saved(index: &HashMap<String, IndexEntry>) -> bool {
+    static LAST: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+    let sorted: std::collections::BTreeMap<&String, &IndexEntry> = index.iter().collect();
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_vec(&sorted).unwrap_or_default().hash(&mut hasher);
+        hasher.finish()
+    };
+    let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *last == Some(hash) {
+        return false;
+    }
+    *last = Some(hash);
+    let index = index.clone();
+    crate::db::run(crate::db::path(), move |db| {
+        if let Err(error) = crate::db::listing::save_index(&mut db.conn, &index) {
+            crate::baaz_log!("db: the index facts were not kept ({error})");
+        }
+    });
+    true
 }
 
 /// The last saved read, or an empty map (no file yet, or one this build
@@ -324,33 +344,12 @@ pub fn load_cache(path: &std::path::Path) -> HashMap<String, IndexEntry> {
     std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
 }
 
-/// Save a read for the next boot. Blocking; call it off the UI thread.
-///
-/// Written only when the bytes changed since this process last wrote
-/// them (docs/85 10.7): it is ~10 MB on a busy machine and used to be
-/// rewritten on every refresh. Returns whether it wrote.
+/// Write a read as the old `index-cache.json` did: what the tests and the
+/// perf runs use to make a pre-11.2 file (docs/85 11.2 keeps the read in
+/// baaz.db instead, [`save_saved`]).
+#[cfg(any(test, feature = "test-support"))]
 pub fn save_cache(path: &std::path::Path, index: &HashMap<String, IndexEntry>) -> bool {
-    static LAST: std::sync::Mutex<Option<(PathBuf, u64)>> = std::sync::Mutex::new(None);
-    // `HashMap` serializes in no fixed order: sort first, so equal maps
-    // make equal bytes.
-    let sorted: std::collections::BTreeMap<&String, &IndexEntry> = index.iter().collect();
-    let Ok(bytes) = serde_json::to_vec(&sorted) else { return false };
-    let hash = {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        bytes.hash(&mut hasher);
-        hasher.finish()
-    };
-    let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if last.as_ref().is_some_and(|(at, seen)| at == path && *seen == hash) && path.exists() {
-        return false;
-    }
-    if crate::store::write_atomic(path, &bytes).is_ok() {
-        *last = Some((path.to_path_buf(), hash));
-        true
-    } else {
-        false
-    }
+    serde_json::to_vec(index).ok().is_some_and(|bytes| crate::store::write_atomic(path, &bytes).is_ok())
 }
 
 /// Muse's `search_text` for `ids`, keyed by session id; ids with no row (or
@@ -583,20 +582,4 @@ mod tests {
         assert_eq!(warm, full);
     }
 
-    /// docs/85 10.7: the cache is written when its content changed, and
-    /// not again for the same content.
-    #[test]
-    fn the_cache_is_rewritten_only_when_it_changed() {
-        let path = std::env::temp_dir().join(format!("baaz-index-cache-{}.json", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let mut index = HashMap::new();
-        assert!(save_cache(&path, &index), "the first save writes");
-        assert!(!save_cache(&path, &index), "the same content writes nothing");
-        index.insert("s-1".to_owned(), IndexEntry::default());
-        assert!(save_cache(&path, &index), "a change writes");
-        assert!(!save_cache(&path, &index));
-        let _ = std::fs::remove_file(&path);
-        assert!(save_cache(&path, &index), "a missing file is written again");
-        let _ = std::fs::remove_file(&path);
-    }
 }

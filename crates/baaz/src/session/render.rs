@@ -72,7 +72,7 @@ impl SessionView {
         let status = self.render_status(cx);
         let needs_you = self.render_needs_you(cx);
         let banner = self.render_banner(cx);
-        let tier_banner = self.render_tier_banner(cx);
+        let billing_hold = self.render_billing_hold(cx);
         let queue = self.render_queue(cx);
         let caret_menu = self.render_caret_menu(window, cx);
         // The composer floats over the transcript (owner 2026-10-15): the
@@ -86,7 +86,7 @@ impl SessionView {
             .children(status)
             .children(needs_you)
             .children(banner)
-            .children(tier_banner)
+            .children(billing_hold)
             .children(queue)
             // The caret menus anchor to the measure: the positioned ancestor is
             // the centred inner wrapper, so the popover spans the 760 px measure, not the
@@ -2191,37 +2191,19 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
         div().w_full().px(px(TRANSCRIPT_PAD_X)).pb(px(scale::SP_3)).child(centred(row)).into_any_element()
     }
 
-    /// The billing guard's banner, directly over the composer
-    /// because it is about the thing the composer is for.
-    ///
-    /// Pay-as-you-go is `Waiting`-tinted and carries both the way out and the
-    /// way through; an unknown plan is a quiet `Info` line that blocks nothing.
-    pub(super) fn render_tier_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        // Muse-account surface: never drawn on another provider's session.
-        if !self.runtime.read(cx).provider_kind().has(provider::ProviderTrait::BillingTier) {
-            return None;
-        }
-        let guard = self.runtime.read(cx).tier_banner.clone()?;
-        let sign_out = cx.listener(|_: &mut Self, _: &(), _, cx| cx.emit(SessionEvent::Logout));
+    /// The billing hold, directly over the composer because it is about
+    /// the thing the composer is for (docs/85 11.6): one question, the same
+    /// on every provider — "Send anyway" answers it, "Check again" re-reads
+    /// the mode.
+    pub(super) fn render_billing_hold(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let hold = self.runtime.read(cx).billing_hold.clone()?;
         let through = cx.listener(move |view: &mut Self, _: &(), window, cx| view.send_anyway(window, cx));
-        let recheck = cx.listener(|_: &mut Self, _: &(), _, cx| cx.emit(SessionEvent::TierRecheck));
-        let kind = if guard.blocking { BannerKind::Waiting } else { BannerKind::Info };
-        let mut row = banner("tier-banner", kind, vec![BannerRun::Text(guard.text.clone().into())]);
-        row = if guard.blocking {
-            row.secondary_action("Sign out", BannerActionStyle::Ghost)
-                .on_secondary(move |window, cx| sign_out(&(), window, cx))
-                .action("Send anyway", BannerActionStyle::Secondary)
-                .on_action(move |window, cx| through(&(), window, cx))
-        } else if guard.checking {
-            // The probe is already running — pressing again reaches
-            // `probe_tier`, which refuses a second probe, so the button only
-            // says what is happening.
-            row.action("Checking…", BannerActionStyle::Ghost)
-                .on_action(move |window, cx| recheck(&(), window, cx))
-        } else {
-            row.action("Check again", BannerActionStyle::Ghost)
-                .on_action(move |window, cx| recheck(&(), window, cx))
-        };
+        let recheck = cx.listener(|_: &mut Self, _: &(), _, cx| cx.emit(SessionEvent::BillingRecheck));
+        let row = banner("billing-hold", BannerKind::Waiting, vec![BannerRun::Text(hold.text.clone().into())])
+            .secondary_action("Check again", BannerActionStyle::Ghost)
+            .on_secondary(move |window, cx| recheck(&(), window, cx))
+            .action("Send anyway", BannerActionStyle::Secondary)
+            .on_action(move |window, cx| through(&(), window, cx));
         Some(
             div()
                 .w_full()

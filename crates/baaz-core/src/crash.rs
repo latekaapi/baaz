@@ -77,10 +77,31 @@ pub fn install_panic_hook(state: PathBuf) {
     }));
 }
 
-/// Copy macOS's newest report for Baaz (`Baaz-*.ips` in `system_dir`) into
-/// the crashes folder when it is newer than every report kept. Returns the
-/// copy's path.
-pub fn collect_system_reports(state: &Path, system_dir: &Path) -> Option<PathBuf> {
+/// The running bundle's identifier, read from the `Info.plist` beside the
+/// executable (`None` for an unbundled binary).
+pub fn own_bundle_id() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let plist = std::fs::read_to_string(exe.parent()?.parent()?.join("Info.plist")).ok()?;
+    let after = &plist[plist.find("<key>CFBundleIdentifier</key>")?..];
+    let start = after.find("<string>")? + "<string>".len();
+    let end = after[start..].find("</string>")?;
+    Some(after[start..start + end].trim().to_owned())
+}
+
+/// The `bundleID` in a macOS report's one-line JSON header.
+fn report_bundle_id(path: &Path) -> Option<String> {
+    use std::io::BufRead as _;
+    let mut header = String::new();
+    std::io::BufReader::new(std::fs::File::open(path).ok()?).read_line(&mut header).ok()?;
+    let value: serde_json::Value = serde_json::from_str(header.trim()).ok()?;
+    value.get("bundleID")?.as_str().map(str::to_owned)
+}
+
+/// Copy macOS's newest report for this Baaz (`Baaz-*.ips` in `system_dir`
+/// whose header names `bundle_id`) into the crashes folder when it is newer
+/// than every report kept. Returns the copy's path. Another build's crash
+/// (the check build's, `sh.baaz.check`) is never this one's to tell of.
+pub fn collect_system_reports(state: &Path, system_dir: &Path, bundle_id: Option<&str>) -> Option<PathBuf> {
     let newest_kept = kept(state).first().and_then(|path| modified(path));
     let newest = std::fs::read_dir(system_dir)
         .ok()?
@@ -89,6 +110,7 @@ pub fn collect_system_reports(state: &Path, system_dir: &Path) -> Option<PathBuf
         .filter(|path| {
             path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("Baaz") && name.ends_with(".ips"))
         })
+        .filter(|path| report_bundle_id(path).as_deref() == bundle_id)
         .filter_map(|path| modified(&path).map(|at| (at, path)))
         .max_by_key(|(at, _)| *at)?;
     if newest_kept.is_some_and(|kept| kept >= newest.0) {
@@ -182,11 +204,25 @@ mod tests {
     fn the_newest_system_report_is_copied_once() {
         let state = temp("system-state");
         let system = temp("system-reports");
-        std::fs::write(system.join("Baaz-2026-11-25-010101.ips"), "native crash").expect("ips");
+        let ours = "{\"app_name\":\"Baaz\",\"bundleID\":\"sh.baaz\"}\n{ native crash }";
+        std::fs::write(system.join("Baaz-2026-11-25-010101.ips"), ours).expect("ips");
         std::fs::write(system.join("Other-2026-11-25-010101.ips"), "not ours").expect("other");
-        let copy = collect_system_reports(&state, &system).expect("copied");
-        assert_eq!(std::fs::read_to_string(&copy).expect("reads"), "native crash");
-        assert_eq!(collect_system_reports(&state, &system), None, "not twice");
+        let copy = collect_system_reports(&state, &system, Some("sh.baaz")).expect("copied");
+        assert_eq!(std::fs::read_to_string(&copy).expect("reads"), ours);
+        assert_eq!(collect_system_reports(&state, &system, Some("sh.baaz")), None, "not twice");
+        let _ = std::fs::remove_dir_all(&state);
+        let _ = std::fs::remove_dir_all(&system);
+    }
+
+    /// Gate 11: the check build's forced crash (`sh.baaz.check`) is not the
+    /// owner's Baaz's to tell of.
+    #[test]
+    fn another_builds_report_is_left_alone() {
+        let state = temp("other-build-state");
+        let system = temp("other-build-reports");
+        std::fs::write(system.join("Baaz-2026-11-25-050502.ips"), "{\"app_name\":\"Baaz\",\"bundleID\":\"sh.baaz.check\"}\n{}").expect("ips");
+        assert_eq!(collect_system_reports(&state, &system, Some("sh.baaz")), None);
+        assert!(collect_system_reports(&state, &system, Some("sh.baaz.check")).is_some(), "the check build's own");
         let _ = std::fs::remove_dir_all(&state);
         let _ = std::fs::remove_dir_all(&system);
     }

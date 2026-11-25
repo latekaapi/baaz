@@ -720,11 +720,9 @@ pub enum SessionEvent {
     /// its `DoneUnread` (task 3.1). Emitted on the frame the list arrives at
     /// its end, not on every frame it stays there.
     SeenToEnd,
-    /// "Send anyway" on the pay-as-you-go banner: the person accepts the bill
-    /// for the rest of this app run.
-    TierOverride,
-    /// "Check again" on the unknown-plan banner: re-probe the billing tier.
-    TierRecheck,
+    /// "Check again" on the billing hold (docs/85 11.6): re-read how the
+    /// session's provider bills.
+    BillingRecheck,
     /// A transcript or terminal link to an `http(s)` URL (B9): the
     /// application opens the right pane on Browser and navigates there on
     /// the next render, instead of the system browser. `external` stays
@@ -755,21 +753,14 @@ pub enum SessionEvent {
 }
 
 
-/// The billing guard's banner over the composer, as the
-/// application decided it.
-///
-/// The session view draws it and refuses to submit while `blocking` is set;
-/// what the two buttons mean is the application's business, so both come back
-/// as [`SessionEvent`]s.
+/// The one billing hold over the composer (docs/85 11.6): the send the
+/// rule held back, and its question ([`baaz_core::billing::Hold::question`]),
+/// the same on every provider. Raised by the send itself; "Send anyway"
+/// answers it and "Check again" re-reads the mode.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TierBanner {
-    /// The line the person reads.
+pub struct BillingHold {
+    /// The question the person reads.
     pub text: String,
-    /// Whether a turn is refused until the person presses "Send anyway".
-    pub blocking: bool,
-    /// A probe is in flight: the unknown-plan banner's "Check again" reads
-    /// "Checking…" and pressing it again is a no-op.
-    pub checking: bool,
 }
 
 /// A turn the server says is running.
@@ -1721,7 +1712,7 @@ impl SessionRuntime {
         let id = self.model_id();
         // Nothing names a model yet while Muse (or this draft's session on
         // it) is still starting: say so, never the bare lane name "Muse".
-        if self.muse_starting || (matches!(self.start, StartState::Starting(_)) && id == self.provider_id) {
+        if self.shared_child_starting || (matches!(self.start, StartState::Starting(_)) && id == self.provider_id) {
             return format!("Starting {}\u{2026}", self.provider_kind().label());
         }
         if let Some(label) =
@@ -1745,10 +1736,12 @@ impl SessionRuntime {
         }
     }
 
-    /// Say whether Muse is still starting under this (live, local) draft.
-    pub(crate) fn set_muse_starting(&mut self, starting: bool, cx: &mut Context<Self>) {
-        if self.muse_starting != starting {
-            self.muse_starting = starting;
+    /// Say whether the shared child (a provider with
+    /// `ProviderTrait::SharedChild`) is still starting under this live,
+    /// local draft.
+    pub(crate) fn set_shared_child_starting(&mut self, starting: bool, cx: &mut Context<Self>) {
+        if self.shared_child_starting != starting {
+            self.shared_child_starting = starting;
             cx.emit(RuntimeEvent::MenusStale);
         }
     }
@@ -1876,6 +1869,35 @@ impl SessionRuntime {
         self.reply_done = None;
         self.ticker = None;
         self.last_tick_secs = None;
+    }
+
+    /// The session's history from Baaz's own transcript store (docs/85
+    /// 11.1): what a reopen shows when the store holds a fresh copy, in place
+    /// of the provider re-reading and re-folding its files. The turns are
+    /// history — finished, modelled from their own footers — and the tail
+    /// pins as after a paged-in history.
+    pub(crate) fn load_stored_turns(&mut self, turns: Vec<aui_protocol::Turn>, cx: &mut Context<Self>) {
+        let mut session = self.store.session().cloned().unwrap_or_else(|| {
+            aui_protocol::Session::new(
+                self.session_id.clone(),
+                baaz_core::handoff::wire_provider(self.provider_kind()),
+                "",
+                "",
+            )
+        });
+        for turn in &turns {
+            if let aui_protocol::Turn::Assistant { id, meta, .. } = turn {
+                self.completed_turns.insert(id.clone());
+                if crate::providers::claude_code_is_model_id(&meta.model) || (!meta.model.is_empty() && self.provider_kind() != ProviderId::ClaudeCode) {
+                    self.history_model = Some(meta.model.clone());
+                }
+            }
+        }
+        session.turns = turns;
+        self.store.load(session);
+        cx.emit(RuntimeEvent::EntriesAppended);
+        cx.emit(SessionEvent::HistoryReady);
+        cx.emit(RuntimeEvent::HistoryChanged);
     }
 
     #[cfg(feature = "probe")]
@@ -2205,39 +2227,16 @@ impl SessionView {
     }
 }
 
-impl SessionRuntime {
-    /// The billing guard's banner, or `None` when the login's tier is fine.
-    ///
-    /// Pushed by the application, which owns the probe: the session view knows
-    /// only what to draw and what to refuse. Muse lanes only — a provider
-    /// session has no muse account behind it, so the banner never lands
-    /// there and never gates its send.
-    pub fn set_tier_banner(&mut self, banner: Option<TierBanner>, cx: &mut Context<Self>) {
-        // The billing tier is Muse's account: no other provider's session
-        // carries its banner or its guard, whichever lane it rides.
-        if !self.provider_kind().has(provider::ProviderTrait::BillingTier) {
-            return;
-        }
-        if self.tier_banner != banner {
-            self.tier_banner = banner;
-            cx.emit(RuntimeEvent::BannerChanged);
-        }
-    }
-}
-
 impl SessionView {
-    /// "Send anyway" on the pay-as-you-go banner: the person accepts the
-    /// bill for this run (the application keeps that, on
-    /// [`SessionEvent::TierOverride`]) and the message the guard held back
-    /// leaves now — pressing the button is the send, never a second Enter
-    /// (2026-10-17: the draft stayed in the composer). The guard is lifted
-    /// here first because the application's banner push lands only after
-    /// this update; it would otherwise refuse the very send it allows.
+    /// "Send anyway" on the billing hold: the person answers its question,
+    /// the mode it named becomes the expected one on this account
+    /// ([`baaz_core::billing::note_sent`]), and the message the hold kept
+    /// back leaves now — pressing the button is the send, never a second
+    /// Enter (2026-10-17: the draft stayed in the composer).
     pub(crate) fn send_anyway(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(banner) = self.runtime.as_mut(cx).tier_banner.as_mut() {
-            banner.blocking = false;
-        }
-        cx.emit(SessionEvent::TierOverride);
+        let id = self.runtime.read(cx).provider_kind();
+        baaz_core::billing::note_sent(id);
+        self.runtime.as_mut(cx).billing_hold = None;
         // A refused send restores its words on the next frame; a press
         // before that frame sends them from here rather than from an
         // empty composer.

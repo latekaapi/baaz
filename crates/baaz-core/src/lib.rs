@@ -11,6 +11,7 @@
 
 pub mod attachments;
 pub mod auth;
+pub mod billing;
 pub mod browser_prefs;
 pub mod byline;
 pub mod checkpoints;
@@ -51,6 +52,7 @@ pub mod skills;
 pub mod store;
 pub mod system_open;
 pub mod terminal_relay;
+pub mod transcripts;
 pub mod tier;
 pub mod titles;
 pub mod undo;

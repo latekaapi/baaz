@@ -641,10 +641,13 @@ impl CodexAdapter {
     /// replayed history and the next live turn share the fold, so the new
     /// turn appends after history with no echo suppression needed: the
     /// resumed child never re-emits a completed turn's items.
+    /// `metadata_only`: the host shows the transcript from its own store
+    /// (docs/85 11.1), so the resumed thread's turns are not folded or sent.
     fn resume_session(
         &self,
         session_id: &str,
         mode: Option<PermissionMode>,
+        metadata_only: bool,
     ) -> Result<Ack, ProviderError> {
         if self.child.lock().expect("child mutex").is_some() {
             return Err(ProviderError::Rejected {
@@ -686,7 +689,9 @@ impl CodexAdapter {
                     session_id: resumed_session.clone(),
                 },
             ));
-            deltas.extend(fold.apply_resume_turns(&thread_id, &turns));
+            if !metadata_only {
+                deltas.extend(fold.apply_resume_turns(&thread_id, &turns));
+            }
             deltas
         };
         *self.session_id.lock().expect("session mutex") = Some(resumed_session.clone());
@@ -1195,9 +1200,9 @@ impl ProviderAdapter for CodexAdapter {
                 *self.session_env.lock().expect("session env mutex") = env;
                 self.open_session(&request_id, workspace.as_deref(), model.as_deref(), mode)
             }
-            Command::ResumeSession { session_id, mode, env, .. } => {
+            Command::ResumeSession { session_id, mode, env, metadata_only, .. } => {
                 *self.session_env.lock().expect("session env mutex") = env;
-                self.resume_session(&session_id, mode)
+                self.resume_session(&session_id, mode, metadata_only)
             }
             Command::ForkSession { .. } => Err(ProviderError::Rejected {
                 reason: "thread/fork was never executed against a live server; not forked blind"

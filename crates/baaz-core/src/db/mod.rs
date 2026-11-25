@@ -34,8 +34,10 @@ use rusqlite::Connection;
 
 pub mod attachments;
 pub mod history;
+pub mod integrity;
 pub mod journals;
 pub mod json_import;
+pub mod listing;
 pub mod schema;
 pub mod sessions;
 pub mod turns;
@@ -240,6 +242,13 @@ pub fn read<R: Send + 'static>(path: PathBuf, work: impl FnOnce(&mut Opened) -> 
     answered.recv().ok().flatten()
 }
 
+/// A clean quit (docs/85 11.4): every queued job has run, so the open
+/// marker beside this run's database goes.
+pub fn mark_clean_exit() {
+    flush();
+    integrity::mark_clean_exit(&path());
+}
+
 /// Wait until every job queued before this one has run: the quit and
 /// window-close durability point, and what a test reads back after.
 pub fn flush() {
@@ -295,6 +304,15 @@ pub fn open_at(path: &Path) -> rusqlite::Result<Connection> {
             let _ = std::fs::create_dir_all(parent);
         }
     }
+    // docs/85 11.4: after an unclean exit the file is checked, and a
+    // damaged one comes back from its newest good backup. An in-memory
+    // database (`:memory:`) has no file to keep whole: no marker, no
+    // backups beside it.
+    let on_disk = path.as_os_str() != ":memory:" && !path.as_os_str().is_empty();
+    if on_disk && integrity::last_exit_unclean(path) {
+        integrity::repair_after_unclean_exit(path);
+    }
+    let fresh_file = !path.exists();
     let mut conn = Connection::open(path)?;
     let _ = conn.busy_timeout(BUSY_TIMEOUT);
     let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
@@ -303,9 +321,25 @@ pub fn open_at(path: &Path) -> rusqlite::Result<Connection> {
     // memory; the statement cache holds every statement the jobs reuse.
     conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY;")?;
     conn.set_prepared_statement_cache_capacity(64);
+    // A migration ahead: room on the disk, and a copy first (11.4).
+    let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if on_disk && !fresh_file && (1..schema::VERSION).contains(&version) {
+        if let Err(why) = integrity::before_migration(path, version, integrity::free_bytes(path)) {
+            return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL), Some(why)));
+        }
+    }
     schema::migrate(&mut conn)?;
     if let Some(state_dir) = path.parent() {
         json_import::run_once(&mut conn, state_dir)?;
+        // docs/85 11.2: the old list and index cache files, once.
+        if schema::meta(&conn, "list_files_imported")?.is_none() {
+            listing::import_old_files(&mut conn, state_dir)?;
+            schema::set_meta(&conn, "list_files_imported", "1")?;
+        }
+    }
+    if on_disk {
+        integrity::refresh_rolling_backup(&conn, path);
+        integrity::mark_open(path);
     }
     Ok(conn)
 }

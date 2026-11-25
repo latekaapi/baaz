@@ -155,13 +155,14 @@ pub struct SessionRuntime {
     /// old full-centre view hid the conversation and the composer). A
     /// restored connection or a finished turn takes it down.
     pub(super) child_failure: Option<ChildFailure>,
-    /// The billing guard's banner, and whether it is refusing turns.
-    pub(super) tier_banner: Option<TierBanner>,
-    /// A live Muse draft opened while Muse itself is still starting (it
-    /// starts on demand, docs/50 P1): the chip and the model menu say so
-    /// instead of reading "Muse" over an empty menu. Set by the
+    /// The billing hold over the composer: a send the rule kept back.
+    pub(super) billing_hold: Option<BillingHold>,
+    /// A live draft on a shared-child provider (`ProviderTrait::SharedChild`,
+    /// today Muse) opened while that child is still starting (it starts on
+    /// demand, docs/50 P1): the chip and the model menu say so instead of
+    /// reading the provider's name over an empty menu. Set by the
     /// application, which owns the connection.
-    pub(super) muse_starting: bool,
+    pub(super) shared_child_starting: bool,
     /// Answers gathered so far for a multi-question request, keyed by
     /// `userInputId` then `questionId`. MSP settles the whole prompt at once, so
     /// the app holds the earlier answers until the last question is answered.
@@ -449,8 +450,8 @@ impl SessionRuntime {
             lost_at: None,
             child_failure: None,
             banner_action: None,
-            tier_banner: None,
-            muse_starting: false,
+            billing_hold: None,
+            shared_child_starting: false,
             answers: HashMap::new(),
             question_started: HashMap::new(),
             retry_started: None,
