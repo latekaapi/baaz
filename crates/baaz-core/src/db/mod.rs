@@ -305,8 +305,11 @@ pub fn open_at(path: &Path) -> rusqlite::Result<Connection> {
         }
     }
     // docs/85 11.4: after an unclean exit the file is checked, and a
-    // damaged one comes back from its newest good backup.
-    if integrity::last_exit_unclean(path) {
+    // damaged one comes back from its newest good backup. An in-memory
+    // database (`:memory:`) has no file to keep whole: no marker, no
+    // backups beside it.
+    let on_disk = path.as_os_str() != ":memory:" && !path.as_os_str().is_empty();
+    if on_disk && integrity::last_exit_unclean(path) {
         integrity::repair_after_unclean_exit(path);
     }
     let fresh_file = !path.exists();
@@ -320,7 +323,7 @@ pub fn open_at(path: &Path) -> rusqlite::Result<Connection> {
     conn.set_prepared_statement_cache_capacity(64);
     // A migration ahead: room on the disk, and a copy first (11.4).
     let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if !fresh_file && (1..schema::VERSION).contains(&version) {
+    if on_disk && !fresh_file && (1..schema::VERSION).contains(&version) {
         if let Err(why) = integrity::before_migration(path, version, integrity::free_bytes(path)) {
             return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL), Some(why)));
         }
@@ -334,8 +337,10 @@ pub fn open_at(path: &Path) -> rusqlite::Result<Connection> {
             schema::set_meta(&conn, "list_files_imported", "1")?;
         }
     }
-    integrity::refresh_rolling_backup(&conn, path);
-    integrity::mark_open(path);
+    if on_disk {
+        integrity::refresh_rolling_backup(&conn, path);
+        integrity::mark_open(path);
+    }
     Ok(conn)
 }
 
