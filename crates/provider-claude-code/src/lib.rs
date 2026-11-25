@@ -1957,7 +1957,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                     self.launch_for_open(&request_id, workspace.as_deref(), model.as_deref())?;
                 self.spawn_launch(&argv::with_permission_mode(launch, mode))
             }
-            Command::ResumeSession { session_id, mode, env, .. } => {
+            Command::ResumeSession { session_id, mode, env, metadata_only, .. } => {
                 // The resumed lane's children carry the session's variables
                 // as an opened one's do (docs/82 6.2).
                 *self.session_env.lock().expect("session env mutex") = env;
@@ -1986,6 +1986,11 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 // (the emission below is the only history source — the
                 // child never repeats it). No file, no history: the lane
                 // opens empty and the next turn still appends.
+                // `metadata_only`: the host shows the transcript from its
+                // own store (docs/85 11.1) — nothing is folded or sent.
+                if metadata_only {
+                    return Ok(ack);
+                }
                 if let Ok((deltas, model)) = self.stored_history(&session_id) {
                     if let Some(model) = model {
                         *self.model.lock().expect("model mutex") = Some(model.clone());

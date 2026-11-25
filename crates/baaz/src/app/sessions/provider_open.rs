@@ -33,6 +33,10 @@ struct ProviderOpen {
     /// ([`provider::RefusalHint::HeldElsewhere`]): the lane still lands,
     /// read-only under the lease notice.
     lease_held: bool,
+    /// The session's history from Baaz's own transcript store, when it held
+    /// a fresh copy (docs/85 11.1): the view shows these, and the provider
+    /// resumed without sending history.
+    stored_turns: Option<Vec<aui_protocol::Turn>>,
 }
 
 /// The work of every fresh provider open: spawn the child through the
@@ -100,6 +104,7 @@ fn provider_open_work(
             title,
             epoch,
             lease_held: false,
+            stored_turns: None,
         }),
         other => Err(provider::ProviderError::Rejected {
             reason: format!("OpenSession answered {other:?} instead of a session"),
@@ -319,7 +324,7 @@ impl Harness {
     /// row, and the centre pane with the composer focused — so it becomes
     /// the visible session.
     fn finish_provider_open(&mut self, open: ProviderOpen, window: &mut Window, cx: &mut Context<Self>) {
-        let ProviderOpen { provider_id, mut provider, events, session_id, project, workspace, title, epoch, lease_held } =
+        let ProviderOpen { provider_id, mut provider, events, session_id, project, workspace, title, epoch, lease_held, stored_turns } =
             open;
         // Last ask wins: an earlier open finishing after a newer one was
         // asked for never steals focus or the send — its child is shut
@@ -383,9 +388,16 @@ impl Harness {
         // project-less session never starts in `/` (docs/82 0.9).
         crate::baaz_log!("provider lane workspace session={session_id} workspace={workspace}");
         self.record_provider_open(provider_id, &session_id, project, workspace, title, cx);
-        // A provider that pages its history (Muse) attached without it: an
-        // existing session's turns page in now.
-        if !fresh && provider_id.has(provider::ProviderTrait::PagesHistory) {
+        // Baaz's own store held the history (docs/85 11.1): it is shown at
+        // once, and nothing pages. Otherwise a provider that pages its
+        // history (Muse) attached without it: an existing session's turns
+        // page in now.
+        let from_store = stored_turns.is_some();
+        if let Some(turns) = stored_turns {
+            crate::baaz_log!("reopen from the transcript store: session={session_id} turns={}", turns.len());
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.load_stored_turns(turns, cx)));
+        }
+        if !fresh && !from_store && provider_id.has(provider::ProviderTrait::PagesHistory) {
             view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.backfill_lane(cx)));
         }
         // Another window holds the session: it still opens, read-only under
@@ -1014,6 +1026,7 @@ impl Harness {
         // The gate reads the registry off the UI thread: cloned up front
         // for the same reason.
         let registry = self.session_list.read(cx).provider_sessions.clone();
+        let muse_stamp = self.session_list.read(cx).index.get(&record.session_id).and_then(|entry| entry.updated_at_us);
         let mode = self.provider_open_mode(provider_id, Some(&workspace), stored_project.as_deref(), cx);
         let work = move || -> (Result<ProviderOpen, crate::app::OpenFailed>, usize) {
             // The consent gate, on the background executor: before the
@@ -1074,8 +1087,12 @@ impl Harness {
                     .as_deref()
                     .map(|folder| baaz_core::worktrees::env_for_folder(&state, std::path::Path::new(folder)))
                     .unwrap_or_default();
+                // Baaz's own store first (docs/85 11.1): a fresh copy is
+                // shown as it is and the provider resumes without history.
+                let stored_turns = crate::transcripts::kept_if_fresh(&state, &record.provider, &record.session_id, muse_stamp);
+                crate::log::trace_mark(if stored_turns.is_some() { "reopen from store" } else { "reopen from provider" });
                 let (session_id, lease_held) =
-                    match crate::provider_sessions::send_resume(&provider, &record, &provider::new_request_id(), Some(mode), env) {
+                    match crate::provider_sessions::send_resume(&provider, &record, &provider::new_request_id(), Some(mode), env, stored_turns.is_some()) {
                         Ok(session_id) => (session_id, false),
                         Err(error) if error.hint() == provider::RefusalHint::StaleHistory => {
                             crate::baaz_log!("resume of {} hit a stale history ({error}); paging anyway", record.session_id);
@@ -1106,6 +1123,7 @@ impl Harness {
                     title: stored_title.clone(),
                     epoch,
                     lease_held,
+                    stored_turns,
                 })
             })();
             (result, moved)
@@ -1316,6 +1334,7 @@ impl Harness {
                     title,
                     epoch,
                     lease_held: false,
+                    stored_turns: None,
                     // The fork groups under no project: it is a new session
                     // the sidebar names when its first turn lands.
                 }),

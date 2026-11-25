@@ -355,11 +355,15 @@ pub fn clear_handoff(overrides: &mut Overrides, source: &str, dest: &str) {
 /// which an agent that re-opens a session only in its folder needs; `env`
 /// is what its child is started with (a worktree session's variables,
 /// docs/82 6.2).
+///
+/// `from_store`: Baaz's own transcript store holds a fresh copy of the
+/// session (docs/85 11.1), so the provider sends no history either.
 pub fn resume_command(
     record: &ProviderSessionRecord,
     request_id: &str,
     mode: Option<aui_protocol::PermissionMode>,
     env: Vec<(String, String)>,
+    from_store: bool,
 ) -> provider::Command {
     // A provider that pages its history (Muse) re-attaches without it —
     // the view pages it in after the ack — and starts in the host's
@@ -370,7 +374,7 @@ pub fn resume_command(
         request_id: request_id.to_owned(),
         session_id: record.session_id.clone(),
         cursor: None,
-        metadata_only: pages,
+        metadata_only: pages || from_store,
         mode,
         workspace: record.workspace.clone(),
         env,
@@ -387,8 +391,9 @@ pub fn send_resume(
     request_id: &str,
     mode: Option<aui_protocol::PermissionMode>,
     env: Vec<(String, String)>,
+    from_store: bool,
 ) -> Result<String, provider::ProviderError> {
-    match provider.send(resume_command(record, request_id, mode, env))? {
+    match provider.send(resume_command(record, request_id, mode, env, from_store))? {
         provider::Ack::Session { session_id, .. } => Ok(session_id),
         other => Err(provider::ProviderError::Rejected {
             reason: format!("ResumeSession answered {other:?} instead of a session"),
@@ -396,11 +401,6 @@ pub fn send_resume(
     }
 }
 
-/// The ledger row one settled provider turn writes: the same
-/// [`crate::usage::row_from_finished`] a muse turn writes, tagged with the
-/// serving provider. The `(session_id, turn_id)` key deduplicates replay:
-/// reopening replays the same finished turns and the second write is a
-/// no-op, so history never double-counts.
 /// Whether `turn` is a compaction (docs/85 10.4): an assistant turn whose
 /// only rows are "Context compacted" markers — what `/compact` folds to on
 /// every provider. Not a person's turn: it is ledgered (as a compaction)
@@ -417,6 +417,11 @@ pub fn is_compaction_turn(turn: &aui_protocol::Turn) -> bool {
     }
 }
 
+/// The ledger row one settled provider turn writes: the same
+/// [`crate::usage::row_from_finished`] a muse turn writes, tagged with the
+/// serving provider. The `(session_id, turn_id)` key deduplicates replay:
+/// reopening replays the same finished turns and the second write is a
+/// no-op, so history never double-counts.
 pub fn ledger_row(
     session_id: &str,
     provider: &str,
@@ -755,7 +760,7 @@ mod tests {
         upsert_open(&mut store, &mut Overrides::new(), "codex", "s-old", Some("/w".into()), None, None);
         let (adapter, commands) = RecordingAdapter::new();
         let provider = provider::Provider::new(adapter);
-        let resumed = send_resume(&provider, &store["s-old"], "r-1", None, Vec::new()).expect("resume lands");
+        let resumed = send_resume(&provider, &store["s-old"], "r-1", None, Vec::new(), false).expect("resume lands");
         assert_eq!(resumed, "s-old");
         let sent = commands.lock().expect("commands").clone();
         assert_eq!(sent.len(), 1, "exactly one command leaves the lane, drew {sent:?}");
@@ -773,7 +778,7 @@ mod tests {
     fn resume_command_names_the_session_and_asks_for_the_transcript() {
         let mut store = ProviderSessionStore::new();
         upsert_open(&mut store, &mut Overrides::new(), "codex", "s-old", Some("/w".into()), None, None);
-        match resume_command(&store["s-old"], "r-1", Some(aui_protocol::PermissionMode::AllowAll), Vec::new()) {
+        match resume_command(&store["s-old"], "r-1", Some(aui_protocol::PermissionMode::AllowAll), Vec::new(), false) {
             provider::Command::ResumeSession { session_id, cursor, metadata_only, mode, .. } => {
                 assert_eq!(session_id, "s-old");
                 assert_eq!(mode, Some(aui_protocol::PermissionMode::AllowAll), "the mode rides along");
@@ -834,6 +839,6 @@ mod tests {
         let mut store = ProviderSessionStore::new();
         upsert_open(&mut store, &mut Overrides::new(), "codex", "s-old", None, None, None);
         let provider = provider::Provider::new(Refusing);
-        assert!(send_resume(&provider, &store["s-old"], "r-1", None, Vec::new()).is_err());
+        assert!(send_resume(&provider, &store["s-old"], "r-1", None, Vec::new(), false).is_err());
     }
 }

@@ -1,5 +1,5 @@
 {
-  "about": "docs/51 step M. Budgets per build profile; `measured` is the median on the reference machine (the owner's MacBook, 2026-10-17, debug build, window behind other apps). Budgets carry headroom for run-to-run noise and catch order-of-magnitude regressions; where docs/51 sets a target (switch one frame, stream ≤ 1 frame, open < 50 ms, idle < 0.5 % and 0 renders) the budget IS the target. Raise a budget only in its own commit, with the reason. 16 Nov 2026 (gpui-pre 0.3.12): on macOS 14+ gpui paces frames with CAMetalDisplayLink, so an event reaches the screen on the next display frame — stream.to_render_* now measure one to two frames (16.7 ms each at 60 Hz). Their budgets are the frame-paced bound: p50 20 ms (one frame), p99 and long_1000 p99 40 ms (two frames).",
+  "about": "docs/51 step M. Budgets per build profile; `measured` is the median on the reference machine (the owner's MacBook, 2026-10-17, debug build, window behind other apps). Budgets carry headroom for run-to-run noise and catch order-of-magnitude regressions; where docs/51 sets a target (switch one frame, stream \u2264 1 frame, open < 50 ms, idle < 0.5 % and 0 renders) the budget IS the target. Raise a budget only in its own commit, with the reason. 16 Nov 2026 (gpui-pre 0.3.12): on macOS 14+ gpui paces frames with CAMetalDisplayLink, so an event reaches the screen on the next display frame \u2014 stream.to_render_* now measure one to two frames (16.7 ms each at 60 Hz). Their budgets are the frame-paced bound: p50 20 ms (one frame), p99 and long_1000 p99 40 ms (two frames).",
   "profiles": {
     "debug": {
       "budgets": {
@@ -117,6 +117,10 @@
           "budget": 400,
           "measured": 95,
           "unit": "us"
+        },
+        "store.transcript_reopen_1000_ms": {
+          "budget": 50,
+          "measured": null
         }
       }
     },
@@ -236,6 +240,10 @@
           "budget": 400,
           "measured": 86,
           "unit": "us"
+        },
+        "store.transcript_reopen_1000_ms": {
+          "budget": 50,
+          "measured": null
         }
       }
     }

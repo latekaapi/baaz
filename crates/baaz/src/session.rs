@@ -1878,6 +1878,35 @@ impl SessionRuntime {
         self.last_tick_secs = None;
     }
 
+    /// The session's history from Baaz's own transcript store (docs/85
+    /// 11.1): what a reopen shows when the store holds a fresh copy, in place
+    /// of the provider re-reading and re-folding its files. The turns are
+    /// history — finished, modelled from their own footers — and the tail
+    /// pins as after a paged-in history.
+    pub(crate) fn load_stored_turns(&mut self, turns: Vec<aui_protocol::Turn>, cx: &mut Context<Self>) {
+        let mut session = self.store.session().cloned().unwrap_or_else(|| {
+            aui_protocol::Session::new(
+                self.session_id.clone(),
+                baaz_core::handoff::wire_provider(self.provider_kind()),
+                "",
+                "",
+            )
+        });
+        for turn in &turns {
+            if let aui_protocol::Turn::Assistant { id, meta, .. } = turn {
+                self.completed_turns.insert(id.clone());
+                if crate::providers::claude_code_is_model_id(&meta.model) || (!meta.model.is_empty() && self.provider_kind() != ProviderId::ClaudeCode) {
+                    self.history_model = Some(meta.model.clone());
+                }
+            }
+        }
+        session.turns = turns;
+        self.store.load(session);
+        cx.emit(RuntimeEvent::EntriesAppended);
+        cx.emit(SessionEvent::HistoryReady);
+        cx.emit(RuntimeEvent::HistoryChanged);
+    }
+
     #[cfg(feature = "probe")]
     /// Load a canned transcript into a read-only view (the
     /// `browser-chat-fixture` step: the agent card and line with no turn).

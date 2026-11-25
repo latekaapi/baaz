@@ -216,6 +216,17 @@ pub fn run(dir: &Path) -> serde_json::Value {
     let at = Instant::now();
     let hits = crate::search::query_sessions(&connection, "freshword", crate::search::LIMIT);
     put("search_query_ms", ms(at));
+
+    // Baaz's own transcript store (docs/85 11.1): a reopen of a 1,000-turn
+    // session reads its folded turns from `transcript.db` instead of the
+    // provider re-folding its files.
+    let long: Vec<aui_protocol::Turn> = (0..1000).map(crate::transcripts::synthetic_turn).collect();
+    let mut transcripts = crate::transcripts::open_at(&dir.join("transcript.db")).expect("transcript store");
+    crate::transcripts::write_from(&mut transcripts, "claude-code", "perf-long", "1:1", &long, 0).expect("write");
+    let at = Instant::now();
+    let read = crate::transcripts::read(&transcripts, "claude-code", "perf-long").expect("read").expect("kept");
+    put("transcript_reopen_1000_ms", ms(at));
+    assert_eq!(read.len(), 1000, "every turn comes back");
     assert!(hits.iter().any(|hit| hit.session_id == session_id(SESSIONS / 2)), "the bumped row is findable");
 
     // Claude Code and Codex transcripts read for search (docs/50 P3): the
