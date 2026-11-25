@@ -325,6 +325,30 @@ pub fn over_budget(task: &Task, now: i64) -> Option<String> {
     (minutes >= i64::from(task.budget.minutes)).then(|| format!("ran {minutes} minutes of its {}", task.budget.minutes))
 }
 
+/// Where a task's worker works (docs/85 14.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// A writer's own new worktree, to be made.
+    NewWorktree,
+    /// An existing folder: a writer's worktree made already, a reviewer's
+    /// writer's worktree, or the project root.
+    Folder(String),
+}
+
+/// A writer works in a worktree of its own; a reviewer or helper reads
+/// the worktree of the writer it follows (its first `after` writer that has
+/// one), else the project root.
+pub fn place_for(task: &Task, all: &[Task], root: &str) -> Place {
+    if let Some(own) = &task.worktree {
+        return Place::Folder(own.clone());
+    }
+    if task.role.writes() {
+        return Place::NewWorktree;
+    }
+    let followed = task.after.iter().filter_map(|id| all.iter().find(|t| &t.id == id)).find(|t| t.role.writes() && t.worktree.is_some());
+    Place::Folder(followed.and_then(|t| t.worktree.clone()).unwrap_or_else(|| root.to_owned()))
+}
+
 /// What the worker is told: the task, its inputs, its frozen criteria and
 /// how to finish (rule 20: it never says who it is; Baaz knows).
 pub fn worker_prompt(task: &Task) -> String {
@@ -569,6 +593,22 @@ mod tests {
         assert!(over_budget(&t, 60 * 60_000).unwrap().contains("60 minutes"));
         t.used_tokens = 2_000_000;
         assert!(over_budget(&t, 0).unwrap().contains("tokens"));
+    }
+
+    /// docs/85 14.3: roles decide where a worker works.
+    #[test]
+    fn writers_get_a_worktree_and_reviewers_read_the_writers() {
+        let mut writer = sample("w", Status::Passed);
+        let fresh = sample("w2", Status::Queued);
+        assert_eq!(place_for(&fresh, &[], "/repo"), Place::NewWorktree);
+        writer.worktree = Some("/state/worktrees/repo/w".into());
+        assert_eq!(place_for(&writer, &[], "/repo"), Place::Folder("/state/worktrees/repo/w".into()), "a made worktree is kept on a retry");
+        let mut reviewer = sample("r", Status::Queued);
+        reviewer.role = Role::Reviewer;
+        reviewer.after = vec!["w".into()];
+        assert_eq!(place_for(&reviewer, &[writer.clone()], "/repo"), Place::Folder("/state/worktrees/repo/w".into()));
+        reviewer.after.clear();
+        assert_eq!(place_for(&reviewer, &[writer], "/repo"), Place::Folder("/repo".into()), "no writer followed: the root, read-only");
     }
 
     #[test]

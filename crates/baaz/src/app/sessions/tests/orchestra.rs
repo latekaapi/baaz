@@ -92,3 +92,48 @@ fn a_delegate_starts_its_worker_in_the_background_and_the_limits_refuse_by_code(
     assert_eq!(out["result"]["tasks"][0]["status"], "stopped");
     cleanup(&root, state);
 }
+
+/// docs/85 14.3: a writer works in a worktree of its own (a branch off the
+/// project, under Baaz's state dir), and a reviewer that follows it reads
+/// that worktree in Read-only, whatever the lead's mode.
+#[gpui::test]
+fn a_writer_gets_its_own_worktree_and_its_reviewer_reads_it_read_only(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("orchestra-roles");
+    let root = folder(&state.2, true);
+    let (factory, _) = recording_factory_numbered(true);
+    let (baaz, vc, lead) = session_with(cx, &root, factory);
+    let out = reply(&pane_call(&baaz, vc, &lead, &root, "delegate", serde_json::json!({"task": "write it", "provider": "codex"})));
+    let writer_task = out["result"]["task"].as_str().unwrap().to_owned();
+    vc.run_until_parked();
+    let workspace_of = |vc: &mut gpui::VisualTestContext, task: &str| -> (String, aui_protocol::PermissionMode) {
+        vc.update(|_, cx| {
+            let h = baaz.read(cx);
+            let worker = h.registry.orchestra.workers.iter().find(|(_, t)| t.as_str() == task).map(|(w, _)| w.clone()).expect("a worker");
+            let rt = h.registry.find_runtime(h.active.as_ref(), &worker, cx).expect("live");
+            let rt = rt.read(cx);
+            (rt.workspace_path().to_owned(), rt.mode())
+        })
+    };
+    let (folder_w, _) = workspace_of(vc, &writer_task);
+    assert_ne!(folder_w, root.to_string_lossy(), "a writer never works in the project root");
+    assert!(crate::app::Harness::in_worktree(&folder_w), "{folder_w} is one of Baaz's worktrees");
+    let branch = super::checkpoints::git(std::path::Path::new(&folder_w), &["rev-parse", "--abbrev-ref", "HEAD"]);
+    assert!(branch.contains("task-"), "its own branch: {branch}");
+    // Mark the writer passed so its reviewer may follow it.
+    let id = writer_task.clone();
+    crate::db::call(crate::db::path(), move |db| {
+        let mut t = crate::db::tasks::load(&db.conn, &id).unwrap().unwrap();
+        t.status = baaz_core::tasks::Status::Passed;
+        crate::db::tasks::save(&mut db.conn, &t).unwrap();
+    });
+    let out = reply(&pane_call(&baaz, vc, &lead, &root, "delegate", serde_json::json!({"task": "review it", "provider": "codex", "role": "reviewer", "after": [writer_task]})));
+    let reviewer_task = out["result"]["task"].as_str().unwrap().to_owned();
+    vc.run_until_parked();
+    let (folder_r, mode_r) = workspace_of(vc, &reviewer_task);
+    assert_eq!(folder_r, folder_w, "the reviewer reads the writer's worktree");
+    assert_eq!(mode_r, aui_protocol::PermissionMode::DenyUnmatched, "and only reads");
+    // A provider with no Read-only mode cannot review.
+    let out = reply(&pane_call(&baaz, vc, &lead, &root, "delegate", serde_json::json!({"task": "review", "provider": "acp", "role": "reviewer"})));
+    assert!(error_text(&out).starts_with("[provider_unavailable]"), "{out}");
+    cleanup(&root, state);
+}

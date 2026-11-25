@@ -156,3 +156,17 @@ pub fn reconcile(client: &MuseClient, session: &Session) -> Result<(), String> {
         )
     })
 }
+
+#[cfg(test)]
+mod reviewer_tests {
+    use super::*;
+
+    /// docs/85 14.3: a reviewer's Read-only is Muse's own: the deny-unmatched
+    /// approval mode with the `:read-only` sandbox profile, on the open and
+    /// on a re-selection.
+    #[test]
+    fn read_only_is_the_native_deny_mode_and_read_only_profile() {
+        assert_eq!(wire_mode(PermissionMode::DenyUnmatched), ApprovalMode::DenyUnmatched);
+        assert_eq!(profile_resume_params("s-1", PermissionMode::DenyUnmatched).permission_profile.as_deref(), Some(":read-only"));
+    }
+}

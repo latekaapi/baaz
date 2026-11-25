@@ -343,6 +343,8 @@ impl Harness {
         };
         let view = cx.new(|cx| SessionView::new_on_provider(session_id.clone(), provider, events, host, window, cx));
         crate::baaz_log!("worker lane open provider={} session={session_id} workspace={workspace}", provider_id.as_str());
+        // A writer's worktree is tied to its worker here too (the record
+        // links it, as for any session).
         self.record_provider_open(provider_id, &session_id, project, workspace, title, cx);
         if let Some(model) = model.filter(|m| !m.is_empty()) {
             view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model(&model, cx)));

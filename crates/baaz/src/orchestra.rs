@@ -20,6 +20,7 @@ use gpui::{AppContext as _, Context};
 use serde_json::{json, Value};
 
 use crate::app::Harness;
+use crate::layout::LayoutGlobal as _;
 use crate::terminal::service::PaneCall;
 
 /// The orchestration tools the harness answers (lead, then worker).
@@ -170,6 +171,11 @@ impl Harness {
         let Some(provider_id) = crate::providers::ProviderId::parse_known(&provider) else {
             return call.answer(Err(refuse(Refusal::new(Code::BadArgument, format!("unknown provider `{provider}` (agents_available lists them)")))));
         };
+        // A reviewer or helper must run Read-only; a provider with no
+        // Read-only mode (ACP) cannot hold it (rule 13).
+        if !role.writes() && !provider_id.descriptor().modes.iter().any(|m| m.id == aui_protocol::PermissionMode::DenyUnmatched) {
+            return call.answer(Err(refuse(Refusal::new(Code::ProviderUnavailable, format!("{} has no Read-only mode, so it cannot review; pick another provider", provider_id.label())))));
+        }
         let Some(lead) = self.registry.find_runtime(self.active.as_ref(), &call.session, cx) else {
             return call.answer(Err(refuse(Refusal::new(Code::NotFound, "this session is not open in Baaz"))));
         };
@@ -254,16 +260,67 @@ impl Harness {
         .detach();
     }
 
-    /// Carry out a task's start: open its worker in the background, send
-    /// it the task, mark it running.
+    /// Carry out a task's start (docs/85 14.2, 14.3): place its worker —
+    /// a writer in a worktree of its own (made off the UI thread), a reviewer
+    /// in the writer's — then open it in the background, send it the task,
+    /// mark it running.
     pub(crate) fn start_worker(&mut self, task: Task, mode: aui_protocol::PermissionMode, root: String, cx: &mut Context<Self>) {
         let Some(provider_id) = crate::providers::ProviderId::parse_known(&task.provider) else { return };
-        let workspace = task.worktree.clone().unwrap_or(root);
-        let project = self.session_list.read(cx).projects.resolve(Some(&workspace), None).map(|p| p.id.clone());
+        let project = self.session_list.read(cx).projects.resolve(Some(&root), None).map(|p| p.id.clone());
+        let prefix = crate::layout::Layout::get(cx).worktree_branch_prefix();
+        let isolated = crate::runtime::state_isolated();
         let model = task.model.clone();
-        self.run_on_main(cx, move |this, window, cx| {
-            this.open_worker(provider_id, model, mode, project, workspace, move |this, opened, cx| this.worker_opened(task, opened, cx), window, cx);
-        });
+        cx.spawn(async move |this, cx| {
+            let (project_bg, root_bg) = (project.clone(), root.clone());
+            let placed = cx
+                .background_spawn(async move {
+                    let all = with_db(|conn| crate::db::tasks::load_all(conn).unwrap_or_default()).unwrap_or_default();
+                    let mut task = task;
+                    match core::place_for(&task, &all, &root_bg) {
+                        core::Place::Folder(folder) => (task, folder, None),
+                        core::Place::NewWorktree if isolated || !baaz_core::worktrees::in_git_repository(std::path::Path::new(&root_bg)) => {
+                            // No git (or a capture): the writer shares the
+                            // root, and its verdict will say so.
+                            crate::baaz_log!("orchestra: {} works in the root (no worktree here)", task.id);
+                            (task, root_bg, None)
+                        }
+                        core::Place::NewWorktree => {
+                            let short: String = task.id.trim_start_matches("task-").chars().take(8).collect();
+                            let made = baaz_core::worktrees::create(&baaz_core::worktrees::CreateSpec {
+                                state_dir: &crate::store::support_dir(),
+                                project_root: std::path::Path::new(&root_bg),
+                                project_id: project_bg.as_deref(),
+                                branch_prefix: &prefix,
+                                name: Some(&format!("task-{short}")),
+                            });
+                            match made {
+                                Ok(worktree) => {
+                                    let folder = worktree.path.to_string_lossy().into_owned();
+                                    task.worktree = Some(folder.clone());
+                                    let saved = task.clone();
+                                    with_db(move |conn| crate::db::tasks::save(conn, &saved));
+                                    (task, folder, Some(worktree))
+                                }
+                                Err(why) => {
+                                    crate::baaz_log!("orchestra: no worktree for {} ({why}); it works in the root", task.id);
+                                    (task, root_bg, None)
+                                }
+                            }
+                        }
+                    }
+                })
+                .await;
+            let (task, workspace, worktree) = placed;
+            let _ = this.update(cx, move |this, cx| {
+                if let Some(worktree) = worktree {
+                    this.run_worktree_setup_for(worktree, cx);
+                }
+                this.run_on_main(cx, move |this, window, cx| {
+                    this.open_worker(provider_id, model, mode, project, workspace, move |this, opened, cx| this.worker_opened(task, opened, cx), window, cx);
+                });
+            });
+        })
+        .detach();
     }
 
     fn worker_opened(&mut self, mut task: Task, opened: Result<String, String>, cx: &mut Context<Self>) {
