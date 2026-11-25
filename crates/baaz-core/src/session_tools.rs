@@ -221,6 +221,27 @@ pub fn read(turns: &[aui_protocol::Turn], query: Option<&str>) -> String {
     out
 }
 
+/// A read-only Markdown copy of a session for the right pane's preview
+/// (a found session's "Open"): its title and every turn as text,
+/// scrubbed, capped at 64 KB.
+pub fn preview_markdown(found: &Found, turns: &[aui_protocol::Turn]) -> String {
+    let mut out = format!("# {}
+
+{} · {} · {}
+
+", found.title, found.provider, found.project, found.date);
+    for (index, turn) in turns.iter().enumerate() {
+        let text = turn_text(turn);
+        let (who, rest) = text.split_once(':').unwrap_or(("", &text));
+        out.push_str(&format!("**{} {}** {}\n\n", index + 1, who, rest.trim()));
+        if out.len() > 64 * 1024 {
+            out.push_str("… (the rest is in the session)\n");
+            break;
+        }
+    }
+    crate::scrub::scrub(&out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

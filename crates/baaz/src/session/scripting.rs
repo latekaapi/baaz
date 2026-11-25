@@ -61,6 +61,43 @@ impl SessionRuntime {
         }
     }
 
+    /// `memory-rows` (probe): a settled turn whose agent found two past
+    /// sessions, saved a note and removed one (docs/85 12.3), loaded into
+    /// this session as its history — the rows those three outcomes draw.
+    pub(crate) fn step_memory_rows(&mut self, cx: &mut Context<Self>) -> StepResult {
+        use aui_protocol::{Block, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta};
+        let call = |id: &str, tool: &str, result: serde_json::Value| Block::ToolCall {
+            id: id.into(),
+            kind: ToolKind::Mcp { server: "baaz".into(), tool: tool.into() },
+            verb: format!("baaz \u{b7} {tool}"),
+            target: String::new(),
+            status: ToolStatus::Success,
+            duration_ms: Some(40),
+            body: ToolBody::Mcp { params: Vec::new(), result_json: result.to_string() },
+            diff_stat: None,
+        };
+        let found = serde_json::json!({"scope": "project", "results": [
+            {"session": "s-old", "title": "GB postcode validation", "provider": "claude-code", "project": "shop", "date": "2026-11-20", "snippet": "…", "preview": "/tmp/session-previews/s-old.md"},
+            {"session": "s-older", "title": "Checkout address form", "provider": "codex", "project": "shop", "date": "2026-11-12", "snippet": "…", "preview": "/tmp/session-previews/s-older.md"},
+        ]});
+        let turns = vec![
+            Turn::User { id: "u-mem".into(), text: "How did we decide to validate GB postcodes? Remember it for next time, and forget the old note about stripping spaces.".into(), attachments: Vec::new(), mentions: Vec::new(), timestamp: None },
+            Turn::Assistant {
+                id: "a-mem".into(),
+                blocks: vec![
+                    call("c1", "session_search", found),
+                    call("c2", "memory_save", serde_json::json!({"saved": "GB postcode rule", "scope": "project memory", "path": "/tmp/claude-memory/shop/gb-postcode-rule.md"})),
+                    call("c3", "memory_edit", serde_json::json!({"removed": "Strip postcode spaces", "scope": "project memory", "path": "/tmp/claude-memory/shop/strip-postcode-spaces.md"})),
+                    Block::Text { text: "GB postcodes are checked with the official regex and spaces are never stripped — the payments API rejects them. I saved that as a project note and removed the old one.".into(), streaming: false },
+                ],
+                meta: TurnMeta::default(),
+                timestamp: None,
+            },
+        ];
+        self.load_stored_turns(turns, cx);
+        Ok(())
+    }
+
     /// `send-held:<text>`: a send the billing rule must hold (docs/85
     /// 11.6). `Err` when it left, or was held for anything else.
     pub(crate) fn step_send_held(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {

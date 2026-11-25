@@ -160,6 +160,10 @@ pub fn edit(dir: &Path, name: &str, change: &Change) -> Result<String, String> {
     let path = dir.join(&file);
     let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut note = parse(&text, &file);
+    // The title the person saw is the index's.
+    if let Some((title, _, _)) = list(dir).into_iter().find(|(_, listed, _)| *listed == file) {
+        note.title = title;
+    }
     if change.delete {
         std::fs::remove_file(&path).map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
         set_index_line(dir, &file, None)?;
@@ -278,7 +282,7 @@ mod tests {
         save(&dir, &Note { body: "CA, GB and NL branch.".into(), ..note("Postcode rules") }).expect("replaced");
         assert_eq!(list(&dir).len(), 1, "the same title replaces, never duplicates");
         let title = edit(&dir, "postcode-rules", &Change { body: Some("Only CA now.".into()), ..Change::default() }).unwrap();
-        assert_eq!(title, "postcode-rules");
+        assert_eq!(title, "Postcode rules", "the index's title, not the file's");
         assert!(std::fs::read_to_string(&path).unwrap().contains("Only CA now."));
         edit(&dir, "Postcode rules", &Change { delete: true, ..Change::default() }).expect("forgotten");
         assert!(!path.exists() && list(&dir).is_empty(), "forget removes the note and its line");

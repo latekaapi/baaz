@@ -996,6 +996,11 @@ def _billing_entry(steps):
 
 
 ENTRIES.update({
+    # docs/85 12.3: found sessions, a saved note, a removed one — the rows
+    # stay out of the settled turn's fold.
+    "memory-rows": {"shot": ["--no-connect", "--login", "signed-in",
+                             "--steps", f"project:{_NEW_ROW_REPO};new;setprovider:claude-code;wait:300;memory-rows;wait:300"],
+                    "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-memory-state-")}},
     "billing-chip": _billing_entry(""),
     "billing-hold": _billing_entry(";billing-last:claude-code:subscription;send-held:Ship the fix;wait:200"),
 })

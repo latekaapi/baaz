@@ -39,6 +39,7 @@
 //! | `draft:<text>` | put text in the composer |
 //! | `send:<text>` | send a turn — **costs a turn** |
 //! | `steer:<text>` | steer the running turn — **costs a turn** |
+//! | `memory-rows` | a settled turn with the session/memory tools' three outcome rows (docs/85 12.3) |
 //! | `send-held:<text>` | a send the billing rule must hold (docs/85 11.6); fails when it left |
 //! | `send-anyway` | the billing hold's "Send anyway": sends what the hold kept back — **costs a turn** |
 //! | `billing-last:<provider>:<mode>` | the last send on that provider's account was in `mode` (`subscription`, `perToken`) |
@@ -1136,6 +1137,7 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "transcript-find-next", run: |v, _, _, cx| if v.find_step(true, cx) { Ok(()) } else { Err("transcript-find-next: no bar or no match".into()) } },
     SessionVerb { verb: "transcript-find-prev", run: |v, _, _, cx| if v.find_step(false, cx) { Ok(()) } else { Err("transcript-find-prev: no bar or no match".into()) } },
     SessionVerb { verb: "transcript-find-close", run: |v, _, window, cx| if v.close_find(window, cx) { Ok(()) } else { Err("transcript-find-close: no bar open".into()) } },
+    SessionVerb { verb: "memory-rows", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_memory_rows(cx)) },
     SessionVerb { verb: "send-held", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_send_held(rest, cx)) },
     SessionVerb { verb: "send", run: |v, rest, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_send(rest, cx)) },
     // The billing hold's "Send anyway", as a verb: sends what the hold

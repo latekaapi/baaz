@@ -803,6 +803,14 @@ fn call_failed(call: &ToolCall) -> bool {
     matches!(call.status, ToolStatus::Error | ToolStatus::Cancelled)
 }
 
+/// docs/85 12.3: a memory note saved or removed, or past sessions found,
+/// is an outcome the person should see: its row stays out of the fold.
+fn memory_outcome(call: &ToolCall) -> bool {
+    let ToolKind::Mcp { tool, .. } = &call.kind else { return false };
+    let tool = tool.rsplit("__").next().unwrap_or(tool);
+    call.status == ToolStatus::Success && matches!(tool, "memory_save" | "memory_edit" | "session_search")
+}
+
 /// B12fix: an empty Thinking block takes no row at all — live or
 /// settled, folded or open. The folds already refuse to mint one (a
 /// redacted trace is signature without utterance); this is the
@@ -907,7 +915,7 @@ pub fn fold_plan(turn: &Turn) -> Option<FoldPlan> {
                 if covered.contains(&index) {
                     continue;
                 }
-                if call_failed(&call) && !recovered_failure(blocks, index, &call) {
+                if (call_failed(&call) && !recovered_failure(blocks, index, &call)) || memory_outcome(&call) {
                     plan.visible.push(index);
                 } else {
                     plan.folded.push(index);
@@ -989,6 +997,7 @@ fn blocks_fingerprint(blocks: &[Block]) -> u64 {
                 0u8.hash(&mut hasher);
                 tool_identity(&call).hash(&mut hasher);
                 (call_failed(&call) as u8).hash(&mut hasher);
+                (memory_outcome(&call) as u8).hash(&mut hasher);
             }
             Block::ToolGroup { calls, .. } => {
                 1u8.hash(&mut hasher);
@@ -2450,7 +2459,78 @@ fn output_range(span: &MessageSelection) -> Option<std::ops::Range<usize>> {
     (span.anchor.cell == span.focus.cell).then(|| span.anchor.offset.min(span.focus.offset)..span.anchor.offset.max(span.focus.offset))
 }
 
+/// A Baaz session or memory tool's answer as one quiet row (docs/85 12.3)
+/// instead of a tool card: "Saved to project memory · <title>" opening the
+/// note, "Removed from project memory · <title>", and one row per found
+/// session whose Open shows a read-only copy in the right pane. Any other
+/// call, a failed one, or an answer that does not parse stays a card.
+fn memory_tool_row(id: &ElementId, call: &ToolCall, folds: &Folds) -> Option<AnyElement> {
+    let (ToolKind::Mcp { tool, .. }, ToolBody::Mcp { result_json, .. }) = (&call.kind, &call.body) else { return None };
+    let tool = tool.rsplit("__").next().unwrap_or(tool);
+    if call.status != ToolStatus::Success || !matches!(tool, "memory_save" | "memory_edit" | "session_search") {
+        return None;
+    }
+    let answer = memory_answer(result_json)?;
+    let field = |key: &str| answer.get(key).and_then(serde_json::Value::as_str).map(str::to_owned);
+    let open = |path: String| {
+        let link = folds.link.clone();
+        move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+            if let Some(link) = &link {
+                link(LinkTarget::Path(path.clone()), window, cx);
+            }
+        }
+    };
+    let scope = field("scope").unwrap_or_else(|| "project memory".to_owned());
+    match tool {
+        "memory_save" => {
+            let (title, path) = (field("saved")?, field("path")?);
+            Some(marker_row(id.clone()).glyph(IconName::File, None).text(format!("Saved to {scope} \u{b7} ")).link(title, open(path)).into_any_element())
+        }
+        "memory_edit" => {
+            if let Some(title) = field("removed") {
+                return Some(marker_row(id.clone()).glyph(IconName::File, None).text(format!("Removed from {scope} \u{b7} ")).strong(title).into_any_element());
+            }
+            let (title, path) = (field("changed")?, field("path")?);
+            Some(marker_row(id.clone()).glyph(IconName::File, None).text(format!("Updated in {scope} \u{b7} ")).link(title, open(path)).into_any_element())
+        }
+        _ => {
+            let results = answer.get("results")?.as_array()?;
+            if results.is_empty() {
+                return Some(marker_row(id.clone()).glyph(IconName::Search, None).text("No past session matched").into_any_element());
+            }
+            let rows = results.iter().enumerate().map(|(index, result)| {
+                let text = |key: &str| result.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+                let label = crate::providers::ProviderId::parse_known(&text("provider")).map_or_else(|| text("provider"), |id| id.label().to_owned());
+                let mut row = marker_row(ElementId::Name(format!("{id:?}-found-{index}").into()))
+                    .glyph(IconName::Search, None)
+                    .text("Found \u{b7} ")
+                    .strong(text("title"))
+                    .text(format!(" \u{b7} {label} \u{b7} {}", text("date")));
+                if let Some(preview) = result.get("preview").and_then(serde_json::Value::as_str) {
+                    row = row.text("  ").link("Open", open(preview.to_owned()));
+                }
+                row.into_any_element()
+            });
+            Some(v_flex().w_full().children(rows).into_any_element())
+        }
+    }
+}
+
+/// A bridge tool's answer as JSON: the result object itself, or the text
+/// of an MCP content block holding it.
+fn memory_answer(result_json: &str) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(result_json.trim()).ok()?;
+    if value.is_object() && value.get("content").is_none() {
+        return Some(value);
+    }
+    let text = value.pointer("/content/0/text").or_else(|| value.pointer("/0/text"))?.as_str()?;
+    serde_json::from_str(text).ok()
+}
+
 fn tool_call_card(key: &str, turn_id: &str, id: ElementId, call: &ToolCall, folds: &Folds) -> AnyElement {
+    if let Some(row) = memory_tool_row(&id, call, folds) {
+        return row;
+    }
     let block_id = call.id.clone();
     let full = folds.full_output.get(&block_id);
     let mut body = call.body.clone();
