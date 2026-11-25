@@ -442,13 +442,6 @@ pub fn grouping_by_project(
     Grouping::Project(groups)
 }
 
-/// Lift the pinned sessions out of a project or date grouping: the v2
-/// sidebar draws them in its own Pinned section above the list, so the
-/// grouping must not list them a second time (a date grouping left with
-/// pinned rows would flatten a second Pinned header). A date bucket left
-/// empty by the lift is dropped. Status groupings are untouched. The
-/// project's count keeps counting them: the head says how many sessions
-/// the project has, not how many rows sit under it.
 /// docs/85 14.9: each worker's row moves under its lead's row (`leads`:
 /// worker → lead) when the lead is listed; a worker whose lead is not
 /// listed stays where it is. One level: a worker's own workers nest under
@@ -500,6 +493,13 @@ pub fn nest_workers(grouping: Grouping, leads: &HashMap<String, String>) -> Grou
     grouping
 }
 
+/// Lift the pinned sessions out of a project or date grouping: the v2
+/// sidebar draws them in its own Pinned section above the list, so the
+/// grouping must not list them a second time (a date grouping left with
+/// pinned rows would flatten a second Pinned header). A date bucket left
+/// empty by the lift is dropped. Status groupings are untouched. The
+/// project's count keeps counting them: the head says how many sessions
+/// the project has, not how many rows sit under it.
 pub fn lift_pinned(grouping: Grouping) -> (Grouping, Vec<aui::nav::SessionSummary>) {
     match grouping {
         Grouping::Project(mut groups) => {
