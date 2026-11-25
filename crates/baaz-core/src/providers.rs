@@ -321,6 +321,13 @@ fn env_override(id: ProviderId) -> Option<&'static str> {
     binary_name(id).and_then(|_| id.descriptor().env_overrides.first().copied())
 }
 
+/// The project memory folder every provider shares (docs/85 10.1, 12.3):
+/// Claude Code's auto-memory folder for `workspace`'s main repo under the
+/// owner's `~/.claude`, or under `redirected` when the state is redirected.
+pub fn claude_memory_dir(workspace: &std::path::Path, home: &std::path::Path, redirected: Option<&std::path::Path>) -> PathBuf {
+    provider_claude_code::home::memory_dir(workspace, &provider_claude_code::home::owner_config_dir(home), redirected)
+}
+
 /// `baaz --tool-output-hook`: Claude Code's `PostToolUse` hook (docs/85
 /// 12.2), stdin to stdout, before anything else in the process starts.
 pub fn run_tool_output_hook(args: &[String]) {
