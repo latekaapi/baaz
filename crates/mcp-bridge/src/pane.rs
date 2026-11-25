@@ -42,9 +42,10 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
         ),
         def(
             "changes_read",
-            "What changed, as Baaz's Changes pane shows it: a diff stat (files, +added −removed) by default, one file's diff \
-             when file is given. Scopes include this session and single turns, which plain git cannot tell apart. Use for \
-             \"what did the last turn change?\", \"what have you changed?\". Read-only.",
+            "What changed, as Baaz's Changes pane shows it — use this instead of git diff or git status: a diff stat (files, \
+             +added −removed) by default, one file's diff when file is given. Scopes include this session, the last turn and \
+             turn N, which plain git cannot tell apart. Use for \"what did the last turn change?\", \"what have you changed \
+             in this session?\", \"what changed in turn 2?\". Read-only.",
             json!({"type": "object", "properties": {
                 "scope": {"type": "string", "description": SCOPE},
                 "file": {"type": "string", "description": "One file: its diff instead of the stat."},
@@ -52,9 +53,10 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
         ),
         def(
             "changes_revert",
-            "Undo a change to one file through the pane's Revert: back to HEAD (scope all) or out of one turn (last_turn, turn_<n>). \
-             The person confirms first; the answer says reverted, declined, or waiting for the person. Use for \"undo your \
-             change to X\", \"revert X\".",
+            "Undo a change to one file through the pane's Revert — use this instead of git checkout or git restore: back to \
+             HEAD (scope all) or out of one turn (last_turn, turn_<n>). The person confirms first; the answer says reverted, \
+             declined, or waiting for the person. Use for \"undo your change to X\", \"revert X\", \"take back what the last \
+             turn did to X\".",
             json!({"type": "object", "required": ["path"], "properties": {
                 "path": {"type": "string"},
                 "scope": {"type": "string", "description": SCOPE},
@@ -62,7 +64,8 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
         ),
         def(
             "changes_comment",
-            "Leave a comment on a line of a changed file; the person sees it in Changes beside that line. For review notes.",
+            "Leave a review comment on a line of a file; the person sees it in Changes under that file's diff. Use for \"comment \
+             on line N of X\", review notes.",
             json!({"type": "object", "required": ["path", "line", "text"], "properties": {
                 "path": {"type": "string"},
                 "line": {"type": "integer"},
@@ -71,9 +74,10 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
         ),
         def(
             "changes_commit",
-            "Commit through the pane's commit box, so the person's Changes pane and pull request card stay in step: the files \
-             ticked there (by default what this session changed), with your message, then push when push is true (the person \
-             approves a push unless the session has full access). Use for \"commit this\", \"commit and push\".",
+            "Commit — use this instead of running git commit or git push yourself, so the person's Changes pane and pull \
+             request card stay in step: the files ticked in the commit box (by default what this session changed), with your \
+             message, then push when push is true (the person approves a push unless the session has full access). Use for \
+             \"commit this\", \"commit and push this\", \"commit with the message X\".",
             json!({"type": "object", "properties": {
                 "message": {"type": "string", "description": "The commit message. Default: the one in the box."},
                 "push": {"type": "boolean", "description": "Push the branch after committing."},
@@ -81,8 +85,9 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
         ),
         def(
             "pr_status",
-            "The pull request for the current branch: state, checks (failing ones named) and review comments. Use for \"did CI \
-             pass?\", \"any review comments?\". Read-only.",
+            "The pull request for the current branch — use this instead of gh: state, checks (failing ones named) and review \
+             comments. Use for \"did CI pass?\", \"which checks fail?\", \"any review comments on the PR?\", \"show me the pull \
+             request\". Read-only.",
             json!({"type": "object", "properties": {}}),
         ),
     ]
