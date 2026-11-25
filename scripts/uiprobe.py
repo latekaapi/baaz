@@ -759,6 +759,13 @@ ENTRIES = {
     "account-usage":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "account"],
                                "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": json.dumps(_usage_script())}},
+    # docs/85 16.1: Settings › Usage — the limits from the same scripted
+    # readings, the ledger table from thirty days of fixture turns, by model
+    # (the default) and by day.
+    "settings-usage":       {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "usage-fixture;settings:usage;wait:300"],
+                               "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": json.dumps(_usage_script()),
+                                       "BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-usage-state-")}},
     # Settings → Providers with one Claude Code and one Codex session
     # still waiting in the fixture owner home: the page carries the B4M
     # migration row (the "Move 2 …" prompt surface with its dry-run paths

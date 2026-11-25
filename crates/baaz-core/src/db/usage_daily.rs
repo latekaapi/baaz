@@ -105,6 +105,42 @@ pub fn totals(conn: &Connection, by: By, days: u32, now: i64) -> rusqlite::Resul
     rows.collect()
 }
 
+/// The capture fixture (docs/85 16.1, probe builds only): thirty days of
+/// turns across three providers, four models and two projects, ending at
+/// `now` (ms), so the Usage page's table reads like a used week.
+#[cfg(feature = "probe")]
+pub fn insert_fixture(conn: &Connection, now: i64) -> rusqlite::Result<()> {
+    super::check_writer("usage fixture");
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO session(provider_key, provider_session_id, id, project_id) VALUES
+            ('claude-code', 'fx-a', 'fx-usage-a', 'p-acme-web'),
+            ('codex', 'fx-b', 'fx-usage-b', 'p-acme-web'),
+            ('muse', 'fx-c', 'fx-usage-c', 'p-harness'),
+            ('claude-code', 'fx-d', 'fx-usage-d', 'p-harness');",
+    )?;
+    let day = 86_400_000;
+    let rows: [(&str, &str, &str, i64, i64, i64, f64); 4] = [
+        ("fx-usage-a", "claude-code", "claude-sonnet-5-5", 22_000, 900, 15_600, 0.0),
+        ("fx-usage-b", "codex", "gpt-6-astra", 21_000, 700, 18_500, 0.0),
+        ("fx-usage-c", "muse", "muse-spark-1.3", 20_000, 650, 8_000, 0.0),
+        ("fx-usage-d", "claude-code", "claude-haiku-5-5", 4_500, 300, 540, 0.007),
+    ];
+    for n in 0..30_i64 {
+        for (i, (session, provider, model, tin, tout, cache, cost)) in rows.iter().enumerate() {
+            // Fewer turns on older days, none on some.
+            let count = (6 - (n / 6) - i as i64).max(0);
+            for k in 0..count {
+                conn.execute(
+                    "INSERT OR IGNORE INTO turn(session_id, turn_id, finished_at, model, tokens_in, tokens_out, cache_read, cost_usd, provider)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![session, format!("fx-{n}-{i}-{k}"), now - n * day - k * 600_000, model, tin, tout, cache, cost, provider],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
