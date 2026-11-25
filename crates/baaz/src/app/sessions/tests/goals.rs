@@ -54,6 +54,12 @@ fn a_goal_from_the_message_runs_the_check_and_ends_met(cx: &mut gpui::TestAppCon
     vc.run_until_parked();
     finish_turn(&rt, vc, 1, "I changed the parser.");
     assert_eq!(goal_of(&rt, vc).state, GoalState::Running, "the check failed once");
+    // The provider holds the goal (Codex): Baaz waits for it to carry on by
+    // itself, and sends the failing tail only once the grace passed with no
+    // turn of its own.
+    assert!(!sent.lock().unwrap().iter().any(|s| s.0.starts_with("Baaz ran")), "not before the grace");
+    vc.executor().advance_clock(crate::goals::NATIVE_CONTINUE_GRACE + std::time::Duration::from_secs(1));
+    vc.run_until_parked();
     finish_turn(&rt, vc, 2, "Fixed the last case.");
     let seen: Vec<String> = sent.lock().unwrap().iter().map(|s| s.0.clone()).collect();
     assert!(seen.iter().any(|s| s.starts_with("goal:the tests pass (verified by `test -f done.txt")), "the native goal names its check: {seen:#?}");
@@ -68,6 +74,29 @@ fn a_goal_from_the_message_runs_the_check_and_ends_met(cx: &mut gpui::TestAppCon
     assert!(seen.iter().any(|s| s == "goal:clear"), "the provider's own goal is cleared once met: {seen:#?}");
     let stored = crate::db::call(crate::db::path(), move |opened| baaz_core::db::goals::load(&opened.conn, &session).unwrap()).flatten().expect("stored");
     assert_eq!(stored.state, GoalState::Met);
+    cleanup(&root, state);
+}
+
+/// Gate 15 live: a provider that carries on by itself (Codex's native goal)
+/// gets no failing-check message when it started its own next turn within
+/// the grace.
+#[gpui::test]
+fn a_native_goal_that_carries_on_by_itself_gets_no_message(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("goal-native-continues");
+    let root = folder(&state.2, true);
+    with_check(&root, "test -f done.txt || (touch done.txt; false)");
+    let (factory, sent) = recording_factory_numbered(true);
+    let (baaz, vc, _) = session_with(cx, &root, factory);
+    let rt = runtime_of(&baaz, vc);
+    vc.update(|_, cx| rt.update(cx, |rt, cx| rt.send_with_goal("Keep going until the tests pass".into(), cx)));
+    vc.run_until_parked();
+    finish_turn(&rt, vc, 1, "Half done.");
+    // Codex starts (and finishes) its own next turn inside the grace.
+    finish_turn(&rt, vc, 2, "All done.");
+    vc.executor().advance_clock(crate::goals::NATIVE_CONTINUE_GRACE + std::time::Duration::from_secs(1));
+    vc.run_until_parked();
+    assert_eq!(goal_of(&rt, vc).state, GoalState::Met);
+    assert!(!sent.lock().unwrap().iter().any(|s| s.0.starts_with("Baaz ran")), "the provider carried on by itself");
     cleanup(&root, state);
 }
 

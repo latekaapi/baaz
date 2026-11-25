@@ -22,6 +22,10 @@ use crate::wire::WireCall as _;
 const CHECK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 /// Lines of a failing check sent back to the agent.
 const FAILING_TAIL_LINES: usize = 20;
+/// How long a provider that holds the goal itself may take to start its own
+/// next turn before Baaz sends the failing check (Gate 15 live: Codex
+/// carried on by itself and Baaz's message queued behind it, unanswered).
+pub(crate) const NATIVE_CONTINUE_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn now() -> i64 {
     baaz_core::clock::now_ms() as i64
@@ -39,6 +43,10 @@ pub(crate) fn note_boot() {
 
 fn boot_ms() -> i64 {
     *BOOT_MS.get_or_init(now)
+}
+
+fn goal_last_turn(runtime: &Entity<SessionRuntime>, cx: &gpui::App) -> Option<String> {
+    runtime.read(cx).goal.as_ref().and_then(|g| g.last_turn.clone())
 }
 
 /// The last `n` lines of `text`.
@@ -98,7 +106,24 @@ impl Harness {
             } else {
                 let tail = last_lines(&outcome.tail, FAILING_TAIL_LINES);
                 let next = goal.continue_text(Some((&command, &tail)));
-                runtime.update(cx, |rt, cx| rt.settle_goal(GoalState::Running, Some(line), None, Some(next), cx));
+                if !runtime.read(cx).provider_kind().has(provider::ProviderTrait::GoalCommand) {
+                    runtime.update(cx, |rt, cx| rt.settle_goal(GoalState::Running, Some(line), None, Some(next), cx));
+                    return;
+                }
+                // The provider works on by itself while its goal is active:
+                // the failing check is sent only if it stopped.
+                runtime.update(cx, |rt, cx| rt.settle_goal(GoalState::Running, Some(line), None, None, cx));
+                let judged = goal_last_turn(&runtime, cx);
+                cx.spawn(async move |_, cx| {
+                    cx.background_executor().timer(NATIVE_CONTINUE_GRACE).await;
+                    runtime.update(cx, |rt, cx| {
+                        let unmoved = rt.goal.as_ref().is_some_and(|g| g.state == GoalState::Running && g.last_turn == judged);
+                        if unmoved && !rt.turn_running() {
+                            rt.send_or_queue(next, cx);
+                        }
+                    });
+                })
+                .detach();
             }
         });
     }
