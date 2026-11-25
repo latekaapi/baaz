@@ -3,7 +3,7 @@
 //! the person never opened in Baaz has a row of its own here, carrying what
 //! its `session/list` row said (`listing`, JSON, in the server's order) and
 //! what Muse's index knows of it (`index_facts`, JSON; `created_by` as a
-//! column: the made-elsewhere rule). `session-list-cache.json` and
+//! column: the made-by-another-client rule). `session-list-cache.json` and
 //! `index-cache.json` are no longer written: their contents live here, and
 //! the old files are imported once and removed.
 

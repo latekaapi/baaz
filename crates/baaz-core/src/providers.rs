@@ -156,6 +156,22 @@ impl ProviderId {
         ProviderId::all().into_iter().find(|id| id.has(trait_))
     }
 
+    /// The provider whose sessions share one child the window keeps
+    /// ([`ProviderTrait::SharedChild`]): whose account, usage and start the
+    /// connection-level code follows. The first provider when none declares
+    /// it.
+    pub fn shared_child() -> ProviderId {
+        ProviderId::with(ProviderTrait::SharedChild).unwrap_or_else(ProviderId::first)
+    }
+
+    /// The provider that keeps its own session list
+    /// ([`ProviderTrait::NativeSessionList`]): the one whose listing,
+    /// index facts, captures and local drafts become sidebar rows. The first
+    /// provider when none declares it.
+    pub fn native_lister() -> ProviderId {
+        ProviderId::with(ProviderTrait::NativeSessionList).unwrap_or_else(ProviderId::first)
+    }
+
     /// The wire id: what the session host, records and the CLI flag carry.
     pub fn as_str(self) -> &'static str {
         self.descriptor().key

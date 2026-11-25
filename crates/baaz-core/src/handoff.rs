@@ -216,7 +216,7 @@ pub fn build_pack(session: &Session, workspace: &str) -> ContextPack {
         workspace: workspace.to_owned(),
         tokens: 0,
     };
-    pack.tokens = estimate_tokens(&pack_text(&pack, ProviderId::Muse));
+    pack.tokens = estimate_tokens(&pack_text(&pack, ProviderId::first()));
     pack
 }
 
