@@ -247,8 +247,8 @@ pub struct Args {
     ///
     /// The probe drives the `muse` TUI in a pseudo-terminal, which takes
     /// seconds and depends on which login the machine is holding — neither of
-    /// which a reproducible capture of the pay-as-you-go banner can live with.
-    /// It fakes nothing else: the footer row, the banner and `/status` all read
+    /// which a reproducible capture of a pay-as-you-go login can live with.
+    /// It fakes nothing else: the footer row, the billing mode and `/status` all read
     /// the same [`tier::Tier`] the real probe returns.
     pub tier: Option<tier::Tier>,
     /// `--print-tier`: run the billing probe, print what it found and exit,

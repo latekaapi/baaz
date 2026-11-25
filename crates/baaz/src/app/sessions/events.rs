@@ -185,11 +185,16 @@ impl Harness {
                 // the dialog rather than serving a cache they just doubted.
                 self.probe_tier(true, cx);
             }
-            SessionEvent::TierOverride => {
-                self.send_anyway = true;
-                self.push_tier(cx);
+            // The hold's "Check again" (docs/85 11.6): the provider with a
+            // billing tier re-runs its probe; any other re-reads its sign-in.
+            SessionEvent::BillingRecheck => {
+                let id = runtime.read(cx).provider_kind();
+                if id.has(provider::ProviderTrait::BillingTier) {
+                    self.probe_tier(true, cx);
+                } else {
+                    crate::provider_status::reprobe_provider(id);
+                }
             }
-            SessionEvent::TierRecheck => self.probe_tier(true, cx),
             SessionEvent::Rename { name } => {
                 let session_id = runtime.read(cx).session_id.clone();
                 self.rename_session(session_id, name.clone(), cx);

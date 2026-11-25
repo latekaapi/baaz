@@ -1091,11 +1091,9 @@ impl Harness {
         if view.read(cx).rt(cx).provider_kind().has(provider::ProviderTrait::BillingTier) {
             self.tier_probe_on_muse_lane(cx);
         }
-        let tier_banner = self.tier_banner();
-        view.update(cx, |view, cx| {
+        view.update(cx, |view, _| {
             view.set_context(titles);
             view.set_at_rest(self.still());
-            view.runtime().clone().update(cx, |rt, cx| rt.set_tier_banner(tier_banner, cx));
         });
         // The swap must repaint the centre even when every push above was
         // `set` without `notify`: a parked view reuses its retained subtree

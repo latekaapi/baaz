@@ -4524,39 +4524,41 @@ mod tests {
         });
     }
 
+    /// docs/85 11.6: the one hold is not one provider's. A Codex login that
+    /// went from its ChatGPT plan to an API key holds the send with the
+    /// same question; "Send anyway" sends it, and the next send is not
+    /// held. (The billing tier's own walk is `send_anyway_sends_the_held_back_message`.)
     #[gpui::test]
-    fn the_tier_banner_never_lands_on_a_provider_lane(cx: &mut gpui::TestAppContext) {
+    fn the_one_hold_holds_a_codex_send_too(cx: &mut gpui::TestAppContext) {
+        use baaz_core::billing::{self, BillingMode};
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
         let vc = cx.add_empty_window();
         let (adapter, handle) = RecordingProvider::new();
         let (view, _tx) = open_recording_view(vc, "s-1", "codex", adapter);
-        vc.update(|_, cx| {
-            view.update(cx, |view, cx| {
-                view.runtime().clone().update(cx, |rt, cx| rt.set_tier_banner(
-                    Some(super::super::TierBanner {
-                        text: "This login is on pay-as-you-go.".to_owned(),
-                        blocking: true,
-                        checking: false,
-                    }),
-                    cx,
-                ));
-            });
-        });
-        vc.update(|_, cx| {
-            assert!(view.read(cx).rt(cx).tier_banner.is_none(), "a muse-account banner never parks on a provider session");
-            view.update(cx, |view, cx| {
-                assert!(view.render_tier_banner(cx).is_none(), "and never draws there either");
-            });
-        });
-        // A blocking banner would gate the send on a muse lane: here the
-        // turn still leaves.
-        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("still sends".to_owned(), cx))));
+        let id = vc.update(|_, cx| view.read(cx).rt(cx).provider_kind());
+        billing::reset();
+        billing::report(id, Some(BillingMode::Subscription));
+        billing::note_sent(id);
+        billing::report(id, Some(BillingMode::PerToken));
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("held".to_owned(), cx))));
         vc.run_until_parked();
+        assert_eq!(handle.commands_of("submit-input").len(), 0, "the changed mode holds the send");
+        let question = vc.update(|_, cx| view.read(cx).rt(cx).billing_hold.clone()).expect("the hold's question");
         assert_eq!(
-            handle.commands_of("submit-input").len(),
-            1,
-            "the send is never gated on a tier the lane has no account behind"
+            question.text,
+            billing::Hold::Changed { from: BillingMode::Subscription, to: BillingMode::PerToken }.question(id.label()),
+            "the same question every provider asks"
         );
+        vc.update(|window, cx| view.update(cx, |view, cx| {
+            assert!(view.render_billing_hold(cx).is_some(), "drawn over the composer");
+            view.send_anyway(window, cx);
+        }));
+        vc.run_until_parked();
+        assert_eq!(handle.commands_of("submit-input").len(), 1, "Send anyway sends it");
+        vc.update(|_, cx| view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_text("again".to_owned(), cx))));
+        vc.run_until_parked();
+        assert_eq!(handle.commands_of("submit-input").len(), 2, "per-token is expected now");
+        billing::reset();
     }
 
     // ------------------------------------------------- W7b: one approval card

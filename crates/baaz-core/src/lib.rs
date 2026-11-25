@@ -11,6 +11,7 @@
 
 pub mod attachments;
 pub mod auth;
+pub mod billing;
 pub mod browser_prefs;
 pub mod byline;
 pub mod checkpoints;

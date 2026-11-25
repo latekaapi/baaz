@@ -762,9 +762,6 @@ pub struct Harness {
     /// whether the query is blank and the two result counts (finding
     /// `performance-9`). Only ever read while the search palette is open.
     search_status: RefCell<Option<(SearchStatusKey, SharedString)>>,
-    /// "Send anyway" was pressed. Once per app run, deliberately: a person who
-    /// accepted the bill this morning should be asked again tomorrow.
-    pub(crate) send_anyway: bool,
     pub(crate) tasks: Vec<Task<()>>,
     /// The boot-time subscriptions: the right pane's events and the text
     /// fields (rename, search, Projects and Commands queries, API key). Made
@@ -925,7 +922,6 @@ impl Harness {
             settings_page,
             skills_page,
             search_status: RefCell::new(None),
-            send_anyway: false,
             tasks: Vec::new(),
             field_subscriptions: Vec::new(),
             window_sync: window_sync::WindowSync::new(),
@@ -2970,6 +2966,28 @@ impl Harness {
                 .accessibility_label(format!("Open this session's {pages} {noun}"))
                 .on_click(open)
         });
+        // docs/85 11.6: per-token billing always shows in the header, on
+        // every provider; pressing it re-reads the mode.
+        let billing_chip = self
+            .active
+            .as_ref()
+            .map(|view| view.read(cx).rt(cx).provider_kind())
+            .filter(|id| baaz_core::billing::mode(*id) == baaz_core::billing::BillingMode::PerToken)
+            .map(|id| {
+                let recheck = cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                    if id.has(provider::ProviderTrait::BillingTier) {
+                        this.probe_tier(true, cx);
+                    } else {
+                        crate::provider_status::reprobe_provider(id);
+                    }
+                });
+                aui::data::button("hd-centre-billing", "Per-token billing")
+                    .ghost()
+                    .muted()
+                    .xs()
+                    .accessibility_label("This login bills per token: check again")
+                    .on_click(recheck)
+            });
         // The wrapper reports the overflow button's own rect (its only
         // child), which is what the overflow menu seats at.
         let overflow_report = cx.entity().downgrade();
@@ -2977,6 +2995,7 @@ impl Harness {
             .flex_none()
             .items_center()
             .gap(px(ROW_GAP))
+            .children(billing_chip)
             .children(pages_button)
             .child(toggles)
             .child(term_button)
@@ -3145,8 +3164,6 @@ impl Harness {
         // the host's session index: read it (read-only) and rebuild `search.db`
         // so `--steps search:<query>` screenshots show session hits.
         self.load_index(cx);
-        let tier_banner = self.tier_banner();
-        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_tier_banner(tier_banner, cx)));
         self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::PageMenu, cx); });
         self.active = Some(view);
         // The replayed session is current, so its agent routes may drive
@@ -4274,7 +4291,7 @@ impl Harness {
     /// Retry, the action the kind implies (Install / Sign in / Update, each
     /// the D5 flow of that name) and Providers…, over a disabled composer
     /// naming the provider. This is deliberately not a session view, so no
-    /// transcript — and no tier banner — from anywhere else can render
+    /// transcript — and no billing hold — from anywhere else can render
     /// here.
     fn render_provider_open_error(
         &self,

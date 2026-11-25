@@ -108,6 +108,26 @@ impl Auth {
             _ => false,
         }
     }
+
+    /// How this login pays for turns (docs/85 11.6), from what it said of
+    /// itself: Claude Code's `auth status` and Codex's `account/read` both
+    /// land here. Anything but a sign-in is unknown.
+    pub fn billing_mode(&self) -> provider::BillingMode {
+        match self {
+            Auth::SignedIn { method, source, plan, .. } => {
+                provider::BillingMode::from_login(method.as_deref(), source.as_deref(), plan.as_deref())
+            }
+            _ => provider::BillingMode::Unknown,
+        }
+    }
+
+    /// The account's email, when the login named one.
+    pub fn email(&self) -> Option<&str> {
+        match self {
+            Auth::SignedIn { email, .. } => email.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// What the person should know beyond the headline.
@@ -1542,6 +1562,11 @@ fn seed_live(statuses: &HashMap<ProviderId, ProviderStatus>) {
 pub fn live_statuses() -> Vec<ProviderStatus> {
     let live = live_service();
     ProviderId::all().iter().map(|id| live.service.status(*id)).collect()
+}
+
+/// One provider's live auth: what the billing rule reads (docs/85 11.6).
+pub fn live_auth(id: ProviderId) -> Auth {
+    live_service().service.status(id).auth
 }
 
 /// Whether the account menu's usage refresh is due: at most every

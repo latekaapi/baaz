@@ -60,10 +60,24 @@ impl SessionRuntime {
             None => Ok(()),
         }
     }
+
+    /// `send-held:<text>`: a send the billing rule must hold (docs/85
+    /// 11.6). `Err` when it left, or was held for anything else.
+    pub(crate) fn step_send_held(&mut self, rest: &str, cx: &mut Context<Self>) -> StepResult {
+        if rest.trim().is_empty() {
+            return Err("no text to send".into());
+        }
+        self.send_text(rest.to_owned(), cx);
+        if self.billing_hold.is_some() {
+            Ok(())
+        } else {
+            Err(format!("send-held: not held by billing ({})", self.banner.clone().unwrap_or_else(|| "it left".into())))
+        }
+    }
 }
 
 impl SessionView {
-    /// `send-anyway`: the billing banner's "Send anyway" — sends what the
+    /// `send-anyway`: the billing hold's "Send anyway" — sends what the
     /// guard held back (the restored prompt, or the composer's draft and
     /// attachments). Fails, changing nothing, when nothing is held to send.
     pub(crate) fn step_send_anyway(&mut self, window: &mut Window, cx: &mut Context<Self>) -> StepResult {

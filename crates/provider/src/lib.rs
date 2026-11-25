@@ -42,6 +42,7 @@
 
 mod ack;
 mod approval;
+pub mod billing;
 pub mod bridge_token;
 mod capability;
 pub mod child_env;
@@ -59,6 +60,7 @@ pub mod version;
 
 pub use ack::{AccountLane, Ack, LoginOutcome, ModelSummary, PendingApproval, PendingQuestion, SessionSummary};
 pub use approval::{ApprovalAnswer, ApprovalOption};
+pub use billing::BillingMode;
 pub use aui_protocol::Delta;
 pub use capability::{Capability, CapabilitySet, CapabilityState};
 pub use command::{Command, ProviderId, QuestionAnswer, SubmissionPart};

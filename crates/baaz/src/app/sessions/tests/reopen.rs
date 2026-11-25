@@ -46,14 +46,7 @@ fn z4_a_failed_reopen_lands_inline_on_the_clicked_session(cx: &mut gpui::TestApp
                 Some("s-codex-old"),
                 "the click's target stays selected"
             );
-            assert!(
-                harness.active.is_none(),
-                "no session view is shown — and no view's Muse tier banner with it"
-            );
-            assert!(
-                harness.tier_banner().is_some(),
-                "the tier would banner any view shown, so its absence is the failure state's"
-            );
+            assert!(harness.active.is_none(), "no session view is shown");
             let parked: Vec<String> =
                 harness.registry.parked_ids();
             assert_eq!(

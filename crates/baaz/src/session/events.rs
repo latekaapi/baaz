@@ -580,8 +580,9 @@ for line in sys.stdin:
         assert!(stub.saw("turn/steer").is_none(), "remove never steers");
     }
 
-    /// "Send anyway" is the send: the words the pay-as-you-go guard held back
-    /// leave on the press, not on a second Enter (2026-10-17).
+    /// "Send anyway" is the send: the words the billing hold kept back
+    /// leave on the press, not on a second Enter (2026-10-17). The hold is
+    /// docs/85 11.6's: the mode changed since the last send.
     #[gpui::test]
     fn send_anyway_sends_the_held_back_message(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
@@ -590,25 +591,29 @@ for line in sys.stdin:
         let view = open_live_view(vc, client, "/tmp/send-anyway");
         vc.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.runtime().clone().update(cx, |rt, cx| rt.set_tier_banner(
-                    Some(crate::session::TierBanner { text: "payg".to_owned(), blocking: true, checking: false }),
-                    cx,
-                ));
+                let id = view.rt(cx).provider_kind();
+                baaz_core::billing::reset();
+                baaz_core::billing::report(id, Some(baaz_core::billing::BillingMode::Subscription));
+                baaz_core::billing::note_sent(id);
+                baaz_core::billing::report(id, Some(baaz_core::billing::BillingMode::PerToken));
                 view.runtime().clone().update(cx, |rt, cx| rt.send_text("bill me".to_owned(), cx));
             })
         });
         assert_eq!(pending_prompt_of(&view, vc).as_deref(), Some("bill me"), "the guard holds the words back");
         assert!(stub.saw("turn/start").is_none(), "nothing left while the guard blocks");
-        assert_eq!(
-            vc.update(|_, cx| view.read(cx).rt(cx).banner.clone()).as_deref(),
-            Some(crate::session::commands::BILLING_HELD),
-            "a held send says why, rather than reading as a dead button"
+        assert!(
+            vc.update(|_, cx| view.read(cx).rt(cx).billing_hold.clone()).is_some_and(|hold| hold.text.ends_with("Send anyway?")),
+            "a held send asks its one question, rather than reading as a dead button"
         );
         vc.update(|window, cx| view.update(cx, |view, cx| view.send_anyway(window, cx)));
         wait_for_wire(&stub, vc, "turn/start");
         let start = stub.saw("turn/start").expect("the press sent a turn");
         assert!(start.to_string().contains("bill me"), "the held-back words are the turn: {start}");
         assert_eq!(vc.update(|_, cx| view.read(cx).rt(cx).banner.clone()), None, "the notice leaves with the send");
+        assert!(vc.update(|_, cx| view.read(cx).rt(cx).billing_hold.is_none()), "and so does the question");
+        let id = vc.update(|_, cx| view.read(cx).rt(cx).provider_kind());
+        assert_eq!(baaz_core::billing::check(id), None, "per-token is the expected mode now: the next send is not held");
+        baaz_core::billing::reset();
     }
 
     /// Quick picks never interleave on the wire, and the latest wins: the

@@ -110,15 +110,22 @@ fn high_usage() -> Tier {
     }
 }
 
+use baaz_core::billing::BillingMode;
+
+/// The billing-tier provider's mode as the one rule reads it (docs/85 11.6).
+fn tier_mode() -> BillingMode {
+    baaz_core::billing::mode(crate::providers::ProviderId::with(provider::ProviderTrait::BillingTier).expect("a tier provider"))
+}
+
 const SIGNED_IN_AUTH: &str = r#"{"providers":{"meta":{"user_email":"ada@example.com","subs_active":true}}}"#;
 
 /// The owner's window, 2026-11-04. A subscribed login whose token has
 /// since refreshed (the remembered mtime no longer matches, so the cache
 /// answers nothing and a probe runs), and that probe gets no verdict. It
 /// used to land `Tier::Unavailable` with the banner on every Muse
-/// session until "Check again". The plan stands, no banner.
+/// session until "Check again". The plan stands, and so does its mode.
 #[gpui::test]
-fn a_failed_probe_keeps_a_confirmed_plan_and_raises_no_banner(cx: &mut gpui::TestAppContext) {
+fn a_failed_probe_keeps_a_confirmed_plan_and_its_billing_mode(cx: &mut gpui::TestAppContext) {
     let (_guard, vc, baaz) = tier_window("tier-kept", SIGNED_IN_AUTH, cx);
     crate::tier::remember_at(&high_usage(), Some(1), crate::tier::now_secs());
     assert_eq!(crate::tier::cached(), None, "the refreshed token invalidated the cache");
@@ -126,46 +133,44 @@ fn a_failed_probe_keeps_a_confirmed_plan_and_raises_no_banner(cx: &mut gpui::Tes
         baaz.update(cx, |harness, cx| {
             harness.land_tier_probe(Err("the /upgrade card did not answer in time".into()), false, cx);
             assert_eq!(harness.tier, Some(high_usage()));
-            assert_eq!(harness.tier_banner(), None, "a transient unknown raises no banner");
+            assert_eq!(tier_mode(), BillingMode::Subscription, "a transient unknown keeps the plan's mode: nothing holds");
         });
     });
     let back: crate::tier::Cached = crate::store::read_json(&crate::tier::cache_path());
     assert_eq!(back.tier, Some(high_usage()), "and does not overwrite what was known");
 }
 
-/// The same failure on a login nothing ever confirmed: the banner.
+/// The same failure on a login nothing ever confirmed: unknown billing.
 #[gpui::test]
-fn a_failed_probe_on_a_login_never_confirmed_still_banners(cx: &mut gpui::TestAppContext) {
+fn a_failed_probe_on_a_login_never_confirmed_reads_unknown(cx: &mut gpui::TestAppContext) {
     let (_guard, vc, baaz) = tier_window("tier-unknown", SIGNED_IN_AUTH, cx);
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             harness.land_tier_probe(Err("no card".into()), false, cx);
-            let banner = harness.tier_banner().expect("nobody knows this login's plan");
-            assert!(banner.text.starts_with("Muse did not say which plan"), "{}", banner.text);
-            assert!(!banner.blocking);
+            assert_eq!(tier_mode(), BillingMode::Unknown, "nobody knows this login's plan");
         });
     });
 }
 
-/// Pay-as-you-go still warns: as a verdict over a known subscription,
+/// Pay-as-you-go reads per-token: as a verdict over a known subscription,
 /// and through a failed re-verify of it.
 #[gpui::test]
-fn pay_as_you_go_still_warns(cx: &mut gpui::TestAppContext) {
+fn pay_as_you_go_reads_per_token(cx: &mut gpui::TestAppContext) {
     let (_guard, vc, baaz) = tier_window("tier-payg", SIGNED_IN_AUTH, cx);
     crate::tier::remember_at(&high_usage(), Some(1), crate::tier::now_secs());
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             harness.land_tier_probe(Ok(Tier::PayAsYouGo), false, cx);
-            assert!(harness.tier_banner().is_some_and(|banner| banner.blocking), "the verdict lands");
+            assert_eq!(tier_mode(), BillingMode::PerToken, "the verdict lands");
             harness.land_tier_probe(Err("no card".into()), false, cx);
             assert_eq!(harness.tier, Some(Tier::PayAsYouGo));
-            assert!(harness.tier_banner().is_some_and(|banner| banner.blocking), "a failure does not lift it");
+            assert_eq!(tier_mode(), BillingMode::PerToken, "a failure does not lift it");
         });
     });
 }
 
 /// Muse's own flag says the subscription lapsed: the remembered plan is
-/// no longer known, so a failed probe banners rather than vouching.
+/// no longer known, so a failed probe reports unknown rather than vouching.
 #[gpui::test]
 fn a_lapsed_subscription_is_not_kept(cx: &mut gpui::TestAppContext) {
     let (_guard, vc, baaz) =
@@ -174,7 +179,7 @@ fn a_lapsed_subscription_is_not_kept(cx: &mut gpui::TestAppContext) {
     vc.update(|_, cx| {
         baaz.update(cx, |harness, cx| {
             harness.land_tier_probe(Err("no card".into()), false, cx);
-            assert!(harness.tier_banner().is_some());
+            assert_eq!(tier_mode(), BillingMode::Unknown, "the lapsed plan is not vouched for");
         });
     });
 }

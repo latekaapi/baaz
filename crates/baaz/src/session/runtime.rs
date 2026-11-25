@@ -155,8 +155,8 @@ pub struct SessionRuntime {
     /// old full-centre view hid the conversation and the composer). A
     /// restored connection or a finished turn takes it down.
     pub(super) child_failure: Option<ChildFailure>,
-    /// The billing guard's banner, and whether it is refusing turns.
-    pub(super) tier_banner: Option<TierBanner>,
+    /// The billing hold over the composer: a send the rule kept back.
+    pub(super) billing_hold: Option<BillingHold>,
     /// A live draft on a shared-child provider (`ProviderTrait::SharedChild`,
     /// today Muse) opened while that child is still starting (it starts on
     /// demand, docs/50 P1): the chip and the model menu say so instead of
@@ -450,7 +450,7 @@ impl SessionRuntime {
             lost_at: None,
             child_failure: None,
             banner_action: None,
-            tier_banner: None,
+            billing_hold: None,
             shared_child_starting: false,
             answers: HashMap::new(),
             question_started: HashMap::new(),
