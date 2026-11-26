@@ -517,6 +517,13 @@ impl SessionRuntime {
                 }
                 self.request_provider_models(cx);
             }
+            // docs/87 18.10: the agent's own word on the goal.
+            provider::ProviderEvent::GoalStatus { session_id, status } => {
+                if session_id != self.session_id {
+                    return;
+                }
+                self.provider_goal_status(&status, cx);
+            }
             provider::ProviderEvent::EffortInForce { session_id, effort } => {
                 if session_id != self.session_id {
                     return;

@@ -1254,7 +1254,8 @@ impl ProviderAdapter for CodexAdapter {
                 Ok(Ack::Accepted)
             }
             // The thread's goal (docs/85 15.1): set, paused or cleared; the
-            // server streams `thread/goal/updated` as it works.
+            // server streams `thread/goal/updated` as it works, read in the
+            // fold as `ProviderEvent::GoalStatus` (docs/87 18.10).
             Command::SetGoal { session_id, objective, paused, .. } => {
                 self.check_session(&session_id)?;
                 let (thread_id, _) = self.thread_and_model()?;

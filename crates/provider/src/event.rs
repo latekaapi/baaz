@@ -112,6 +112,17 @@ pub enum ProviderEvent {
         /// The level in force, as the backend spells it.
         effort: Option<String>,
     },
+    /// The backend's own word on the session's goal, other than "working
+    /// on it" (docs/87 18.10): Codex's `thread/goal/updated` status
+    /// (`blocked`, `complete`, …; captured live in docs/85 15.1). The app
+    /// still judges a goal by its own check; a running goal the agent
+    /// calls `blocked` waits for the person at once.
+    GoalStatus {
+        /// The owning session.
+        session_id: String,
+        /// The status, as the backend spells it.
+        status: String,
+    },
     /// The session's model catalog changed after the open answered: ask
     /// again with [`crate::Command::ListModels`]. Claude Code acks the
     /// open before the child's `initialize` answer (which carries the

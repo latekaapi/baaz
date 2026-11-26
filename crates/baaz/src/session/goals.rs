@@ -183,6 +183,21 @@ impl SessionRuntime {
         cx.emit(SessionEvent::GoalChanged);
     }
 
+    /// docs/87 18.10: the backend's own word on the goal
+    /// ([`provider::ProviderEvent::GoalStatus`]). A running goal the agent
+    /// calls `blocked` waits for the person now, rather than after three
+    /// identical failing checks; `complete` changes nothing, because Baaz's
+    /// own check decides met.
+    pub(super) fn provider_goal_status(&mut self, status: &str, cx: &mut Context<Self>) {
+        if status != "blocked" || !self.goal.as_ref().is_some_and(|goal| goal.state == GoalState::Running) {
+            return;
+        }
+        // Plain words: the pill's caption draws no Markdown; no provider
+        // name in the copy (rule 14).
+        let reason = "The agent says it is blocked. It needs you: answer it, then Resume.".to_owned();
+        self.settle_goal(GoalState::Blocked, None, Some(reason), None, cx);
+    }
+
     /// The app's verdict on the goal: its new state (met, still running
     /// with the next message, paused at a limit) and the check's line.
     pub(crate) fn settle_goal(&mut self, state: GoalState, check_line: Option<String>, reason: Option<String>, next: Option<String>, cx: &mut Context<Self>) {
