@@ -24,7 +24,7 @@ takes focus, and a person clicking in it would move its active session.
 
 Usage:
   python3 scripts/bench/bench.py --work <scratch dir> [--tasks 1-3] [--providers claude,codex]
-      [--modes bare,baaz] [--claude-model haiku] [--codex-model gpt-6.2-sol] [--codex-effort medium]
+      [--modes bare,baaz] [--claude-model haiku] [--codex-model gpt-5.6-luna] [--codex-effort medium]
 
 Appends one JSON line per run to <work>/results.jsonl (a rerun skips runs already
 there) and writes <work>/report.md. Exit 0 always: a rate is a measurement.
@@ -165,20 +165,27 @@ def baaz_run(repo, run_dir, prompt, provider, model, effort, timeout, log):
     os.makedirs(state, exist_ok=True)
     env = dict(os.environ, BAAZ_STATE_DIR=state)
     wait_for_quiet(log)
+    # Run from inside the repo: the connected pass boots its own session in
+    # the app's working folder (the offline pass's scripted session does not
+    # carry over), so that folder must be the throwaway repo (rule 24).
     p0 = subprocess.run([BAAZ, "--no-connect", "--login", "signed-in", "--steps", f"project:{repo};new;setprovider:{WIRE[provider]}",
                          "--screenshot", os.path.join(run_dir, "baaz-0.png"), "--screenshot-delay", "1500"],
-                        env=env, capture_output=True, text=True, timeout=180)
+                        env=env, capture_output=True, text=True, timeout=180, cwd=repo)
     open(os.path.join(run_dir, "baaz-pass0.log"), "w").write(p0.stdout + p0.stderr)
     steps = [f"setmodel:{model}"] + ([f"seteffort:{effort}"] if effort else []) + ["setmode:AllowAll", f"send:{prompt}", f"wait-idle:{timeout * 1000}"]
     wait_for_quiet(log)
     start = time.time()
     p1 = subprocess.run([BAAZ, "--steps", ";".join(steps), "--screenshot", os.path.join(run_dir, "baaz-1.png"), "--screenshot-delay", "1500"],
-                        env=env, capture_output=True, text=True, timeout=timeout + 300)
+                        env=env, capture_output=True, text=True, timeout=timeout + 300, cwd=repo)
     wall = round(time.time() - start, 1)
     out = p1.stdout + p1.stderr
     open(os.path.join(run_dir, "baaz-pass1.log"), "w").write(out)
     shutil.copy(os.path.join(state, "logs", "baaz.log"), os.path.join(run_dir, "baaz.log")) if os.path.exists(os.path.join(state, "logs", "baaz.log")) else None
     failed = [l for l in out.splitlines() if l.startswith("steps: failed step")]
+    log_text = open(os.path.join(run_dir, "baaz.log")).read() if os.path.exists(os.path.join(run_dir, "baaz.log")) else ""
+    elsewhere = sorted({l.split("workspace=", 1)[1].strip() for l in log_text.splitlines() if "provider lane workspace" in l and "workspace=" in l} - {repo, os.path.realpath(repo)})
+    if elsewhere:
+        failed.append(f"a session opened outside the repo: {elsewhere}")
     rows = []
     db = os.path.join(state, "baaz.db")
     if os.path.exists(db):
@@ -240,7 +247,7 @@ def main():
     ap.add_argument("--providers", default="claude,codex")
     ap.add_argument("--modes", default="bare,baaz")
     ap.add_argument("--claude-model", default="haiku")
-    ap.add_argument("--codex-model", default="gpt-6.2-sol")
+    ap.add_argument("--codex-model", default="gpt-5.6-luna")
     ap.add_argument("--codex-effort", default="medium")
     ap.add_argument("--timeout", type=int, default=600)
     args = ap.parse_args()

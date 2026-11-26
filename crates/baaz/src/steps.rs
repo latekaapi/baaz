@@ -272,7 +272,7 @@
 //! | `folder-new:<name>` | a new folder named `<name>` in the current browser space, holding the active person tab (the new-folder flow, committed), free |
 //! | `space-new:<name>` | add a browser space named `<name>` and make it current, free |
 //! | `wait:<ms>` | let the wire catch up before the next step |
-//! | `wait-idle:<ms>` | wait until the open session's turn has started (up to 10 s) and then ended, at most `<ms>` in all (docs/85 17.1, the bench); still running at the bound fails the step, free |
+//! | `wait-idle:<ms>` | wait until a new agent answer has landed in the open session and nothing is sending, at most `<ms>` (docs/85 17.1, the bench); no finished answer by the bound fails the step, free |
 //!
 //! # `--login-steps <a;b;c>`
 //!
@@ -1475,23 +1475,35 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
                     );
                 }
             }
-            // `wait-idle:<ms>` (docs/85 17.1): the open session's turn
-            // starts (bounded 10 s: a send takes a moment to admit) and
-            // ends, within `<ms>` in all. Still running at the bound fails.
+            // `wait-idle:<ms>` (docs/85 17.1): a new agent answer lands in
+            // the open session and nothing is sending, within `<ms>`. Not
+            // "sending went false": between a send's admission and its
+            // turn starting nothing reads as sending (found live, 26 Nov).
             if let Some(ms) = step.strip_prefix("wait-idle:") {
                 STEPS_RAN.fetch_add(1, Ordering::Relaxed);
                 let start = std::time::Instant::now();
                 let bound = std::time::Duration::from_millis(ms.parse().unwrap_or(600_000));
-                let sending = |this: &Harness, cx: &gpui::App| this.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).is_sending());
-                while start.elapsed() < std::time::Duration::from_secs(10) && !this.read_with(cx, |this, cx| sending(this, cx)).unwrap_or(false) {
-                    cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
-                }
-                while start.elapsed() < bound && this.read_with(cx, |this, cx| sending(this, cx)).unwrap_or(false) {
+                let probe = |this: &Harness, cx: &gpui::App| {
+                    this.active.as_ref().map(|view| {
+                        let rt = view.read(cx).rt(cx);
+                        let answers = rt.session().map(|s| s.turns.iter().filter(|t| matches!(t, aui_protocol::Turn::Assistant { .. })).count()).unwrap_or(0);
+                        (answers, rt.is_sending())
+                    })
+                };
+                let before = this.read_with(cx, |this, cx| probe(this, cx)).ok().flatten().map(|(n, _)| n).unwrap_or(0);
+                let mut settled = false;
+                while start.elapsed() < bound {
+                    if let Some((answers, sending)) = this.read_with(cx, |this, cx| probe(this, cx)).ok().flatten() {
+                        if answers > before && !sending {
+                            settled = true;
+                            break;
+                        }
+                    }
                     cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
                 }
-                if this.read_with(cx, |this, cx| sending(this, cx)).unwrap_or(false) {
+                if !settled {
                     record_step_failure(&step);
-                    crate::baaz_log!("steps: `{step}` failed: the turn still runs at the bound; ending script");
+                    crate::baaz_log!("steps: `{step}` failed: no finished answer within the bound; ending script");
                     capture.set_steps_running(false);
                     capture.set_steps_done(true);
                     return;
