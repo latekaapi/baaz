@@ -475,7 +475,7 @@ mod tests {
     fn a_never_opened_codex_session_reads_from_its_rollout() {
         let dir = temp("lite-codex");
         let file = dir.join("rollout.jsonl");
-        std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/codex/rollout-stored.jsonl"), &file).expect("fixture");
+        std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/codex/rollout-stored.ndjson"), &file).expect("fixture");
         let mut conn = open_at(&dir.join("transcript.db")).expect("store");
         let turns = read_or_fold(&mut conn, "codex", "01a216a3", Some(&file)).expect("read").expect("turns");
         let lines = texts(&turns);
@@ -493,7 +493,7 @@ mod tests {
     fn the_real_store_wins_and_a_lite_copy_never_heads_a_transcript() {
         let dir = temp("lite-real");
         let file = dir.join("rollout.jsonl");
-        std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/codex/rollout-stored.jsonl"), &file).expect("fixture");
+        std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/codex/rollout-stored.ndjson"), &file).expect("fixture");
         let mut conn = open_at(&dir.join("transcript.db")).expect("store");
         write_from(&mut conn, "codex", "kept", "real-source", &[turn(0), turn(1)], 0).expect("write");
         assert_eq!(read_or_fold(&mut conn, "codex", "kept", Some(&file)).expect("read"), Some(vec![turn(0), turn(1)]));

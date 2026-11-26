@@ -4048,13 +4048,13 @@ mod tests {
 
     /// docs/87 18.10: Codex's own goal state reaches the app, except the
     /// "still working" status that rides every token tick. Fixture:
-    /// `goal-updated.jsonl` (active and complete captured live in 15.1;
+    /// `goal-updated.ndjson` (active and complete captured live in 15.1;
     /// blocked is that frame with the schema's `blocked` status).
     #[test]
     fn goal_updates_report_every_status_but_active() {
         let mut fold = CodexFold::new();
         let mut events = Vec::new();
-        for line in fixture_lines("goal-updated.jsonl") {
+        for line in fixture_lines("goal-updated.ndjson") {
             let envelope: Value = serde_json::from_str(&line).expect("json");
             step_line(&mut fold, &envelope["frame"].to_string(), &mut |event| events.push(event));
         }
