@@ -1150,7 +1150,18 @@ impl ClaudeCodeAdapter {
             let overrides: serde_json::Map<String, serde_json::Value> = off.into_iter().map(|name| (name, serde_json::Value::String("off".into()))).collect();
             extra.insert("skillOverrides".into(), serde_json::Value::Object(overrides));
         }
-        let mut launch = argv::with_token_flags(argv::with_settings(launch, extra));
+        let mut launch = argv::with_settings(launch, extra);
+        // docs/85 16.2: the repo's `.agents/skills`, which claude does not
+        // read itself (probed 26 Nov 2026), as links in a folder it is
+        // handed with `--add-dir`. A name the home's skills already hold
+        // stays theirs.
+        if let Some(cwd) = &cwd {
+            let taken = self.owner_config_dir().parent().map(crate::home::skill_sources).unwrap_or_default();
+            if let Ok(Some(dir)) = crate::home::repo_skills_dir(&provider::child_env::state_dir(), cwd, &taken) {
+                launch = argv::with_add_dir(launch, &dir);
+            }
+        }
+        let mut launch = argv::with_token_flags(launch);
         if *self.bills_by_key.lock().expect("bills mutex") {
             launch.env.retain(|(key, _)| key != argv::PROMPT_CACHE_TTL_ENV);
             launch.env.push((argv::PROMPT_CACHE_TTL_ENV.to_owned(), "1h".to_owned()));

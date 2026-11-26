@@ -68,8 +68,14 @@ pub fn ensure_skills_dir(home: &Path, sources: &[PathBuf]) -> std::io::Result<()
             }
         }
     }
+    sync_skill_links(&dir, &wanted)
+}
+
+/// Make `dir` hold exactly one link per `wanted` skill: stale links go,
+/// missing ones are made, a real file or folder someone put there stays.
+fn sync_skill_links(dir: &Path, wanted: &[(String, PathBuf)]) -> std::io::Result<()> {
     // Stale links go; real entries stay.
-    if let Ok(entries) = std::fs::read_dir(&dir) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.filter_map(Result::ok) {
             let name = entry.file_name().to_string_lossy().into_owned();
             let is_link = entry.file_type().is_ok_and(|t| t.is_symlink());
@@ -81,12 +87,45 @@ pub fn ensure_skills_dir(home: &Path, sources: &[PathBuf]) -> std::io::Result<()
         }
     }
     for (name, path) in wanted {
-        let link = dir.join(&name);
+        let link = dir.join(name);
         if std::fs::symlink_metadata(&link).is_err() {
-            std::os::unix::fs::symlink(&path, &link)?;
+            std::os::unix::fs::symlink(path, &link)?;
         }
     }
     Ok(())
+}
+
+/// The folder Baaz hands Claude Code as `--add-dir` so it sees a repo's
+/// `.agents/skills` (docs/85 16.2): claude 2.1.276 reads only
+/// `.claude/skills` (probed live 26 Nov 2026), and lists the skills in an
+/// added folder's `.claude/skills` under their own names (a
+/// `--plugin-dir` would prefix them). The folder is
+/// `<state_dir>/claude-repo-skills/<slug>` with one link per skill in
+/// `.claude/skills/`; nothing is written into the repo (rule 21). A name
+/// the repo's own `.claude/skills` or any of `taken` (the home's skill
+/// folders) already holds is left to them. `None` when the repo has no
+/// `.agents/skills` skill to add.
+pub fn repo_skills_dir(state_dir: &Path, cwd: &Path, taken: &[PathBuf]) -> std::io::Result<Option<PathBuf>> {
+    let root = cwd.ancestors().find(|dir| dir.join(".git").exists()).unwrap_or(cwd);
+    let Ok(entries) = std::fs::read_dir(root.join(".agents").join("skills")) else { return Ok(None) };
+    let held = |name: &str| {
+        std::iter::once(root.join(".claude").join("skills")).chain(taken.iter().cloned()).any(|folder| folder.join(name).join("SKILL.md").is_file())
+    };
+    let mut wanted: Vec<(String, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.path().join("SKILL.md").is_file())
+        .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+        .filter(|(name, _)| !held(name))
+        .collect();
+    if wanted.is_empty() {
+        return Ok(None);
+    }
+    wanted.sort();
+    let folder = state_dir.join("claude-repo-skills").join(project_slug(root));
+    let dir = folder.join(".claude").join("skills");
+    std::fs::create_dir_all(&dir)?;
+    sync_skill_links(&dir, &wanted)?;
+    Ok(Some(folder))
 }
 
 /// `<state_dir>/claude-home`.
@@ -388,6 +427,55 @@ mod tests {
     fn the_home_lives_under_the_given_state_dir() {
         let state = PathBuf::from("/tmp/baaz-state");
         assert_eq!(home_dir(&state), PathBuf::from("/tmp/baaz-state/claude-home"));
+    }
+
+    /// docs/85 16.2 (probed 26 Nov 2026): a repo's `.agents/skills` reaches
+    /// claude as links in a state-dir folder handed over with `--add-dir`;
+    /// a session in a subfolder finds the repo root; a name the repo's
+    /// `.claude/skills` or the home's folders hold is left to them; a skill
+    /// that went away loses its link; nothing is written into the repo; a
+    /// repo without `.agents/skills` gets no folder.
+    #[test]
+    fn a_repos_agents_skills_become_links_in_an_added_folder() {
+        let root = temp_root("repo-skills");
+        let (state, repo, personal) = (root.join("state"), root.join("repo"), root.join("owner/.claude/skills"));
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src/deep")).unwrap();
+        for (dir, name) in [(repo.join(".agents/skills"), "deploy"), (repo.join(".agents/skills"), "lint"), (repo.join(".agents/skills"), "review"), (repo.join(".claude/skills"), "lint"), (personal.clone(), "review")] {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+            std::fs::write(dir.join(name).join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+        }
+        let before: Vec<_> = walk(&repo);
+        let folder = repo_skills_dir(&state, &repo.join("src/deep"), &[personal.clone()]).unwrap().expect("a folder");
+        assert!(folder.starts_with(state.join("claude-repo-skills")));
+        let links = folder.join(".claude/skills");
+        let names = |dir: &Path| { let mut n: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect(); n.sort(); n };
+        assert_eq!(names(&links), vec!["deploy"], "lint is the repo's .claude skill, review the person's");
+        assert_eq!(std::fs::read_link(links.join("deploy")).unwrap(), repo.join(".agents/skills/deploy"));
+        assert_eq!(walk(&repo), before, "nothing written into the repo");
+
+        std::fs::create_dir_all(repo.join(".agents/skills/ship")).unwrap();
+        std::fs::write(repo.join(".agents/skills/ship/SKILL.md"), "x").unwrap();
+        std::fs::remove_dir_all(repo.join(".agents/skills/deploy")).unwrap();
+        repo_skills_dir(&state, &repo, &[personal.clone()]).unwrap().expect("a folder");
+        assert_eq!(names(&links), vec!["ship"], "a gone skill loses its link, a new one gains one");
+
+        let bare = root.join("bare");
+        std::fs::create_dir_all(bare.join(".git")).unwrap();
+        assert_eq!(repo_skills_dir(&state, &bare, &[]).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap().filter_map(Result::ok) {
+            out.push(entry.path());
+            if entry.file_type().unwrap().is_dir() {
+                out.extend(walk(&entry.path()));
+            }
+        }
+        out.sort();
+        out
     }
 
     /// docs/85 16.2: a home made before had `skills` as one link to the
