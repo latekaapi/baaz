@@ -9,11 +9,17 @@
 //! rebuildable (the size test is `a_long_session_is_measured`).
 //!
 //! **Freshness.** Each session row keeps the provider file's fingerprint
-//! (`source`: length and modified time of Claude's jsonl or Codex's rollout,
-//! Muse's index stamp) as of the last write. A reopen serves from the store
+//! (`source`: length and a hash of the tail of Claude's jsonl or Codex's
+//! rollout, [`file_fingerprint`]; Muse's index stamp) as of the last write. A reopen serves from the store
 //! only when the provider's current fingerprint matches; otherwise it takes
 //! the provider path and rewrites the row — so a session continued in the
 //! terminal is never shown stale.
+//!
+//! **Sessions Baaz never opened** (docs/87 18.7): an agent's `session_read`
+//! of one folds the provider's own file to text-only turns on demand
+//! ([`read_or_fold`]) and keeps them under a [`LITE`] fingerprint. A reopen
+//! never serves those (its fingerprint never equals a [`LITE`] one), so the
+//! first real reopen rebuilds the row from the provider in full.
 //!
 //! **Format.** [`FORMAT`] is stamped in `meta`; a different stamp drops every
 //! row (the store is rebuilt lazily from the providers as sessions reopen).
@@ -154,7 +160,9 @@ pub fn write_tail(
 pub fn record_settled(state: &Path, provider: &str, session_id: &str, muse_stamp: Option<i64>, start: usize, tail: &[aui_protocol::Turn]) {
     let source = source_now(provider, session_id, muse_stamp);
     let written = with_store(state, |conn| -> rusqlite::Result<()> {
-        let held = stored(conn, provider, session_id)?.map_or(0, |row| row.turns);
+        let row = stored(conn, provider, session_id)?;
+        // A text-only fold ([`LITE`]) is never the head of a real transcript.
+        let held = row.filter(|row| !row.source.starts_with(LITE)).map_or(0, |row| row.turns);
         if start == 0 || held >= start {
             write_tail(conn, provider, session_id, &source, start, tail)
         } else {
@@ -202,6 +210,114 @@ pub fn kept_if_fresh(state: &Path, provider: &str, session_id: &str, muse_stamp:
     })
     .ok()?
     .ok()?
+}
+
+/// The fingerprint prefix of a text-only fold of a provider file
+/// ([`lite_turns`]): what `session_read` keeps for a session Baaz never
+/// opened. Never equal to [`source_now`], so a reopen never serves it.
+pub const LITE: &str = "lite:";
+
+/// `session_read`'s turns (docs/87 18.7): the store's, when Baaz keeps the
+/// session; else a text-only fold of the provider's own file (`file`: its
+/// jsonl or rollout), kept under a [`LITE`] fingerprint and refolded when
+/// the file has changed since. `None` when neither has turns (Muse keeps no
+/// file Baaz can read). Blocking.
+pub fn read_or_fold(conn: &mut Connection, provider: &str, session_id: &str, file: Option<&Path>) -> rusqlite::Result<Option<Vec<aui_protocol::Turn>>> {
+    let row = stored(conn, provider, session_id)?;
+    if row.as_ref().is_some_and(|row| !row.source.starts_with(LITE)) {
+        return read(conn, provider, session_id);
+    }
+    let Some(file) = file else { return Ok(None) };
+    let lite = format!("{LITE}{}", file_fingerprint(file));
+    if lite == LITE {
+        return Ok(None);
+    }
+    if row.is_some_and(|row| row.source == lite) {
+        return read(conn, provider, session_id);
+    }
+    let Ok(text) = std::fs::read_to_string(file) else { return Ok(None) };
+    let turns = lite_turns(provider, &text);
+    if turns.is_empty() {
+        return Ok(None);
+    }
+    write_from(conn, provider, session_id, &lite, &turns, 0)?;
+    Ok(Some(turns))
+}
+
+/// A provider file folded to text-only turns: each real prompt a user turn,
+/// the replies after it one assistant turn of text blocks (tool calls,
+/// thinking and injected context are left out). Claude Code's jsonl: a
+/// prompt is [`crate::import::claude_prompt`], a reply an `assistant` line's
+/// `text` blocks (sidechains skipped). Codex's rollout: a prompt is
+/// [`crate::import::codex_prompt`], a reply an assistant `response_item`'s
+/// `output_text`. Anything else folds to nothing.
+pub fn lite_turns(provider: &str, text: &str) -> Vec<aui_protocol::Turn> {
+    use aui_protocol::{Block, Turn};
+    let mut turns: Vec<Turn> = Vec::new();
+    let push_reply = |turns: &mut Vec<Turn>, reply: &str| {
+        let reply = reply.trim();
+        if reply.is_empty() {
+            return;
+        }
+        match turns.last_mut() {
+            Some(Turn::Assistant { blocks, .. }) => blocks.push(Block::text(reply)),
+            _ => {
+                let id = format!("lite-{}", turns.len());
+                turns.push(Turn::Assistant { id, blocks: vec![Block::text(reply)], meta: Default::default(), timestamp: None });
+            }
+        }
+    };
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let prompt = match provider {
+            "claude-code" => crate::import::claude_prompt(&value),
+            "codex" => crate::import::codex_prompt(&value),
+            _ => return Vec::new(),
+        };
+        if let Some(prompt) = prompt {
+            let id = format!("lite-{}", turns.len());
+            turns.push(Turn::User { id, text: prompt.to_owned(), attachments: Vec::new(), mentions: Vec::new(), timestamp: None });
+            continue;
+        }
+        let replies: Vec<&str> = match provider {
+            "claude-code" if value.get("type").and_then(|v| v.as_str()) == Some("assistant")
+                && value.get("isSidechain").and_then(|v| v.as_bool()) != Some(true) =>
+            {
+                value
+                    .pointer("/message/content")
+                    .and_then(|v| v.as_array())
+                    .map(|blocks| {
+                        blocks
+                            .iter()
+                            .filter(|b| b.get("type").and_then(|v| v.as_str()) == Some("text"))
+                            .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            "codex" if value.get("type").and_then(|v| v.as_str()) == Some("response_item")
+                && value.pointer("/payload/type").and_then(|v| v.as_str()) == Some("message")
+                && value.pointer("/payload/role").and_then(|v| v.as_str()) == Some("assistant") =>
+            {
+                value
+                    .pointer("/payload/content")
+                    .and_then(|v| v.as_array())
+                    .map(|blocks| {
+                        blocks
+                            .iter()
+                            .filter(|b| b.get("type").and_then(|v| v.as_str()) == Some("output_text"))
+                            .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        for reply in replies {
+            push_reply(&mut turns, reply);
+        }
+    }
+    turns
 }
 
 /// How long an archived session keeps its stored turns (docs/85 11.4).
@@ -317,6 +433,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp");
         dir
+    }
+
+    fn texts(turns: &[Turn]) -> Vec<String> {
+        turns.iter().map(crate::session_tools::turn_text).collect()
+    }
+
+    /// docs/87 18.7: a Claude Code session Baaz never opened (a real stored
+    /// jsonl, no CLI) reads as its prompts and replies, kept under a lite
+    /// fingerprint a reopen never serves.
+    #[test]
+    fn a_never_opened_claude_session_reads_from_its_file() {
+        let dir = temp("lite-claude");
+        let file = dir.join("af18b5bb.jsonl");
+        std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/claude-code/stored-history.jsonl"), &file).expect("fixture");
+        let mut conn = open_at(&dir.join("transcript.db")).expect("store");
+        let turns = read_or_fold(&mut conn, "claude-code", "af18b5bb", Some(&file)).expect("read").expect("turns");
+        let lines = texts(&turns);
+        assert_eq!(lines.first().map(String::as_str), Some("User: Say R1 and nothing else"), "{lines:?}");
+        assert!(lines.iter().any(|t| t == "Assistant: R1"), "{lines:?}");
+        assert!(lines.iter().all(|t| !t.contains("<system-reminder>")), "no injected context: {lines:?}");
+        let row = stored(&conn, "claude-code", "af18b5bb").expect("row").expect("kept");
+        assert!(row.source.starts_with(LITE), "{}", row.source);
+        assert_ne!(row.source, file_fingerprint(&file), "a reopen never takes the lite copy as fresh");
+        // Read again: served from the store, the same turns.
+        assert_eq!(read_or_fold(&mut conn, "claude-code", "af18b5bb", Some(&file)).expect("read"), Some(turns.clone()));
+        // The file grew (the session went on in the terminal): refolded.
+        let mut more = std::fs::read_to_string(&file).expect("read");
+        more.push_str(r#"{"type":"user","isSidechain":false,"message":{"role":"user","content":[{"type":"text","text":"Say R2"}]},"uuid":"x"}"#);
+        more.push('\n');
+        std::fs::write(&file, more).expect("grow");
+        let again = read_or_fold(&mut conn, "claude-code", "af18b5bb", Some(&file)).expect("read").expect("turns");
+        assert_eq!(texts(&again).last().map(String::as_str), Some("User: Say R2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// docs/87 18.7: the same for a Codex session (a real rollout from the
+    /// Stage 17 bench, trimmed): the typed prompt, not the injected context,
+    /// and the agent's replies.
+    #[test]
+    fn a_never_opened_codex_session_reads_from_its_rollout() {
+        let dir = temp("lite-codex");
+        let file = dir.join("rollout.jsonl");
+        std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/codex/rollout-stored.ndjson"), &file).expect("fixture");
+        let mut conn = open_at(&dir.join("transcript.db")).expect("store");
+        let turns = read_or_fold(&mut conn, "codex", "01a216a3", Some(&file)).expect("read").expect("turns");
+        let lines = texts(&turns);
+        assert_eq!(turns.len(), 2, "one prompt, one reply turn: {lines:?}");
+        assert!(lines[0].starts_with("User: The tests in this repo fail. Find the bug in calc.py"), "{lines:?}");
+        assert!(lines[1].contains("All tests pass: 2/2."), "{lines:?}");
+        assert!(lines.iter().all(|t| !t.contains("<environment_context>")), "{lines:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session Baaz keeps for real is read from the store, never refolded;
+    /// a lite copy never becomes the head of a real transcript; no file and
+    /// no row is no turns.
+    #[test]
+    fn the_real_store_wins_and_a_lite_copy_never_heads_a_transcript() {
+        let dir = temp("lite-real");
+        let file = dir.join("rollout.jsonl");
+        std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/codex/rollout-stored.ndjson"), &file).expect("fixture");
+        let mut conn = open_at(&dir.join("transcript.db")).expect("store");
+        write_from(&mut conn, "codex", "kept", "real-source", &[turn(0), turn(1)], 0).expect("write");
+        assert_eq!(read_or_fold(&mut conn, "codex", "kept", Some(&file)).expect("read"), Some(vec![turn(0), turn(1)]));
+        assert_eq!(read_or_fold(&mut conn, "codex", "none", None).expect("read"), None);
+        assert_eq!(read_or_fold(&mut conn, "muse", "m", Some(&file)).expect("read"), None, "no lite fold for Muse");
+        drop(conn);
+        // A lite copy, then a settled tail that does not start at 0: the
+        // partial transcript is forgotten, never served.
+        let lite = with_store(&dir, |conn| read_or_fold(conn, "codex", "lite", Some(&file))).expect("store").expect("read");
+        assert_eq!(lite.map(|turns| turns.len()), Some(2), "a two-turn lite copy");
+        record_settled(&dir, "codex", "lite", None, 2, &[turn(2)]);
+        assert_eq!(with_store(&dir, |conn| stored(conn, "codex", "lite")).expect("store").expect("row"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

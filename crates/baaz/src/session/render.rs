@@ -425,6 +425,7 @@ impl SessionView {
             // Rule 13: only where the fork cuts at the turn (Claude Code, Codex, Muse).
             branchable: self.runtime.read(cx).offers(provider::Capability::ForkSession) && self.runtime.read(cx).provider_kind().has(provider::ProviderTrait::ForkAtTurn),
             branches: Rc::new(self.runtime.read(cx).branch_counts.clone()),
+            branches_share_folder: self.runtime.read(cx).branches_share_folder(),
             full_output: Rc::clone(&self.cached_full_output),
             show_full_output: {
                 let show = cx.listener(|this: &mut Self, id: &String, _, cx| {

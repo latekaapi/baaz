@@ -84,7 +84,7 @@ fn project_with_origin(scratch: &Scratch) -> (PathBuf, String) {
 }
 
 fn spec<'a>(scratch_state: &'a Path, root: &'a Path, name: Option<&'a str>) -> CreateSpec<'a> {
-    CreateSpec { state_dir: scratch_state, project_root: root, project_id: Some("p-1"), branch_prefix: DEFAULT_BRANCH_PREFIX, name }
+    CreateSpec { state_dir: scratch_state, project_root: root, project_id: Some("p-1"), branch_prefix: DEFAULT_BRANCH_PREFIX, name, base: None }
 }
 
 fn rows(state: &Path) -> Vec<Worktree> {

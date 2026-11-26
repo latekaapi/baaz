@@ -308,6 +308,7 @@ impl Harness {
                                 project_id: project_bg.as_deref(),
                                 branch_prefix: &prefix,
                                 name: Some(&format!("task-{short}")),
+                                base: None,
                             });
                             match made {
                                 Ok(worktree) => {

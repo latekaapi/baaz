@@ -84,11 +84,12 @@ impl SessionRuntime {
             through_turn,
             metadata_only: false,
             mode: Some(self.mode()),
+            workspace: None,
         };
         let provider = self.provider_kind();
         self.provider_send(command, cx, move |this, result, cx| match result {
             Ok(provider::Ack::Session { session_id, .. }) => {
-                cx.emit(SessionEvent::ForkedOnProvider { session_id, provider });
+                cx.emit(SessionEvent::ForkedOnProvider { session_id, provider, workspace: None });
             }
             Ok(_) => {
                 this.set_banner("The fork answered without a session.", None, cx);
@@ -113,8 +114,13 @@ impl SessionRuntime {
     /// fork through that message's answer (the assistant turn after it),
     /// opened as its own session beside this one; the app records the
     /// branch and nests it under this session. A message with no finished
-    /// answer yet says so. Returns whether the fork was sent (a refusal is
-    /// the banner).
+    /// answer yet says so. Returns whether the fork was asked for (a
+    /// refusal is the banner).
+    ///
+    /// docs/87 18.9: in a git folder, on a provider whose fork can move,
+    /// the window first cuts a worktree at that turn's checkpoint
+    /// ([`SessionEvent::BranchIntoWorktree`]) and the branch runs there;
+    /// elsewhere it shares this session's folder ([`Self::send_branch`]).
     pub(crate) fn branch_from(&mut self, message: &str, cx: &mut Context<Self>) -> bool {
         // Rule 13: a fork that copies the whole session is not a branch.
         if !self.provider_kind().has(provider::ProviderTrait::ForkAtTurn) {
@@ -133,25 +139,55 @@ impl SessionRuntime {
             self.plain_banner("This message has no finished answer yet, so there is nothing to branch from.".to_owned(), cx);
             return false;
         };
+        if self.provider_kind().has(provider::ProviderTrait::ForkIntoFolder) {
+            if let Some(folder) = self.checkpoints.folder() {
+                cx.emit(SessionEvent::BranchIntoWorktree {
+                    message: message.to_owned(),
+                    through,
+                    folder: folder.to_path_buf(),
+                    key: self.checkpoints.key().map(str::to_owned),
+                });
+                return true;
+            }
+        }
+        self.send_branch(message.to_owned(), through, None, cx);
+        true
+    }
+
+    /// Whether this session's branches share its folder (docs/87 18.9).
+    pub(crate) fn branches_share_folder(&self) -> bool {
+        self.branches_share_folder
+    }
+
+    /// `branches-fixture:nongit`: a capture's folder reads as outside git.
+    #[cfg(feature = "probe")]
+    pub(crate) fn set_branches_share_folder_for_capture(&mut self) {
+        self.branches_share_folder = true;
+    }
+
+    /// Fork through `through` for the branch at `message`, in `workspace`
+    /// (its own worktree) or, with `None`, in this session's folder; the
+    /// branch is recorded and opened as its own session (docs/85 16.3).
+    pub(crate) fn send_branch(&mut self, message: String, through: String, workspace: Option<String>, cx: &mut Context<Self>) {
         let command = ProviderCommand::ForkSession {
             request_id: provider::new_request_id(),
             session_id: self.session_id.clone(),
             through_turn: Some(through),
             metadata_only: false,
             mode: Some(self.mode()),
+            workspace: workspace.clone(),
         };
-        let (provider, source, message) = (self.provider_kind(), self.session_id.clone(), message.to_owned());
+        let (provider, source) = (self.provider_kind(), self.session_id.clone());
         self.provider_send(command, cx, move |this, result, cx| match result {
             Ok(provider::Ack::Session { session_id, .. }) => {
                 *this.branch_counts.entry(message.clone()).or_insert(0) += 1;
                 cx.emit(SessionEvent::Branched { branch: session_id.clone(), source: source.clone(), message: message.clone() });
-                cx.emit(SessionEvent::ForkedOnProvider { session_id, provider });
+                cx.emit(SessionEvent::ForkedOnProvider { session_id, provider, workspace: workspace.clone() });
                 cx.emit(RuntimeEvent::BannerChanged);
             }
             Ok(_) => this.set_banner("The branch answered without a session.", None, cx),
             Err(error) => this.report_provider_error(&error, cx),
         });
-        true
     }
 
     /// The nth user message's turn id, from 1 (the `branch-from` step).

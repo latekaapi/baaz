@@ -596,6 +596,7 @@ impl<'a> Checker<'a> {
             | ProviderEvent::PlanModeChanged { session_id, .. }
             | ProviderEvent::SkillsListed { session_id, .. }
             | ProviderEvent::EffortInForce { session_id, .. }
+            | ProviderEvent::GoalStatus { session_id, .. }
             | ProviderEvent::ModelCatalogChanged { session_id }
             | ProviderEvent::SessionFacts { session_id, .. }
             | ProviderEvent::HeaderChanged { session_id, .. }

@@ -255,6 +255,9 @@ pub struct CreateSpec<'a> {
     pub branch_prefix: &'a str,
     /// The worktree's name, else a fresh `s-xxxxxx`.
     pub name: Option<&'a str>,
+    /// The commit to cut it from, else [`resolve_base`]'s (docs/87 18.9:
+    /// a branch's worktree starts at its turn's checkpoint).
+    pub base: Option<&'a str>,
 }
 
 /// Make a worktree: resolve its base, reserve its row (and port block),
@@ -265,7 +268,10 @@ pub fn create(spec: &CreateSpec) -> Result<Worktree, String> {
     if git_ok(root, &["rev-parse", "--show-toplevel"]).is_err() {
         return Err(format!("{} is not a git repository.", root.display()));
     }
-    let base = resolve_base(root)?;
+    let base = match spec.base {
+        Some(commit) => Base { commit: commit.to_owned(), label: "checkpoint".to_owned() },
+        None => resolve_base(root)?,
+    };
     let parent = worktrees_root(spec.state_dir).join(project_folder(spec.project_id, root));
     let db_path = crate::db::path_in(spec.state_dir);
     let mut worktree = None;

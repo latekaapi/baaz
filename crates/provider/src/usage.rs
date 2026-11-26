@@ -36,6 +36,10 @@ pub struct UsageReport {
     /// one. The store persists with this time and never re-stamps an
     /// unchanged reading, so the menu shows the reading's true age.
     pub observed_at: Option<i64>,
+    /// The reading came from a source the vendor does not document (Claude
+    /// Code's `get_usage` control request, docs/85 16.1): the Usage page
+    /// says "unofficial" beside its age.
+    pub unofficial: bool,
 }
 
 /// Name a window length in minutes for its card: a five-hour window is

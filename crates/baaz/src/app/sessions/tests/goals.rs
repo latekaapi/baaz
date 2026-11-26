@@ -126,6 +126,38 @@ fn the_same_failure_three_turns_running_blocks_the_goal(cx: &mut gpui::TestAppCo
     cleanup(&root, state);
 }
 
+/// docs/87 18.10: the agent's own "blocked" (Codex's `thread/goal/updated`)
+/// blocks a running goal at once, with nothing sent; "complete" changes
+/// nothing (Baaz's own check decides met); another session's status is
+/// not this goal's.
+#[gpui::test]
+fn the_agent_saying_blocked_blocks_the_goal_at_once(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("goal-provider-blocked");
+    let root = folder(&state.2, true);
+    with_check(&root, "false");
+    let (factory, sent) = recording_factory_numbered(true);
+    let (baaz, vc, _) = session_with(cx, &root, factory);
+    let rt = runtime_of(&baaz, vc);
+    vc.update(|_, cx| rt.update(cx, |rt, cx| rt.send_with_goal("Keep going until the tests pass".into(), cx)));
+    vc.run_until_parked();
+    let session = vc.update(|_, cx| rt.read(cx).session_id.clone());
+    let status = |vc: &mut gpui::VisualTestContext, session_id: &str, status: &str| {
+        let event = provider::ProviderEvent::GoalStatus { session_id: session_id.to_owned(), status: status.to_owned() };
+        vc.update(|_, cx| rt.update(cx, |rt, cx| rt.test_provider_event(event, cx)));
+        vc.run_until_parked();
+    };
+    status(vc, &session, "complete");
+    status(vc, "s-another", "blocked");
+    assert_eq!(goal_of(&rt, vc).state, GoalState::Running, "complete, or another session's word, changes nothing");
+    let before = sent.lock().unwrap().len();
+    status(vc, &session, "blocked");
+    let goal = goal_of(&rt, vc);
+    assert_eq!(goal.state, GoalState::Blocked, "{goal:?}");
+    assert!(goal.reason.as_deref().unwrap().contains("says it is blocked"));
+    assert_eq!(sent.lock().unwrap().len(), before, "nothing is sent");
+    cleanup(&root, state);
+}
+
 /// 15.4 + 15.7: over its ceiling the goal pauses and says why in one line;
 /// the progress note is written once and replaced, never duplicated.
 #[gpui::test]

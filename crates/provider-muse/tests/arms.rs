@@ -239,6 +239,7 @@ fn every_command_arm_sends_its_method_params_and_ack() {
                 through_turn: Some("t-9".into()),
                 metadata_only: false,
                 mode: None,
+                workspace: None,
             }),
             expected_params: params_of!(SessionForkParams {
                 command_id: "cmd-fork".into(),

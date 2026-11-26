@@ -168,7 +168,7 @@
 //! | `workers-pane` | a stand-in worker (the window's scripted lane, Read-only) opened beside the open session as the block's ↗ opens one — captures only (fails the step otherwise), free |
 //! | `workers-unfold` | unfold the open session's Workers block (its rows after every worker settled); no workers fails the step, free |
 //! | `worker-beside:<n>` | open the open session's nth worker (from 1) beside it, as its row's ↗ does; no such live worker fails the step, free |
-//! | `branches-fixture` | the open session's last user message reads "2 branches" (docs/85 16.3): no fork made, no row written; no open session or no user message fails the step, free |
+//! | `branches-fixture` | (or `branches-fixture:nongit`) the open session's last user message reads "2 branches" (docs/85 16.3): no fork made, no row written; `:nongit` also treats the session's folder as outside git, so it reads "2 branches · same folder" (docs/87 18.9); another suffix, no open session or no user message fails the step, free |
 //! | `branch-from:<n>` | Branch from here on the open session's nth user message (from 1), for real — it forks on the provider, so **never in a capture** unless the lane is scripted; no session, no such message, or Branch refused (the provider cannot cut at a turn, no finished answer) fails the step, free |
 //! | `skills-folders-fixture` | the shared skill folders read three fixture skills (docs/85 16.2) for the Skills page's folder section and the `/` menu; captures only (fails the step otherwise), free |
 //! | `usage-fixture` | thirty days of fixture turns (three providers, four models, two projects) in the capture's own baaz.db for Settings › Usage (docs/85 16.1); captures only (fails the step otherwise), free |
@@ -502,7 +502,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "goal-fixture", run: |this, rest, _, cx| this.step_goal_fixture(rest, cx) },
     WindowVerb { verb: "usage-fixture", run: |_, _, _, _| crate::usage_page::step_usage_fixture() },
     WindowVerb { verb: "skills-folders-fixture", run: |_, _, _, _| crate::skill_folders::step_fixture() },
-    WindowVerb { verb: "branches-fixture", run: |this, _, _, cx| this.step_branches_fixture(cx) },
+    WindowVerb { verb: "branches-fixture", run: |this, rest, _, cx| this.step_branches_fixture(rest, cx) },
     WindowVerb { verb: "branch-from", run: |this, rest, _, cx| this.step_branch_from(rest, cx) },
     WindowVerb { verb: "tick", run: |this, rest, _, cx| this.step_changes_tick(rest, true, cx) },
     WindowVerb { verb: "untick", run: |this, rest, _, cx| this.step_changes_tick(rest, false, cx) },

@@ -124,7 +124,7 @@ impl AccountSnapshot {
                 window_minutes: self.secondary_minutes,
             });
         }
-        Some(provider::UsageReport {
+        Some(provider::UsageReport { unofficial: false,
             plan: self.plan.clone(),
             windows,
             observed_at: self.observed_at,

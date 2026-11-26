@@ -284,6 +284,8 @@ fn connected_row(status: &ProviderStatus, now: i64, stale: bool) -> UsageRowData
     }
     let as_of = snapshot.map(|snapshot| {
         let age = age_text(snapshot.as_of, now);
+        // docs/85 16.1: an undocumented source says so beside its age.
+        let age = if snapshot.unofficial { format!("{age} · unofficial") } else { age };
         if stale {
             format!("{age} · unavailable now").into()
         } else {
@@ -437,7 +439,7 @@ mod tests {
     }
 
     fn snapshot(provider: &str, as_of: i64) -> UsageSnapshot {
-        UsageSnapshot {
+        UsageSnapshot { unofficial: false,
             provider: provider.into(),
             plan: Some("prolite".into()),
             windows: vec![SnapshotWindow {
@@ -722,7 +724,7 @@ mod tests {
         // real reset clauses. The snapshot stands in only when the card has
         // no numbers.
         let mut muse = status(ProviderId::Muse);
-        muse.usage = Some(UsageSnapshot {
+        muse.usage = Some(UsageSnapshot { unofficial: false,
             provider: "muse".into(),
             plan: None,
             windows: vec![SnapshotWindow {
@@ -763,7 +765,7 @@ mod tests {
 
         let mut codex = status(ProviderId::Codex);
         codex.auth = Auth::SignedIn { email: None, plan: Some("prolite".into()), method: None, source: None };
-        codex.usage = Some(UsageSnapshot {
+        codex.usage = Some(UsageSnapshot { unofficial: false,
             provider: "codex".into(),
             plan: None,
             windows: vec![SnapshotWindow {
@@ -796,7 +798,7 @@ mod tests {
         // `utilization` decodes to unknown) rows the meter's status text,
         // never a bar.
         let mut claude = status(ProviderId::ClaudeCode);
-        claude.usage = Some(UsageSnapshot {
+        claude.usage = Some(UsageSnapshot { unofficial: false,
             provider: "claude-code".into(),
             plan: Some("Allowed".into()),
             windows: Vec::new(),
@@ -805,6 +807,29 @@ mod tests {
         let rows = usage_rows(&[claude], None, 1700000000);
         assert_eq!(rows.len(), 1);
         assert_eq!(unavailable_text(&rows[0]), "Allowed");
+    }
+
+    /// docs/85 16.1 / docs/87 18.10: a reading from Claude Code's
+    /// undocumented `get_usage` says "unofficial" beside its age; a turn's
+    /// reading does not.
+    #[test]
+    fn an_unofficial_reading_says_so_beside_its_age() {
+        let footnote = |unofficial: bool| {
+            let mut claude = status(ProviderId::ClaudeCode);
+            claude.usage = Some(UsageSnapshot {
+                unofficial,
+                provider: "claude-code".into(),
+                plan: Some("Max".into()),
+                windows: vec![baaz_core::provider_status::UsageWindow { label: "Weekly".into(), used_fraction: 0.67, resets_at: Some(1700000000 + 86400) }],
+                as_of: 1700000000 - 120,
+            });
+            match usage_rows(&[claude], None, 1700000000).remove(0).state {
+                UsageRowState::Windows(_, as_of) => as_of.map(|text| text.to_string()),
+                other => panic!("windows expected: {other:?}"),
+            }
+        };
+        assert_eq!(footnote(true).as_deref(), Some("2m ago · unofficial"));
+        assert_eq!(footnote(false).as_deref(), Some("2m ago"));
     }
 
     #[test]

@@ -38,8 +38,8 @@ pub(super) fn recording_factory_numbered(numbered: bool) -> (crate::providers::R
         }
         fn dispatch(&self, command: provider::Command) -> Result<provider::Ack, provider::ProviderError> {
             // A resume (docs/85 14.1's restart) echoes the session.
-            if let provider::Command::ResumeSession { session_id, .. } = &command {
-                self.sent.lock().expect("sent").push((format!("resumed:{session_id}"), String::new()));
+            if let provider::Command::ResumeSession { session_id, workspace, .. } = &command {
+                self.sent.lock().expect("sent").push((format!("resumed:{session_id}"), workspace.clone().unwrap_or_default()));
                 return Ok(provider::Ack::Session { session_id: session_id.clone(), title: None });
             }
             let steered = match &command {
@@ -53,9 +53,11 @@ pub(super) fn recording_factory_numbered(numbered: bool) -> (crate::providers::R
                 }).collect();
                 self.sent.lock().expect("sent").push((text, "(steered)".into()));
             }
-            // A fork (docs/85 16.3) is recorded as `fork:<through turn>`.
-            if let provider::Command::ForkSession { through_turn, .. } = &command {
-                self.sent.lock().expect("sent").push((format!("fork:{}", through_turn.as_deref().unwrap_or("")), String::new()));
+            // A fork (docs/85 16.3) is recorded as `fork:<through turn>`,
+            // beside the folder it runs in (docs/87 18.9; empty: the
+            // source's).
+            if let provider::Command::ForkSession { through_turn, workspace, .. } = &command {
+                self.sent.lock().expect("sent").push((format!("fork:{}", through_turn.as_deref().unwrap_or("")), workspace.clone().unwrap_or_default()));
             }
             // A native goal (docs/85 15.1) is recorded as `goal:<words>`
             // (`goal:clear` when cleared, `goal-paused:` when paused).

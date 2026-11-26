@@ -337,6 +337,11 @@ pub enum ProviderTrait {
     /// conversation through that turn (docs/85 16.3). A fork without it
     /// copies the whole session, and Branch is not offered.
     ForkAtTurn,
+    /// Its fork can run in another folder ([`crate::Command::ForkSession`]'s
+    /// `workspace`): "Branch from here" opens the branch in its own worktree
+    /// cut at the turn's checkpoint (docs/87 18.9; probed live on Claude
+    /// Code 2.1.276 and Codex 0.153.2, docs/85-evidence/18.9).
+    ForkIntoFolder,
     /// Its thread takes its model at its start: a turn on another model
     /// is a mid-thread switch, which the backend pays for in every later
     /// request (Codex pastes the new model's instructions into the

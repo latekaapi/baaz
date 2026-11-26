@@ -109,10 +109,13 @@ fn read(params: &Value, current: &str) -> Result<Value, String> {
         return Err("that is a side session; it has nothing to read".into());
     }
     let state = crate::store::support_dir();
-    let turns = baaz_core::transcripts::with_store(&state, |conn| baaz_core::transcripts::read(conn, &facts.provider, &session))
+    // A session Baaz never opened is read from the provider's own file
+    // (docs/87 18.7), text only.
+    let file = baaz_core::provider_search::stored_file(&facts.provider, &session);
+    let turns = baaz_core::transcripts::with_store(&state, |conn| baaz_core::transcripts::read_or_fold(conn, &facts.provider, &session, file.as_deref()))
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Baaz has not kept that session's turns yet (it keeps them from the first time it is opened in Baaz)".to_owned())?;
+        .ok_or_else(|| "Baaz cannot read that session's turns (it keeps none, and the provider left no file Baaz can read)".to_owned())?;
     Ok(json!({"session": session, "title": facts.title, "provider": facts.provider, "turns": baaz_core::session_tools::read(&turns, query.as_deref())}))
 }
 

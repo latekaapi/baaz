@@ -3267,6 +3267,7 @@ mod tests {
                 through_turn: Some(turn.into()),
                 metadata_only: false,
                 mode: None,
+                workspace: None,
             })
         };
         // The source's adapter: no spawn, the branch id acked.

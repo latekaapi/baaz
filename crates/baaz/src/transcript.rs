@@ -152,6 +152,9 @@ pub struct Folds {
     /// many branches start at each message, by its turn id.
     pub branchable: bool,
     pub branches: Rc<HashMap<String, u32>>,
+    /// docs/87 18.9: the session's folder is not a git repository, so its
+    /// branches share it; the count says so.
+    pub branches_share_folder: bool,
     /// What each turn currently holds spanned, by turn id (C8b). Per turn
     /// because the library scopes cell keys to the markdown view that
     /// rendered them — one shared span would light up every turn at once.
@@ -1659,7 +1662,9 @@ pub fn turn_row(turn: &Turn, row: usize, settled: bool, folds: &Folds, window: &
                 turn = turn.actions(&[UserTurnAction::Edit, UserTurnAction::Copy, UserTurnAction::Branch]);
             }
             if let Some(n) = folds.branches.get(id).copied().filter(|n| *n > 0) {
-                turn = turn.branches(Some(if n == 1 { "1 branch".into() } else { format!("{n} branches").into() }));
+                let count = if n == 1 { "1 branch".to_owned() } else { format!("{n} branches") };
+                let words = if folds.branches_share_folder { format!("{count} · same folder") } else { count };
+                turn = turn.branches(Some(words.into()));
             }
             if let Some(on_link) = &folds.link {
                 let on_link = on_link.clone();
@@ -3319,6 +3324,7 @@ mod tests {
         Folds {
             branchable: false,
             branches: Rc::new(HashMap::new()),
+            branches_share_folder: false,
             toggled: Rc::new(HashSet::new()),
             toggle: Rc::new(|_: String, _: &mut Window, _: &mut App| {}),
             plan: None,

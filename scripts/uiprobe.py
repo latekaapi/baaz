@@ -9,6 +9,11 @@ run costs nothing and reaches no model.
 
     uiprobe.py --entry signed-in --probe-shot out.png
     uiprobe.py --entry signed-in --probe-idle 2000
+    uiprobe.py --check-docs [--plant NAME]
+
+`--check-docs` (docs/85 rule 28, docs/87 18.2) exits 1 when an entry declared
+here is missing from CLAUDE.md's `--entry` lists, or CLAUDE.md names an entry
+that does not exist. `--plant NAME` adds a fake entry first, to watch it fail.
 """
 import argparse, json, os, shutil, subprocess, sys, tempfile, time
 import atexit
@@ -161,7 +166,7 @@ def _usage_script():
             "checked_at": now,
             "usage": usage,
         }
-    def usage(provider, plan, windows):
+    def usage(provider, plan, windows, unofficial=False):
         return {
             "provider": provider,
             "plan": plan,
@@ -170,13 +175,16 @@ def _usage_script():
                 for (label, used, resets) in windows
             ],
             "as_of": now,
+            # docs/87 18.10: Claude's reading before a first turn comes from
+            # the undocumented get_usage, and its card says "unofficial".
+            "unofficial": unofficial,
         }
     return [
         status("muse", "ada@example.com", "High Usage", usage(
             "muse", "High Usage", [("Weekly", 0.01, now + 2 * 86400)])),
         status("claude-code", None, "Pro", usage(
             "claude-code", "Pro", [("Session · 5h", 0.42, now + 41 * 60),
-                                      ("Weekly", 0.83, now + (2 * 24 + 4) * 3600)])),
+                                      ("Weekly", 0.83, now + (2 * 24 + 4) * 3600)], unofficial=True)),
         status("codex", None, "prolite", usage(
             "codex", "prolite", [("Weekly", 0.19, now + 7 * 86400)])),
     ]
@@ -1252,6 +1260,9 @@ ENTRIES.update({
     "transcript-full":         _populated(replay=True, sidebar=False),
     # docs/85 16.3: the branch count under a user message.
     "branches-message":        _populated("branches-fixture", replay=True, sidebar=False),
+    # docs/87 18.9: a session whose folder is not a git repository: its
+    # branches share the folder, and the count says so.
+    "branches-nongit":         _populated("branches-fixture:nongit", replay=True, sidebar=False),
     "transcript-full-light":   _populated(replay=True, sidebar=False, theme="light"),
     "transcript-full-top":     _populated("top", replay=True, sidebar=False),
     "transcript-full-mid":     _populated("mid", replay=True, sidebar=False),
@@ -1542,7 +1553,26 @@ def prime_adoptions(cmd, env, pristine):
     return None
 
 
+def check_docs(plant=None):
+    """Every declared entry is named in CLAUDE.md, and CLAUDE.md names only
+    declared entries. Returns the exit code."""
+    import re
+    names = set(ENTRIES) | ({plant} if plant else set())
+    text = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "CLAUDE.md")).read()
+    listed = set(re.findall(r"--entry ([\w-]+)", text))
+    missing, unknown = sorted(names - listed), sorted(listed - names)
+    for name in missing:
+        print(f"uiprobe --check-docs: entry `{name}` is declared in scripts/uiprobe.py but not listed in CLAUDE.md")
+    for name in unknown:
+        print(f"uiprobe --check-docs: CLAUDE.md lists `{name}`, which scripts/uiprobe.py does not declare")
+    print(f"uiprobe --check-docs: {len(names)} entries, {len(listed)} listed, {len(missing)} missing, {len(unknown)} unknown")
+    return 1 if missing or unknown else 0
+
+
 def main():
+    if "--check-docs" in sys.argv:
+        plant = sys.argv[sys.argv.index("--plant") + 1] if "--plant" in sys.argv else None
+        return check_docs(plant)
     keep_display_awake()
     ap = argparse.ArgumentParser()
     ap.add_argument("--entry", required=True)

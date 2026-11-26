@@ -127,7 +127,7 @@ fn parse_iso_utc(text: &str) -> Option<i64> {
     let (date, rest) = text.split_once('T')?;
     let mut ymd = date.split('-').map(|part| part.parse::<i64>().ok());
     let (year, month, day) = (ymd.next()??, ymd.next()??, ymd.next()??);
-    let split = rest.find(|c| c == 'Z' || c == '+' || c == '-')?;
+    let split = rest.find(['Z', '+', '-'])?;
     let (clock, offset) = rest.split_at(split);
     let mut hms = clock.split(':');
     let hour: i64 = hms.next()?.parse().ok()?;
@@ -209,7 +209,7 @@ impl AccountSnapshot {
     /// flag, so it always wins; the polled reply fills the meter before
     /// the first turn (docs/85 16.1).
     pub fn observe_polled(&mut self, info: RateLimitInfo) {
-        if self.latest.as_ref().map_or(true, |latest| latest.rate_limit_type.is_empty()) {
+        if self.latest.as_ref().is_none_or(|latest| latest.rate_limit_type.is_empty()) {
             self.observe(info);
         }
     }
@@ -270,13 +270,16 @@ impl AccountSnapshot {
             });
         }
         if windows.is_empty() {
-            return Some(provider::UsageReport {
+            return Some(provider::UsageReport { unofficial: false,
                 plan: Some(humanize_status(&info.status)),
                 windows: Vec::new(),
                 observed_at: self.observed_at,
             });
         }
-        Some(provider::UsageReport { plan: info.plan.clone(), windows, observed_at: self.observed_at })
+        // A polled `get_usage` reading names no window of its own; a
+        // turn's `rate_limit_event` always does.
+        let unofficial = info.rate_limit_type.is_empty();
+        Some(provider::UsageReport { unofficial, plan: info.plan.clone(), windows, observed_at: self.observed_at })
     }
 
     /// The display label for [`provider::Ack::Account`]: window, percentage,
@@ -437,10 +440,12 @@ mod tests {
         assert_eq!(report.plan.as_deref(), Some("Max"));
         assert_eq!(report.windows.iter().map(|w| (w.label.as_str(), w.used_fraction)).collect::<Vec<_>>(), vec![("Session · 5h", 0.05), ("Weekly", 0.67)]);
         assert!(snapshot.label().expect("label").starts_with("Claude Code five_hour 5%"));
+        assert!(report.unofficial, "the polled reply is the undocumented source (16.1)");
 
         let event = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1790647800,"rateLimitType":"five_hour","isUsingOverage":true,"unifiedWindows":{"five_hour":{"utilization":0.12,"resetsAt":1790647800}}}}"#;
         let Frame::RateLimit(event) = decode_line(event).expect("decodes") else { panic!("event") };
         snapshot.observe(event);
+        assert!(!snapshot.usage_report().expect("report").unofficial, "a turn's event is the documented source");
         snapshot.observe_polled(info);
         assert!(snapshot.is_using_overage(), "the turn's event stays: a polled reply never replaces it");
 

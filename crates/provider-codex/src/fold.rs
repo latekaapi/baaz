@@ -1594,6 +1594,21 @@ pub fn step_line(fold: &mut CodexFold, line: &str, emit: &mut impl FnMut(Provide
         }
         _ => (None, None),
     };
+    // docs/87 18.10: Codex's own goal state (`thread/goal/updated`,
+    // captured live in docs/85 15.1: active, blocked, complete). "Still
+    // working" (`active`) says nothing new, and it arrives with every
+    // token-count tick, so only another status goes up.
+    let goal_status = match &frame {
+        Frame::Notification(Notification::Unknown { method, params }) if method == "thread/goal/updated" => params
+            .pointer("/goal/status")
+            .and_then(Value::as_str)
+            .filter(|status| *status != "active")
+            .map(|status| (status.to_owned(), params.get("threadId").and_then(Value::as_str).map(str::to_owned))),
+        _ => None,
+    };
+    if let Some((status, Some(session_id))) = goal_status.map(|(status, thread)| (status, session_id.clone().or(thread))) {
+        emit(ProviderEvent::GoalStatus { session_id, status });
+    }
     let deltas = fold.apply(&frame);
     if !deltas.is_empty() {
         emit(ProviderEvent::Deltas { session_id: session_id.clone(), deltas });
@@ -4029,5 +4044,28 @@ mod tests {
             })
             .collect();
         assert_eq!(modes, vec![PermissionMode::OnRequest], "on-request, announced once");
+    }
+
+    /// docs/87 18.10: Codex's own goal state reaches the app, except the
+    /// "still working" status that rides every token tick. Fixture:
+    /// `goal-updated.ndjson` (active and complete captured live in 15.1;
+    /// blocked is that frame with the schema's `blocked` status).
+    #[test]
+    fn goal_updates_report_every_status_but_active() {
+        let mut fold = CodexFold::new();
+        let mut events = Vec::new();
+        for line in fixture_lines("goal-updated.ndjson") {
+            let envelope: Value = serde_json::from_str(&line).expect("json");
+            step_line(&mut fold, &envelope["frame"].to_string(), &mut |event| events.push(event));
+        }
+        let statuses: Vec<(String, String)> = events
+            .into_iter()
+            .filter_map(|event| match event {
+                ProviderEvent::GoalStatus { session_id, status } => Some((session_id, status)),
+                _ => None,
+            })
+            .collect();
+        let thread = "01a212d5-6bb3-7f72-89a1-d54d205112a4".to_owned();
+        assert_eq!(statuses, vec![(thread.clone(), "blocked".to_owned()), (thread, "complete".to_owned())]);
     }
 }

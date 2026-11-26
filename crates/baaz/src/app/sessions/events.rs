@@ -114,11 +114,11 @@ impl Harness {
             // fresh child on the same provider and resume the fork there,
             // opening it as a new lane view — the source view's lane is
             // never disturbed.
-            SessionEvent::ForkedOnProvider { session_id, provider } => {
-                let (session_id, provider) = (session_id.clone(), *provider);
+            SessionEvent::ForkedOnProvider { session_id, provider, workspace } => {
+                let (session_id, provider, folder) = (session_id.clone(), *provider, workspace.clone());
                 self.tasks.push(cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| {
-                        let workspace = this.workspace(cx);
+                        let workspace = folder.unwrap_or_else(|| this.workspace(cx));
                         this.open_forked_on_provider(provider, session_id, workspace, window, cx);
                     });
                 }));
@@ -411,6 +411,9 @@ impl Harness {
             SessionEvent::GoalTurnEnded => self.goal_turn_ended(runtime.clone(), cx),
             // docs/85 16.3: a branch landed.
             SessionEvent::Branched { branch, source, message } => self.branched(branch, source, message, cx),
+            SessionEvent::BranchIntoWorktree { message, through, folder, key } => {
+                self.branch_into_worktree(runtime.clone(), message.clone(), through.clone(), folder.clone(), key.clone(), cx)
+            }
             SessionEvent::GoalChanged => self.update_keep_awake(cx),
         }
         cx.notify();

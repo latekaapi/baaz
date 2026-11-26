@@ -259,7 +259,7 @@ pub fn dispatch(
                 title: result.session.title,
             })
         }
-        Command::ForkSession { request_id, session_id, through_turn, metadata_only, mode: _ } => {
+        Command::ForkSession { request_id, session_id, through_turn, metadata_only, mode: _, workspace: _ } => {
             let result = client
                 .session_fork(&SessionForkParams {
                     command_id: request_id,
