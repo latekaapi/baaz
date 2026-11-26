@@ -342,6 +342,14 @@ pub enum ProviderTrait {
     /// cut at the turn's checkpoint (docs/87 18.9; probed live on Claude
     /// Code 2.1.276 and Codex 0.153.2, docs/85-evidence/18.9).
     ForkIntoFolder,
+    /// Its thread takes its model at its start: a turn on another model
+    /// is a mid-thread switch, which the backend pays for in every later
+    /// request (Codex pastes the new model's instructions into the
+    /// history, about 4.4k tokens; docs/85-evidence/s17). So a fresh
+    /// session opens on the model it will use, and a pick before its first
+    /// turn restarts the still-empty session on the pick rather than
+    /// switching it.
+    ModelAtThreadStart,
 }
 
 /// A stdio MCP server every session of a window gets: the terminal relay's

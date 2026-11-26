@@ -57,13 +57,19 @@ impl Harness {
             terminal_host: Some(self.terminal_host(cx)),
         };
         let view = cx.new(|cx| SessionView::new_provider_opening(request_id.clone(), mode, host, window, cx));
+        // The chat's thread starts on its model where the provider takes it
+        // there (see `note_fresh_thread`); its ask is queued at once, so the
+        // model is never switched or restarted afterwards.
+        let start_model = (!choice.model.is_empty() && choice.provider.has(provider::ProviderTrait::ModelAtThreadStart))
+            .then(|| choice.model.to_owned());
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, _| rt.note_fresh_thread(start_model.clone())));
         if !choice.model.is_empty() {
             view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model(choice.model, cx)));
         }
         view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.send_or_queue(ask, cx)));
         self.set_browser_chat(view, cx);
         self.open_state.starts_in_flight.insert(request_id.clone());
-        self.spawn_provider_open(choice.provider, None, workspace, request_id.clone(), mode, cx);
+        self.spawn_provider_open(choice.provider, None, workspace, request_id.clone(), mode, start_model, cx);
         cx.notify();
         Some(request_id)
     }

@@ -46,7 +46,7 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     // one: not reached blind, so the Plan toggle is absent.
     plan: provider::PlanMode::None,
     routes: &[],
-    traits: &[ProviderTrait::ModelsLimitModes, ProviderTrait::DeviceCodeSignIn, ProviderTrait::GoalCommand, ProviderTrait::ForkAtTurn, ProviderTrait::ForkIntoFolder],
+    traits: &[ProviderTrait::ModelsLimitModes, ProviderTrait::DeviceCodeSignIn, ProviderTrait::GoalCommand, ProviderTrait::ForkAtTurn, ProviderTrait::ForkIntoFolder, ProviderTrait::ModelAtThreadStart],
     capabilities: |_| crate::caps::capabilities(),
     command_env: None,
 };

@@ -403,6 +403,8 @@ pub(super) fn y2b2_factory() -> (crate::providers::Registry, Y2b2Shared) {
             created: Vec::new(),
             shutdowns: Vec::new(),
             modes: Vec::new(),
+            models: Vec::new(),
+            selects: Vec::new(),
         })),
     };
     let factory_shared = shared.clone();
@@ -702,6 +704,10 @@ pub(super) struct Y2b2State {
     pub(super) shutdowns: Vec<String>,
     /// The mode each `OpenSession` asked for, in order.
     pub(super) modes: Vec<Option<aui_protocol::PermissionMode>>,
+    /// The model each `OpenSession` asked for, in order.
+    pub(super) models: Vec<Option<String>>,
+    /// Each `SelectModel`, as (session, model), in order.
+    pub(super) selects: Vec<(String, String)>,
 }
 
 pub(super) struct Y2b2Adapter {
@@ -738,7 +744,7 @@ impl provider::ProviderAdapter for Y2b2Adapter {
             (Capability::ModelCatalog, native.clone()),
             (Capability::ForkSession, off()),
             (Capability::CompactSession, off()),
-            (Capability::SessionConfig, off()),
+            (Capability::SessionConfig, native.clone()),
             (Capability::SessionShell, off()),
             (Capability::SteerTurn, off()),
             (Capability::TurnControl, off()),
@@ -757,11 +763,12 @@ impl provider::ProviderAdapter for Y2b2Adapter {
             return Err(provider::ProviderError::Unavailable { reason: "not connected".into() });
         }
         match command {
-            provider::Command::OpenSession { mode, .. } => {
+            provider::Command::OpenSession { mode, model, .. } => {
                 let id = {
                     let mut shared = self.shared.inner.lock().expect("y2b2");
                     shared.opens += 1;
                     shared.modes.push(mode);
+                    shared.models.push(model);
                     let id = format!("y2b2-{}", shared.opens);
                     shared.created.push(id.clone());
                     id
@@ -774,6 +781,10 @@ impl provider::ProviderAdapter for Y2b2Adapter {
             }
             provider::Command::ListPending { .. } => {
                 Ok(provider::Ack::PendingWork { approvals: Vec::new(), questions: Vec::new() })
+            }
+            provider::Command::SelectModel { session_id, model, .. } => {
+                self.shared.inner.lock().expect("y2b2").selects.push((session_id, model));
+                Ok(provider::Ack::Accepted)
             }
             other => Err(provider::ProviderError::unsupported(
                 other.capability(),

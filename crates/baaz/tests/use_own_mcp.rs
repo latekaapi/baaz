@@ -93,7 +93,8 @@ fn codex_without_a_relay_still_spawns_silenced() {
     );
 }
 
-/// Codex with the switch on: bridge only, no disables.
+/// Codex with the switch on: bridge only, no disables (install
+/// suggestions stay off: docs/88 C.4).
 #[test]
 fn codex_with_the_switch_on_builds_bridge_only() {
     let adapter = provider_codex::CodexAdapter::new("codex-must-never-spawn");
@@ -103,9 +104,9 @@ fn codex_with_the_switch_on_builds_bridge_only() {
     });
     adapter.set_use_own_mcp(true);
     let extra = adapter.spawn_args_for("cmd-open");
-    assert_eq!(extra.len(), 10, "bridge only (command, args, token env) plus the CLAUDE.md fallback and the tool-output limit: {extra:?}");
+    assert_eq!(extra.len(), 12, "bridge only (command, args, token env) plus the CLAUDE.md fallback, the tool-output limit and install suggestions off (docs/88 C.4): {extra:?}");
     assert!(
-        !extra.iter().any(|arg| arg.contains("enabled=false")),
+        !extra.iter().any(|arg| arg.contains("enabled=false") || arg == "features.plugins=false"),
         "opted in means nothing silenced: {extra:?}"
     );
 }

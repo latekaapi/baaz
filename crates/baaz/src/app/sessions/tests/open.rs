@@ -1040,6 +1040,123 @@ fn a_provider_draft_requests_the_projects_remembered_model(cx: &mut gpui::TestAp
         assert!(!view.read(cx).rt(cx).is_opening_lane());
         assert_eq!(view.read(cx).rt(cx).model_id(), "opus[1m]");
     });
+    // Claude Code's thread takes a model at any point: its open names
+    // none, so the CLI's own default stands until the pick is sent.
+    assert_eq!(shared.inner.lock().expect("y2b2").models, [None], "no --model at a Claude Code open");
+    lane_restore(state);
+}
+
+/// docs/85-evidence/s17: a Codex thread takes its model at its start, and a
+/// first turn on another model is a mid-thread switch that costs every
+/// later request ~4.4k tokens. So a Codex draft's open names the project's
+/// remembered model, and the landing's replay of the pick is no switch.
+#[gpui::test]
+fn a_codex_draft_starts_its_thread_on_the_remembered_model(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("codex-start-model");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    let (factory, shared) = y2b2_factory();
+    b2fix_project(vc, &baaz, "codex", &[("codex", "gpt-remembered")], &[]);
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, _| {
+            harness.providers = harness.providers.with_opens_of(&factory);
+            mark_muse_up(harness);
+            harness.active = None;
+        });
+    });
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
+    vc.run_until_parked();
+    let state_now = shared.inner.lock().expect("y2b2");
+    assert_eq!(state_now.models, [Some("gpt-remembered".to_owned())], "thread/start names the model");
+    assert_eq!(state_now.opens, 1, "no restart: the pick is the model the thread started on");
+    drop(state_now);
+    vc.update(|_, cx| {
+        let view = baaz.read(cx).active.clone().expect("the draft landed");
+        assert_eq!(view.read(cx).rt(cx).model_id(), "gpt-remembered");
+    });
+    lane_restore(state);
+}
+
+/// A model picked on a landed, unsent Codex draft restarts it on the pick
+/// (a fresh `thread/start`) instead of switching its thread: the old child
+/// is hung up, its zero-turn record goes with its view, and the
+/// replacement — under the id the new thread minted — opens on the pick.
+/// Once the session has a turn, a pick is a plain `SelectModel` again.
+#[gpui::test]
+fn a_model_picked_before_the_first_turn_restarts_a_codex_draft(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("codex-restart-model");
+    let vc = cx.add_empty_window();
+    let baaz = lane_harness(vc, &state.2);
+    let (factory, shared) = y2b2_factory();
+    b2fix_project(vc, &baaz, "codex", &[], &[]);
+    vc.update(|_, cx| {
+        baaz.update(cx, |harness, _| {
+            harness.providers = harness.providers.with_opens_of(&factory);
+            mark_muse_up(harness);
+            harness.active = None;
+        });
+    });
+    vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
+    vc.run_until_parked();
+    let first = vc.update(|_, cx| baaz.read(cx).active.clone().expect("the draft landed").read(cx).rt(cx).session_id.clone());
+    assert_eq!(first, "y2b2-1");
+    assert_eq!(shared.inner.lock().expect("y2b2").models, [None], "nothing remembered: the CLI default");
+    // The pick, through the runtime the composer and `setmodel:` both call.
+    vc.update(|_, cx| {
+        let view = baaz.read(cx).active.clone().expect("the draft");
+        view.read(cx).runtime().clone().update(cx, |rt, cx| rt.set_model("gpt-picked", cx));
+    });
+    vc.run_until_parked();
+    {
+        let shared = shared.inner.lock().expect("y2b2");
+        assert_eq!(shared.models, [None, Some("gpt-picked".to_owned())], "the replacement's thread starts on the pick");
+        // The landing replays the draft's pick, which is the model the new
+        // thread started on: no switch reaches either thread.
+        assert!(
+            shared.selects.iter().all(|(session, model)| session == "y2b2-2" && model == "gpt-picked"),
+            "no model switch reached either thread: {:?}",
+            shared.selects
+        );
+        assert_eq!(shared.shutdowns, ["y2b2-1"], "the empty thread's child is hung up");
+    }
+    let second = vc.update(|_, cx| {
+        let harness = baaz.read(cx);
+        let view = harness.active.clone().expect("the replacement is active");
+        assert_eq!(view.read(cx).rt(cx).session_id, "y2b2-2", "the session id is the new thread's");
+        assert_eq!(view.read(cx).rt(cx).model_id(), "gpt-picked", "the chip names the pick");
+        assert!(view.read(cx).rt(cx).provider_kind() == ProviderId::Codex, "same provider");
+        let list = harness.session_list.read(cx);
+        assert!(!list.provider_sessions.contains_key(&first), "the empty thread's record left with its view");
+        assert!(list.provider_sessions.contains_key("y2b2-2"), "the replacement is recorded");
+        assert!(!harness.registry.is_parked(&first), "the replaced draft was closed, never parked");
+        assert!(!harness.open_state.drafts.values().any(|id| id == &first), "no draft name keeps the old id");
+        assert!(!harness.open_state.switch_pending, "the restart landed");
+        view.read(cx).runtime().clone()
+    });
+    // The same pick again is no restart: the thread already runs it.
+    vc.update(|_, cx| second.update(cx, |rt, cx| rt.set_model("gpt-picked", cx)));
+    vc.run_until_parked();
+    assert_eq!(shared.inner.lock().expect("y2b2").opens, 2, "a pick of the thread's own model restarts nothing");
+    // With a turn in it, a pick switches the thread as before: no restart,
+    // the session keeps its id, and the pick travels as `SelectModel`.
+    vc.update(|_, cx| {
+        second.update(cx, |rt, _| rt.append_client_block("t-seed", aui_protocol::Block::Text { text: "earlier work".into(), streaming: false }));
+        assert!(!second.read(cx).restarts_on_model("gpt-later"), "a session with turns is switched, never restarted");
+        second.update(cx, |rt, cx| rt.set_model("gpt-later", cx));
+    });
+    vc.run_until_parked();
+    assert_eq!(shared.inner.lock().expect("y2b2").opens, 2, "a session with turns is never restarted");
+    assert_eq!(
+        shared.inner.lock().expect("y2b2").selects.last(),
+        Some(&("y2b2-2".to_owned(), "gpt-later".to_owned())),
+        "the later pick switches in place"
+    );
+    vc.update(|_, cx| {
+        let active = baaz.read(cx).active.clone().expect("still open");
+        assert_eq!(active.read(cx).rt(cx).session_id, "y2b2-2", "the session keeps its id");
+    });
     lane_restore(state);
 }
 

@@ -1,0 +1,5 @@
+{"type": "session_meta", "payload": {"id": "01a217e8-75e6-7af2-a218-61a599f8dd57", "cli_version": "0.153.2", "originator": "baaz", "source": "vscode"}}
+{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 12441, "cached_input_tokens": 10112, "cache_write_input_tokens": 0, "output_tokens": 272, "reasoning_output_tokens": 18, "total_tokens": 12713}}}}
+{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 12923, "cached_input_tokens": 12288, "cache_write_input_tokens": 0, "output_tokens": 280, "reasoning_output_tokens": 12, "total_tokens": 13203}}}}
+{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 13238, "cached_input_tokens": 10112, "cache_write_input_tokens": 0, "output_tokens": 162, "reasoning_output_tokens": 8, "total_tokens": 13400}}}}
+{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 13462, "cached_input_tokens": 13056, "cache_write_input_tokens": 0, "output_tokens": 92, "reasoning_output_tokens": 0, "total_tokens": 13554}}}}
