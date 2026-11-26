@@ -271,6 +271,30 @@ def bare_codex(repo, run_dir, prompt, model, effort, timeout, codex="codex", arm
     return with_rollout(m, home)
 
 
+def remember_picks(state, provider, model, effort):
+    """docs/88 C.7: the person picked this model, effort and Full access on
+    this provider before, so the connected pass opens on them (the normal
+    open path: a Codex thread starts on its model) instead of picking them
+    after the open, which restarts the empty thread. Written into the run's
+    own `projects.json` `lastPicks`, as Baaz itself writes them."""
+    path = os.path.join(state, "projects.json")
+    data = json.load(open(path)) if os.path.exists(path) else {"version": 1, "projects": []}
+    picks = data.setdefault("lastPicks", {})
+    key = WIRE[provider]
+    picks.setdefault("models", {})[key] = model
+    if effort:
+        picks.setdefault("efforts", {})[key] = effort
+    picks.setdefault("modes", {})[key] = "allowAll"
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def restarts(log_text):
+    """How many times the session restarted on a model pick: the bench must
+    measure the normal open path, so a run with any is not counted clean."""
+    return sum(1 for line in log_text.splitlines() if "restart on model" in line)
+
+
 def baaz_final_text(state, provider):
     """The agent's last message, from the provider's own files under the
     run's state dir (rule 18: the provider's files are the authority)."""
@@ -311,6 +335,7 @@ def baaz_run(repo, run_dir, prompt, provider, model, effort, timeout, log, codex
                          "--screenshot", os.path.join(run_dir, "baaz-0.png"), "--screenshot-delay", "1500"],
                         env=env, capture_output=True, text=True, timeout=180, cwd=repo)
     open(os.path.join(run_dir, "baaz-pass0.log"), "w").write(p0.stdout + p0.stderr)
+    remember_picks(state, provider, model, effort)
     steps = [f"setmodel:{model}"] + ([f"seteffort:{effort}"] if effort else []) + ["setmode:AllowAll", f"send:{prompt}", f"wait-idle:{timeout * 1000}"]
     wait_for_quiet(log)
     start = time.time()
@@ -325,6 +350,9 @@ def baaz_run(repo, run_dir, prompt, provider, model, effort, timeout, log, codex
     elsewhere = sorted({l.split("workspace=", 1)[1].strip() for l in log_text.splitlines() if "provider lane workspace" in l and "workspace=" in l} - {repo, os.path.realpath(repo)})
     if elsewhere:
         failed.append(f"a session opened outside the repo: {elsewhere}")
+    restarted = restarts(log_text)
+    if restarted:
+        failed.append(f"{restarted} restart(s) on a model pick: not the normal open path")
     rows = []
     db = os.path.join(state, "baaz.db")
     if os.path.exists(db):
@@ -337,7 +365,7 @@ def baaz_run(repo, run_dir, prompt, provider, model, effort, timeout, log, codex
     m = {"tokens_in": sum(r[0] for r in rows), "tokens_out": sum(r[1] for r in rows), "cached": sum(r[2] for r in rows),
          "cost_usd": round(sum(costs), 6) if costs else None, "final": baaz_final_text(state, provider), "agent_turns": len(rows),
          "wall_s": wall, "error": ("; ".join(failed) or None) if rows else ("; ".join(failed) or "no finished turn in baaz.db"),
-         "stuck": bool(failed), "baaz_tokens_in": sum(r[0] for r in rows)}
+         "stuck": bool(failed), "baaz_tokens_in": sum(r[0] for r in rows), "restarts": restarted}
     return with_rollout(m, os.path.join(state, "codex-home")) if provider == "codex" else m
 
 

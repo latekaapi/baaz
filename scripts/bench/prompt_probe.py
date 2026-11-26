@@ -42,8 +42,9 @@ def config_plugins(config_toml):
     return [m.group(1) for m in re.finditer(r'^\s*\[plugins\."?([^"\]]+)"?\]\s*$', config_toml, re.M)]
 
 
-def baaz_args(config_toml):
-    """Baaz's `-c` list today, minus the bridge (see the module docs)."""
+def baaz_args_before(config_toml):
+    """Baaz's `-c` list before docs/88 C.3/C.4, minus the bridge: a
+    per-plugin disable for each config.toml plugin."""
     args = ["-c", 'project_doc_fallback_filenames=["CLAUDE.md"]', "-c", "tool_output_token_limit=3000"]
     servers = BUNDLED_SERVERS + [s for s in file_servers(config_toml) if s not in BUNDLED_SERVERS]
     for s in servers:
@@ -51,6 +52,31 @@ def baaz_args(config_toml):
     for p in config_plugins(config_toml):
         args += ["-c", f'plugins."{p}".enabled=false']
     return args
+
+
+def baaz_args(config_toml):
+    """Baaz's `-c` list now (`spawn_args_for`, own servers off), minus the
+    bridge: server disables, `features.plugins=false` (C.3),
+    `features.tool_suggest=false` (C.4), plus Baaz's note as
+    `developer_instructions` (it rides `thread/start` in the app; the same
+    developer message here) so its size shows (C.5)."""
+    args = ["-c", 'project_doc_fallback_filenames=["CLAUDE.md"]', "-c", "tool_output_token_limit=3000",
+            "-c", "features.tool_suggest=false"]
+    servers = BUNDLED_SERVERS + [s for s in file_servers(config_toml) if s not in BUNDLED_SERVERS]
+    for s in servers:
+        args += ["-c", f'mcp_servers.{s}={{enabled=false,command="/bin/true"}}']
+    args += ["-c", "features.plugins=false"]
+    args += ["-c", "developer_instructions=" + json.dumps(baaz_note())]
+    return args
+
+
+def baaz_note():
+    """The note `provider::note::compose` builds with the bridge, read from
+    its source: the string literals between `pub fn compose` and the join."""
+    src = open(os.path.join(HERE, "..", "..", "crates", "provider", "src", "note.rs")).read()
+    body = src[src.index("pub fn compose("):]
+    body = body[:body.index('lines.join("\\n")')]
+    return "\n".join(json.loads(m) for m in re.findall(r'"(?:[^"\\]|\\.)*"', body) if "NoteTools" not in m)
 
 
 def feature(*names):
@@ -61,10 +87,12 @@ def feature(*names):
 
 
 def variants(config_toml):
-    baaz = baaz_args(config_toml)
-    clean_baaz = baaz_args("")
+    baaz = baaz_args_before(config_toml)
+    clean_baaz = baaz_args_before("")
     return [
         ("clean", "clean", []),
+        ("clean + baaz now (C.3-C.5)", "clean", baaz_args("")),
+        ("installed + baaz now (C.3-C.5)", "installed", baaz_args(config_toml)),
         ("clean + baaz", "clean", clean_baaz),
         ("clean + baaz + tool_suggest off", "clean", clean_baaz + feature("tool_suggest")),
         ("clean + baaz + apps off", "clean", clean_baaz + feature("apps")),
@@ -102,7 +130,8 @@ def blocks(items):
         for b in it.get("content") or []:
             text = b.get("text") or ""
             m = re.match(r"\s*<([A-Za-z_][\w ]*?)>", text)
-            out.append((it.get("role"), m.group(1) if m else "(text)", len(text), text))
+            tag = m.group(1) if m else ("baaz note" if text.startswith("You are running inside Baaz") else "(text)")
+            out.append((it.get("role"), tag, len(text), text))
     return out
 
 

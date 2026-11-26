@@ -147,6 +147,28 @@ class Homes(unittest.TestCase):
             self.assertEqual(os.listdir(home), ["auth.json"])
 
 
+class OpenPath(unittest.TestCase):
+    """docs/88 C.7: the Baaz side opens on remembered picks, not the
+    restart path."""
+
+    def test_the_fix_runs_log_shows_its_restart(self):
+        text = open(os.path.join(FIX, "baaz-restart.log")).read()
+        self.assertEqual(bench.restarts(text), 1)
+        self.assertEqual(bench.restarts("\n".join(l for l in text.splitlines() if "restart on model" not in l)), 0)
+
+    def test_picks_are_remembered_for_the_connected_pass(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "projects.json"), "w") as f:
+                json.dump({"version": 1, "projects": [{"id": "p"}], "lastPicks": {"efforts": {"claude-code": "high"}}}, f)
+            bench.remember_picks(d, "codex", "gpt-5.6-luna", "medium")
+            data = json.load(open(os.path.join(d, "projects.json")))
+            picks = data["lastPicks"]
+            self.assertEqual(picks["models"]["codex"], "gpt-5.6-luna")
+            self.assertEqual(picks["efforts"], {"claude-code": "high", "codex": "medium"})
+            self.assertEqual(picks["modes"]["codex"], "allowAll")
+            self.assertEqual(data["projects"], [{"id": "p"}], "the project the offline pass made stays")
+
+
 class Keys(unittest.TestCase):
     def test_old_rows_and_repeats_have_distinct_keys(self):
         old = {"task": "01", "provider": "codex", "mode": "bare"}

@@ -1,0 +1,8 @@
+2026-11-26T18:20:39.169 ERROR : can't render at a zero size
+2026-11-26T18:20:39.202 ERROR : can't render at a zero size (repeats; not logged again)
+2026-11-26T18:20:40.092 provider lane workspace session=01a217e8-74e9-7b52-bfeb-d8aa51e9b880 workspace=/private/tmp/claude-501/-Users-latekaapi-Projects-harness/c2e70681-1c55-4865-bd9a-6fd63978c849/sc
+2026-11-26T18:20:40.092 provider lane open provider=codex session=01a217e8-74e9-7b52-bfeb-d8aa51e9b880
+2026-11-26T18:20:40.092 steps: running 5 scripted steps
+2026-11-26T18:20:40.095 restart on model provider=codex session=01a217e8-74e9-7b52-bfeb-d8aa51e9b880 model=gpt-5.6-luna
+2026-11-26T18:20:40.266 provider lane workspace session=01a217e8-75e6-7af2-a218-61a599f8dd57 workspace=/private/tmp/claude-501/-Users-latekaapi-Projects-harness/c2e70681-1c55-4865-bd9a-6fd63978c849/sc
+2026-11-26T18:20:40.266 provider lane open provider=codex session=01a217e8-75e6-7af2-a218-61a599f8dd57
