@@ -185,6 +185,10 @@ pub struct SessionRuntime {
     /// possible one offered as a chip under the composer.
     pub(crate) goal: Option<baaz_core::goals::Goal>,
     pub(crate) goal_offer: Option<String>,
+    /// docs/85 16.3: how many branches start at each of this session's
+    /// messages, by the user turn's id (loaded with the session, counted
+    /// up as branches land).
+    pub(crate) branch_counts: HashMap<String, u32>,
     /// When each pending question's auto-resolution clock started, keyed by
     /// `userInputId`. MSP sends a duration, never a deadline.
     pub(super) question_started: HashMap<String, Instant>,
@@ -480,6 +484,7 @@ impl SessionRuntime {
             workers_open: None,
             goal: None,
             goal_offer: None,
+            branch_counts: HashMap::new(),
             question_started: HashMap::new(),
             retry_started: None,
             countdown: None,

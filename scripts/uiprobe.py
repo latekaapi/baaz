@@ -694,6 +694,10 @@ ENTRIES = {
                                       "--steps", "skills:page"]},
     "skills-empty":         {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "skills:empty"]},
+    # docs/85 16.2: the shared skill folders across providers (fixture
+    # skills, never the machine's own folders).
+    "skills-folders":       {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "skills-folders-fixture;skills:page"]},
     # The K3 dialogs over the page fixture (no CLI, deterministic,
     # offline): the Add menu with its cached trails, the import preview
     # over fixed rows, and the New dialog with empty fields. Each steps
@@ -759,6 +763,13 @@ ENTRIES = {
     "account-usage":        {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "account"],
                                "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": json.dumps(_usage_script())}},
+    # docs/85 16.1: Settings › Usage — the limits from the same scripted
+    # readings, the ledger table from thirty days of fixture turns, by model
+    # (the default) and by day.
+    "settings-usage":       {"shot": ["--no-connect", "--login", "signed-in",
+                                      "--steps", "usage-fixture;settings:usage;wait:300"],
+                               "env": {"BAAZ_PROVIDER_STATUS_SCRIPT": json.dumps(_usage_script()),
+                                       "BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-usage-state-")}},
     # Settings → Providers with one Claude Code and one Codex session
     # still waiting in the fixture owner home: the page carries the B4M
     # migration row (the "Move 2 …" prompt surface with its dry-run paths
@@ -1239,6 +1250,8 @@ ENTRIES.update({
     "sidebar-needs-you":       _populated(_PROJECTS + ";needs-you-filter:on"),
     "sidebar-projects-light":  _populated(_PROJECTS, theme="light"),
     "transcript-full":         _populated(replay=True, sidebar=False),
+    # docs/85 16.3: the branch count under a user message.
+    "branches-message":        _populated("branches-fixture", replay=True, sidebar=False),
     "transcript-full-light":   _populated(replay=True, sidebar=False, theme="light"),
     "transcript-full-top":     _populated("top", replay=True, sidebar=False),
     "transcript-full-mid":     _populated("mid", replay=True, sidebar=False),

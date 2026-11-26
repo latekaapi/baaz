@@ -332,6 +332,11 @@ pub enum ProviderTrait {
     /// working until it judges it met; nothing on its stream says so, so
     /// the app checks after each turn (docs/85 15.1).
     GoalSlashCommand,
+    /// Its fork cuts at a named turn ([`crate::Command::ForkSession`]'s
+    /// `through_turn`), so "Branch from here" holds exactly the
+    /// conversation through that turn (docs/85 16.3). A fork without it
+    /// copies the whole session, and Branch is not offered.
+    ForkAtTurn,
 }
 
 /// A stdio MCP server every session of a window gets: the terminal relay's

@@ -97,6 +97,7 @@ mod perf_budget;
 mod picker;
 #[cfg(feature = "probe")]
 mod perf_turn;
+mod branches;
 mod goals;
 mod keep_awake;
 mod orchestra;
@@ -134,6 +135,8 @@ mod session;
 mod session_migration;
 use baaz_core::sessions;
 mod settings;
+mod skill_folders;
+mod usage_page;
 mod settings_providers;
 mod setup;
 #[cfg(feature = "probe")]

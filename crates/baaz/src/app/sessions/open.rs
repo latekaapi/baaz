@@ -1086,6 +1086,7 @@ impl Harness {
         // through these: the row-affecting arms read the parked fold
         // without touching its UI.
         self.registry.resubscribe(Some(&view), cx);
+        self.push_branch_counts(cx);
         let titles: HashMap<String, String> =
             self.session_list.read(cx).sessions.iter().map(|entry| (entry.id.clone(), entry.label.clone())).collect();
         if view.read(cx).rt(cx).provider_kind().has(provider::ProviderTrait::BillingTier) {

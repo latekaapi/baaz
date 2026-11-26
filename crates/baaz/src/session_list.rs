@@ -137,6 +137,8 @@ pub(crate) struct SessionList {
     /// docs/85 14.9: worker session → its lead's, so a worker's row nests
     /// under its lead (`sidebar::nest_workers`).
     pub(crate) worker_leads: std::collections::HashMap<String, String>,
+    /// docs/85 16.3: source session → its messages' branch counts.
+    pub(crate) branch_counts: std::collections::HashMap<String, std::collections::HashMap<String, u32>>,
     /// One sorted visible list and one grouping per change, not per frame.
     cache: RefCell<ListCache>,
     /// The handoff chains over full storage, built once per `epoch` and
@@ -221,6 +223,7 @@ impl SessionList {
             sessions: Vec::new(),
             epoch: 0,
             worker_leads: Default::default(),
+            branch_counts: Default::default(),
             cache: RefCell::new(ListCache::default()),
             chain_index: RefCell::new(None),
             chain_index_builds: Cell::new(0),

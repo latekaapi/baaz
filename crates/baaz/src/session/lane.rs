@@ -3630,7 +3630,7 @@ mod tests {
                     },
                     aui_protocol::Delta::TurnFinished {
                         turn_id: "a-1".to_owned(),
-                        meta: aui_protocol::TurnMeta { tokens_in: 1200, tokens_out: 300, cost_usd: 0.25, ..Default::default() },
+                        meta: aui_protocol::TurnMeta { tokens_in: 1200, tokens_out: 300, cost_usd: 0.25, cache_read_tokens: Some(300), ..Default::default() },
                     },
                 ],
             })
@@ -3654,6 +3654,8 @@ mod tests {
                 // Cost is shown where the provider reports one.
                 let status = view.read(cx).rt(cx).status_text(cx);
                 assert!(status.contains("Cost: $0.2500"), "{status}");
+                // docs/85 16.1: the session's cache share, from its turns.
+                assert!(status.contains("Cache: 25% of input read from cache"), "{status}");
             });
         }
     }

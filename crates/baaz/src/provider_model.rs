@@ -229,6 +229,7 @@ impl ProviderStatusModel {
             fresh
         };
         self.statuses = fresh;
+        record_accounts(&self.statuses);
         crate::skills_page::note_statuses(&self.statuses, cx);
         self.sync_banners();
         self.new_provider.follow(&self.statuses);
@@ -491,6 +492,42 @@ fn visible(statuses: &[ProviderStatus]) -> Vec<ProviderStatus> {
         })
         .collect()
 }
+
+/// docs/85 16.1: every signed-in account the statuses name goes into
+/// baaz.db's `account` table (its email, how it signed in, its plan),
+/// off the UI thread; never in a capture or with scripted providers.
+fn record_accounts(statuses: &[ProviderStatus]) {
+    if crate::runtime::captures() || crate::runtime::providers_scripted() || cfg!(test) {
+        return;
+    }
+    let now = baaz_core::clock::now_ms() as i64;
+    let accounts: Vec<baaz_core::db::accounts::Account> = statuses
+        .iter()
+        .filter_map(|s| match &s.auth {
+            crate::provider_status::Auth::SignedIn { email, plan, method, .. } => Some(baaz_core::db::accounts::Account {
+                provider: s.provider.as_str().to_owned(),
+                label: email.clone(),
+                lane: method.clone(),
+                plan: plan.clone().or_else(|| s.usage.as_ref().and_then(|u| u.plan.clone())),
+                observed_at: s.checked_at.unwrap_or(now),
+            }),
+            _ => None,
+        })
+        .collect();
+    if accounts.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        crate::db::call(crate::db::path(), move |opened| {
+            for account in &accounts {
+                if let Err(why) = baaz_core::db::accounts::record(&opened.conn, account) {
+                    crate::baaz_log!("account: not recorded ({why})");
+                }
+            }
+        });
+    });
+}
+
 
 #[cfg(feature = "probe")]
 #[cfg(test)]

@@ -46,6 +46,7 @@ pub mod billing;
 pub mod bridge_token;
 mod capability;
 pub mod child_env;
+pub mod skill_switches;
 mod command;
 pub mod env_path;
 mod error;

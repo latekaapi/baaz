@@ -71,6 +71,7 @@ pub mod session_migration;
 pub mod session_tools;
 pub mod sessions;
 pub mod sidebar;
+pub mod skill_catalog;
 pub mod skills;
 pub mod store;
 pub mod tasks;

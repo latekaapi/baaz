@@ -167,6 +167,7 @@ pub(crate) const SETTINGS_SECTIONS: &[(&str, &str)] = &[
     ("git", "Git & worktrees"),
     ("browser", "Browser"),
     ("providers", "Providers"),
+    ("usage", "Usage"),
     ("mcp", "MCP"),
     ("shortcuts", "Shortcuts"),
     ("memory", "Memory"),
@@ -184,6 +185,7 @@ pub(crate) fn settings_blurb(section: &str) -> &'static str {
         "git" => "Worktrees and pull requests. Changes apply live.",
         "browser" => "How Baaz browses: the assistant, tabs, search, downloads.",
         "providers" => "Turn providers on or off and manage their accounts.",
+        "usage" => aui::screens::USAGE_BLURB,
         "mcp" => "The MCP servers each provider's sessions can reach. Read from each provider's own files.",
         "shortcuts" => "Click a keycap to rebind it, or edit the keymap file. Changes apply live.",
         "memory" => "What your agents remember, per project. Every provider reads the same notes.",
@@ -294,6 +296,7 @@ pub(crate) fn settings_breadcrumb(section: &str) -> Vec<String> {
         "git" => crumbs.push("Git & worktrees".to_owned()),
         "browser" => crumbs.push("Browser".to_owned()),
         "providers" => crumbs.push("Providers".to_owned()),
+        "usage" => crumbs.push("Usage".to_owned()),
         "mcp" => crumbs.push("MCP".to_owned()),
         "shortcuts" => crumbs.push("Shortcuts".to_owned()),
         "memory" => crumbs.push("Memory".to_owned()),
@@ -483,6 +486,11 @@ pub(crate) struct SettingsPageState {
     pub shortcut_search: String,
     /// The active session id as it was on open, restored on close.
     pub saved_active: Option<String>,
+    /// Usage (docs/85 16.1): the table's range and split, as indexes into
+    /// `aui::screens::USAGE_RANGES` and `USAGE_SPLITS` (30 days by model
+    /// on first open).
+    pub usage_range: Option<usize>,
+    pub usage_split: Option<usize>,
 }
 
 impl SettingsPageState {
@@ -622,6 +630,8 @@ pub(crate) struct SettingsFacts {
     pub import_line: Option<crate::import_ui::CardLine>,
     /// Memory: each project's notes, then the personal ones (docs/85 12.3b).
     pub memory: Vec<MemoryGroup>,
+    /// Usage (docs/85 16.1): each provider's limits and the ledger table.
+    pub usage: Option<aui::screens::UsagePageModel>,
 }
 
 /// One project's memory notes (or the personal ones) on the Memory page.
@@ -651,6 +661,9 @@ pub(crate) enum SettingsEvent {
     /// A nav row or crumb: open the page at this target (the root's
     /// `open_settings_page`, which also closes what Settings replaces).
     Navigate(String),
+    /// Usage's range or split changed (docs/85 16.1): the root gathers the
+    /// table again.
+    UsageView,
     /// Back, ✕: close and restore.
     Close,
     /// A switch row (or the summary line): flip it and apply it.
@@ -1361,6 +1374,7 @@ impl SettingsPage {
             "mcp" => self.settings_mcp_page(cx),
             "shortcuts" => self.settings_shortcuts_page(window, cx),
             "memory" => self.settings_memory_page(cx),
+            "usage" => self.settings_usage_page(cx),
             "data" => self.settings_data_page(cx),
             "archived" => self.settings_archived_page(cx),
             _ if is_provider_subpage(&section) => self.settings_provider_subpage(window, cx),
@@ -2585,6 +2599,27 @@ impl SettingsPage {
     /// Memory (docs/85 12.3b): per project, a plain list of the notes its
     /// agents share — title, type and day; the title opens the note in the
     /// right pane, the bin deletes it. No editor.
+    /// docs/85 16.1: Settings › Usage — the limits and the ledger table;
+    /// the range and split are this page's own.
+    fn settings_usage_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(model) = self.facts.usage.clone() else { return settings_sections_stack().into_any_element() };
+        aui::screens::usage_page("settings-usage", model)
+            .bare()
+            .on_intent({
+                let page = cx.entity().downgrade();
+                move |intent, _, cx| {
+                    let _ = page.update(cx, |this, cx| {
+                        match intent {
+                            aui::screens::UsageIntent::Range(i) => this.state.usage_range = Some(i),
+                            aui::screens::UsageIntent::Split(i) => this.state.usage_split = Some(i),
+                        }
+                        cx.emit(SettingsEvent::UsageView);
+                    });
+                }
+            })
+            .into_any_element()
+    }
+
     fn settings_memory_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut stack = settings_sections_stack();
         for (g, group) in self.facts.memory.iter().enumerate() {
@@ -3063,6 +3098,23 @@ impl Harness {
                     })
                     .collect();
             }
+            "usage" => {
+                let (range, split) = (page.state.usage_range.unwrap_or(1), page.state.usage_split.unwrap_or(1));
+                let days = crate::usage_page::RANGE_DAYS[range.min(2)];
+                let totals = crate::usage_page::totals(crate::usage_page::split_at(split), days);
+                let projects = &self.session_list.read(cx).projects;
+                let names = |id: &str| projects.find_available(id).map(|p| p.name.clone()).unwrap_or_else(|| id.to_owned());
+                let signed_in = matches!(self.auth, crate::login::Auth::SignedIn(_));
+                let feed = signed_in.then(|| crate::account_usage::TierFeed { tier: self.tier.clone() });
+                let rows = crate::account_usage::usage_rows(&crate::provider_status::live_statuses(), feed, crate::account_usage::now_secs());
+                facts.usage = Some(aui::screens::UsagePageModel {
+                    limits: crate::usage_page::limits(rows),
+                    range,
+                    split,
+                    lines: crate::usage_page::lines(&totals, &names),
+                    total: crate::usage_page::total_line(&totals, days).into(),
+                });
+            }
             "memory" => facts.memory = memory_groups_cached(self.session_list.read(cx).projects.sorted().into_iter().map(|p| (p.name.clone(), p.root.clone()))),
             "data" => {
                 facts.history_pages = self.browser.read(cx).data.read(cx).history_len();
@@ -3139,6 +3191,7 @@ impl Harness {
         match event {
             SettingsEvent::Navigate(target) => self.open_settings_page(target, cx),
             SettingsEvent::Close => self.close_settings(cx),
+            SettingsEvent::UsageView => repaint = true,
             SettingsEvent::Flip { id, on } => self.flip_setting(id, *on, cx),
             SettingsEvent::Theme(pref) => self.set_theme_pref(*pref, Some(window), cx),
             SettingsEvent::TextSize(pref) => self.set_text_size_pref(*pref, Some(window), cx),
@@ -3681,7 +3734,7 @@ mod tests {
     #[test]
     fn browser_section_is_registered() {
         let ids: Vec<&str> = SETTINGS_SECTIONS.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, ["general", "appearance", "sidebar", "notifications", "git", "browser", "providers", "mcp", "shortcuts", "memory", "data", "archived"]);
+        assert_eq!(ids, ["general", "appearance", "sidebar", "notifications", "git", "browser", "providers", "usage", "mcp", "shortcuts", "memory", "data", "archived"]);
         assert_eq!(normalize_settings_target("browser", ""), "browser");
         assert_eq!(normalize_settings_target("BROWSER", ""), "browser");
         assert_eq!(normalize_settings_target("search-engine", ""), "browser");

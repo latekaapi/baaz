@@ -129,7 +129,7 @@ mod tests {
         assert!(Command::Compact.offered_on(ProviderId::ClaudeCode), "docs/85 10.4");
         assert!(Command::Fork.offered_on(ProviderId::ClaudeCode));
         assert!(Command::Compact.offered_on(ProviderId::Codex), "docs/85 10.4");
-        assert!(!Command::Fork.offered_on(ProviderId::Codex));
+        assert!(Command::Fork.offered_on(ProviderId::Codex), "docs/85 16.3: thread/fork, probed live");
         assert!(Command::Compact.offered_on(ProviderId::Muse));
         assert!(Command::Model.offered_on(ProviderId::Codex), "commands that need nothing are always offered");
     }

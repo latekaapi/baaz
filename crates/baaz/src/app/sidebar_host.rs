@@ -582,6 +582,8 @@ impl Harness {
                 match action {
                     AccountAction::Settings => self.open_settings(0, cx),
                     AccountAction::Providers => self.open_providers(cx),
+                    // docs/85 16.1: the meter's way to the whole page.
+                    AccountAction::Usage => self.open_settings_page("usage", cx),
                     // The menu carries no sign-out row (each provider signs
                     // out on its card); the intent, if anything sends it,
                     // goes where those cards are.

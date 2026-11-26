@@ -34,7 +34,9 @@ use std::sync::{mpsc, Mutex, OnceLock};
 /// SQLite crate itself: `tests/db_ratchet.rs`).
 pub use rusqlite::Connection;
 
+pub mod accounts;
 pub mod attachments;
+pub mod branches;
 pub mod goals;
 pub mod history;
 pub mod integrity;
@@ -45,6 +47,7 @@ pub mod schema;
 pub mod sessions;
 pub mod tasks;
 pub mod turns;
+pub mod usage_daily;
 pub mod worktrees;
 
 thread_local! {

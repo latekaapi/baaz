@@ -33,7 +33,61 @@ pub const HOME_DIR_NAME: &str = "claude-home";
 
 /// Owner entries symlinked into the Baaz home when they exist.
 pub const LINKED_ENTRIES: &[&str] =
-    &["settings.json", "skills", "plugins", "CLAUDE.md", "agents", "commands"];
+    &["settings.json", "plugins", "CLAUDE.md", "agents", "commands"];
+
+/// The skill folders whose skills the home's `skills/` links one by one
+/// (docs/85 16.2), first wins on a name both hold: the owner's own Claude
+/// skills, then the shared `~/.agents/skills` every provider reads.
+pub fn skill_sources(owner_home: &Path) -> Vec<PathBuf> {
+    vec![owner_config_dir(owner_home).join("skills"), owner_home.join(".agents").join("skills")]
+}
+
+/// The home's `skills/`: a real folder of one link per skill (docs/85
+/// 16.2), so `~/.agents/skills` joins the owner's own without anything
+/// being written into either. A whole-folder link Baaz made before is
+/// replaced (the link only — never what it points at); a link whose skill
+/// went away is removed; a real file or folder someone put there is left.
+pub fn ensure_skills_dir(home: &Path, sources: &[PathBuf]) -> std::io::Result<()> {
+    let dir = home.join("skills");
+    if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        std::fs::remove_file(&dir)?;
+    }
+    std::fs::create_dir_all(&dir)?;
+    let mut wanted: Vec<(String, PathBuf)> = Vec::new();
+    for source in sources {
+        let Ok(entries) = std::fs::read_dir(source) else { continue };
+        let mut names: Vec<(String, PathBuf)> = entries
+            .filter_map(Result::ok)
+            .filter(|e| e.path().join("SKILL.md").is_file())
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+            .collect();
+        names.sort();
+        for (name, path) in names {
+            if !wanted.iter().any(|(n, _)| *n == name) {
+                wanted.push((name, path));
+            }
+        }
+    }
+    // Stale links go; real entries stay.
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_link = entry.file_type().is_ok_and(|t| t.is_symlink());
+            let target = std::fs::read_link(entry.path()).ok();
+            let keep = wanted.iter().any(|(n, p)| *n == name && target.as_deref() == Some(p.as_path()));
+            if is_link && !keep {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+    }
+    for (name, path) in wanted {
+        let link = dir.join(&name);
+        if std::fs::symlink_metadata(&link).is_err() {
+            std::os::unix::fs::symlink(&path, &link)?;
+        }
+    }
+    Ok(())
+}
 
 /// `<state_dir>/claude-home`.
 pub fn home_dir(state_dir: &Path) -> PathBuf {
@@ -60,6 +114,7 @@ pub fn owner_config_dir(owner_home: &Path) -> PathBuf {
 pub fn ensure_home(owner_home: &Path, state_dir: &Path) -> std::io::Result<PathBuf> {
     let home = home_dir(state_dir);
     provider::child_env::ensure_linked_dir(&home, &owner_config_dir(owner_home), LINKED_ENTRIES)?;
+    ensure_skills_dir(&home, &skill_sources(owner_home))?;
     Ok(home)
 }
 
@@ -335,6 +390,29 @@ mod tests {
         assert_eq!(home_dir(&state), PathBuf::from("/tmp/baaz-state/claude-home"));
     }
 
+    /// docs/85 16.2: a home made before had `skills` as one link to the
+    /// owner's folder; it becomes a real folder of per-skill links, the
+    /// owner's skills untouched, the owner's own name winning over a
+    /// shared skill of the same name.
+    #[test]
+    fn an_old_skills_link_becomes_a_folder_of_skill_links() {
+        let root = temp_root("skills-migrate");
+        let owner = root.join("owner-home");
+        let home = root.join("claude-home");
+        for (dir, name) in [(owner.join(".claude/skills"), "review"), (owner.join(".agents/skills"), "review"), (owner.join(".agents/skills"), "shared")] {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+            std::fs::write(dir.join(name).join("SKILL.md"), "x").unwrap();
+        }
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(owner.join(".claude/skills"), home.join("skills")).unwrap();
+        ensure_skills_dir(&home, &skill_sources(&owner)).unwrap();
+        assert!(!std::fs::symlink_metadata(home.join("skills")).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(home.join("skills/review")).unwrap(), owner.join(".claude/skills/review"), "the owner's own wins");
+        assert_eq!(std::fs::read_link(home.join("skills/shared")).unwrap(), owner.join(".agents/skills/shared"));
+        assert!(owner.join(".claude/skills/review/SKILL.md").is_file(), "nothing of the owner's moved");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn links_reach_the_owner_files_and_skip_what_is_absent() {
         let root = temp_root("links");
@@ -348,13 +426,15 @@ mod tests {
 
         let home = ensure_home(&owner, &state).expect("ensure");
         assert_eq!(home, state.join("claude-home"));
-        for name in ["settings.json", "skills", "plugins"] {
+        for name in ["settings.json", "plugins"] {
             let dst = home.join(name);
             assert!(
                 std::fs::symlink_metadata(&dst).expect("linked").file_type().is_symlink(),
                 "{name} is a link, not a copy"
             );
         }
+        // docs/85 16.2: skills/ is a real folder of per-skill links.
+        assert!(!std::fs::symlink_metadata(home.join("skills")).expect("made").file_type().is_symlink());
         assert_eq!(
             std::fs::read_to_string(home.join("settings.json")).expect("reads through"),
             "{\"model\":\"sonnet\"}"

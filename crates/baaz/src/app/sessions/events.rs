@@ -405,6 +405,8 @@ impl Harness {
             // docs/85 15.1: Baaz judges the goal turn; 15.5: keep-awake
             // follows every goal change.
             SessionEvent::GoalTurnEnded => self.goal_turn_ended(runtime.clone(), cx),
+            // docs/85 16.3: a branch landed.
+            SessionEvent::Branched { branch, source, message } => self.branched(branch, source, message, cx),
             SessionEvent::GoalChanged => self.update_keep_awake(cx),
         }
         cx.notify();

@@ -633,6 +633,11 @@ impl ClaudeCodeAdapter {
         let home = self.resolved_config_dir();
         let owner_root = self.owner_config_dir();
         let _ = provider::child_env::ensure_linked_dir(&home, &owner_root, crate::home::LINKED_ENTRIES);
+        // docs/85 16.2: `skills/` is one link per skill, the owner's own and
+        // the shared `~/.agents/skills`, re-made on every spawn.
+        if let Some(owner_home) = owner_root.parent() {
+            let _ = crate::home::ensure_skills_dir(&home, &crate::home::skill_sources(owner_home));
+        }
     }
 
     /// Mint a host→child control `request_id`. One sequence for every
@@ -1127,6 +1132,14 @@ impl ClaudeCodeAdapter {
             extra.extend(hook::hook_settings(&exe, hook::wants_read_stub(version.as_deref())));
         }
         extra.extend(argv::token_settings());
+        // docs/85 16.2: the skills the person switched off on the Skills
+        // page, as Claude's own `skillOverrides` on the settings layer
+        // (rule 26: never in the linked settings.json).
+        let off = provider::skill_switches::load(&provider::child_env::state_dir()).off_for("claude-code");
+        if !off.is_empty() {
+            let overrides: serde_json::Map<String, serde_json::Value> = off.into_iter().map(|name| (name, serde_json::Value::String("off".into()))).collect();
+            extra.insert("skillOverrides".into(), serde_json::Value::Object(overrides));
+        }
         let mut launch = argv::with_token_flags(argv::with_settings(launch, extra));
         if *self.bills_by_key.lock().expect("bills mutex") {
             launch.env.retain(|(key, _)| key != argv::PROMPT_CACHE_TTL_ENV);
@@ -3531,24 +3544,29 @@ mod tests {
             std::fs::symlink_metadata(home.join("settings.json")).expect("meta").file_type().is_symlink(),
             "what exists at setup is linked"
         );
-        assert!(
-            std::fs::symlink_metadata(home.join("skills")).is_err(),
-            "an absent source links nothing"
-        );
-        // The owner creates skills/ later: the next spawn's re-ensure
-        // picks it up without a restart.
-        std::fs::create_dir_all(owner.join(".claude").join("skills")).expect("late owner skills");
+        // docs/85 16.2: `skills/` is a real folder of one link per skill.
+        assert!(home.join("skills").is_dir(), "the skills folder is made");
+        assert_eq!(std::fs::read_dir(home.join("skills")).expect("reads").count(), 0, "no skills yet");
+        // The owner adds a skill later, and one in ~/.agents/skills: the
+        // next spawn's re-ensure links both without a restart.
+        let skill = |root: std::path::PathBuf, name: &str| {
+            std::fs::create_dir_all(root.join(name)).expect("skill dir");
+            std::fs::write(root.join(name).join("SKILL.md"), "---\nname: x\n---\n").expect("skill");
+        };
+        skill(owner.join(".claude").join("skills"), "review");
+        skill(owner.join(".agents").join("skills"), "shared");
         adapter.prepare_home(false);
-        assert!(
-            std::fs::symlink_metadata(home.join("skills")).expect("meta").file_type().is_symlink(),
-            "a late-created owner dir is linked on the next spawn"
-        );
-        assert!(home.join("skills").is_dir(), "the linked dir reads as a dir");
-        // Idempotent: a third run changes nothing.
+        for name in ["review", "shared"] {
+            assert!(
+                std::fs::symlink_metadata(home.join("skills").join(name)).expect("meta").file_type().is_symlink(),
+                "{name} is linked on the next spawn"
+            );
+        }
+        // A skill that went away loses its link; idempotent otherwise.
+        std::fs::remove_dir_all(owner.join(".agents").join("skills").join("shared")).expect("remove");
         adapter.prepare_home(false);
-        assert!(
-            std::fs::symlink_metadata(home.join("skills")).expect("meta").file_type().is_symlink()
-        );
+        assert!(std::fs::symlink_metadata(home.join("skills").join("shared")).is_err(), "a stale link goes");
+        assert!(home.join("skills").join("review").join("SKILL.md").is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
 
