@@ -326,6 +326,24 @@ pub fn child_env(home: &Path) -> Vec<(String, String)> {
 /// Each pin may carry the owner home it resumes from (P7 import:
 /// [`pin_legacy_resume_at`]); a bare pin means the real `HOME`.
 #[allow(clippy::type_complexity)]
+/// Forks waiting for their branch's own adapter (docs/85 16.3): branch id
+/// → (source id, the cut uuid). Pinned by the source's `ForkSession`,
+/// taken by the branch's `ResumeSession`.
+static PENDING_FORKS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Pin `branch` to start as a fork of `source`, cut at `cut` when given.
+pub fn pin_fork(branch: &str, source: &str, cut: Option<&str>) {
+    if let Ok(mut pending) = PENDING_FORKS.lock() {
+        pending.insert(branch.to_owned(), (source.to_owned(), cut.map(str::to_owned)));
+    }
+}
+
+/// Take `branch`'s pinned fork, if one waits: (source id, cut uuid).
+pub fn take_fork(branch: &str) -> Option<(String, Option<String>)> {
+    PENDING_FORKS.lock().ok()?.remove(branch)
+}
+
 static LEGACY_RESUME: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, Option<PathBuf>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
