@@ -431,6 +431,14 @@ disables already silence. Z5 emits them anyway as defense in depth
 this probe did not enumerate) — the listing proves the server half,
 not the plugin half.
 
+**Superseded (docs/88 C.3, 26 Nov 2026):** the per-plugin key did NOT
+remove the plugin half. Codex 0.153.2's prompt input (`codex debug
+prompt-input`, `scripts/bench/prompt_probe.py`) still listed 6 plugin
+skills and a `<plugins_instructions>` block with every per-plugin disable
+set, and remotely installed plugins (under `plugins/cache`, absent from
+`config.toml`) were never named at all. Baaz now sends one
+`-c features.plugins=false` instead, which leaves 0 plugin skills.
+
 ## Z5 consequences (what this probe justifies)
 
 1. The disables apply to EVERY session, relay or not: run A is the

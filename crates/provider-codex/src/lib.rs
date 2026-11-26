@@ -208,7 +208,8 @@ impl CodexAdapter {
     /// Let the session inherit the owner's own MCP servers and plugins:
     /// the Settings › MCP "Use my own MCP servers" switch. When on,
     /// [`Self::spawn_args_for`] skips every disable (server and plugin)
-    /// while the bridge still rides when a relay is set. Off by default.
+    /// while the bridge still rides when a relay is set; install
+    /// suggestions stay off. Off by default.
     pub fn set_use_own_mcp(&self, use_own: bool) {
         *self.use_own_mcp.lock().expect("use-own-mcp mutex") = use_own;
     }
@@ -314,9 +315,10 @@ impl CodexAdapter {
     /// The `app-server` argv fragment for `session_id`: the bridge as a
     /// per-session MCP server when a relay is set, then — unless the
     /// owner's own servers were opted into — a full-table disable for
-    /// every inherited server (bundled floor plus file-configured) and a
-    /// plugin disable per owner-enabled plugin, so the session sees
-    /// Baaz's tools and nothing else. The disables ride EVERY session,
+    /// every inherited server (bundled floor plus file-configured) and
+    /// every plugin off (`features.plugins=false`), so the session sees
+    /// Baaz's tools and nothing else; install suggestions are off either
+    /// way (`features.tool_suggest=false`). The disables ride EVERY session,
     /// relay or not: the Z5 probe (docs/19-codex.md) listed a bare
     /// `app-server` at 5 servers and 104 owner tools — a session without
     /// a relay spawns no bridge but still spawns silenced. No spawn — see
@@ -343,13 +345,15 @@ impl CodexAdapter {
         if let Some(config) = provider::skill_switches::codex_config_arg(&off) {
             args.extend(["-c".to_owned(), config]);
         }
+        // docs/88 C.4: Baaz cannot act on an install suggestion.
+        args.extend(crate::terminal::tool_suggest_off());
         if !use_own {
             args.extend(crate::terminal::disable_overrides(
                 crate::terminal::inherited_servers().iter().map(String::as_str),
             ));
-            args.extend(crate::terminal::plugin_disable_overrides(
-                crate::terminal::inherited_plugins().iter().map(String::as_str),
-            ));
+            // docs/88 C.3: one key for every plugin, config-named or
+            // installed remotely (see `plugins_off`).
+            args.extend(crate::terminal::plugins_off());
         }
         args
     }
@@ -1546,6 +1550,35 @@ mod tests {
             let args = adapter.spawn_args_for("s-1");
             assert_eq!(args.iter().filter(|arg| *arg == r#"project_doc_fallback_filenames=["CLAUDE.md"]"#).count(), 1, "{args:?}");
         }
+    }
+
+    /// docs/88 C.3/C.4: with the person's own servers off, one key turns
+    /// every plugin off — including one installed remotely that
+    /// `config.toml` never names (the fixture home below) — and no
+    /// per-plugin key is needed; with them on, plugins stay. Install
+    /// suggestions are off either way.
+    #[test]
+    fn plugins_go_off_by_one_key_and_suggestions_always() {
+        let dir = std::env::temp_dir().join(format!("codex-plugins-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let owner = dir.join("owner").join(".codex");
+        // A remotely installed plugin: on disk under plugins/cache, absent
+        // from config.toml.
+        std::fs::create_dir_all(owner.join("plugins/cache/openai-curated-remote/remote-only/1.0/skills/x")).expect("plugin dir");
+        std::fs::write(owner.join("config.toml"), "[plugins.\"pdf@openai-primary-runtime\"]\nenabled = true\n").expect("config");
+        let adapter = CodexAdapter::new(NO_CLI).with_home(dir.join("owner"));
+        adapter.set_state_dir(dir.join("state"));
+        adapter.set_use_own_mcp(false);
+        let off = adapter.spawn_args_for("s-1");
+        assert_eq!(off.iter().filter(|arg| *arg == "features.plugins=false").count(), 1, "{off:?}");
+        assert!(!off.iter().any(|arg| arg.starts_with("plugins.")), "no per-plugin key: {off:?}");
+        assert_eq!(off.iter().filter(|arg| *arg == "features.tool_suggest=false").count(), 1, "{off:?}");
+        adapter.set_use_own_mcp(true);
+        let own = adapter.spawn_args_for("s-1");
+        assert!(!own.iter().any(|arg| arg.contains("features.plugins")), "own servers keep plugins: {own:?}");
+        assert!(!own.iter().any(|arg| arg.starts_with("mcp_servers.")), "nor disable servers: {own:?}");
+        assert_eq!(own.iter().filter(|arg| *arg == "features.tool_suggest=false").count(), 1, "{own:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// docs/85 10.5: Baaz's note rides `thread/start` and every

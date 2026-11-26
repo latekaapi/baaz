@@ -121,34 +121,26 @@ pub fn disable_overrides<'a>(servers: impl IntoIterator<Item = &'a str>) -> Vec<
 pub const BUNDLED_SERVERS: &[&str] =
     &["codex_app", "codex_apps", "computer-use", "cua_repl", "node_repl"];
 
-/// Silence one owner-enabled plugin for this child only: a single-key
-/// `-c 'plugins."<name>".enabled=false'`. Single-key is safe here (unlike
-/// [`disable_override`]'s servers): the Z5 probe (2026-09-28) booted with
-/// eleven such overrides and listed the same silenced rows — the key is
-/// accepted, though it removes nothing `mcpServerStatus/list` can see
-/// beyond what the server disables already silence (defense in depth for
-/// what plugins contribute outside that listing, e.g. skills). The name
-/// rides a quoted segment, so a `"` (or anything outside the plugin-id
-/// alphabet) is refused rather than smuggled into the override key.
-pub fn plugin_disable_override(plugin: &str) -> Option<Vec<String>> {
-    if plugin.is_empty()
-        || plugin.contains(|char: char| {
-            !(char.is_ascii_alphanumeric()
-                || char == '_'
-                || char == '-'
-                || char == '@'
-                || char == '.')
-        })
-    {
-        return None;
-    }
-    Some(vec!["-c".to_owned(), format!("plugins.\"{plugin}\".enabled=false")])
+/// Every plugin off for this child: `-c features.plugins=false`. One key
+/// for the owner's config-named plugins AND the ones installed remotely
+/// (under `plugins/cache`, absent from `config.toml`), which a per-plugin
+/// `plugins."<name>".enabled=false` could never name. The per-plugin key
+/// was also not enough on its own: Codex 0.153.2 still listed the plugin's
+/// skills with it set. The offline probe (docs/88 C.2,
+/// `scripts/bench/prompt_probe.py`) shows this key leaves 0 plugin skills,
+/// no `<plugins_instructions>` and no `<recommended_plugins>`; the five
+/// bundled system skills stay.
+pub fn plugins_off() -> [String; 2] {
+    ["-c".to_owned(), "features.plugins=false".to_owned()]
 }
 
-/// The plugin disables for every name in `plugins`, in order, skipping
-/// what [`plugin_disable_override`] refuses. Empty in, empty out.
-pub fn plugin_disable_overrides<'a>(plugins: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    plugins.into_iter().filter_map(plugin_disable_override).flatten().collect()
+/// Plugin install suggestions off for this child: `-c
+/// features.tool_suggest=false` drops the `<recommended_plugins>` block
+/// (about 876 characters a request, probed in docs/88 C.2). Baaz has no
+/// handler for an install request, so the suggestions are dead weight
+/// whether or not the person uses their own MCP servers.
+pub fn tool_suggest_off() -> [String; 2] {
+    ["-c".to_owned(), "features.tool_suggest=false".to_owned()]
 }
 
 /// Owner-enabled `[plugins."<name>@<marketplace>"]` tables named by
@@ -171,15 +163,6 @@ pub fn plugin_names(config_toml: &str) -> Vec<String> {
         names.push(name);
     }
     names
-}
-
-/// Every owner-enabled plugin to silence for one child, read-only from
-/// the owner's config file. Best-effort: an unreadable file silences
-/// nothing here (the server disables above are unaffected).
-pub fn inherited_plugins() -> Vec<String> {
-    let Some(path) = codex_config_path() else { return Vec::new() };
-    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
-    plugin_names(&text)
 }
 
 /// File-configured `[mcp_servers.<name>]` tables named by `config.toml`
@@ -405,25 +388,9 @@ mod tests {
     }
 
     #[test]
-    fn plugin_disables_quote_the_marketplace_name() {
-        assert_eq!(
-            plugin_disable_override("browser@openai-bundled"),
-            Some(vec![
-                "-c".to_owned(),
-                "plugins.\"browser@openai-bundled\".enabled=false".to_owned()
-            ])
-        );
-        assert_eq!(plugin_disable_override(""), None);
-        assert_eq!(plugin_disable_override("a\"b"), None, "no smuggled quotes");
-        assert_eq!(plugin_disable_override("a b"), None, "no whitespace");
-        assert_eq!(
-            plugin_disable_overrides(["chrome@openai-bundled", "a\"b"]),
-            vec![
-                "-c".to_owned(),
-                "plugins.\"chrome@openai-bundled\".enabled=false".to_owned()
-            ]
-        );
-        assert!(plugin_disable_overrides(Vec::<&str>::new()).is_empty());
+    fn plugins_and_install_suggestions_go_off_by_feature_key() {
+        assert_eq!(plugins_off(), ["-c".to_owned(), "features.plugins=false".to_owned()]);
+        assert_eq!(tool_suggest_off(), ["-c".to_owned(), "features.tool_suggest=false".to_owned()]);
     }
 
     #[test]
