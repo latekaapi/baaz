@@ -1,0 +1,5 @@
+{
+  "id": "07-config-defaults",
+  "prompt": "Implement load_config in config.py: read the JSON file at the given path and return its settings merged over DEFAULTS, so keys missing from the file keep their default. The tests describe it.",
+  "check": "python3 -m unittest discover -s tests -q"
+}

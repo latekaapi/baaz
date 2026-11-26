@@ -1,0 +1,5 @@
+{
+  "id": "08-extract-helper",
+  "prompt": "In users.py, make_username and make_handle repeat the same text clean-up. Extract it into one helper function named normalize that both call. Keep the tests passing.",
+  "check": "python3 -m unittest discover -s tests -q && grep -q 'def normalize' users.py && test $(grep -c 'normalize(' users.py) -ge 3"
+}

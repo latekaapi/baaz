@@ -272,6 +272,7 @@
 //! | `folder-new:<name>` | a new folder named `<name>` in the current browser space, holding the active person tab (the new-folder flow, committed), free |
 //! | `space-new:<name>` | add a browser space named `<name>` and make it current, free |
 //! | `wait:<ms>` | let the wire catch up before the next step |
+//! | `wait-idle:<ms>` | wait until the open session's turn has started (up to 10 s) and then ended, at most `<ms>` in all (docs/85 17.1, the bench); still running at the bound fails the step, free |
 //!
 //! # `--login-steps <a;b;c>`
 //!
@@ -1247,6 +1248,7 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     // `wait` is handled by the runners, which are the only thing that can let
     // the wire catch up; reaching a table means it slipped through.
     SessionVerb { verb: "wait", run: |_, _, _, _| Err("`wait` belongs to the runner".into()) },
+    SessionVerb { verb: "wait-idle", run: |_, _, _, _| Err("`wait-idle` belongs to the runner".into()) },
 ];
 
 /// The `--login-steps` verbs.
@@ -1472,6 +1474,29 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
                         "session switch never arrived; `{step}` runs against {active:?}"
                     );
                 }
+            }
+            // `wait-idle:<ms>` (docs/85 17.1): the open session's turn
+            // starts (bounded 10 s: a send takes a moment to admit) and
+            // ends, within `<ms>` in all. Still running at the bound fails.
+            if let Some(ms) = step.strip_prefix("wait-idle:") {
+                STEPS_RAN.fetch_add(1, Ordering::Relaxed);
+                let start = std::time::Instant::now();
+                let bound = std::time::Duration::from_millis(ms.parse().unwrap_or(600_000));
+                let sending = |this: &Harness, cx: &gpui::App| this.active.as_ref().is_some_and(|view| view.read(cx).rt(cx).is_sending());
+                while start.elapsed() < std::time::Duration::from_secs(10) && !this.read_with(cx, |this, cx| sending(this, cx)).unwrap_or(false) {
+                    cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+                }
+                while start.elapsed() < bound && this.read_with(cx, |this, cx| sending(this, cx)).unwrap_or(false) {
+                    cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                }
+                if this.read_with(cx, |this, cx| sending(this, cx)).unwrap_or(false) {
+                    record_step_failure(&step);
+                    crate::baaz_log!("steps: `{step}` failed: the turn still runs at the bound; ending script");
+                    capture.set_steps_running(false);
+                    capture.set_steps_done(true);
+                    return;
+                }
+                continue;
             }
             // `run-wait-preview[:<s>]` (docs/82 7.4): the step checks the
             // Page opened; the wait for the port to answer is the runner's,
