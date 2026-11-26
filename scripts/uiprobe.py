@@ -9,6 +9,11 @@ run costs nothing and reaches no model.
 
     uiprobe.py --entry signed-in --probe-shot out.png
     uiprobe.py --entry signed-in --probe-idle 2000
+    uiprobe.py --check-docs [--plant NAME]
+
+`--check-docs` (docs/85 rule 28, docs/87 18.2) exits 1 when an entry declared
+here is missing from CLAUDE.md's `--entry` lists, or CLAUDE.md names an entry
+that does not exist. `--plant NAME` adds a fake entry first, to watch it fail.
 """
 import argparse, json, os, shutil, subprocess, sys, tempfile, time
 import atexit
@@ -1542,7 +1547,26 @@ def prime_adoptions(cmd, env, pristine):
     return None
 
 
+def check_docs(plant=None):
+    """Every declared entry is named in CLAUDE.md, and CLAUDE.md names only
+    declared entries. Returns the exit code."""
+    import re
+    names = set(ENTRIES) | ({plant} if plant else set())
+    text = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "CLAUDE.md")).read()
+    listed = set(re.findall(r"--entry ([\w-]+)", text))
+    missing, unknown = sorted(names - listed), sorted(listed - names)
+    for name in missing:
+        print(f"uiprobe --check-docs: entry `{name}` is declared in scripts/uiprobe.py but not listed in CLAUDE.md")
+    for name in unknown:
+        print(f"uiprobe --check-docs: CLAUDE.md lists `{name}`, which scripts/uiprobe.py does not declare")
+    print(f"uiprobe --check-docs: {len(names)} entries, {len(listed)} listed, {len(missing)} missing, {len(unknown)} unknown")
+    return 1 if missing or unknown else 0
+
+
 def main():
+    if "--check-docs" in sys.argv:
+        plant = sys.argv[sys.argv.index("--plant") + 1] if "--plant" in sys.argv else None
+        return check_docs(plant)
     keep_display_awake()
     ap = argparse.ArgumentParser()
     ap.add_argument("--entry", required=True)
