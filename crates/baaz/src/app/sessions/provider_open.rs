@@ -759,6 +759,10 @@ impl Harness {
     /// wherever that view is ([`Self::land_provider_draft`]) or fail it, and
     /// fail it visibly past [`PROVIDER_OPEN_TIMEOUT`]. Shared by the centre's
     /// drafts and browser chats.
+    // `model` joined the open's facts with the model-at-thread-start fix:
+    // each is one of the open's own inputs, with no grouping that both
+    // callers already hold.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::app) fn spawn_provider_open(
         &mut self,
         provider_id: ProviderId,
