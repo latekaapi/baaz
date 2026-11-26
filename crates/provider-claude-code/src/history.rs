@@ -197,6 +197,49 @@ fn cut_at_char_boundary(text: &mut String, limit: usize) {
     text.truncate(at);
 }
 
+/// The uuid `--resume-session-at` cuts at for "Branch from here" through
+/// the assistant turn `turn_id` (docs/85 16.3, probed live 26 Nov 2026,
+/// claude 2.1.276): the turn starts at the first `assistant` row whose
+/// `message.id` is the turn id (the fold keys a turn by its first
+/// message), and the cut is the last row carrying a `uuid` before the next
+/// prompt the person typed — so the turn's tool results and closing rows
+/// stay in the branch. `None` when the turn is not in the transcript.
+pub fn cut_uuid_for_turn(transcript: &str, turn_id: &str) -> Option<String> {
+    let mut started = false;
+    let mut cut = None;
+    for line in transcript.lines() {
+        let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let kind = row.get("type").and_then(serde_json::Value::as_str).unwrap_or_default();
+        if !started {
+            started = kind == "assistant"
+                && row.pointer("/message/id").and_then(serde_json::Value::as_str) == Some(turn_id);
+        } else if kind == "user" && is_typed_prompt(&row) {
+            break;
+        }
+        if started {
+            if let Some(uuid) = row.get("uuid").and_then(serde_json::Value::as_str) {
+                cut = Some(uuid.to_owned());
+            }
+        }
+    }
+    cut
+}
+
+/// A `user` row the person typed: not meta, and its content is text
+/// rather than a tool result.
+fn is_typed_prompt(row: &serde_json::Value) -> bool {
+    if row.get("isMeta").and_then(serde_json::Value::as_bool) == Some(true) {
+        return false;
+    }
+    match row.pointer("/message/content") {
+        Some(serde_json::Value::String(_)) => true,
+        Some(serde_json::Value::Array(blocks)) => {
+            !blocks.iter().any(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result"))
+        }
+        _ => false,
+    }
+}
+
 /// Every stored transcript under one config dir, by session id: one walk
 /// of `<config-dir>/projects/*/`, so a search sync that needs many bodies
 /// lists the directories once rather than once per session. A session id
@@ -416,5 +459,27 @@ pub(crate) mod tests {
         assert_eq!(found.len(), 2);
         assert_eq!(found["sess-b"], dir.join("projects").join("-work-b").join("sess-b.jsonl"));
         assert!(stored_transcripts(&dir.join("absent")).is_empty());
+    }
+
+    /// docs/85 16.3: the cut for a turn is its last row with a uuid
+    /// before the next typed prompt (the live source of the 26 Nov probe,
+    /// scrubbed); the last turn runs to the end; a tool result does not
+    /// end a turn; an unknown turn has no cut.
+    #[test]
+    fn a_turns_cut_is_its_last_row_before_the_next_typed_prompt() {
+        const SOURCE: &str = include_str!("../../../fixtures/claude-code/fork-source.ndjson");
+        assert_eq!(cut_uuid_for_turn(SOURCE, "msg_011ChQyGv7gFNYb56LXj8TTf").as_deref(), Some("68477577-b2e6-478d-8bf3-d287ec563f2d"));
+        assert_eq!(cut_uuid_for_turn(SOURCE, "msg_011ChQyH4ftH7pRJVgbmj3S1").as_deref(), Some("4f0c3ca4-7073-4c73-906a-e639b558857c"));
+        assert_eq!(cut_uuid_for_turn(SOURCE, "msg_nope"), None);
+        let tools = [
+            r#"{"type":"user","uuid":"u1","message":{"content":"run it"}}"#,
+            r#"{"type":"assistant","uuid":"a1","message":{"id":"m1","content":[{"type":"tool_use"}]}}"#,
+            r#"{"type":"user","uuid":"t1","message":{"content":[{"type":"tool_result"}]}}"#,
+            r#"{"type":"user","uuid":"meta","isMeta":true,"message":{"content":"<reminder>"}}"#,
+            r#"{"type":"assistant","uuid":"a2","message":{"id":"m2","content":[{"type":"text","text":"done"}]}}"#,
+            r#"{"type":"user","uuid":"u2","message":{"content":[{"type":"text","text":"next"}]}}"#,
+        ]
+        .join("\n");
+        assert_eq!(cut_uuid_for_turn(&tools, "m1").as_deref(), Some("a2"), "the tool result and the second message stay in the turn");
     }
 }

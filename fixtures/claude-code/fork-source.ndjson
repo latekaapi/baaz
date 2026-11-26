@@ -1,0 +1,31 @@
+{"type": "queue-operation"}
+{"type": "queue-operation"}
+{"type": "user", "uuid": "0e93ae13-62d4-4157-acd1-c42dc305bb0c", "parentUuid": null, "message": {"role": "user", "content": "Reply with exactly: ALPHA"}}
+{"type": "attachment", "uuid": "a244765d-a719-4ce1-a90f-f690e0ced8c9", "parentUuid": "0e93ae13-62d4-4157-acd1-c42dc305bb0c"}
+{"type": "attachment", "uuid": "5a2d6ad9-566f-42ba-a37f-abf087abd1e7", "parentUuid": "a244765d-a719-4ce1-a90f-f690e0ced8c9"}
+{"type": "attachment", "uuid": "5ac96bff-d539-4ae9-8eb4-2b951731af8e", "parentUuid": "5a2d6ad9-566f-42ba-a37f-abf087abd1e7"}
+{"type": "attachment", "uuid": "101b8075-d33b-4996-a7ea-9f87593a6750", "parentUuid": "5ac96bff-d539-4ae9-8eb4-2b951731af8e"}
+{"type": "attachment", "uuid": "cdfa3d9c-90f0-428b-91af-3d7a8db2e8ca", "parentUuid": "101b8075-d33b-4996-a7ea-9f87593a6750"}
+{"type": "attachment", "uuid": "08cdb7bb-45df-4efc-9443-4a3602741b82", "parentUuid": "cdfa3d9c-90f0-428b-91af-3d7a8db2e8ca"}
+{"type": "file-history-snapshot"}
+{"type": "atis-latch"}
+{"type": "attachment", "uuid": "c03c16fa-6858-401e-b3ec-0755a97ae1ae", "parentUuid": "08cdb7bb-45df-4efc-9443-4a3602741b82"}
+{"type": "attachment", "uuid": "9785394f-f741-4fbc-904c-77708e727237", "parentUuid": "c03c16fa-6858-401e-b3ec-0755a97ae1ae"}
+{"type": "attachment", "uuid": "19544b4a-671a-4ecd-8545-5f134c9ab259", "parentUuid": "9785394f-f741-4fbc-904c-77708e727237"}
+{"type": "attachment", "uuid": "5160baa4-2789-4384-8b22-40b73d9e19a7", "parentUuid": "19544b4a-671a-4ecd-8545-5f134c9ab259"}
+{"type": "last-prompt"}
+{"type": "atis-latch"}
+{"type": "assistant", "uuid": "d915c42e-93a2-4e59-9892-f2f400682f9c", "parentUuid": "5160baa4-2789-4384-8b22-40b73d9e19a7", "message": {"id": "msg_011ChQyGv7gFNYb56LXj8TTf", "role": "assistant", "content": [{"type": "thinking", "thinking": ""}]}}
+{"type": "assistant", "uuid": "86cd5c7f-2ab1-485f-b70f-4366cc5995f2", "parentUuid": "d915c42e-93a2-4e59-9892-f2f400682f9c", "message": {"id": "msg_011ChQyGv7gFNYb56LXj8TTf", "role": "assistant", "content": [{"type": "text", "text": "ALPHA"}]}}
+{"type": "attachment", "uuid": "68477577-b2e6-478d-8bf3-d287ec563f2d", "parentUuid": "86cd5c7f-2ab1-485f-b70f-4366cc5995f2"}
+{"type": "last-prompt"}
+{"type": "atis-latch"}
+{"type": "queue-operation"}
+{"type": "queue-operation"}
+{"type": "user", "uuid": "c8fc779b-2ce7-4d3c-acf5-72824d2cd0a1", "parentUuid": "68477577-b2e6-478d-8bf3-d287ec563f2d", "message": {"role": "user", "content": "Reply with exactly: BETA"}}
+{"type": "attachment", "uuid": "72ba5513-55d9-4a82-a75b-cdaa45af55d8", "parentUuid": "c8fc779b-2ce7-4d3c-acf5-72824d2cd0a1"}
+{"type": "attachment", "uuid": "e84ba87c-e29e-4d4a-8e6e-1bb626986e0b", "parentUuid": "72ba5513-55d9-4a82-a75b-cdaa45af55d8"}
+{"type": "file-history-snapshot"}
+{"type": "assistant", "uuid": "f4d4a9c6-b355-4268-aded-efa298addfeb", "parentUuid": "e84ba87c-e29e-4d4a-8e6e-1bb626986e0b", "message": {"id": "msg_011ChQyH4ftH7pRJVgbmj3S1", "role": "assistant", "content": [{"type": "thinking", "thinking": ""}]}}
+{"type": "assistant", "uuid": "4f0c3ca4-7073-4c73-906a-e639b558857c", "parentUuid": "f4d4a9c6-b355-4268-aded-efa298addfeb", "message": {"id": "msg_011ChQyH4ftH7pRJVgbmj3S1", "role": "assistant", "content": [{"type": "text", "text": "BETA"}]}}
+{"type": "last-prompt"}

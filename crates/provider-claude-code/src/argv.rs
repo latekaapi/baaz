@@ -640,10 +640,10 @@ pub fn argv_for_resume(
     }
 }
 
-/// Branch a session. `--resume` plus `--fork-session` mints the new id;
-/// `request_id` is the Baaz-side id for the branch. Whether the CLI honors
-/// a `--session-id` alongside `--fork-session` was never probed live, so
-/// the argv carries it as the caller's intent and the report says so.
+/// Branch a session. `--resume` plus `--fork-session` forks it, and the
+/// `--session-id <request_id>` beside them names the branch: probed live
+/// 26 Nov 2026 (claude 2.1.276), the branch's transcript lands under that
+/// id. [`with_resume_at`] cuts it at a turn.
 pub fn argv_for_fork(
     request_id: &str,
     session_id: &str,
@@ -669,6 +669,16 @@ pub fn argv_for_fork(
         permission_mode: None,
         env: Vec::new(),
     }
+}
+
+/// Cut a fork at the transcript row `uuid` (`--resume-session-at`, a
+/// hidden print-mode flag; probed live 26 Nov 2026): the branch holds the
+/// conversation through that row and nothing after it, and the source's
+/// transcript is untouched (docs/85 16.3).
+pub fn with_resume_at(mut launch: SessionLaunch, uuid: &str) -> SessionLaunch {
+    launch.argv.push("--resume-session-at".into());
+    launch.argv.push(uuid.to_owned());
+    launch
 }
 
 /// A `--resume` relaunch of a session the CLI never stored, as the fresh

@@ -422,7 +422,7 @@ impl SessionView {
             // any) holding its copy check.
             now_ms: transcript::transcript_now_ms(&self.cached_turns),
             copied: Rc::new(self.copied_turn.iter().cloned().collect()),
-            // Rule 13: only where the fork cuts at the turn (Codex, Muse).
+            // Rule 13: only where the fork cuts at the turn (Claude Code, Codex, Muse).
             branchable: self.runtime.read(cx).offers(provider::Capability::ForkSession) && self.runtime.read(cx).provider_kind().has(provider::ProviderTrait::ForkAtTurn),
             branches: Rc::new(self.runtime.read(cx).branch_counts.clone()),
             full_output: Rc::clone(&self.cached_full_output),
@@ -1588,7 +1588,9 @@ impl SessionView {
                 self.focus_composer(window, cx);
             }
             // docs/85 16.3: a new session through this message's answer.
-            aui::transcript::UserTurnAction::Branch => self.runtime.update(cx, |rt, cx| rt.branch_from(&turn_id, cx)),
+            aui::transcript::UserTurnAction::Branch => {
+                self.runtime.update(cx, |rt, cx| rt.branch_from(&turn_id, cx));
+            }
         }
     }
 

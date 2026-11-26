@@ -2054,8 +2054,20 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 }
                 Ok(ack)
             }
-            Command::ForkSession { request_id, session_id, mode, .. } => {
-                let launch = self.launch_for_fork(&request_id, &session_id)?;
+            Command::ForkSession { request_id, session_id, through_turn, mode, .. } => {
+                let mut launch = self.launch_for_fork(&request_id, &session_id)?;
+                // docs/85 16.3: a branch through a turn is cut at that
+                // turn's last transcript row. A turn the transcript does
+                // not hold is refused, never forked whole.
+                if let Some(turn) = through_turn {
+                    let transcript = self.find_stored(&session_id).and_then(|path| std::fs::read_to_string(path).ok());
+                    let Some(cut) = transcript.as_deref().and_then(|text| history::cut_uuid_for_turn(text, &turn)) else {
+                        return Err(ProviderError::Unavailable {
+                            reason: format!("the turn {turn} is not in session {session_id}'s transcript, so there is nothing to branch from"),
+                        });
+                    };
+                    launch = argv::with_resume_at(launch, &cut);
+                }
                 self.spawn_launch(&argv::with_permission_mode(launch, mode))
             }
             Command::ListSessions { workspace, .. } => {
@@ -3147,6 +3159,58 @@ mod tests {
         assert_eq!(adapter.config_dir_for(&id), fixture.join(".claude"), "history reads it too");
         crate::home::clear_legacy_resume(&id);
         assert!(adapter.home_env_for(&id).is_some(), "a cleared pin resumes Baaz-homed");
+    }
+
+    /// docs/85 16.3 (probed live 26 Nov 2026): Branch through a turn
+    /// forks with `--resume-session-at` at that turn's last row, under the
+    /// branch's own id; a turn the transcript does not hold is refused
+    /// before anything spawns, never forked whole. Against a stand-in
+    /// `claude` that records its argv.
+    #[test]
+    fn a_branch_through_a_turn_cuts_the_fork_at_that_turns_last_row() {
+        let config = std::env::temp_dir().join(format!("baaz-claude-fork-cut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&config);
+        let slug_dir = config.join("projects").join("-fixture-proj");
+        std::fs::create_dir_all(&slug_dir).expect("slug dir");
+        let source = "139c8757-db8e-4243-a440-de494311ee11";
+        std::fs::write(slug_dir.join(format!("{source}.jsonl")), include_str!("../../../fixtures/claude-code/fork-source.ndjson")).expect("transcript");
+        let (dir, _) = seed_executable("fork-cut", "unused", "");
+        let seen = dir.join("argv");
+        let script = dir.join("fake-claude");
+        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}.tmp'; mv '{0}.tmp' '{0}'\nexec cat >/dev/null\n", seen.display())).expect("fake");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let fork = |adapter: &ClaudeCodeAdapter, turn: &str| {
+            adapter.dispatch(Command::ForkSession {
+                request_id: "branch-1".into(),
+                session_id: source.into(),
+                through_turn: Some(turn.into()),
+                metadata_only: false,
+                mode: None,
+            })
+        };
+        let adapter = ClaudeCodeAdapter::new(&script.to_string_lossy()).with_config_dir(config.clone());
+        let ack = fork(&adapter, "msg_011ChQyGv7gFNYb56LXj8TTf");
+        assert!(matches!(ack, Ok(Ack::Session { .. })), "branched: {ack:?}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !seen.is_file() {
+            assert!(std::time::Instant::now() < deadline, "the stand-in never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(adapter);
+        let argv: Vec<String> = std::fs::read_to_string(&seen).expect("argv").lines().map(str::to_owned).collect();
+        let after = |flag: &str| argv.iter().position(|arg| arg == flag).map(|at| argv[at + 1].clone());
+        assert_eq!(after("--resume").as_deref(), Some(source));
+        assert_eq!(after("--resume-session-at").as_deref(), Some("68477577-b2e6-478d-8bf3-d287ec563f2d"));
+        assert_eq!(after("--session-id").as_deref(), Some("branch-1"));
+        assert!(argv.iter().any(|arg| arg == "--fork-session"));
+
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn").with_config_dir(config.clone());
+        let error = fork(&adapter, "msg_not_in_it").expect_err("an unknown turn is refused");
+        assert!(format!("{error:?}").contains("nothing to branch from"), "{error:?}");
+        let _ = std::fs::remove_dir_all(&config);
     }
 
     /// A stand-in `claude` that records where and under which config dir

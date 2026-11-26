@@ -45,7 +45,7 @@ pub static DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     // switched live over `set_permission_mode`.
     plan: provider::PlanMode::Native,
     routes: &[],
-    traits: &[ProviderTrait::ModelsLimitModes, ProviderTrait::GoalSlashCommand],
+    traits: &[ProviderTrait::ModelsLimitModes, ProviderTrait::GoalSlashCommand, ProviderTrait::ForkAtTurn],
     capabilities: |_| crate::caps::capabilities(),
     command_env: None,
 };
