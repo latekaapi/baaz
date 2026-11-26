@@ -478,8 +478,15 @@ pub fn turn_start_request(
 /// the model's `defaultReasoningEffort` explicitly; Default with nothing
 /// standing omits the key, byte-identical to the old shape. A reset whose
 /// default is unknown omits the key too — never a guessed level.
+///
+/// A pick the thread already holds is not re-sent (docs/88 C.6): the
+/// level a started turn carried (`sticky`), or — with nothing standing —
+/// the model's own default. Re-sending it changed nothing but the request
+/// (and made the first request differ from the thread's prewarm).
 pub fn turn_effort(picked: Option<&str>, sticky: Option<&str>, model_default: Option<&str>) -> Option<String> {
     match picked.filter(|level| !level.is_empty()) {
+        Some(level) if sticky == Some(level) => None,
+        Some(level) if sticky.is_none() && model_default == Some(level) => None,
         Some(level) => Some(level.to_owned()),
         None if sticky.is_some() => model_default.map(str::to_owned),
         None => None,
@@ -1800,9 +1807,12 @@ mod tests {
 
     #[test]
     fn default_after_a_pick_resets_to_the_model_default() {
-        // A pick rides as itself, standing or not.
+        // A pick rides as itself unless the thread already holds it.
         assert_eq!(turn_effort(Some("high"), None, Some("medium")).as_deref(), Some("high"));
         assert_eq!(turn_effort(Some("low"), Some("high"), Some("medium")).as_deref(), Some("low"));
+        assert_eq!(turn_effort(Some("high"), Some("high"), Some("medium")), None, "held: docs/88 C.6");
+        assert_eq!(turn_effort(Some("medium"), None, Some("medium")), None, "the model's default, nothing standing");
+        assert_eq!(turn_effort(Some("medium"), None, None).as_deref(), Some("medium"), "an unknown default is sent");
         // Default with nothing standing omits the key: the old shape.
         assert_eq!(turn_effort(None, None, Some("medium")), None);
         assert_eq!(turn_effort(Some(""), None, Some("medium")), None);
