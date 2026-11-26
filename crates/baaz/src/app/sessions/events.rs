@@ -239,6 +239,10 @@ impl Harness {
             // locked, chip already on the pick) until the replacement
             // activates in the same update — no empty-state frame between.
             SessionEvent::SwitchProvider { provider } => self.on_switch_provider(runtime, provider, cx),
+            // A model picked before the first turn on a provider whose
+            // thread takes its model at its start: the same retire-and-
+            // replace, on the same provider, opening on the pick.
+            SessionEvent::RestartOnModel { model } => self.on_restart_on_model(runtime, model, cx),
             // "Hand off to X…" on a session with turns: the lossy
             // re-prompt (see `crate::handoff`). The dialog (or the step
             // verb's headless flag) decides whether a confirm comes
@@ -670,7 +674,37 @@ impl Harness {
     /// locked, chip already on the pick) until the replacement
     /// activates in the same update — no empty-state frame between.
     pub(super) fn on_switch_provider(&mut self, runtime: Entity<SessionRuntime>, provider: &ProviderId, cx: &mut Context<Self>) {
+        let (mode, effort) = runtime.read(cx).draft_settings();
+        self.replace_unsent_draft(runtime, *provider, (mode, effort, None), cx);
+    }
+
+    /// Restart an unsent session on `model` instead of switching its thread
+    /// ([`provider::ProviderTrait::ModelAtThreadStart`]): the replacement
+    /// opens on the same provider with the model at its thread's start, so
+    /// its first turn carries no model switch (docs/85-evidence/s17: about
+    /// 4.4k tokens in every later Codex request). The session id changes —
+    /// the backend mints it on the start — and nothing was keyed by the old
+    /// one beyond what any retired draft leaves (`close_view` drops its
+    /// zero-turn record with the view).
+    fn on_restart_on_model(&mut self, runtime: Entity<SessionRuntime>, model: &str, cx: &mut Context<Self>) {
+        let (provider, old) = (runtime.read(cx).provider_kind(), runtime.read(cx).session_id.clone());
+        crate::baaz_log!("restart on model provider={} session={old} model={model}", provider.as_str());
+        let (mode, effort) = runtime.read(cx).draft_settings();
+        self.replace_unsent_draft(runtime, provider, (mode, effort, Some(model.to_owned())), cx);
+    }
+
+    /// Retire `runtime`'s unsent session and start its replacement on
+    /// `provider`, carrying the draft's settings (Y2b): the provider switch,
+    /// and the restart on a model.
+    fn replace_unsent_draft(
+        &mut self,
+        runtime: Entity<SessionRuntime>,
+        provider: ProviderId,
+        carry: baaz_core::lifecycle::SwitchCarry,
+        cx: &mut Context<Self>,
+    ) {
         let old = runtime.read(cx).session_id.clone();
+        let provider = &provider;
         // Y2b2: every switch stamps a fresh generation. A second
         // switch while one is pending supersedes the first: its
         // in-flight open is orphaned (it lands stale — child shut
@@ -691,8 +725,14 @@ impl Harness {
         // lane instead of failing on the closed draft — and the
         // claim is what lets the start through the one-session
         // guard (see [`OpenState::begin_switch`]).
-        let carry = runtime.read(cx).draft_settings();
+        let same_provider = carry.2.is_some();
         let epoch = self.open_state.begin_switch(old.clone(), carry);
+        // On the same provider the project's draft name would hand the
+        // replaced view straight back (`draft_serves` matches its lane):
+        // the replacement names itself when it is drawn.
+        if same_provider {
+            self.open_state.drafts.retain(|_, id| *id != old);
+        }
         self.select_new_provider(*provider, cx);
         runtime.update(cx, |rt, cx| {
             rt.set_input_locked(true, cx);

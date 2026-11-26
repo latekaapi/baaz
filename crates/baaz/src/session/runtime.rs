@@ -319,6 +319,14 @@ pub struct SessionRuntime {
     /// The switch's pick, for the composer chip while this view is still
     /// drawn: the lane itself never changes, only the displayed mark.
     pub(super) switching_to: Option<ProviderId>,
+    /// The model this session's thread was started on, when this process
+    /// started it fresh on a provider whose thread takes its model at its
+    /// start ([`provider::ProviderTrait::ModelAtThreadStart`]): the outer
+    /// `None` for every other session (reopened, forked, other providers),
+    /// the inner `None` when the open named no model and the CLI chose.
+    /// A pick of another model before the first turn restarts the session
+    /// on it ([`SessionRuntime::set_model`]).
+    pub(super) fresh_thread_model: Option<Option<String>>,
     /// The new-session row's facts (docs/82 6.6): set by the window when
     /// this session activates as an unsent draft, `None` otherwise. The
     /// row hides on its own once a turn starts.
@@ -527,6 +535,7 @@ impl SessionRuntime {
             input_locked: false,
             start: StartState::Started,
             switching_to: None,
+            fresh_thread_model: None,
             new_row: None,
             handoff_origin: None,
             handoff_prefix: Rc::new(Vec::new()),

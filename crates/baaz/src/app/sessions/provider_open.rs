@@ -37,6 +37,13 @@ struct ProviderOpen {
     /// a fresh copy (docs/85 11.1): the view shows these, and the provider
     /// resumed without sending history.
     stored_turns: Option<Vec<aui_protocol::Turn>>,
+    /// The model a fresh open started its thread on, for a provider whose
+    /// thread takes its model at its start
+    /// ([`provider::ProviderTrait::ModelAtThreadStart`]): the landing notes
+    /// it on the runtime, so a different pick before the first turn
+    /// restarts the session rather than switching it. `None` for every
+    /// resume and fork, and for every other provider.
+    fresh_thread_model: Option<Option<String>>,
 }
 
 /// The work of every fresh provider open: spawn the child through the
@@ -57,13 +64,16 @@ fn provider_open_work(
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<ProviderOpen, crate::app::OpenFailed> {
     let provider = factory.open(provider_id)?;
-    let OpenExtras { model_provider, mode } = extras;
+    let OpenExtras { model_provider, mode, model } = extras;
+    let fresh_thread_model = provider_id.has(provider::ProviderTrait::ModelAtThreadStart).then(|| model.clone());
     #[cfg(not(all(test, feature = "probe")))]
     let (provider, events) = conn::gate(provider);
-    // `model: None` on purpose: the chip's display seed (env,
-    // `claude` settings, the last reported model) never reaches
-    // the child — no `--model` flag without a pick — so the CLI
-    // resolves its own default exactly as before.
+    // `model` is `None` unless the provider's thread takes its model at
+    // its start ([`thread_start_model`]): there it is the model the
+    // session will use, so its first turn is no model switch. Elsewhere the
+    // chip's display seed (env, `claude` settings, the last reported model)
+    // never reaches the child — no `--model` flag without a pick — so the
+    // CLI resolves its own default exactly as before.
     // A session in one of Baaz's worktrees starts its child with the
     // worktree's variables (docs/82 6.1), so the agent's own commands see
     // its port block.
@@ -72,7 +82,7 @@ fn provider_open_work(
         .send(provider::Command::OpenSession {
             request_id,
             workspace: Some(workspace_bg),
-            model: None,
+            model,
             model_provider,
             mode,
             env,
@@ -105,6 +115,7 @@ fn provider_open_work(
             epoch,
             lease_held: false,
             stored_turns: None,
+            fresh_thread_model,
         }),
         other => Err(provider::ProviderError::Rejected {
             reason: format!("OpenSession answered {other:?} instead of a session"),
@@ -120,6 +131,18 @@ fn provider_open_work(
 pub(crate) struct OpenExtras {
     model_provider: Option<String>,
     pub(crate) mode: Option<aui_protocol::PermissionMode>,
+    /// The model the thread starts on: set by the caller through
+    /// [`thread_start_model`], `None` from [`Harness::open_extras`].
+    model: Option<String>,
+}
+
+/// The model an open on `provider_id` names at its start: `model` when the
+/// provider's thread takes its model there
+/// ([`provider::ProviderTrait::ModelAtThreadStart`] — a later first-turn
+/// pick would be a switch, paid for in every later request), else `None`,
+/// so the CLI resolves its own default.
+fn thread_start_model(provider_id: ProviderId, model: Option<String>) -> Option<String> {
+    model.filter(|model| !model.is_empty() && provider_id.has(provider::ProviderTrait::ModelAtThreadStart))
 }
 
 /// Whether a finished turn's model report seeds the next fresh Claude
@@ -173,7 +196,7 @@ impl Harness {
         workspace: Option<&str>,
         project: Option<&str>, cx: &gpui::App) -> OpenExtras {
         if !provider_id.has(provider::ProviderTrait::RoutesModelVendor) {
-            return OpenExtras { model_provider: None, mode: Some(mode) };
+            return OpenExtras { model_provider: None, mode: Some(mode), model: None };
         }
         let model_provider = if self.new_provider_id(cx) == Some(provider_id) {
             self.new_provider(cx).to_owned()
@@ -184,7 +207,7 @@ impl Harness {
             let list = self.session_list.read(cx);
             list.projects.picks(list.projects.resolve(workspace, project)).mode_for(provider_id.as_str())
         });
-        OpenExtras { model_provider: Some(model_provider), mode }
+        OpenExtras { model_provider: Some(model_provider), mode, model: None }
     }
 
     /// The mode a new `provider_id` session opens in: the flag, else that
@@ -258,7 +281,8 @@ impl Harness {
         // so the relay keeps routing the bridge's `--session <request_id>`
         // calls at the lane's browser and tabs.
         let alias_from = request_id.clone();
-        let extras = self.open_extras(provider_id, mode, Some(&workspace), project.as_deref(), cx);
+        let mut extras = self.open_extras(provider_id, mode, Some(&workspace), project.as_deref(), cx);
+        extras.model = thread_start_model(provider_id, self.start_model(provider_id, project.as_deref(), cx));
         let cancelled = std::sync::Arc::clone(&self.open_state.provider_opens_cancelled);
         let work = move || {
             provider_open_work(factory, provider_id, request_id, workspace_bg, extras, project, workspace, epoch, Some(cancelled))
@@ -314,6 +338,7 @@ impl Harness {
         self.register_terminal_session(&request_id, std::path::PathBuf::from(workspace.clone()), provider_id.as_str(), cx);
         let mut extras = self.open_extras(provider_id, mode, Some(&workspace), project.as_deref(), cx);
         extras.mode = Some(mode);
+        extras.model = thread_start_model(provider_id, model.clone());
         let alias_from = request_id.clone();
         let (workspace_bg, model_bg) = (workspace.clone(), model.clone());
         let work = move || {
@@ -367,7 +392,7 @@ impl Harness {
             #[cfg(feature = "probe")]
             #[cfg(test)]
             let (provider, events) = conn::gate_sync(provider);
-            Ok(ProviderOpen { provider_id, provider, events, session_id, project, workspace, title: None, epoch: 0, lease_held: false, stored_turns: None })
+            Ok(ProviderOpen { provider_id, provider, events, session_id, project, workspace, title: None, epoch: 0, lease_held: false, stored_turns: None, fresh_thread_model: None })
         };
         self.run_open(inline, work, move |this, result, window, cx| match result {
             Ok(open) => {
@@ -380,7 +405,7 @@ impl Harness {
 
     /// Land a worker's lane: its view, record and row, parked live.
     fn finish_worker_open(&mut self, open: ProviderOpen, model: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> String {
-        let ProviderOpen { provider_id, provider, events, session_id, project, workspace, title, .. } = open;
+        let ProviderOpen { provider_id, provider, events, session_id, project, workspace, title, fresh_thread_model, .. } = open;
         self.register_terminal_session(&session_id, std::path::PathBuf::from(workspace.clone()), provider_id.as_str(), cx);
         let host = SessionHost {
             provider_id: provider_id.as_str().to_owned(),
@@ -394,6 +419,9 @@ impl Harness {
         // A writer's worktree is tied to its worker here too (the record
         // links it, as for any session).
         self.record_provider_open(provider_id, &session_id, project, workspace, title, cx);
+        if let Some(started_on) = fresh_thread_model {
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, _| rt.note_fresh_thread(started_on)));
+        }
         if let Some(model) = model.filter(|m| !m.is_empty()) {
             view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model(&model, cx)));
         }
@@ -441,7 +469,7 @@ impl Harness {
     /// row, and the centre pane with the composer focused — so it becomes
     /// the visible session.
     fn finish_provider_open(&mut self, open: ProviderOpen, window: &mut Window, cx: &mut Context<Self>) {
-        let ProviderOpen { provider_id, mut provider, events, session_id, project, workspace, title, epoch, lease_held, stored_turns } =
+        let ProviderOpen { provider_id, mut provider, events, session_id, project, workspace, title, epoch, lease_held, stored_turns, fresh_thread_model } =
             open;
         // Last ask wins: an earlier open finishing after a newer one was
         // asked for never steals focus or the send — its child is shut
@@ -481,6 +509,9 @@ impl Harness {
         let view = cx.new(|cx| {
             SessionView::new_on_provider(session_id.clone(), provider, events, host, window, cx)
         });
+        if let Some(started_on) = fresh_thread_model {
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, _| rt.note_fresh_thread(started_on)));
+        }
         // A disabled open lands readable with the quiet banner instead of
         // a live child: the view above rides the scripted lane, so there
         // is no child to hang up and nothing was ever sent.
@@ -681,17 +712,27 @@ impl Harness {
         // turn asks for (owner 2026-10-21: a Claude Code draft never read
         // it). Then the last model picked for this provider is the model
         // the draft asks for — the chip names it and the open's landing
-        // sends it, so chip, menu check and child agree from the first
+        // sends it (on Codex the open itself names it, at the thread's
+        // start), so chip, menu check and child agree from the first
         // frame.
         let picks = self.session_list.read(cx).projects.picks(project.as_deref().and_then(|id| self.session_list.read(cx).projects.find(id)));
+        // A restart on a model (`RestartOnModel`) carries the pick, which
+        // stands over the remembered one.
         let carry = self.open_state.take_carry();
-        if let Some((mode, effort)) = switch.and(carry) {
+        let mut carried_model = None;
+        if let Some((mode, effort, model)) = switch.and(carry) {
             view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.carry_draft_settings(mode, effort, cx)));
+            carried_model = model;
         } else if let Some(effort) = picks.effort_for(provider_id.as_str()).as_deref().and_then(projects::parse_effort) {
             view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_initial_effort(Some(effort), cx)));
         }
-        let remembered = self.start_model(provider_id, project.as_deref(), cx);
-        if let Some(model) = remembered {
+        let model = carried_model.or_else(|| self.start_model(provider_id, project.as_deref(), cx));
+        // On a provider whose thread takes its model at its start, the open
+        // names it too ([`thread_start_model`]); noted first, so the pick
+        // below queues like any other rather than restarting this draft.
+        let start_model = thread_start_model(provider_id, model.clone());
+        view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, _| rt.note_fresh_thread(start_model.clone())));
+        if let Some(model) = model {
             view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model(&model, cx)));
         }
         // The open asks for the mode the draft now stands on: a carried or
@@ -710,7 +751,7 @@ impl Harness {
         crate::log::boot_mark("new-draft-shown");
         crate::log::trace_mark("new-draft-shown");
         crate::log::trace_arm_first_frame();
-        self.spawn_provider_open(provider_id, project, workspace, request_id, mode, cx);
+        self.spawn_provider_open(provider_id, project, workspace, request_id, mode, start_model, cx);
     }
 
     /// The background half of a provider draft's open: run the provider's
@@ -725,6 +766,7 @@ impl Harness {
         workspace: String,
         request_id: String,
         mode: aui_protocol::PermissionMode,
+        model: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let factory = self.providers.clone();
@@ -735,7 +777,8 @@ impl Harness {
         // by then): cloned before `work` moves the originals.
         let (retry_project, retry_workspace) = (project.clone(), workspace.clone());
         let (timed_project, timed_workspace) = (project.clone(), workspace.clone());
-        let extras = self.open_extras(provider_id, mode, Some(&workspace), project.as_deref(), cx);
+        let mut extras = self.open_extras(provider_id, mode, Some(&workspace), project.as_deref(), cx);
+        extras.model = thread_start_model(provider_id, model);
         let cancelled = std::sync::Arc::clone(&self.open_state.provider_opens_cancelled);
         let work = move || {
             provider_open_work(factory, provider_id, opened, workspace_bg, extras, project, workspace, epoch, Some(cancelled))
@@ -819,7 +862,7 @@ impl Harness {
         cx: &mut Context<Self>,
     ) {
         crate::log::boot_mark("provider open-reply early");
-        let ProviderOpen { provider_id, mut provider, events, session_id, project, workspace, title, .. } = open;
+        let ProviderOpen { provider_id, mut provider, events, session_id, project, workspace, title, fresh_thread_model, .. } = open;
         self.open_state.starts_in_flight.remove(provisional);
         // Baaz is quitting: every lane child was hung up, and one that
         // answers after the teardown is hung up too, never attached.
@@ -846,6 +889,11 @@ impl Harness {
             cx,
         );
         view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.attach_provider(session_id.clone(), provider, events, cx)));
+        // The model the thread started on: the draft noted the one it
+        // asked for, and this is what the open carried.
+        if let Some(started_on) = fresh_thread_model {
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, _| rt.note_fresh_thread(started_on)));
+        }
         // Recorded before the queue replays, so a send's acceptance finds
         // the record it titles.
         // Where the session runs: what a scripted check reads to prove a
@@ -1241,6 +1289,7 @@ impl Harness {
                     epoch,
                     lease_held,
                     stored_turns,
+                    fresh_thread_model: None,
                 })
             })();
             (result, moved)
@@ -1452,6 +1501,7 @@ impl Harness {
                     epoch,
                     lease_held: false,
                     stored_turns: None,
+                    fresh_thread_model: None,
                     // The fork groups under no project: it is a new session
                     // the sidebar names when its first turn lands.
                 }),

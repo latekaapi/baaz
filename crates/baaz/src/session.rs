@@ -676,6 +676,16 @@ pub enum SessionEvent {
         /// The picked backend.
         provider: ProviderId,
     },
+    /// The person picked another model in a session whose thread took its
+    /// model at its start and has never sent
+    /// ([`provider::ProviderTrait::ModelAtThreadStart`]): like
+    /// [`Self::SwitchProvider`], the application retires this empty session
+    /// and starts a new one on the same provider, on the pick, carrying the
+    /// draft. The session's id changes: the backend mints it on the start.
+    RestartOnModel {
+        /// The picked model id.
+        model: String,
+    },
     /// The person picked "Continue in X…" (composer provider menu, or ⌘K
     /// `/continue`): the session's turns move to a fresh session on the
     /// pick as a lossy re-prompt (see [`crate::handoff`]). A same-provider
