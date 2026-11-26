@@ -2765,7 +2765,7 @@ mod tests {
         let sandbox = crate::provider_status::TestSandbox::hold();
         let vc = cx.add_empty_window();
         let (adapter, handle) = RecordingProvider::new();
-        handle.set_usage(provider::UsageReport {
+        handle.set_usage(provider::UsageReport { unofficial: false,
             plan: Some("prolite".into()),
             windows: vec![provider::UsageWindow {
                 label: "Weekly".into(),

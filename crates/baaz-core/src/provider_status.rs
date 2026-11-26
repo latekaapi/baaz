@@ -179,6 +179,10 @@ pub struct UsageSnapshot {
     pub windows: Vec<UsageWindow>,
     /// Unix time the snapshot was taken.
     pub as_of: i64,
+    /// From an undocumented source ([`provider::UsageReport::unofficial`]).
+    /// Absent in snapshots stored before it existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unofficial: bool,
 }
 
 /// One provider's status: installed, auth, the person's switch, an
@@ -1034,7 +1038,7 @@ impl Service {
     /// cache write instead of re-stamping the age or writing every turn.
     pub fn record_lane_usage(&mut self, id: ProviderId, report: &provider::UsageReport) -> bool {
         let observed_at = report.observed_at;
-        let candidate = UsageSnapshot {
+        let candidate = UsageSnapshot { unofficial: report.unofficial,
             provider: id.as_str().into(),
             plan: report.plan.clone(),
             windows: report
@@ -1097,7 +1101,7 @@ impl Service {
                 self.muse_unavailable_now = true;
                 return false;
             }
-            return self.record_usage(UsageSnapshot {
+            return self.record_usage(UsageSnapshot { unofficial: false,
                 provider: ProviderId::shared_child().as_str().into(),
                 plan,
                 windows: Vec::new(),
@@ -1105,7 +1109,7 @@ impl Service {
             });
         };
         self.muse_unavailable_now = false;
-        let candidate = UsageSnapshot {
+        let candidate = UsageSnapshot { unofficial: false,
             provider: ProviderId::shared_child().as_str().into(),
             plan,
             windows: vec![UsageWindow {
@@ -1241,7 +1245,7 @@ fn probe_provider(
                     } else {
                         Auth::SignedOut
                     };
-                    status.set_usage(UsageSnapshot {
+                    status.set_usage(UsageSnapshot { unofficial: false,
                         provider: id.as_str().into(),
                         plan: status_plan(&status.auth),
                         windows: probe
@@ -2330,7 +2334,7 @@ mod tests {
             },
             Err("unreachable".into()),
         );
-        let saved = UsageSnapshot {
+        let saved = UsageSnapshot { unofficial: false,
             provider: "claude-code".into(),
             plan: Some("Max".into()),
             windows: Vec::new(),
@@ -2654,7 +2658,7 @@ mod tests {
             method: Some("account".into()),
             source: None,
         };
-        status.set_usage(UsageSnapshot {
+        status.set_usage(UsageSnapshot { unofficial: false,
             provider: "muse".into(),
             plan: Some("Ultra".into()),
             windows: vec![UsageWindow {
@@ -2792,7 +2796,7 @@ mod tests {
         assert!(service.status(ProviderId::Codex).usage.is_none());
         assert!(service.record_lane_usage(
             ProviderId::Codex,
-            &provider::UsageReport {
+            &provider::UsageReport { unofficial: false,
                 plan: Some("prolite".into()),
                 windows: vec![provider::UsageWindow {
                     label: "Weekly".into(),
@@ -2826,7 +2830,7 @@ mod tests {
         record_refreshed_usage(
             &[(
                 ProviderId::ClaudeCode,
-                provider::UsageReport {
+                provider::UsageReport { unofficial: false,
                     plan: None,
                     windows: vec![provider::UsageWindow {
                         label: "Weekly".into(),
@@ -2887,7 +2891,7 @@ mod tests {
             enabled: true,
             advisory: Advisory::None,
             checked_at: Some(1_700_000_000),
-            usage: Some(UsageSnapshot {
+            usage: Some(UsageSnapshot { unofficial: false,
                 provider: "claude-code".into(),
                 plan: Some("Max".into()),
                 windows: vec![UsageWindow {
@@ -2901,7 +2905,7 @@ mod tests {
         let before = now_secs();
         assert!(service.record_lane_usage(
             ProviderId::ClaudeCode,
-            &provider::UsageReport {
+            &provider::UsageReport { unofficial: false,
                 plan: Some("Max".into()),
                 windows: vec![provider::UsageWindow {
                     label: "Weekly".into(),
@@ -2990,7 +2994,7 @@ mod tests {
         // write from the false return).
         let _env = sandbox();
         let mut service = Service::with_probes(Probes::never());
-        let report = || provider::UsageReport {
+        let report = || provider::UsageReport { unofficial: false,
             plan: None,
             windows: vec![provider::UsageWindow {
                 label: "Weekly".into(),

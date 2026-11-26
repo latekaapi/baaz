@@ -22,7 +22,7 @@ const WEEK_MINUTES: u64 = 7 * 24 * 60;
 /// window first, the weekly block second.
 pub fn report_from(usage: &SubscriptionUsage) -> UsageReport {
     let minutes = u64::from(usage.window.window_duration_mins);
-    UsageReport {
+    UsageReport { unofficial: false,
         plan: Some(usage.tier.clone()),
         windows: vec![
             UsageWindow {

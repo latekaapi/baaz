@@ -166,7 +166,7 @@ def _usage_script():
             "checked_at": now,
             "usage": usage,
         }
-    def usage(provider, plan, windows):
+    def usage(provider, plan, windows, unofficial=False):
         return {
             "provider": provider,
             "plan": plan,
@@ -175,13 +175,16 @@ def _usage_script():
                 for (label, used, resets) in windows
             ],
             "as_of": now,
+            # docs/87 18.10: Claude's reading before a first turn comes from
+            # the undocumented get_usage, and its card says "unofficial".
+            "unofficial": unofficial,
         }
     return [
         status("muse", "ada@example.com", "High Usage", usage(
             "muse", "High Usage", [("Weekly", 0.01, now + 2 * 86400)])),
         status("claude-code", None, "Pro", usage(
             "claude-code", "Pro", [("Session · 5h", 0.42, now + 41 * 60),
-                                      ("Weekly", 0.83, now + (2 * 24 + 4) * 3600)])),
+                                      ("Weekly", 0.83, now + (2 * 24 + 4) * 3600)], unofficial=True)),
         status("codex", None, "prolite", usage(
             "codex", "prolite", [("Weekly", 0.19, now + 7 * 86400)])),
     ]
