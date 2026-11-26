@@ -479,6 +479,10 @@ pub enum Frame {
         /// The MCP servers this answer reports: an `mcp_status` reply
         /// (`response.response.mcpServers`) only, `None` otherwise.
         mcp_servers: Option<Vec<crate::argv::McpServerStatus>>,
+
+        /// The plan's limits this answer reports: a `get_usage` reply
+        /// (`response.response.rate_limits`) only, `None` otherwise.
+        usage: Option<crate::account::RateLimitInfo>,
     },
     /// Noise or the not-yet-known: hooks, spinner status, token estimates,
     /// turn summaries, and any unknown `type`. Ignored, not fatal.
@@ -1358,6 +1362,7 @@ pub fn decode_line(line: &str) -> Result<Frame, DecodeError> {
                 permission_mode,
                 error: decode_control_error(response),
                 mcp_servers: inner.and_then(decode_mcp_servers),
+                usage: inner.and_then(crate::account::RateLimitInfo::from_get_usage),
             })
         }
         // Forward compatibility: the CLI will add frames; Baaz ignores them.

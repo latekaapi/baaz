@@ -692,6 +692,9 @@ pub struct ControlOutcome {
     /// The MCP servers, when this answer reports them: the `mcp_status`
     /// reply only, `None` otherwise.
     pub mcp_servers: Option<Vec<crate::argv::McpServerStatus>>,
+    /// The plan's limits, when this answer reports them: the `get_usage`
+    /// reply only, `None` otherwise.
+    pub usage: Option<crate::account::RateLimitInfo>,
 }
 
 /// Wall time as Unix milliseconds for live turn starts: the clock the
@@ -724,6 +727,12 @@ impl ClaudeFold {
     /// The latest account reading (see [`crate::account`]).
     pub fn account(&self) -> &AccountSnapshot {
         &self.account
+    }
+
+    /// A `get_usage` reading the adapter confirmed (docs/85 16.1): kept
+    /// only while no `rate_limit_event` has arrived.
+    pub fn observe_polled_usage(&mut self, info: crate::account::RateLimitInfo) {
+        self.account.observe_polled(info);
     }
 
     /// The session id from the last `init` frame, when seen.
@@ -1265,13 +1274,14 @@ impl ClaudeFold {
             // catalog-carrying answer straight into the catalog let a
             // rejected model/effort change claim success, and let a stray
             // id rewrite `ListModels`.
-            Frame::ControlResponse { request_id, subtype, models, error, mcp_servers, .. } => {
+            Frame::ControlResponse { request_id, subtype, models, error, mcp_servers, usage, .. } => {
                 self.control_outcomes.push(ControlOutcome {
                     request_id: request_id.clone(),
                     subtype: subtype.clone(),
                     error: error.clone(),
                     models: models.clone(),
                     mcp_servers: mcp_servers.clone(),
+                    usage: usage.clone(),
                 });
             }
             // The other lane, by choice (see module docs): parsed, ignored.

@@ -694,6 +694,16 @@ impl ClaudeCodeAdapter {
             sent_at: Instant::now(),
         };
         let _ = self.send_control(&initialize_control_request(&request_id), pending);
+        // The plan's limits before the first turn (docs/85 16.1): the
+        // `rate_limit_event` only comes with a turn.
+        let usage_id = self.next_control_id();
+        let line = serde_json::json!({
+            "type": "control_request",
+            "request_id": usage_id,
+            "request": {"subtype": "get_usage", "skip_behaviors": true},
+        })
+        .to_string();
+        let _ = self.send_control(&line, PendingControl::bare(PendingControlKind::GetUsage, usage_id));
         // The owner's MCP servers, for the Read-only layer's MCP denies.
         self.hub.query_mcp_status();
     }
@@ -4667,6 +4677,34 @@ mod tests {
         );
     }
 
+    /// docs/85 16.1: the spawn handshake asks `get_usage`, and its answer
+    /// — matched by request id like every control answer — fills the
+    /// account meter before any turn; an answer under a foreign id does not.
+    #[test]
+    fn the_handshake_asks_get_usage_and_its_answer_fills_the_meter() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.send_initialize();
+        let ask: serde_json::Value = adapter
+            .sent_control_lines()
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|line| line["request"]["subtype"] == "get_usage")
+            .expect("a get_usage query at spawn");
+        assert_eq!(ask["request"]["skip_behaviors"], true);
+        let reply: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/claude-code/get-usage.json").trim()).unwrap();
+        let mut foreign = reply.clone();
+        foreign["response"]["request_id"] = "someone-else".into();
+        adapter.ingest_child_line(&foreign.to_string());
+        assert!(adapter.read_usage().is_none(), "a foreign id fills nothing");
+        let mut ours = reply;
+        ours["response"]["request_id"] = ask["request_id"].clone();
+        adapter.ingest_child_line(&ours.to_string());
+        let report = adapter.read_usage().expect("the meter is filled");
+        assert_eq!(report.plan.as_deref(), Some("Max"));
+        assert_eq!(report.windows.len(), 2);
+    }
+
     fn probe_servers(later: &str) -> serde_json::Value {
         serde_json::json!([
             {"name": "probe", "status": "connected", "tools": [
@@ -4749,7 +4787,8 @@ mod tests {
 
         pick(&adapter, PermissionMode::DenyUnmatched);
         let lines = adapter.sent_control_lines();
-        let layer = applied_settings(&lines[1]).expect("the layer");
+        // initialize and get_usage come first; the layer is the one apply.
+        let layer = lines.iter().find_map(|line| applied_settings(line)).expect("the layer");
         assert_eq!(layer, argv::read_only_settings_with(&["mcp__later".to_owned(), "mcp__probe__poke".to_owned()]));
 
         pick(&adapter, PermissionMode::PromptUnmatched);
