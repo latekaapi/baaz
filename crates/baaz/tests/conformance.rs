@@ -804,7 +804,7 @@ fn an_absent_capability_is_refused_typed() {
     let session = || "s-any".to_owned();
     let id = provider::new_request_id;
     let commands = vec![
-        Command::ForkSession { request_id: id(), session_id: session(), through_turn: None, metadata_only: false, mode: None },
+        Command::ForkSession { request_id: id(), session_id: session(), through_turn: None, metadata_only: false, mode: None, workspace: None },
         Command::CompactSession { request_id: id(), session_id: session(), through_turn: None, focus: None },
         Command::RunShell { request_id: id(), session_id: session(), command: "true".into() },
         Command::SteerInput {

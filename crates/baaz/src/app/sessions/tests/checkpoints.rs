@@ -48,6 +48,16 @@ pub(super) fn session_with<'a>(
     root: &std::path::Path,
     factory: crate::providers::Registry,
 ) -> (gpui::Entity<Harness>, &'a mut gpui::VisualTestContext, String) {
+    session_on(cx, root, factory, ProviderId::Codex)
+}
+
+/// [`session_with`] on `provider_id`.
+pub(super) fn session_on<'a>(
+    cx: &'a mut gpui::TestAppContext,
+    root: &std::path::Path,
+    factory: crate::providers::Registry,
+    provider_id: ProviderId,
+) -> (gpui::Entity<Harness>, &'a mut gpui::VisualTestContext, String) {
     cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
     cx.update(crate::app::bind_keys);
     let state = crate::store::support_dir();
@@ -61,7 +71,7 @@ pub(super) fn session_with<'a>(
             harness.providers = harness.providers.with_opens_of(&factory);
             mark_muse_up(harness);
             adopt_for_muse(harness, root, cx);
-            harness.provider_model.update(cx, |model, _| model.point_new_provider(ProviderId::Codex));
+            harness.provider_model.update(cx, |model, _| model.point_new_provider(provider_id));
         })
     });
     vc.update(|window, cx| baaz.update(cx, |harness, cx| harness.new_session(window, cx)));
@@ -109,8 +119,13 @@ pub(super) fn turn(baaz: &gpui::Entity<Harness>, vc: &mut gpui::VisualTestContex
 }
 
 pub(super) fn session_uuid(id: &str) -> String {
-    let id = id.to_owned();
-    crate::db::call(crate::db::path_in(&crate::store::support_dir()), move |db| crate::db::sessions::read_row(&db.conn, "codex", &id).expect("read"))
+    session_uuid_on(id, "codex")
+}
+
+/// [`session_uuid`] for a session on `provider`.
+pub(super) fn session_uuid_on(id: &str, provider: &str) -> String {
+    let (id, provider) = (id.to_owned(), provider.to_owned());
+    crate::db::call(crate::db::path_in(&crate::store::support_dir()), move |db| crate::db::sessions::read_row(&db.conn, &provider, &id).expect("read"))
         .flatten()
         .expect("the session has a row")
 }

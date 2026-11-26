@@ -397,7 +397,7 @@ fn three_sessions_then_land_and_push(cx: &mut gpui::TestAppContext) {
             project_root: &root,
             project_id: None,
             branch_prefix: "baaz/",
-            name: Some(&format!("watch-{n}")),
+            name: Some(&format!("watch-{n}")), base: None,
         })
         .expect("a worktree");
         let folder = worktree.path.to_string_lossy().into_owned();

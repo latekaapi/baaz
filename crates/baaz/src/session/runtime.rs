@@ -189,6 +189,12 @@ pub struct SessionRuntime {
     /// messages, by the user turn's id (loaded with the session, counted
     /// up as branches land).
     pub(crate) branch_counts: HashMap<String, u32>,
+    /// docs/87 18.9: this session's folder is not in a git repository, so
+    /// its branches run in the same folder (no worktree to cut); the count
+    /// under a message says so. Read once from the folder at construction
+    /// (no `.git` at or above it); a capture says git unless a fixture verb
+    /// sets it.
+    pub(super) branches_share_folder: bool,
     /// When each pending question's auto-resolution clock started, keyed by
     /// `userInputId`. MSP sends a duration, never a deadline.
     pub(super) question_started: HashMap<String, Instant>,
@@ -429,11 +435,18 @@ impl Drop for SessionRuntime {
     }
 }
 
+/// Whether `workspace` sits in a git repository: a `.git` (a folder, or a
+/// worktree's file) in it or a folder above it. Filesystem only, no git.
+fn in_git_folder(workspace: &str) -> bool {
+    !workspace.is_empty() && std::path::Path::new(workspace).ancestors().any(|dir| dir.join(".git").exists())
+}
+
 impl SessionRuntime {
     /// A runtime over `session_id` with no lane yet: every field but the
     /// lane, which [`Self::install_lane`] or an opening lane sets.
     pub(crate) fn new(session_id: String, provider_id: String, workspace: String) -> Self {
         let workspace_key = workspace.clone();
+        let branches_share_folder = !crate::runtime::captures() && !in_git_folder(&workspace);
         let checkpoints = crate::checkpoints::Recorder::new(super::checkpoints::checkpoint_folder(&workspace));
         let sent_items = crate::sent::load(&provider_id, &session_id);
         Self {
@@ -485,6 +498,7 @@ impl SessionRuntime {
             goal: None,
             goal_offer: None,
             branch_counts: HashMap::new(),
+            branches_share_folder,
             question_started: HashMap::new(),
             retry_started: None,
             countdown: None,

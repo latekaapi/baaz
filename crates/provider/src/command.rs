@@ -125,6 +125,12 @@ pub enum Command {
         /// The approval mode the branch runs in, as in
         /// [`Command::OpenSession`].
         mode: Option<PermissionMode>,
+        /// The folder the branch runs in (docs/87 18.9: a worktree cut at
+        /// the turn's checkpoint); `None` keeps the source's folder. Only
+        /// a backend with [`crate::ProviderTrait::ForkIntoFolder`] is sent
+        /// one; a backend whose branch is resumed by the host in a new
+        /// child (Claude Code) takes the folder from that resume.
+        workspace: Option<String>,
     },
     /// List stored sessions, newest activity first.
     ListSessions {

@@ -60,6 +60,7 @@ impl ForgetfulAdapter {
             through_turn: None,
             metadata_only: false,
             mode: None,
+            workspace: None,
         }
     }
 

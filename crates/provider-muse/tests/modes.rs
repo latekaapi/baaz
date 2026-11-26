@@ -148,6 +148,7 @@ fn a_fork_keeps_the_parents_mode_profile_first() {
             through_turn: Some("t-1".into()),
             metadata_only: true,
             mode: Some(PermissionMode::DenyUnmatched),
+            workspace: None,
         })
         .expect("fork");
     assert!(matches!(ack, Ack::Session { ref session_id, .. } if session_id == "s-fork"));

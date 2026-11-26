@@ -518,6 +518,24 @@ pub enum SessionEvent {
         /// The backend the fork runs on — the source view's own provider,
         /// never a switch.
         provider: ProviderId,
+        /// The folder the fork runs in: a branch's own worktree (docs/87
+        /// 18.9); `None` opens it in the window's folder, as before.
+        workspace: Option<String>,
+    },
+    /// docs/87 18.9: "Branch from here" in a git folder on a provider whose
+    /// fork can move ([`provider::ProviderTrait::ForkIntoFolder`]): the
+    /// window cuts a worktree at the turn's checkpoint off the UI thread,
+    /// then calls [`crate::session::SessionRuntime::send_branch`] with it
+    /// (or without, when there is no checkpoint or git refuses).
+    BranchIntoWorktree {
+        /// The user message the branch starts at.
+        message: String,
+        /// The answer turn the branch holds through.
+        through: String,
+        /// The session's folder (its checkpoints' repository).
+        folder: std::path::PathBuf,
+        /// Its checkpoints' key, when the runtime knows it already.
+        key: Option<String>,
     },
     /// A provider lane admitted a turn: the `SubmitInput` ack named its
     /// turn. The application reveals the row, titles it from the prompt,

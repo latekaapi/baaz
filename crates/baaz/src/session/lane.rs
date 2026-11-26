@@ -4017,7 +4017,7 @@ mod tests {
         vc.update(|_, cx| {
             let seen = seen.clone();
             let sub = cx.subscribe(&view.read(cx).runtime().clone(), move |_, event: &super::super::SessionEvent, _| {
-                if let super::super::SessionEvent::ForkedOnProvider { session_id, provider } = event {
+                if let super::super::SessionEvent::ForkedOnProvider { session_id, provider, .. } = event {
                     assert_eq!(*provider, crate::providers::ProviderId::Muse, "the fork stays on its lane");
                     seen.borrow_mut().push(session_id.clone());
                 }

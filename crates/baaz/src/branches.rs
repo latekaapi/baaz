@@ -6,8 +6,15 @@
 //! Keyed by session id — holders: the `branch` table, `SessionList`'s
 //! `worker_leads` (branch → source) and `branch_counts` (source → message →
 //! count), each runtime's `branch_counts`.
+//!
+//! docs/87 18.9: in a git folder, a branch on a provider whose fork can move
+//! runs in its own worktree, cut at the turn's checkpoint
+//! ([`Harness::branch_into_worktree`]); its session row is tied to the
+//! worktree's when it opens there, as any session in a worktree is.
 
 use gpui::{AppContext as _, Context, Entity};
+
+use crate::wire::WireCall as _;
 
 use crate::app::Harness;
 use crate::session::SessionRuntime;
@@ -28,6 +35,71 @@ impl Harness {
         self.session_list.update(cx, |list, cx| {
             *list.branch_counts.entry(source.to_owned()).or_default().entry(message.to_owned()).or_insert(0) += 1;
             list.set_worker_lead(branch, source, cx);
+        });
+    }
+
+    /// docs/87 18.9: cut a worktree at the checkpoint after `through` (the
+    /// branch's answer turn) off the UI thread, then fork into it. No
+    /// checkpoint for that turn, a folder that is not a git repository, or
+    /// git refusing: the branch shares the session's folder instead (git's
+    /// refusal is a toast).
+    pub(crate) fn branch_into_worktree(
+        &mut self,
+        runtime: Entity<SessionRuntime>,
+        message: String,
+        through: String,
+        folder: std::path::PathBuf,
+        key: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let (provider, session) = {
+            let rt = runtime.read(cx);
+            (rt.provider_kind().as_str().to_owned(), rt.session_id.clone())
+        };
+        let root = baaz_core::providers::main_repo_root(&folder);
+        let project = self.session_list.read(cx).projects.find_by_root(&root).map(|project| project.id.clone());
+        let prefix = <crate::layout::Layout as crate::layout::LayoutGlobal>::get(cx).worktree_branch_prefix();
+        let state_dir = crate::store::support_dir();
+        let through_turn = through.clone();
+        let work = move || -> Result<Option<baaz_core::worktrees::Worktree>, String> {
+            if !baaz_core::worktrees::in_git_repository(&folder) {
+                return Ok(None);
+            }
+            let key = key.or_else(|| {
+                crate::db::read(crate::db::path_in(&state_dir), move |db| crate::db::sessions::read_row(&db.conn, &provider, &session).ok().flatten()).flatten()
+            });
+            let commit = key
+                .and_then(|key| crate::checkpoints::session_refs(&folder, &key))
+                .and_then(|refs| refs.get(&crate::checkpoints::component(&through)).and_then(|ends| ends.post.clone()));
+            let Some(commit) = commit else {
+                crate::baaz_log!("branch: no checkpoint after turn {through}; the branch shares the folder");
+                return Ok(None);
+            };
+            baaz_core::worktrees::create(&baaz_core::worktrees::CreateSpec {
+                state_dir: &state_dir,
+                project_root: &root,
+                project_id: project.as_deref(),
+                branch_prefix: &prefix,
+                name: None,
+                base: Some(&commit),
+            })
+            .map(Some)
+        };
+        self.wire_call(cx, work, move |this, made, cx| {
+            let workspace = match made {
+                Ok(Some(worktree)) => {
+                    let folder = worktree.path.to_string_lossy().into_owned();
+                    this.run_worktree_setup_for(worktree, cx);
+                    Some(folder)
+                }
+                Ok(None) => None,
+                Err(why) => {
+                    crate::baaz_log!("branch: no worktree ({why}); the branch shares the folder");
+                    this.overlays.update(cx, |overlays, cx| overlays.toast("Couldn't make a worktree", why, cx));
+                    None
+                }
+            };
+            runtime.update(cx, |rt, cx| rt.send_branch(message, through_turn, workspace, cx));
         });
     }
 
@@ -82,16 +154,25 @@ impl Harness {
 
 #[cfg(feature = "probe")]
 impl Harness {
-    /// `branches-fixture` (docs/85 16.3 captures): the open session's last
-    /// user message reads "2 branches", with no fork made and no row
-    /// written.
+    /// `branches-fixture[:nongit]` (docs/85 16.3 captures): the open
+    /// session's last user message reads "2 branches", with no fork made and
+    /// no row written; `:nongit` (docs/87 18.9) also takes the session's
+    /// folder as outside git, so the count says the branches share it.
     #[cfg(feature = "probe")]
-    pub(crate) fn step_branches_fixture(&mut self, cx: &mut Context<Self>) -> crate::steps::StepResult {
+    pub(crate) fn step_branches_fixture(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let nongit = match rest.trim() {
+            "" => false,
+            "nongit" => true,
+            other => return Err(format!("unknown branches-fixture variant `{other}` (try `nongit`)")),
+        };
         let view = self.active.clone().ok_or("no open session")?;
         let runtime = view.read(cx).runtime().clone();
         let last_user = runtime.read(cx).last_user_turn_id().ok_or("the session has no user message")?;
         runtime.update(cx, |rt, cx| {
             rt.branch_counts.insert(last_user, 2);
+            if nongit {
+                rt.set_branches_share_folder_for_capture();
+            }
             cx.emit(crate::session::RuntimeEvent::BannerChanged);
         });
         Ok(())

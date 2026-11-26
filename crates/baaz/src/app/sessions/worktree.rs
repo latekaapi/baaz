@@ -133,7 +133,7 @@ impl Harness {
                 project_root: std::path::Path::new(&work_root),
                 project_id: work_project.as_deref(),
                 branch_prefix: &prefix,
-                name: None,
+                name: None, base: None,
             })
         };
         self.wire_call_in(cx, work, move |this, made, window, cx| {

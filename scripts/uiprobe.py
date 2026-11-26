@@ -1257,6 +1257,9 @@ ENTRIES.update({
     "transcript-full":         _populated(replay=True, sidebar=False),
     # docs/85 16.3: the branch count under a user message.
     "branches-message":        _populated("branches-fixture", replay=True, sidebar=False),
+    # docs/87 18.9: a session whose folder is not a git repository: its
+    # branches share the folder, and the count says so.
+    "branches-nongit":         _populated("branches-fixture:nongit", replay=True, sidebar=False),
     "transcript-full-light":   _populated(replay=True, sidebar=False, theme="light"),
     "transcript-full-top":     _populated("top", replay=True, sidebar=False),
     "transcript-full-mid":     _populated("mid", replay=True, sidebar=False),

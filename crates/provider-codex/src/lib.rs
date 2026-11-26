@@ -1214,11 +1214,11 @@ impl ProviderAdapter for CodexAdapter {
             // `thread/fork {threadId, lastTurnId}` (docs/85 16.3, probed
             // live: the fork holds the turns through `lastTurnId`, the
             // source keeps all of its). The fork opens as its own session.
-            Command::ForkSession { session_id, through_turn, .. } => {
+            Command::ForkSession { session_id, through_turn, workspace, .. } => {
                 self.check_session(&session_id)?;
                 let (thread_id, _) = self.thread_and_model()?;
                 let answer = self
-                    .with_child(|running| running.send_frame(thread_fork_request(running.next_request_id(), &thread_id, through_turn.as_deref())))?
+                    .with_child(|running| running.send_frame(thread_fork_request(running.next_request_id(), &thread_id, through_turn.as_deref(), workspace.as_deref())))?
                     .map_err(Self::unavailable)?;
                 let forked = fork_thread_id(&answer).ok_or_else(|| ProviderError::Unavailable { reason: "thread/fork answered without a thread id".into() })?;
                 Ok(Ack::Session { session_id: forked, title: None })

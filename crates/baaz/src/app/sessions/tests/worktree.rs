@@ -483,7 +483,7 @@ fn a_reopened_worktree_session_resumes_with_its_variables(cx: &mut gpui::TestApp
         project_root: &root,
         project_id: None,
         branch_prefix: baaz_core::worktrees::DEFAULT_BRANCH_PREFIX,
-        name: None,
+        name: None, base: None,
     })
     .expect("a worktree");
     let vc = cx.add_empty_window();

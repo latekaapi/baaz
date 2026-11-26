@@ -538,10 +538,15 @@ pub fn thread_compact_request(id: u64, thread_id: &str) -> Value {
 /// `thread/fork` (docs/85 16.3, probed live 25 Nov 2026, codex 0.144.6):
 /// a new thread holding the source's turns through `last_turn` (all of
 /// them when `None`), the source untouched.
-pub fn thread_fork_request(id: u64, thread_id: &str, last_turn: Option<&str>) -> Value {
+pub fn thread_fork_request(id: u64, thread_id: &str, last_turn: Option<&str>, cwd: Option<&str>) -> Value {
     let mut params = json!({"threadId": thread_id});
     if let Some(turn) = last_turn {
         params["lastTurnId"] = json!(turn);
+    }
+    // docs/87 18.9 (probed live 26 Nov 2026): the fork runs in `cwd`, and a
+    // resume in a fresh app-server keeps it.
+    if let Some(cwd) = cwd {
+        params["cwd"] = json!(cwd);
     }
     json!({"id": id, "method": "thread/fork", "params": params})
 }
@@ -2830,10 +2835,13 @@ mod tests {
     /// docs/85 16.3: the fork names the turn it cuts at, or none.
     #[test]
     fn fork_request_names_the_last_turn() {
-        let r = thread_fork_request(7, "t-1", Some("turn-1"));
+        let r = thread_fork_request(7, "t-1", Some("turn-1"), None);
         assert_eq!(r["method"], "thread/fork");
         assert_eq!(r["params"], serde_json::json!({"threadId": "t-1", "lastTurnId": "turn-1"}));
-        assert!(thread_fork_request(8, "t-1", None)["params"].get("lastTurnId").is_none());
+        assert!(thread_fork_request(8, "t-1", None, None)["params"].get("lastTurnId").is_none());
+        // docs/87 18.9: a branch into its own worktree names the folder.
+        let w = thread_fork_request(9, "t-1", Some("turn-1"), Some("/wt/s-1"));
+        assert_eq!(w["params"], serde_json::json!({"threadId": "t-1", "lastTurnId": "turn-1", "cwd": "/wt/s-1"}));
         assert_eq!(fork_thread_id(&serde_json::json!({"thread": {"id": "t-2", "forkedFromId": "t-1"}})).as_deref(), Some("t-2"));
     }
 }
