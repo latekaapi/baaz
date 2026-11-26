@@ -96,4 +96,22 @@ impl Harness {
         });
         Ok(())
     }
+
+    /// `branch-from:<n>` (docs/85 16.3 live checks): Branch from here on
+    /// the open session's nth user message (from 1), through the
+    /// message's own action; the branch opens as a Branch does. No session,
+    /// no such message, or a refusal (the provider cannot cut at a turn,
+    /// no finished answer) fails the step.
+    #[cfg(feature = "probe")]
+    pub(crate) fn step_branch_from(&mut self, rest: &str, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let n: usize = rest.trim().parse().map_err(|_| format!("`{rest}` is not a message number from 1"))?;
+        let view = self.active.clone().ok_or("no open session")?;
+        let runtime = view.read(cx).runtime().clone();
+        let message = runtime.read(cx).nth_user_turn_id(n).ok_or_else(|| format!("the session has no user message {n}"))?;
+        if runtime.update(cx, |rt, cx| rt.branch_from(&message, cx)) {
+            Ok(())
+        } else {
+            Err("the branch was refused (see the banner)".into())
+        }
+    }
 }

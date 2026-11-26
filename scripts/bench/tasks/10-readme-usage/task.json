@@ -1,0 +1,5 @@
+{
+  "id": "10-readme-usage",
+  "prompt": "Add a section headed '## Usage' to README.md that explains how to run greet.py and lists every command-line option it takes, with one line each.",
+  "check": "grep -q '^## Usage' README.md && grep -q -- '--name' README.md && grep -q -- '--times' README.md && grep -q -- '--loud' README.md"
+}

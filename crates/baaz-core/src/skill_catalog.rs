@@ -7,8 +7,9 @@
 //! Who sees what (probed 25 Nov 2026 where it says so):
 //! * `~/.agents/skills` — Codex natively (probed, codex 0.144.6), Claude
 //!   Code through Baaz's per-skill links in its home.
-//! * a repo's `.agents/skills` — Codex natively (probed). Claude Code: not
-//!   counted until a live probe says it reads it.
+//! * a repo's `.agents/skills` — Codex natively (probed). Claude Code does
+//!   not read it (probed 26 Nov 2026, claude 2.1.276); it sees it through
+//!   Baaz's per-repo folder of links handed over with `--add-dir`.
 //! * `~/.claude/skills`, a repo's `.claude/skills` — Claude Code.
 //! * `~/.codex/skills`, a repo's `.codex/skills` — Codex.
 //!
@@ -39,8 +40,8 @@ impl Source {
     /// The providers (wire ids) that load skills from here themselves.
     pub fn seen_by(self) -> &'static [&'static str] {
         match self {
-            Self::Agents => &["claude-code", "codex"],
-            Self::RepoAgents | Self::Codex | Self::RepoCodex => &["codex"],
+            Self::Agents | Self::RepoAgents => &["claude-code", "codex"],
+            Self::Codex | Self::RepoCodex => &["codex"],
             Self::Claude | Self::RepoClaude => &["claude-code"],
         }
     }
@@ -168,7 +169,7 @@ mod tests {
         let all = scan(&home, Some(&repo));
         let rows: Vec<(&str, Source, &[&str])> = all.iter().map(|s| (s.name.as_str(), s.source, s.seen_by())).collect();
         assert_eq!(rows, vec![
-            ("deploy", Source::RepoAgents, &["codex"][..]),
+            ("deploy", Source::RepoAgents, &["claude-code", "codex"][..]),
             ("shared", Source::Agents, &["claude-code", "codex"][..]),
             ("review", Source::Claude, &["claude-code"][..]),
             ("lint", Source::Codex, &["codex"][..]),

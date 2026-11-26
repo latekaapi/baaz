@@ -1,0 +1,5 @@
+{
+  "id": "04-cli-flag",
+  "prompt": "Add a --reverse flag to sortlines.py that prints the lines in reverse sorted order. Add a test for it in tests/test_cli.py next to the existing one.",
+  "check": "python3 -m unittest discover -s tests -q && grep -q -- --reverse sortlines.py && test $(grep -c 'def test_' tests/test_cli.py) -ge 2"
+}

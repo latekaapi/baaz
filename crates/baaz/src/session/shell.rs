@@ -113,12 +113,13 @@ impl SessionRuntime {
     /// fork through that message's answer (the assistant turn after it),
     /// opened as its own session beside this one; the app records the
     /// branch and nests it under this session. A message with no finished
-    /// answer yet says so.
-    pub(crate) fn branch_from(&mut self, message: &str, cx: &mut Context<Self>) {
+    /// answer yet says so. Returns whether the fork was sent (a refusal is
+    /// the banner).
+    pub(crate) fn branch_from(&mut self, message: &str, cx: &mut Context<Self>) -> bool {
         // Rule 13: a fork that copies the whole session is not a branch.
         if !self.provider_kind().has(provider::ProviderTrait::ForkAtTurn) {
             self.plain_banner(format!("{} cannot branch from a message yet.", self.provider_kind().label()), cx);
-            return;
+            return false;
         }
         let answer = self.session().and_then(|session| {
             let at = session.turns.iter().position(|t| matches!(t, aui_protocol::Turn::User { id, .. } if id == message))?;
@@ -130,7 +131,7 @@ impl SessionRuntime {
         let running = self.running.as_ref().map(|r| r.turn_id.clone());
         let Some(through) = answer.filter(|id| Some(id) != running.as_ref()) else {
             self.plain_banner("This message has no finished answer yet, so there is nothing to branch from.".to_owned(), cx);
-            return;
+            return false;
         };
         let command = ProviderCommand::ForkSession {
             request_id: provider::new_request_id(),
@@ -150,6 +151,16 @@ impl SessionRuntime {
             Ok(_) => this.set_banner("The branch answered without a session.", None, cx),
             Err(error) => this.report_provider_error(&error, cx),
         });
+        true
+    }
+
+    /// The nth user message's turn id, from 1 (the `branch-from` step).
+    #[cfg(feature = "probe")]
+    pub(crate) fn nth_user_turn_id(&self, n: usize) -> Option<String> {
+        self.session()?.turns.iter().filter_map(|t| match t {
+            aui_protocol::Turn::User { id, .. } => Some(id.clone()),
+            _ => None,
+        }).nth(n.checked_sub(1)?)
     }
 
     /// The completed assistant turns, newest first: the rows of the `/fork`

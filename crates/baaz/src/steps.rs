@@ -169,6 +169,7 @@
 //! | `workers-unfold` | unfold the open session's Workers block (its rows after every worker settled); no workers fails the step, free |
 //! | `worker-beside:<n>` | open the open session's nth worker (from 1) beside it, as its row's ↗ does; no such live worker fails the step, free |
 //! | `branches-fixture` | the open session's last user message reads "2 branches" (docs/85 16.3): no fork made, no row written; no open session or no user message fails the step, free |
+//! | `branch-from:<n>` | Branch from here on the open session's nth user message (from 1), for real — it forks on the provider, so **never in a capture** unless the lane is scripted; no session, no such message, or Branch refused (the provider cannot cut at a turn, no finished answer) fails the step, free |
 //! | `skills-folders-fixture` | the shared skill folders read three fixture skills (docs/85 16.2) for the Skills page's folder section and the `/` menu; captures only (fails the step otherwise), free |
 //! | `usage-fixture` | thirty days of fixture turns (three providers, four models, two projects) in the capture's own baaz.db for Settings › Usage (docs/85 16.1); captures only (fails the step otherwise), free |
 //! | `goal-fixture:<running\|met\|paused\|offer>` | the open session's goal pill in that state (docs/85 15.2), or the offer chip (15.1): a fixture goal (14 minutes, 6 turns, 212k tokens, `cargo test`), no turn sent, no row written; keep-awake follows as it would (15.5; held only outside a capture); no open session or an unknown word fails the step, free |
@@ -271,6 +272,7 @@
 //! | `folder-new:<name>` | a new folder named `<name>` in the current browser space, holding the active person tab (the new-folder flow, committed), free |
 //! | `space-new:<name>` | add a browser space named `<name>` and make it current, free |
 //! | `wait:<ms>` | let the wire catch up before the next step |
+//! | `wait-idle:<ms>` | wait until a new agent answer has landed in the open session and nothing is sending, at most `<ms>` (docs/85 17.1, the bench); no finished answer by the bound fails the step, free |
 //!
 //! # `--login-steps <a;b;c>`
 //!
@@ -501,6 +503,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "usage-fixture", run: |_, _, _, _| crate::usage_page::step_usage_fixture() },
     WindowVerb { verb: "skills-folders-fixture", run: |_, _, _, _| crate::skill_folders::step_fixture() },
     WindowVerb { verb: "branches-fixture", run: |this, _, _, cx| this.step_branches_fixture(cx) },
+    WindowVerb { verb: "branch-from", run: |this, rest, _, cx| this.step_branch_from(rest, cx) },
     WindowVerb { verb: "tick", run: |this, rest, _, cx| this.step_changes_tick(rest, true, cx) },
     WindowVerb { verb: "untick", run: |this, rest, _, cx| this.step_changes_tick(rest, false, cx) },
     WindowVerb { verb: "changes-branch", run: |this, rest, _, cx| this.step_changes_branch(rest, cx) },
@@ -1245,6 +1248,7 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     // `wait` is handled by the runners, which are the only thing that can let
     // the wire catch up; reaching a table means it slipped through.
     SessionVerb { verb: "wait", run: |_, _, _, _| Err("`wait` belongs to the runner".into()) },
+    SessionVerb { verb: "wait-idle", run: |_, _, _, _| Err("`wait-idle` belongs to the runner".into()) },
 ];
 
 /// The `--login-steps` verbs.
@@ -1470,6 +1474,41 @@ pub(crate) fn run_steps(this: &mut Harness, cx: &mut Context<Harness>) {
                         "session switch never arrived; `{step}` runs against {active:?}"
                     );
                 }
+            }
+            // `wait-idle:<ms>` (docs/85 17.1): a new agent answer lands in
+            // the open session and nothing is sending, within `<ms>`. Not
+            // "sending went false": between a send's admission and its
+            // turn starting nothing reads as sending (found live, 26 Nov).
+            if let Some(ms) = step.strip_prefix("wait-idle:") {
+                STEPS_RAN.fetch_add(1, Ordering::Relaxed);
+                let start = std::time::Instant::now();
+                let bound = std::time::Duration::from_millis(ms.parse().unwrap_or(600_000));
+                let probe = |this: &Harness, cx: &gpui::App| {
+                    this.active.as_ref().map(|view| {
+                        let rt = view.read(cx).rt(cx);
+                        let answers = rt.session().map(|s| s.turns.iter().filter(|t| matches!(t, aui_protocol::Turn::Assistant { .. })).count()).unwrap_or(0);
+                        (answers, rt.is_sending())
+                    })
+                };
+                let before = this.read_with(cx, |this, cx| probe(this, cx)).ok().flatten().map(|(n, _)| n).unwrap_or(0);
+                let mut settled = false;
+                while start.elapsed() < bound {
+                    if let Some((answers, sending)) = this.read_with(cx, |this, cx| probe(this, cx)).ok().flatten() {
+                        if answers > before && !sending {
+                            settled = true;
+                            break;
+                        }
+                    }
+                    cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                }
+                if !settled {
+                    record_step_failure(&step);
+                    crate::baaz_log!("steps: `{step}` failed: no finished answer within the bound; ending script");
+                    capture.set_steps_running(false);
+                    capture.set_steps_done(true);
+                    return;
+                }
+                continue;
             }
             // `run-wait-preview[:<s>]` (docs/82 7.4): the step checks the
             // Page opened; the wait for the port to answer is the runner's,

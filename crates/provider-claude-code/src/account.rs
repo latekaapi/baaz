@@ -1,4 +1,6 @@
-//! The account meter: `rate_limit_event` (doc §5) into the seam's shape.
+//! The account meter: `rate_limit_event` (doc §5) into the seam's shape,
+//! and — before the first turn sends one — the `get_usage` control reply
+//! (docs/85 16.1; unofficial, probed live 26 Nov 2026 on 2.1.276).
 //!
 //! The seam's account shape is [`provider::Ack::Account`]: `signed_in` plus
 //! a display label, never key material. This module keeps the latest meter
@@ -37,6 +39,9 @@ pub struct RateLimitInfo {
     pub five_hour: Option<UsageWindow>,
     /// The seven-day window, when reported.
     pub seven_day: Option<UsageWindow>,
+    /// The plan (`get_usage`'s `subscription_type`, e.g. `max`). A
+    /// `rate_limit_event` names none.
+    pub plan: Option<String>,
 }
 
 impl RateLimitInfo {
@@ -67,8 +72,84 @@ impl RateLimitInfo {
                 .unwrap_or(false),
             five_hour: window("five_hour"),
             seven_day: window("seven_day"),
+            plan: None,
         }
     }
+
+    /// Decode a `get_usage` control reply (`response.response`, probed
+    /// live 26 Nov 2026, claude 2.1.276): `rate_limits.five_hour` and
+    /// `.seven_day` carry `utilization` in **percent** (0–100, unlike the
+    /// event's fraction) and `resets_at` as an ISO time; the plan is
+    /// `subscription_type`. `None` for any other reply, or when the CLI
+    /// says no rate limits are available (an API-key account). The CLI
+    /// marks the reply experimental, so anything missing is unknown.
+    pub fn from_get_usage(inner: &Value) -> Option<Self> {
+        let limits = inner.get("rate_limits")?.as_object()?;
+        if inner.get("rate_limits_available").and_then(Value::as_bool) == Some(false) {
+            return None;
+        }
+        let window = |key: &str| {
+            let window = limits.get(key)?.as_object()?;
+            Some(UsageWindow {
+                utilization: window.get("utilization").and_then(Value::as_f64).map(|percent| percent / 100.0),
+                resets_at: window.get("resets_at").and_then(Value::as_str).and_then(parse_iso_utc),
+            })
+        };
+        let (five_hour, seven_day) = (window("five_hour"), window("seven_day"));
+        if five_hour.is_none() && seven_day.is_none() {
+            return None;
+        }
+        Some(Self {
+            status: String::new(),
+            rate_limit_type: String::new(),
+            utilization: None,
+            resets_at: None,
+            is_using_overage: false,
+            five_hour,
+            seven_day,
+            plan: inner.get("subscription_type").and_then(Value::as_str).filter(|plan| !plan.is_empty()).map(capitalised),
+        })
+    }
+}
+
+/// `max` → `Max`: the plan as the card names it.
+fn capitalised(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Unix seconds of an ISO-8601 time with an offset (`2026-11-26T09:59:59.94+00:00`,
+/// or `Z`), as `get_usage` writes `resets_at`. `None` for anything else.
+fn parse_iso_utc(text: &str) -> Option<i64> {
+    let (date, rest) = text.split_once('T')?;
+    let mut ymd = date.split('-').map(|part| part.parse::<i64>().ok());
+    let (year, month, day) = (ymd.next()??, ymd.next()??, ymd.next()??);
+    let split = rest.find(|c| c == 'Z' || c == '+' || c == '-')?;
+    let (clock, offset) = rest.split_at(split);
+    let mut hms = clock.split(':');
+    let hour: i64 = hms.next()?.parse().ok()?;
+    let minute: i64 = hms.next()?.parse().ok()?;
+    let second: i64 = hms.next()?.split('.').next()?.parse().ok()?;
+    let offset_secs = match offset {
+        "Z" => 0,
+        _ => {
+            let sign = if offset.starts_with('-') { -1 } else { 1 };
+            let (h, m) = offset[1..].split_once(':')?;
+            sign * (h.parse::<i64>().ok()? * 3600 + m.parse::<i64>().ok()? * 60)
+        }
+    };
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second - offset_secs)
 }
 
 /// The meter's status text for a person: `allowed_warning` reads
@@ -121,6 +202,16 @@ impl AccountSnapshot {
     pub fn observe(&mut self, info: RateLimitInfo) {
         self.latest = Some(info);
         self.observed_at = Some(now_secs());
+    }
+
+    /// Record a `get_usage` reading only while no `rate_limit_event` has
+    /// arrived: the event comes with every turn and carries the overage
+    /// flag, so it always wins; the polled reply fills the meter before
+    /// the first turn (docs/85 16.1).
+    pub fn observe_polled(&mut self, info: RateLimitInfo) {
+        if self.latest.as_ref().map_or(true, |latest| latest.rate_limit_type.is_empty()) {
+            self.observe(info);
+        }
     }
 
     /// Pin the wire-arrival stamp (tests drive the clock through this).
@@ -185,7 +276,7 @@ impl AccountSnapshot {
                 observed_at: self.observed_at,
             });
         }
-        Some(provider::UsageReport { plan: None, windows, observed_at: self.observed_at })
+        Some(provider::UsageReport { plan: info.plan.clone(), windows, observed_at: self.observed_at })
     }
 
     /// The display label for [`provider::Ack::Account`]: window, percentage,
@@ -195,14 +286,20 @@ impl AccountSnapshot {
     /// `None` until the first reading arrives.
     pub fn label(&self) -> Option<String> {
         let info = self.latest.as_ref()?;
-        let mut label = match info.utilization {
-            Some(used) => {
+        // A polled `get_usage` reading names no window of its own: the
+        // first window with a number stands for it.
+        let polled = info.utilization.is_none().then(|| {
+            [("five_hour", &info.five_hour), ("seven_day", &info.seven_day)]
+                .into_iter()
+                .find_map(|(name, window)| window.as_ref().and_then(|w| w.utilization.map(|used| (name, used, w.resets_at))))
+        }).flatten();
+        let named = info.utilization.map(|used| (info.rate_limit_type.as_str(), used, info.resets_at));
+        let mut label = match named.or(polled) {
+            Some((window, used, resets_at)) => {
                 let percent = (used * 100.0).round() as u64;
-                match info.resets_at {
-                    Some(resets) => {
-                        format!("Claude Code {} {percent}% (resets {resets})", info.rate_limit_type)
-                    }
-                    None => format!("Claude Code {} {percent}%", info.rate_limit_type),
+                match resets_at {
+                    Some(resets) => format!("Claude Code {window} {percent}% (resets {resets})"),
+                    None => format!("Claude Code {window} {percent}%"),
                 }
             }
             None => format!("Claude Code {} {}", info.rate_limit_type, humanize_status(&info.status)),
@@ -315,5 +412,41 @@ mod tests {
         snapshot.observe(info);
         assert!(snapshot.is_using_overage());
         assert!(snapshot.label().expect("label").contains("overage"));
+    }
+
+    /// docs/85 16.1: the live `get_usage` reply (claude 2.1.276, 26 Nov
+    /// 2026) decodes through the control-response frame into the meter:
+    /// percent becomes a fraction, the ISO reset a Unix time, the plan
+    /// reads "Max"; a later `rate_limit_event` replaces it, and a polled
+    /// reply never replaces an event.
+    #[test]
+    fn a_live_get_usage_reply_fills_the_meter_until_a_turn_reports() {
+        const REPLY: &str = include_str!("../../../fixtures/claude-code/get-usage.json");
+        let Frame::ControlResponse { usage: Some(info), .. } = decode_line(REPLY.trim()).expect("decodes") else {
+            panic!("a get_usage reply carries the limits");
+        };
+        assert_eq!(info.plan.as_deref(), Some("Max"));
+        let five = info.five_hour.clone().expect("five hour");
+        assert_eq!(five.utilization, Some(0.05));
+        assert_eq!(five.resets_at, Some(1_795_687_199), "2026-11-26T09:59:59.945433+00:00");
+        assert_eq!(info.seven_day.as_ref().and_then(|w| w.utilization), Some(0.67));
+
+        let mut snapshot = AccountSnapshot::default();
+        snapshot.observe_polled(info.clone());
+        let report = snapshot.usage_report().expect("report");
+        assert_eq!(report.plan.as_deref(), Some("Max"));
+        assert_eq!(report.windows.iter().map(|w| (w.label.as_str(), w.used_fraction)).collect::<Vec<_>>(), vec![("Session · 5h", 0.05), ("Weekly", 0.67)]);
+        assert!(snapshot.label().expect("label").starts_with("Claude Code five_hour 5%"));
+
+        let event = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1790647800,"rateLimitType":"five_hour","isUsingOverage":true,"unifiedWindows":{"five_hour":{"utilization":0.12,"resetsAt":1790647800}}}}"#;
+        let Frame::RateLimit(event) = decode_line(event).expect("decodes") else { panic!("event") };
+        snapshot.observe(event);
+        snapshot.observe_polled(info);
+        assert!(snapshot.is_using_overage(), "the turn's event stays: a polled reply never replaces it");
+
+        for other in [r#"{"type":"control_response","response":{"subtype":"success","request_id":"x","response":{}}}"#,
+                      r#"{"type":"control_response","response":{"subtype":"success","request_id":"x","response":{"rate_limits_available":false,"rate_limits":{"five_hour":{"utilization":1}}}}}"#] {
+            assert!(matches!(decode_line(other).expect("decodes"), Frame::ControlResponse { usage: None, .. }), "{other}");
+        }
     }
 }

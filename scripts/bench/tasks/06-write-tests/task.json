@@ -1,0 +1,5 @@
+{
+  "id": "06-write-tests",
+  "prompt": "Write unit tests for the function clamp in mathx.py in a new file tests/test_mathx.py, with at least three test methods covering below, inside and above the range. They must pass.",
+  "check": "python3 -m unittest discover -s tests -q && test -f tests/test_mathx.py && test $(grep -c 'def test_' tests/test_mathx.py) -ge 3"
+}

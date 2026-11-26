@@ -2788,6 +2788,13 @@ impl Harness {
     pub(crate) fn open_settings_page(&mut self, target: &str, cx: &mut Context<Self>) {
         let active = self.settings_active_id(cx);
         self.settings_page.update(cx, |page, cx| page.open(target, active, cx));
+        // Settings › Usage renders the saved statuses: fold in the readings
+        // the open sessions hold first, as opening the account menu does
+        // (a Claude session's `get_usage` answer lands before any turn,
+        // docs/85 16.1; found live 26 Nov 2026 missing from the page).
+        if self.settings_page.read(cx).state.section == "usage" {
+            self.refresh_account_usage(cx);
+        }
         // Settings replaces the Skills page as it does the transcript.
         self.leave_skills(cx);
         self.overlays.update(cx, |overlays, cx| {

@@ -1,0 +1,5 @@
+{
+  "id": "05-parse-date",
+  "prompt": "parse_date in dates.py returns the wrong month for some inputs. Fix it so the tests pass.",
+  "check": "python3 -m unittest discover -s tests -q"
+}

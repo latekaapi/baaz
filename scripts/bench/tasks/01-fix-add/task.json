@@ -1,0 +1,5 @@
+{
+  "id": "01-fix-add",
+  "prompt": "The tests in this repo fail. Find the bug in calc.py and fix it so the tests pass.",
+  "check": "python3 -m unittest discover -s tests -q"
+}

@@ -1,0 +1,5 @@
+{
+  "id": "02-slugify",
+  "prompt": "Implement slugify() in text.py so the tests in tests/ pass. Do not change the tests.",
+  "check": "python3 -m unittest discover -s tests -q"
+}

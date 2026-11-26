@@ -694,6 +694,16 @@ impl ClaudeCodeAdapter {
             sent_at: Instant::now(),
         };
         let _ = self.send_control(&initialize_control_request(&request_id), pending);
+        // The plan's limits before the first turn (docs/85 16.1): the
+        // `rate_limit_event` only comes with a turn.
+        let usage_id = self.next_control_id();
+        let line = serde_json::json!({
+            "type": "control_request",
+            "request_id": usage_id,
+            "request": {"subtype": "get_usage", "skip_behaviors": true},
+        })
+        .to_string();
+        let _ = self.send_control(&line, PendingControl::bare(PendingControlKind::GetUsage, usage_id));
         // The owner's MCP servers, for the Read-only layer's MCP denies.
         self.hub.query_mcp_status();
     }
@@ -1140,7 +1150,18 @@ impl ClaudeCodeAdapter {
             let overrides: serde_json::Map<String, serde_json::Value> = off.into_iter().map(|name| (name, serde_json::Value::String("off".into()))).collect();
             extra.insert("skillOverrides".into(), serde_json::Value::Object(overrides));
         }
-        let mut launch = argv::with_token_flags(argv::with_settings(launch, extra));
+        let mut launch = argv::with_settings(launch, extra);
+        // docs/85 16.2: the repo's `.agents/skills`, which claude does not
+        // read itself (probed 26 Nov 2026), as links in a folder it is
+        // handed with `--add-dir`. A name the home's skills already hold
+        // stays theirs.
+        if let Some(cwd) = &cwd {
+            let taken = self.owner_config_dir().parent().map(crate::home::skill_sources).unwrap_or_default();
+            if let Ok(Some(dir)) = crate::home::repo_skills_dir(&provider::child_env::state_dir(), cwd, &taken) {
+                launch = argv::with_add_dir(launch, &dir);
+            }
+        }
+        let mut launch = argv::with_token_flags(launch);
         if *self.bills_by_key.lock().expect("bills mutex") {
             launch.env.retain(|(key, _)| key != argv::PROMPT_CACHE_TTL_ENV);
             launch.env.push((argv::PROMPT_CACHE_TTL_ENV.to_owned(), "1h".to_owned()));
@@ -1192,6 +1213,58 @@ impl ClaudeCodeAdapter {
         }
         let home = self.resolved_config_dir();
         home.parent().map(PathBuf::from).unwrap_or(home)
+    }
+
+    /// Start the fork [`Command::ForkSession`] pinned for `branch`: the
+    /// source resumed with `--fork-session` under the branch's id, cut at
+    /// `cut` when the branch names a turn, in the source's own folder. The
+    /// branch has no transcript of its own until its first turn, so the
+    /// view is shown the source's history through the cut.
+    fn spawn_pinned_fork(
+        &self,
+        branch: &str,
+        source: &str,
+        cut: Option<&str>,
+        mode: Option<PermissionMode>,
+        metadata_only: bool,
+    ) -> Result<Ack, ProviderError> {
+        let path = self.stored_anywhere(source);
+        let mut launch = self.launch_for_fork(branch, source)?;
+        if let Some(cut) = cut {
+            launch = argv::with_resume_at(launch, cut);
+        }
+        if launch.cwd.is_none() {
+            launch.cwd = path.as_deref().and_then(history::transcript_cwd).filter(|cwd| std::path::Path::new(cwd).is_dir());
+        }
+        let ack = self.spawn_launch(&argv::with_permission_mode(launch, mode))?;
+        if metadata_only {
+            return Ok(ack);
+        }
+        let Some(text) = path.and_then(|path| std::fs::read_to_string(path).ok()) else { return Ok(ack) };
+        let kept = match cut {
+            Some(cut) => {
+                let needle = format!("\"uuid\":\"{cut}\"");
+                let mut kept = String::new();
+                for line in text.lines() {
+                    kept.push_str(line);
+                    kept.push('\n');
+                    if line.replace(' ', "").contains(&needle) {
+                        break;
+                    }
+                }
+                kept
+            }
+            None => text,
+        };
+        let (deltas, model) = self.fold_stored_text(&kept);
+        if let Some(model) = model {
+            *self.model.lock().expect("model mutex") = Some(model.clone());
+            self.fold.lock().expect("fold mutex").set_model(&model);
+        }
+        if !deltas.is_empty() {
+            let _ = self.tx.send(provider::ProviderEvent::Deltas { session_id: Some(branch.to_owned()), deltas });
+        }
+        Ok(ack)
     }
 
     /// A resume launch run in its session's own folder: the cwd the
@@ -1845,6 +1918,12 @@ impl ClaudeCodeAdapter {
         let text = std::fs::read_to_string(&path).map_err(|error| ProviderError::Unavailable {
             reason: format!("stored transcript is unreadable: {error}"),
         })?;
+        Ok(self.fold_stored_text(&text))
+    }
+
+    /// Fold stored transcript `text` the way a resume shows it: the
+    /// history's deltas and the model it last ran on.
+    fn fold_stored_text(&self, text: &str) -> (Vec<Delta>, Option<String>) {
         let mut fold = ClaudeFold::new();
         // The live fold holds this session's submit display map; the
         // replay fold is fresh, so it inherits the map before the stored
@@ -1860,7 +1939,7 @@ impl ClaudeCodeAdapter {
             deltas.extend(fold.apply(&frame));
         }
         deltas.extend(fold.finish_stored_turns());
-        Ok((deltas, fold.stored_model().map(str::to_owned)))
+        (deltas, fold.stored_model().map(str::to_owned))
     }
 }
 
@@ -1994,6 +2073,9 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 // as a lost child and promised to "pick up where it left
                 // off" over an empty view (QA 2026-10-30). Refused typed
                 // instead, before any spawn.
+                if let Some((source, cut)) = crate::home::take_fork(&session_id) {
+                    return self.spawn_pinned_fork(&session_id, &source, cut.as_deref(), mode, metadata_only);
+                }
                 if !self.transcript_exists_anywhere(&session_id) {
                     return Err(ProviderError::launch_refusal(
                         provider::RefusalHint::HistoryMissing,
@@ -2033,9 +2115,35 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 }
                 Ok(ack)
             }
-            Command::ForkSession { request_id, session_id, mode, .. } => {
-                let launch = self.launch_for_fork(&request_id, &session_id)?;
-                self.spawn_launch(&argv::with_permission_mode(launch, mode))
+            Command::ForkSession { request_id, session_id, through_turn, .. } => {
+                // One child per adapter: the source's adapter already runs
+                // the source, so the branch starts in the NEW session's
+                // adapter, which the host opens with `ResumeSession` on the
+                // id acked here (found live 26 Nov 2026: forking in place
+                // was refused as "already holds a session child"). Here the
+                // source is checked and the fork pinned for that resume.
+                if !self.transcript_exists_anywhere(&session_id) {
+                    return Err(ProviderError::Unavailable {
+                        reason: format!("no stored transcript for session {session_id}, so there is nothing to fork"),
+                    });
+                }
+                // docs/85 16.3: a branch through a turn is cut at that
+                // turn's last transcript row. A turn the transcript does
+                // not hold is refused, never forked whole.
+                let cut = match through_turn {
+                    Some(turn) => {
+                        let transcript = self.stored_anywhere(&session_id).and_then(|path| std::fs::read_to_string(path).ok());
+                        let Some(cut) = transcript.as_deref().and_then(|text| history::cut_uuid_for_turn(text, &turn)) else {
+                            return Err(ProviderError::Unavailable {
+                                reason: format!("the turn {turn} is not in session {session_id}'s transcript, so there is nothing to branch from"),
+                            });
+                        };
+                        Some(cut)
+                    }
+                    None => None,
+                };
+                crate::home::pin_fork(&request_id, &session_id, cut.as_deref());
+                Ok(Ack::Session { session_id: request_id, title: None })
             }
             Command::ListSessions { workspace, .. } => {
                 let projects = self.resolved_config_dir().join("projects");
@@ -3126,6 +3234,81 @@ mod tests {
         assert_eq!(adapter.config_dir_for(&id), fixture.join(".claude"), "history reads it too");
         crate::home::clear_legacy_resume(&id);
         assert!(adapter.home_env_for(&id).is_some(), "a cleared pin resumes Baaz-homed");
+    }
+
+    /// docs/85 16.3 (probed live 26 Nov 2026): Branch through a turn on a
+    /// running session. The source's adapter holds its own child, so it
+    /// only checks the cut and acks the branch id (forking in place was
+    /// refused live as "already holds a session child"); the branch's own
+    /// adapter, opened with `ResumeSession` on that id, spawns the fork with
+    /// `--resume-session-at` at the turn's last row and shows the history
+    /// through it. A turn the transcript does not hold is refused, never
+    /// forked whole. Against a stand-in `claude` that records its argv.
+    #[test]
+    fn a_branch_through_a_turn_cuts_the_fork_at_that_turns_last_row() {
+        let config = std::env::temp_dir().join(format!("baaz-claude-fork-cut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&config);
+        let slug_dir = config.join("projects").join("-fixture-proj");
+        std::fs::create_dir_all(&slug_dir).expect("slug dir");
+        let source = "139c8757-db8e-4243-a440-de494311ee11";
+        std::fs::write(slug_dir.join(format!("{source}.jsonl")), include_str!("../../../fixtures/claude-code/fork-source.ndjson")).expect("transcript");
+        let (dir, _) = seed_executable("fork-cut", "unused", "");
+        let seen = dir.join("argv");
+        let script = dir.join("fake-claude");
+        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}.tmp'; mv '{0}.tmp' '{0}'\nexec cat >/dev/null\n", seen.display())).expect("fake");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let fork = |adapter: &ClaudeCodeAdapter, branch: &str, turn: &str| {
+            adapter.dispatch(Command::ForkSession {
+                request_id: branch.into(),
+                session_id: source.into(),
+                through_turn: Some(turn.into()),
+                metadata_only: false,
+                mode: None,
+            })
+        };
+        // The source's adapter: no spawn, the branch id acked.
+        let source_adapter = ClaudeCodeAdapter::new("claude-must-never-spawn").with_config_dir(config.clone());
+        let ack = fork(&source_adapter, "branch-1", "msg_011ChQyGv7gFNYb56LXj8TTf");
+        assert!(matches!(&ack, Ok(Ack::Session { session_id, .. }) if session_id == "branch-1"), "{ack:?}");
+
+        // The branch's own adapter starts the fork, cut at the turn.
+        let branch_adapter = ClaudeCodeAdapter::new(&script.to_string_lossy()).with_config_dir(config.clone());
+        let events = branch_adapter.events();
+        let ack = branch_adapter.dispatch(Command::ResumeSession {
+            request_id: "r".into(),
+            session_id: "branch-1".into(),
+            cursor: None,
+            metadata_only: false,
+            mode: None,
+            env: Vec::new(),
+            workspace: None,
+        });
+        assert!(matches!(ack, Ok(Ack::Session { .. })), "the branch started: {ack:?}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !seen.is_file() {
+            assert!(std::time::Instant::now() < deadline, "the stand-in never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let shown: String = events.try_iter().filter_map(|event| match event {
+            provider::ProviderEvent::Deltas { deltas, .. } => Some(format!("{deltas:?}")),
+            _ => None,
+        }).collect();
+        drop(branch_adapter);
+        let argv: Vec<String> = std::fs::read_to_string(&seen).expect("argv").lines().map(str::to_owned).collect();
+        let after = |flag: &str| argv.iter().position(|arg| arg == flag).map(|at| argv[at + 1].clone());
+        assert_eq!(after("--resume").as_deref(), Some(source));
+        assert_eq!(after("--resume-session-at").as_deref(), Some("68477577-b2e6-478d-8bf3-d287ec563f2d"));
+        assert_eq!(after("--session-id").as_deref(), Some("branch-1"));
+        assert!(argv.iter().any(|arg| arg == "--fork-session"));
+        assert!(shown.contains("ALPHA") && !shown.contains("BETA"), "the branch shows the history through the cut only");
+
+        let error = fork(&source_adapter, "branch-2", "msg_not_in_it").expect_err("an unknown turn is refused");
+        assert!(format!("{error:?}").contains("nothing to branch from"), "{error:?}");
+        assert!(crate::home::take_fork("branch-2").is_none(), "nothing pinned for a refused branch");
+        let _ = std::fs::remove_dir_all(&config);
     }
 
     /// A stand-in `claude` that records where and under which config dir
@@ -4667,6 +4850,34 @@ mod tests {
         );
     }
 
+    /// docs/85 16.1: the spawn handshake asks `get_usage`, and its answer
+    /// — matched by request id like every control answer — fills the
+    /// account meter before any turn; an answer under a foreign id does not.
+    #[test]
+    fn the_handshake_asks_get_usage_and_its_answer_fills_the_meter() {
+        let adapter = ClaudeCodeAdapter::new("claude-must-never-spawn");
+        adapter.attach_session_for_tests("sess-1");
+        adapter.send_initialize();
+        let ask: serde_json::Value = adapter
+            .sent_control_lines()
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|line| line["request"]["subtype"] == "get_usage")
+            .expect("a get_usage query at spawn");
+        assert_eq!(ask["request"]["skip_behaviors"], true);
+        let reply: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/claude-code/get-usage.json").trim()).unwrap();
+        let mut foreign = reply.clone();
+        foreign["response"]["request_id"] = "someone-else".into();
+        adapter.ingest_child_line(&foreign.to_string());
+        assert!(adapter.read_usage().is_none(), "a foreign id fills nothing");
+        let mut ours = reply;
+        ours["response"]["request_id"] = ask["request_id"].clone();
+        adapter.ingest_child_line(&ours.to_string());
+        let report = adapter.read_usage().expect("the meter is filled");
+        assert_eq!(report.plan.as_deref(), Some("Max"));
+        assert_eq!(report.windows.len(), 2);
+    }
+
     fn probe_servers(later: &str) -> serde_json::Value {
         serde_json::json!([
             {"name": "probe", "status": "connected", "tools": [
@@ -4749,7 +4960,8 @@ mod tests {
 
         pick(&adapter, PermissionMode::DenyUnmatched);
         let lines = adapter.sent_control_lines();
-        let layer = applied_settings(&lines[1]).expect("the layer");
+        // initialize and get_usage come first; the layer is the one apply.
+        let layer = lines.iter().find_map(|line| applied_settings(line)).expect("the layer");
         assert_eq!(layer, argv::read_only_settings_with(&["mcp__later".to_owned(), "mcp__probe__poke".to_owned()]));
 
         pick(&adapter, PermissionMode::PromptUnmatched);

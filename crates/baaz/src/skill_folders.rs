@@ -136,7 +136,9 @@ mod tests {
         let base = vec![crate::skills::Skill { id: "review-pr".into(), name: "review-pr".into(), ..Default::default() }];
         let claude = merge("claude-code", folders.clone(), &switches, base);
         let names: Vec<(&str, Option<&str>)> = claude.iter().map(|s| (s.name.as_str(), s.description.as_deref())).collect();
-        assert_eq!(names, vec![("review-pr", Some("Review a pull request against the team checklist")), ("release-notes", Some("Draft release notes from the merged PRs"))]);
+        // A repo's .agents/skills reaches Claude Code too (through Baaz's
+        // --add-dir links, probed 26 Nov 2026), so deploy is offered.
+        assert_eq!(names, vec![("review-pr", Some("Review a pull request against the team checklist")), ("deploy", Some("Ship the web app to staging")), ("release-notes", Some("Draft release notes from the merged PRs"))]);
         let codex: Vec<String> = merge("codex", folders.clone(), &switches, Vec::new()).into_iter().map(|s| s.name).collect();
         assert_eq!(codex, vec!["review-pr"], "deploy is switched off for Codex");
         let muse = merge("muse", folders, &switches, Vec::new());

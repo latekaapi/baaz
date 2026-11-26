@@ -410,6 +410,20 @@ pub fn with_token_flags(mut launch: SessionLaunch) -> SessionLaunch {
     launch
 }
 
+/// Add `dir` with `--add-dir` (docs/85 16.2: the repo's `.agents/skills`
+/// links). The flag is variadic, so it is pushed before
+/// [`with_token_flags`] puts `--disallowedTools` after it: nothing that is
+/// not a path can follow it. One `--add-dir` per launch, whatever the
+/// launch carried.
+pub fn with_add_dir(mut launch: SessionLaunch, dir: &std::path::Path) -> SessionLaunch {
+    if let Some(at) = launch.argv.iter().position(|arg| arg == "--add-dir") {
+        launch.argv.drain(at..(at + 2).min(launch.argv.len()));
+    }
+    launch.argv.push("--add-dir".into());
+    launch.argv.push(dir.to_string_lossy().into_owned());
+    launch
+}
+
 /// The env that asks for the one-hour prompt cache: set only for an account
 /// that bills by API key (a subscription's main conversation has it already).
 pub const PROMPT_CACHE_TTL_ENV: &str = "CLAUDE_CODE_PROMPT_CACHE_TTL";
@@ -626,10 +640,10 @@ pub fn argv_for_resume(
     }
 }
 
-/// Branch a session. `--resume` plus `--fork-session` mints the new id;
-/// `request_id` is the Baaz-side id for the branch. Whether the CLI honors
-/// a `--session-id` alongside `--fork-session` was never probed live, so
-/// the argv carries it as the caller's intent and the report says so.
+/// Branch a session. `--resume` plus `--fork-session` forks it, and the
+/// `--session-id <request_id>` beside them names the branch: probed live
+/// 26 Nov 2026 (claude 2.1.276), the branch's transcript lands under that
+/// id. [`with_resume_at`] cuts it at a turn.
 pub fn argv_for_fork(
     request_id: &str,
     session_id: &str,
@@ -655,6 +669,16 @@ pub fn argv_for_fork(
         permission_mode: None,
         env: Vec::new(),
     }
+}
+
+/// Cut a fork at the transcript row `uuid` (`--resume-session-at`, a
+/// hidden print-mode flag; probed live 26 Nov 2026): the branch holds the
+/// conversation through that row and nothing after it, and the source's
+/// transcript is untouched (docs/85 16.3).
+pub fn with_resume_at(mut launch: SessionLaunch, uuid: &str) -> SessionLaunch {
+    launch.argv.push("--resume-session-at".into());
+    launch.argv.push(uuid.to_owned());
+    launch
 }
 
 /// A `--resume` relaunch of a session the CLI never stored, as the fresh
@@ -1226,5 +1250,17 @@ mod tests {
         assert!(model_lacks_auto("sonnet", Some(&row(Some(false)))));
         assert!(!model_lacks_auto("haiku", Some(&row(Some(true)))));
         assert!(model_lacks_auto("haiku", Some(&row(None))), "an answer silent on auto falls back to the family");
+    }
+
+    /// docs/85 16.2: one `--add-dir`, and a flag after it (it is variadic).
+    #[test]
+    fn the_repo_skills_folder_rides_on_one_add_dir_with_a_flag_after_it() {
+        let launch = argv_for_resume("sess-9", None, None, None);
+        let once = with_add_dir(launch, std::path::Path::new("/s/a"));
+        let twice = with_token_flags(with_add_dir(once, std::path::Path::new("/s/b")));
+        let at = twice.argv.iter().position(|arg| arg == "--add-dir").expect("the flag");
+        assert_eq!(twice.argv.iter().filter(|arg| *arg == "--add-dir").count(), 1);
+        assert_eq!(twice.argv[at + 1], "/s/b");
+        assert!(twice.argv[at + 2].starts_with("--"), "a flag follows the folder: {:?}", twice.argv);
     }
 }

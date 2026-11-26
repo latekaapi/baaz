@@ -120,6 +120,11 @@ pub(crate) enum PendingControlKind {
     /// Read-only layer's MCP denies are refreshed; error or silence is
     /// logged and changes nothing — the next dispatch asks again.
     McpStatus,
+    /// A `get_usage` query after the handshake (unofficial; probed live
+    /// 26 Nov 2026): success fills the account meter before the first
+    /// turn's `rate_limit_event`; error or silence is logged and changes
+    /// nothing (docs/85 16.1).
+    GetUsage,
 }
 
 /// One host→child control request awaiting its `control_response`.
@@ -680,6 +685,7 @@ impl ControlHub {
                 outcome.error.as_deref(),
                 outcome.models,
                 outcome.mcp_servers,
+                outcome.usage,
             );
         }
         self.expire_timeouts();
@@ -698,6 +704,7 @@ impl ControlHub {
         error: Option<&str>,
         models: Vec<crate::frame::CatalogModel>,
         mcp_servers: Option<Vec<crate::argv::McpServerStatus>>,
+        usage: Option<crate::account::RateLimitInfo>,
     ) {
         let Some(pending) = self.pending.lock().expect("pending mutex").remove(request_id) else {
             return;
@@ -726,6 +733,11 @@ impl ControlHub {
                 PendingControlKind::McpStatus => {
                     if let Some(servers) = mcp_servers {
                         self.refresh_mcp_denies(&servers);
+                    }
+                }
+                PendingControlKind::GetUsage => {
+                    if let Some(info) = usage {
+                        self.fold.lock().expect("fold mutex").observe_polled_usage(info);
                     }
                 }
                 PendingControlKind::ApplyReadOnly(PermissionMode::DenyUnmatched) => {
@@ -788,6 +800,12 @@ impl ControlHub {
             PendingControlKind::Initialize => {
                 eprintln!(
                     "[provider-claude-code] initialize {} refused ({}); keeping the fallback catalog",
+                    pending.request_id, reason
+                );
+            }
+            PendingControlKind::GetUsage => {
+                eprintln!(
+                    "[provider-claude-code] get_usage {} refused ({}); the meter waits for a turn's rate_limit_event",
                     pending.request_id, reason
                 );
             }

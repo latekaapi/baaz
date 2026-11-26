@@ -1,0 +1,5 @@
+{
+  "id": "03-rename",
+  "prompt": "Rename the function calc_total to total_price everywhere in this repo, including its callers and tests. Keep the tests passing.",
+  "check": "python3 -m unittest discover -s tests -q && ! grep -rn calc_total --include=*.py ."
+}
