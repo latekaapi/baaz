@@ -60,8 +60,10 @@ pub struct LaunchFailure {
 }
 
 /// What a provider switch carries from the replaced draft to the draft that
-/// replaces it: its approval mode and effort.
-pub type SwitchCarry = (aui_protocol::PermissionMode, Option<aui_protocol::ReasoningEffort>);
+/// replaces it: its approval mode and effort — plus, for a restart on the
+/// same provider (a model picked before the first turn), the model the
+/// replacement opens on.
+pub type SwitchCarry = (aui_protocol::PermissionMode, Option<aui_protocol::ReasoningEffort>, Option<String>);
 
 /// The view a provider switch is replacing (Y2b): kept active and drawn —
 /// composer locked, chip already on the pick — until the replacement
@@ -248,7 +250,9 @@ impl<D> OpenState<D> {
 
     // ------------------------------------------------- the replace (Y2b)
 
-    /// A draft's composer chip picked another provider: stamp a fresh
+    /// A draft's composer chip picked another provider (or, on a provider
+    /// whose thread takes its model at its start, another model before the
+    /// first turn — the carry then names it): stamp a fresh
     /// switch generation, mark `old` as the view being replaced (with the
     /// drafts-map project that names it and the draft settings `carry`),
     /// hold the verbs, and claim the next start for the replacement.
@@ -473,7 +477,7 @@ mod tests {
     type OpenState = super::OpenState<()>;
 
     fn carry() -> SwitchCarry {
-        (aui_protocol::PermissionMode::default(), None)
+        (aui_protocol::PermissionMode::default(), None, None)
     }
 
     /// The last ask wins: every open moves the epoch, and only the newest
