@@ -81,12 +81,24 @@ def claims_done(text):
     return any(word in text for word in DONE_WORDS)
 
 
-def bare_claude(repo, run_dir, prompt, model, timeout):
+EXPLORE_AGENT = json.dumps({"Explore": {
+    "description": "Fast read-only exploration of the codebase: finding files and symbols and working out how something works. Use it for open-ended searches.",
+    "prompt": "You explore code read-only. Search with Grep and Glob, read only what you need, and report concise findings with file paths and line numbers.",
+    "tools": ["Read", "Grep", "Glob"], "model": "haiku"}})
+
+
+def bare_claude(repo, run_dir, prompt, model, timeout, variant="base"):
     home = os.path.join(run_dir, "claude-home")
     os.makedirs(home, exist_ok=True)
     env = dict(os.environ, CLAUDE_CONFIG_DIR=home, CLAUDE_SECURESTORAGE_CONFIG_DIR="")
-    argv = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--model", model,
-            "--permission-mode", "bypassPermissions"]
+    argv = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose",
+            "--permission-mode", "bypassPermissions"] + (["--model", model] if model != "default" else [])
+    # docs/85 17.2 variants: WebFetch and WebSearch off (10.6), an Explore
+    # agent on Haiku (12.7).
+    if variant == "no-web":
+        argv += ["--disallowedTools", "WebFetch,WebSearch"]
+    elif variant == "explore":
+        argv += ["--agents", EXPLORE_AGENT]
     start = time.time()
     p = subprocess.run(argv, cwd=repo, env=env, capture_output=True, text=True, timeout=timeout)
     open(os.path.join(run_dir, "bare.ndjson"), "w").write(p.stdout)
@@ -102,7 +114,8 @@ def bare_claude(repo, run_dir, prompt, model, timeout):
     tin = usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0) + usage.get("cache_creation_input_tokens", 0)
     return {"tokens_in": tin, "tokens_out": usage.get("output_tokens", 0), "cached": usage.get("cache_read_input_tokens", 0),
             "cost_usd": result.get("total_cost_usd"), "final": result.get("result", ""), "agent_turns": result.get("num_turns"),
-            "wall_s": round(time.time() - start, 1), "error": None if result else (p.stderr[-400:] or "no result frame")}
+            "wall_s": round(time.time() - start, 1), "error": None if result else (p.stderr[-400:] or "no result frame"),
+            "models": sorted((result.get("modelUsage") or {}).keys())}
 
 
 def bare_codex(repo, run_dir, prompt, model, effort, timeout):
@@ -216,25 +229,31 @@ def report(work):
     lines = ["# Baaz bench report", "", f"{len(runs)} runs. Finished = the task's own check passes after one prompt.", "",
              "| provider | mode | runs | finished | tokens in / finished | cached % | cost / finished | done-claims overruled | stuck | wall s (median) |",
              "|---|---|---|---|---|---|---|---|---|---|"]
-    for provider in sorted({r["provider"] for r in runs}):
-        for mode in ("bare", "baaz"):
-            rs = [r for r in runs if r["provider"] == provider and r["mode"] == mode]
-            if not rs:
-                continue
-            fin = [r for r in rs if r["finished"]]
-            tin = sum(r["tokens_in"] for r in rs)
-            cached = sum(r["cached"] for r in rs)
-            costs = [r["cost_usd"] for r in rs if r["cost_usd"] is not None]
-            per_tok = f"{tin // max(len(fin), 1):,}" if fin else "-"
-            per_cost = f"${sum(costs) / len(fin):.4f}" if fin and costs else "-"
-            overruled = sum(1 for r in rs if r["claims_done"] and not r["finished"])
-            stuck = sum(1 for r in rs if r.get("stuck"))
-            walls = sorted(r["wall_s"] for r in rs)
-            lines.append(f"| {provider} | {mode} | {len(rs)} | {len(fin)} | {per_tok} | {100 * cached // max(tin, 1)}% | {per_cost} | {overruled} | {stuck} | {walls[len(walls) // 2]} |")
+    groups = sorted({(r["provider"], r["mode"], r.get("variant", "base")) for r in runs}, key=lambda g: (g[0], g[1] != "bare", g[2]))
+    for provider, mode, variant in groups:
+        rs = [r for r in runs if r["provider"] == provider and r["mode"] == mode and r.get("variant", "base") == variant]
+        if not rs:
+            continue
+        fin = [r for r in rs if r["finished"]]
+        tin = sum(r["tokens_in"] for r in rs)
+        cached = sum(r["cached"] for r in rs)
+        costs = [r["cost_usd"] for r in rs if r["cost_usd"] is not None]
+        per_tok = f"{tin // max(len(fin), 1):,}" if fin else "-"
+        per_cost = f"${sum(costs) / len(fin):.4f}" if fin and costs else "-"
+        overruled = sum(1 for r in rs if r["claims_done"] and not r["finished"])
+        stuck = sum(1 for r in rs if r.get("stuck"))
+        walls = sorted(r["wall_s"] for r in rs)
+        label = mode if variant == "base" else f"{mode} ({variant})"
+        lines.append(f"| {provider} | {label} | {len(rs)} | {len(fin)} | {per_tok} | {100 * cached // max(tin, 1)}% | {per_cost} | {overruled} | {stuck} | {walls[len(walls) // 2]} |")
     lines += ["", "## Per run", "", "| task | provider | mode | finished | tokens in | out | cached | cost | agent turns | wall s | error |", "|---|---|---|---|---|---|---|---|---|---|---|"]
-    for r in sorted(runs, key=lambda r: (r["task"], r["provider"], r["mode"])):
+    for r in sorted(runs, key=lambda r: (r["task"], r["provider"], r["mode"], r.get("variant", "base"))):
         cost = f"${r['cost_usd']:.4f}" if r["cost_usd"] is not None else "-"
-        lines.append(f"| {r['task']} | {r['provider']} | {r['mode']} | {'yes' if r['finished'] else 'NO'} | {r['tokens_in']:,} | {r['tokens_out']:,} | {r['cached']:,} | {cost} | {r['agent_turns'] if r['agent_turns'] is not None else '-'} | {r['wall_s']} | {(r['error'] or '')[:80]} |")
+        mode = r["mode"] if r.get("variant", "base") == "base" else f"{r['mode']} ({r['variant']})"
+        lines.append(f"| {r['task']} | {r['provider']} | {mode} | {'yes' if r['finished'] else 'NO'} | {r['tokens_in']:,} | {r['tokens_out']:,} | {r['cached']:,} | {cost} | {r['agent_turns'] if r['agent_turns'] is not None else '-'} | {r['wall_s']} | {(r['error'] or '')[:80]} |")
+    explore = [r for r in runs if r.get("variant") == "explore"]
+    if explore:
+        used = sum(1 for r in explore if any("haiku" in m for m in r.get("models", [])))
+        lines += ["", f"Explore variant: the Haiku agent ran in {used} of {len(explore)} runs (modelUsage)."]
     lines += ["", "Interventions and approval wait: every run is one prompt in Full access (bare: the CLI's own bypass), so neither occurs by design; a run left waiting on the person is counted as stuck."]
     open(os.path.join(work, "report.md"), "w").write("\n".join(lines) + "\n")
     return "\n".join(lines)
@@ -250,13 +269,15 @@ def main():
     ap.add_argument("--codex-model", default="gpt-5.6-luna")
     ap.add_argument("--codex-effort", default="medium")
     ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--variant", default="base", choices=["base", "no-web", "explore"],
+                    help="bare Claude only (docs/85 17.2): WebFetch/WebSearch off, or an Explore agent on Haiku")
     args = ap.parse_args()
     work = os.path.abspath(args.work)
     os.makedirs(work, exist_ok=True)
     results = os.path.join(work, "results.jsonl")
     done = set()
     if os.path.exists(results):
-        done = {(r["task"], r["provider"], r["mode"]) for r in map(json.loads, open(results))}
+        done = {(r["task"], r["provider"], r["mode"], r.get("variant", "base")) for r in map(json.loads, open(results))}
     tasks = sorted(os.listdir(TASKS))
     pick = [tasks[i - 1] for i in parse_range(args.tasks, len(tasks))]
     log = lambda msg: print(msg, flush=True)
@@ -264,16 +285,17 @@ def main():
         spec = json.load(open(os.path.join(TASKS, task, "task.json")))
         for provider in args.providers.split(","):
             for mode in args.modes.split(","):
-                if (task, provider, mode) in done:
+                if (task, provider, mode, args.variant) in done:
                     continue
-                run_dir = os.path.join(work, f"{task}-{provider}-{mode}")
+                suffix = "" if args.variant == "base" else f"-{args.variant}"
+                run_dir = os.path.join(work, f"{task}-{provider}-{mode}{suffix}")
                 shutil.rmtree(run_dir, ignore_errors=True)
                 os.makedirs(run_dir)
                 repo = make_repo(os.path.join(TASKS, task), run_dir)
                 log(f"{task} {provider} {mode} ...")
                 try:
                     if mode == "bare" and provider == "claude":
-                        m = bare_claude(repo, run_dir, spec["prompt"], args.claude_model, args.timeout)
+                        m = bare_claude(repo, run_dir, spec["prompt"], args.claude_model, args.timeout, args.variant)
                     elif mode == "bare":
                         m = bare_codex(repo, run_dir, spec["prompt"], args.codex_model, args.codex_effort, args.timeout)
                     else:
@@ -284,7 +306,7 @@ def main():
                     m = {"tokens_in": 0, "tokens_out": 0, "cached": 0, "cost_usd": None, "final": "", "agent_turns": None,
                          "wall_s": args.timeout, "error": "timeout", "stuck": True}
                 check = sh(spec["check"], repo)
-                row = dict(m, task=task, provider=provider, mode=mode, finished=check.returncode == 0,
+                row = dict(m, task=task, provider=provider, mode=mode, variant=args.variant, finished=check.returncode == 0,
                            claims_done=claims_done(m.get("final")), check_tail=(check.stdout + check.stderr)[-300:])
                 row["final"] = (row.get("final") or "")[:500]
                 with open(results, "a") as f:
