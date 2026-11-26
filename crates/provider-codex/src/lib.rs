@@ -76,6 +76,13 @@ pub struct CodexAdapter {
     /// subsequent turns", per `TurnStartParams.json`). Taken by that turn;
     /// put back when the turn fails to start.
     pending_turn_mode: Mutex<Option<PermissionMode>>,
+    /// The approval mode the thread runs under as far as this adapter
+    /// knows: what `thread/start` or `thread/resume` answered (or asked
+    /// for), then each override a started turn carried. A pick equal to it
+    /// queues no override (docs/88 C.6), so an unchanged turn's
+    /// `turn/start` carries only `threadId`, `model` and `input`. `None`
+    /// (not known) lets every pick through.
+    thread_mode: Mutex<Option<PermissionMode>>,
     /// The last explicit level a started turn carried. `effort` on
     /// `turn/start` applies "for this turn and subsequent turns", so while
     /// this is set a Default turn must reset to the model's default rather
@@ -172,6 +179,7 @@ impl CodexAdapter {
             thread_id: Mutex::new(None),
             model: Mutex::new(None),
             pending_turn_mode: Mutex::new(None),
+            thread_mode: Mutex::new(None),
             sent_effort: Arc::new(Mutex::new(None)),
             model_defaults: Arc::new(Mutex::new(None)),
             effort_lookup: Mutex::new(None),
@@ -208,7 +216,8 @@ impl CodexAdapter {
     /// Let the session inherit the owner's own MCP servers and plugins:
     /// the Settings › MCP "Use my own MCP servers" switch. When on,
     /// [`Self::spawn_args_for`] skips every disable (server and plugin)
-    /// while the bridge still rides when a relay is set. Off by default.
+    /// while the bridge still rides when a relay is set; install
+    /// suggestions stay off. Off by default.
     pub fn set_use_own_mcp(&self, use_own: bool) {
         *self.use_own_mcp.lock().expect("use-own-mcp mutex") = use_own;
     }
@@ -314,9 +323,10 @@ impl CodexAdapter {
     /// The `app-server` argv fragment for `session_id`: the bridge as a
     /// per-session MCP server when a relay is set, then — unless the
     /// owner's own servers were opted into — a full-table disable for
-    /// every inherited server (bundled floor plus file-configured) and a
-    /// plugin disable per owner-enabled plugin, so the session sees
-    /// Baaz's tools and nothing else. The disables ride EVERY session,
+    /// every inherited server (bundled floor plus file-configured) and
+    /// every plugin off (`features.plugins=false`), so the session sees
+    /// Baaz's tools and nothing else; install suggestions are off either
+    /// way (`features.tool_suggest=false`). The disables ride EVERY session,
     /// relay or not: the Z5 probe (docs/19-codex.md) listed a bare
     /// `app-server` at 5 servers and 104 owner tools — a session without
     /// a relay spawns no bridge but still spawns silenced. No spawn — see
@@ -343,13 +353,15 @@ impl CodexAdapter {
         if let Some(config) = provider::skill_switches::codex_config_arg(&off) {
             args.extend(["-c".to_owned(), config]);
         }
+        // docs/88 C.4: Baaz cannot act on an install suggestion.
+        args.extend(crate::terminal::tool_suggest_off());
         if !use_own {
             args.extend(crate::terminal::disable_overrides(
                 crate::terminal::inherited_servers().iter().map(String::as_str),
             ));
-            args.extend(crate::terminal::plugin_disable_overrides(
-                crate::terminal::inherited_plugins().iter().map(String::as_str),
-            ));
+            // docs/88 C.3: one key for every plugin, config-named or
+            // installed remotely (see `plugins_off`).
+            args.extend(crate::terminal::plugins_off());
         }
         args
     }
@@ -448,7 +460,10 @@ impl CodexAdapter {
                 reason: "thread/start answered without thread ids".into(),
             })?;
         provider::note::store(&self.note_state_dir(), &session_id, &note);
-        self.announce_mode(&session_id, child::reported_mode(&started).or(mode));
+        let held = child::reported_mode(&started).or(mode);
+        *self.thread_mode.lock().expect("mode mutex") = held;
+        *self.pending_turn_mode.lock().expect("mode mutex") = None;
+        self.announce_mode(&session_id, held);
         *self.session_id.lock().expect("session mutex") = Some(session_id.clone());
         *self.thread_id.lock().expect("thread mutex") = Some(thread_id);
         *self.sent_effort.lock().expect("effort mutex") = None;
@@ -702,7 +717,10 @@ impl CodexAdapter {
             deltas
         };
         *self.session_id.lock().expect("session mutex") = Some(resumed_session.clone());
-        self.announce_mode(&resumed_session, child::reported_mode(&answer).or(mode));
+        let held = child::reported_mode(&answer).or(mode);
+        *self.thread_mode.lock().expect("mode mutex") = held;
+        *self.pending_turn_mode.lock().expect("mode mutex") = None;
+        self.announce_mode(&resumed_session, held);
         *self.thread_id.lock().expect("thread mutex") = Some(thread_id);
         *self.sent_effort.lock().expect("effort mutex") = None;
         *self.model.lock().expect("model mutex") = Some(model.clone());
@@ -881,9 +899,13 @@ impl CodexAdapter {
         self.await_effort_lookup();
         let sticky = self.sent_effort.lock().expect("effort mutex").clone();
         let picked = effort.filter(|level| !level.is_empty());
-        // Only a reset reads the catalog — once per child: the model's own
-        // default level.
-        let model_default = if picked.is_none() && sticky.is_some() { self.model_default(&model)? } else { None };
+        // A reset, or a pick the thread may already hold at its model's
+        // default, reads the catalog — once per child.
+        let model_default = if (picked.is_none() && sticky.is_some()) || (picked.is_some() && sticky.is_none()) {
+            self.model_default(&model)?
+        } else {
+            None
+        };
         let wire_effort = child::turn_effort(picked, sticky.as_deref(), model_default.as_deref());
         let mode = self.pending_turn_mode.lock().expect("mode mutex").take();
         // The bubble's words are recorded before the request leaves (docs/81
@@ -925,11 +947,16 @@ impl CodexAdapter {
             keep_mode();
             return Err(ProviderError::Unavailable { reason: "turn/start answered without a turn id".into() });
         };
-        // The level now standing: a pick stands; a reset that landed clears
+        // The mode override this turn carried is the thread's now.
+        if mode.is_some() {
+            *self.thread_mode.lock().expect("mode mutex") = mode;
+        }
+        // The level now standing: a pick that was sent stands; a pick the
+        // thread already held changes nothing; a reset that landed clears
         // it; a reset with no known default leaves it for the next turn.
-        if picked.is_some() || wire_effort.is_some() {
+        if wire_effort.is_some() {
             *self.sent_effort.lock().expect("effort mutex") = picked.map(str::to_owned);
-        } else if let Some(level) = sticky {
+        } else if let (None, Some(level)) = (picked, sticky) {
             // Default with no level to reset to: the earlier level still
             // runs, so the chip says so rather than Default.
             self.announce_effort(session_id, Some(level));
@@ -1281,8 +1308,11 @@ impl ProviderAdapter for CodexAdapter {
                 // Admission only, like a model pick: the running turn keeps
                 // its policy; the next `turn/start` carries the override,
                 // and the server's `thread/settings/updated` then restates
-                // what it took.
-                *self.pending_turn_mode.lock().expect("mode mutex") = Some(mode);
+                // what it took. A pick of the mode the thread already runs
+                // under queues nothing (docs/88 C.6), and drops an earlier
+                // pick still waiting.
+                let held = *self.thread_mode.lock().expect("mode mutex");
+                *self.pending_turn_mode.lock().expect("mode mutex") = (held != Some(mode)).then_some(mode);
                 self.announce_mode(&session_id, Some(mode));
                 Ok(Ack::Accepted)
             }
@@ -1546,6 +1576,35 @@ mod tests {
             let args = adapter.spawn_args_for("s-1");
             assert_eq!(args.iter().filter(|arg| *arg == r#"project_doc_fallback_filenames=["CLAUDE.md"]"#).count(), 1, "{args:?}");
         }
+    }
+
+    /// docs/88 C.3/C.4: with the person's own servers off, one key turns
+    /// every plugin off — including one installed remotely that
+    /// `config.toml` never names (the fixture home below) — and no
+    /// per-plugin key is needed; with them on, plugins stay. Install
+    /// suggestions are off either way.
+    #[test]
+    fn plugins_go_off_by_one_key_and_suggestions_always() {
+        let dir = std::env::temp_dir().join(format!("codex-plugins-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let owner = dir.join("owner").join(".codex");
+        // A remotely installed plugin: on disk under plugins/cache, absent
+        // from config.toml.
+        std::fs::create_dir_all(owner.join("plugins/cache/openai-curated-remote/remote-only/1.0/skills/x")).expect("plugin dir");
+        std::fs::write(owner.join("config.toml"), "[plugins.\"pdf@openai-primary-runtime\"]\nenabled = true\n").expect("config");
+        let adapter = CodexAdapter::new(NO_CLI).with_home(dir.join("owner"));
+        adapter.set_state_dir(dir.join("state"));
+        adapter.set_use_own_mcp(false);
+        let off = adapter.spawn_args_for("s-1");
+        assert_eq!(off.iter().filter(|arg| *arg == "features.plugins=false").count(), 1, "{off:?}");
+        assert!(!off.iter().any(|arg| arg.starts_with("plugins.")), "no per-plugin key: {off:?}");
+        assert_eq!(off.iter().filter(|arg| *arg == "features.tool_suggest=false").count(), 1, "{off:?}");
+        adapter.set_use_own_mcp(true);
+        let own = adapter.spawn_args_for("s-1");
+        assert!(!own.iter().any(|arg| arg.contains("features.plugins")), "own servers keep plugins: {own:?}");
+        assert!(!own.iter().any(|arg| arg.starts_with("mcp_servers.")), "nor disable servers: {own:?}");
+        assert_eq!(own.iter().filter(|arg| *arg == "features.tool_suggest=false").count(), 1, "{own:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// docs/85 10.5: Baaz's note rides `thread/start` and every
@@ -1835,6 +1894,79 @@ for line in sys.stdin:
 
     fn method_frames<'a>(frames: &'a [serde_json::Value], method: &str) -> Vec<&'a serde_json::Value> {
         frames.iter().filter(|frame| frame["method"] == method).collect()
+    }
+
+    /// docs/88 C.6: a turn re-sends neither a mode nor an effort the
+    /// thread already holds. The resume answers `OnRequest` at the model's
+    /// default (`medium`); a pick of that mode and that level leaves both
+    /// turns' `turn/start` with only `threadId`, `model` and `input`. A real
+    /// change rides once, and the turn after it is bare again.
+    #[test]
+    fn an_unchanged_turn_carries_only_thread_model_and_input() {
+        let _guard = FAKE_SERVER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::remove_var("FAKE_CODEX_MODELS_DELAY");
+        let (script, log) = scripted_effort_server();
+        std::env::set_var("FAKE_CODEX_LOG", &log);
+        std::env::set_var("FAKE_CODEX_MODEL", "gpt-test");
+        std::env::set_var("FAKE_CODEX_RESUME_EFFORT", "medium");
+        let scratch = script.parent().expect("temp dir").join("homes");
+        let owner_home = scratch.join("owner-home");
+        std::fs::create_dir_all(owner_home.join(".codex")).expect("temp owner home");
+        let mut adapter = CodexAdapter::new(&script.to_string_lossy()).with_home(owner_home);
+        adapter.set_state_dir(scratch.join("state"));
+        adapter.connect(&ConnectInfo::new("baaz", "0.0.0")).expect("fake connects");
+        adapter
+            .dispatch(Command::ResumeSession {
+                request_id: "r-resume".into(),
+                session_id: "sess-1".into(),
+                cursor: None,
+                metadata_only: false,
+                mode: Some(PermissionMode::OnRequest),
+                workspace: None,
+                env: Vec::new(),
+            })
+            .expect("resumes");
+        let pick = |mode| {
+            adapter
+                .dispatch(Command::SelectApprovalMode { request_id: "m".into(), session_id: "sess-1".into(), mode })
+                .expect("mode admitted");
+        };
+        let turn = |id: &str, effort: &str| {
+            adapter
+                .dispatch(Command::SubmitInput {
+                    request_id: id.into(),
+                    session_id: "sess-1".into(),
+                    parts: vec![SubmissionPart::Text("hi".into())],
+                    display_text: None,
+                    effort: Some(effort.into()),
+                })
+                .expect("turn starts");
+        };
+        pick(PermissionMode::OnRequest);
+        turn("t-1", "medium");
+        turn("t-2", "medium");
+        pick(PermissionMode::AllowAll);
+        turn("t-3", "high");
+        turn("t-4", "high");
+        drop(adapter);
+        let frames: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let turns = method_frames(&frames, "turn/start");
+        assert_eq!(turns.len(), 4);
+        let keys = |frame: &serde_json::Value| {
+            let mut keys: Vec<String> = frame["params"].as_object().expect("params").keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        let bare = vec!["input".to_owned(), "model".to_owned(), "threadId".to_owned()];
+        assert_eq!(keys(turns[0]), bare, "a pick the thread holds is not re-sent: {}", turns[0]);
+        assert_eq!(keys(turns[1]), bare, "{}", turns[1]);
+        assert_eq!(turns[2]["params"]["effort"], "high", "a change rides: {}", turns[2]);
+        assert_eq!(turns[2]["params"]["approvalPolicy"], "never", "{}", turns[2]);
+        assert_eq!(keys(turns[3]), bare, "the turn after a change is bare again: {}", turns[3]);
     }
 
     /// A resumed thread still at an earlier session's level reads that

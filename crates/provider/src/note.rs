@@ -30,22 +30,24 @@ pub struct NoteTools {
     pub bridge: bool,
 }
 
-/// The note: under 300 tokens, no dates, no model names.
+/// The note's ceiling with the bridge's lines (docs/88 C.5): every request
+/// carries it, so it names only what the agent would not find on its own —
+/// each tool's own description says the rest. Without the bridge it is
+/// shorter still.
+pub const MAX_CHARS: usize = 500;
+
+/// The note: at most [`MAX_CHARS`] characters (about 120 tokens), no dates,
+/// no model names.
 pub fn compose(tools: NoteTools) -> String {
     let mut lines = vec![
-        "You are running inside Baaz, the desktop app the person uses to work with you. You don't need to mention it.",
-        "When you name a file, give its absolute path, with :line when a line matters (/abs/path/file.rs:42): Baaz makes these clickable.",
+        "You are running inside Baaz, the person's desktop app. Give file paths absolute, with :line when it matters (/abs/file.rs:42).",
     ];
     if tools.bridge {
-        lines.push(
-            "Baaz's terminal tools (terminal_*) run commands in a terminal the person can watch: use them when the person says terminal, \
-             for long-running or interactive commands, and for anything they should see. Use your own shell tool for quick checks.",
-        );
-        lines.push("Baaz's browser tools (browser_*) open and drive pages in the person's browser pane.");
-        lines.push("Baaz keeps every past session and a shared project memory: look before redoing work (session_search, session_read) and save what a later session needs (memory_save). code_find finds definitions and uses in the project.");
-        lines.push("To show the person something (a file, a diff, the terminal, the PR) use pane_show; over your own shell prefer changes_read, changes_commit, changes_revert, pr_status, code_find, memory_save/memory_edit.");
+        lines.push("terminal_* runs commands in a terminal the person watches: use it when they say terminal, or for long or interactive commands.");
+        lines.push("browser_* drives their browser pane; pane_show shows them a file, diff, terminal or PR.");
+        lines.push("Check session_search before redoing work; save what later sessions need with memory_save.");
     }
-    lines.push("When you need the person to choose or answer, ask with your question tool rather than in prose.");
+    lines.push("Ask choices with your question tool.");
     lines.join("\n")
 }
 
@@ -109,8 +111,8 @@ mod tests {
     #[test]
     fn the_note_is_short_and_carries_no_date_or_model() {
         let note = compose(NoteTools { bridge: true });
-        // ~4 characters a token: 300 tokens is ~1,200 characters.
-        assert!(note.len() < 1_200, "{} chars", note.len());
+        assert!(note.len() <= MAX_CHARS, "{} chars", note.len());
+        assert!(compose(NoteTools { bridge: false }).len() < note.len());
         for word in ["2026", "claude-", "gpt-", "haiku", "sonnet", "opus"] {
             assert!(!note.to_lowercase().contains(word), "{word} in the note");
         }
@@ -118,6 +120,35 @@ mod tests {
         assert!(note.contains("session_search") && note.contains("memory_save"), "12.3's tools are named");
         assert!(note.contains("pane_show"), "13.1's line (W4)");
         assert!(!compose(NoteTools { bridge: false }).contains("terminal_"), "no tools named that do not exist");
+    }
+
+    /// docs/88 C.5: every tool the note names is one the bridge serves (a
+    /// `name_*` family needs at least one tool with that prefix). The
+    /// bridge is a binary no crate links, so its tool-definition sources
+    /// are read as text: each tool is a quoted name there.
+    #[test]
+    fn every_tool_the_note_names_is_served_by_the_bridge() {
+        let sources = [
+            include_str!("../../mcp-bridge/src/terminal.rs"),
+            include_str!("../../mcp-bridge/src/browser.rs"),
+            include_str!("../../mcp-bridge/src/memory.rs"),
+            include_str!("../../mcp-bridge/src/pane.rs"),
+            include_str!("../../mcp-bridge/src/orchestra.rs"),
+        ]
+        .concat();
+        let note = compose(NoteTools { bridge: true });
+        let named: Vec<&str> = note
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '*'))
+            .filter(|word| word.contains('_') && word.chars().next().is_some_and(|c| c.is_ascii_lowercase()))
+            .collect();
+        assert!(named.len() >= 5, "{named:?}");
+        for name in named {
+            let served = match name.strip_suffix('*') {
+                Some(prefix) => sources.contains(&format!("\"{prefix}")),
+                None => sources.contains(&format!("\"{name}\"")),
+            };
+            assert!(served, "the note names {name}, which the bridge does not serve");
+        }
     }
 
     #[test]

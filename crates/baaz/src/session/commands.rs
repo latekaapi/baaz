@@ -611,6 +611,34 @@ impl SessionRuntime {
         cx.emit(RuntimeEvent::TurnChanged);
     }
 
+    /// Note the model this session's thread starts (or started) on, for a
+    /// fresh open on a provider whose thread takes its model at its start
+    /// ([`provider::ProviderTrait::ModelAtThreadStart`]); any other
+    /// provider keeps no note, and its picks switch as always.
+    pub(crate) fn note_fresh_thread(&mut self, model: Option<String>) {
+        if self.provider_kind().has(provider::ProviderTrait::ModelAtThreadStart) {
+            self.fresh_thread_model = Some(model.filter(|model| !model.is_empty()));
+        }
+    }
+
+    /// Whether a pick of `model_id` restarts this session instead of
+    /// switching it: its thread was started fresh here on another model
+    /// ([`Self::note_fresh_thread`]), nothing was ever sent or queued for
+    /// it, it is live, and no switch is already replacing it. A switch on
+    /// such a thread would cost every later request the new model's
+    /// instructions (docs/85-evidence/s17); a restart costs a new child.
+    pub(crate) fn restarts_on_model(&self, model_id: &str) -> bool {
+        let Some(started_on) = &self.fresh_thread_model else { return false };
+        let queued = matches!(&self.start, StartState::Starting(queue) if !queue.sends.is_empty());
+        started_on.as_deref() != Some(model_id)
+            && !self.read_only
+            && !self.has_turns()
+            && !queued
+            && self.switching_to.is_none()
+            && !self.input_locked
+            && self.handed_off_to.is_none()
+    }
+
     /// Switch the session's model. On the muse lane that is the existing
     /// `session/setModel` path, and the chip moves only on
     /// `session/modelChanged`, never here. On a provider kind (Claude
@@ -621,8 +649,20 @@ impl SessionRuntime {
     /// no lane attached the command parks on the outbox the lane drains,
     /// so an offline pick still records. Both lanes apply to a session
     /// with turns in it exactly as to a fresh one: model is switchable,
-    /// provider is not, and nothing here counts turns.
+    /// provider is not. The one exception counts turns: a thread that took
+    /// its model at its start and has none yet is restarted on the pick,
+    /// not switched ([`Self::restarts_on_model`]).
     pub(crate) fn set_model(&mut self, model_id: &str, cx: &mut Context<Self>) {
+        // A still-empty thread that took its model at its start is not
+        // switched: the window restarts the session on the pick, so its
+        // first turn runs on the model its thread started on (see
+        // [`Self::restarts_on_model`]).
+        if self.restarts_on_model(model_id) {
+            self.apply_model_selected(model_id, cx);
+            self.leave_auto_if_unsupported(cx);
+            cx.emit(SessionEvent::RestartOnModel { model: model_id.to_owned() });
+            return;
+        }
         // The session is not known yet (a muse start, or a provider child
         // still answering its open): the latest pick waits for the start
         // and goes when it lands; the chip reads it meanwhile.

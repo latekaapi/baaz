@@ -1,0 +1,5 @@
+{"type": "session_meta", "payload": {"id": "01a216a3-6fe0-79f2-b910-13d4735a79f4", "cli_version": "0.144.6", "originator": "codex_exec", "source": "exec"}}
+{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 11740, "cached_input_tokens": 9856, "output_tokens": 234, "reasoning_output_tokens": 19, "total_tokens": 11974}}}}
+{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 12271, "cached_input_tokens": 11520, "output_tokens": 252, "reasoning_output_tokens": 11, "total_tokens": 12523}}}}
+{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 12558, "cached_input_tokens": 12032, "output_tokens": 184, "reasoning_output_tokens": 8, "total_tokens": 12742}}}}
+{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 12804, "cached_input_tokens": 12416, "output_tokens": 102, "reasoning_output_tokens": 0, "total_tokens": 12906}}}}

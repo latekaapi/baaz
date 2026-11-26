@@ -37,9 +37,10 @@ fn the_spawn_argv_carries_the_bridge_for_the_session() {
     assert!(extra[3].contains("\"--session\",\"cmd-open\""), "the open id: {}", extra[3]);
     // Inherited servers ride along as full-table disables (the bundled
     // set at least — the file-configured rest depends on the machine),
-    // plus one plugin disable per owner-enabled plugin.
+    // plus every plugin off by one key (docs/88 C.3).
     let disables = extra.iter().filter(|arg| arg.contains("enabled=false")).count();
     assert!(disables > 0, "inherited servers are silenced: {extra:?}");
+    assert!(extra.iter().any(|arg| arg == "features.plugins=false"), "plugins off: {extra:?}");
     assert!(
         extra.iter().any(|arg| arg.contains("mcp_servers.codex_apps={")),
         "the probe's 97-tool server stays covered: {extra:?}"
@@ -79,20 +80,21 @@ fn with_the_switch_on_no_disables_but_the_bridge() {
     adapter.set_terminal_relay(relay());
     adapter.set_use_own_mcp(true);
     let extra = adapter.spawn_args_for("cmd-open");
-    assert_eq!(extra.len(), 10, "bridge only (command, args, token env) plus the CLAUDE.md fallback and the tool-output limit: {extra:?}");
+    assert_eq!(extra.len(), 12, "bridge only (command, args, token env) plus the CLAUDE.md fallback, the tool-output limit and install suggestions off: {extra:?}");
     assert!(extra[1].starts_with("mcp_servers.baaz.command="));
     assert!(extra[3].contains("\"--session\",\"cmd-open\""));
     assert!(
-        !extra.iter().any(|arg| arg.contains("enabled=false")),
+        !extra.iter().any(|arg| arg.contains("enabled=false") || arg == "features.plugins=false"),
         "opted in means nothing silenced: {extra:?}"
     );
-    // And without a relay the opt-in is bare `app-server` plus the
-    // CLAUDE.md fallback (docs/85 10.2), which every child carries.
+    // And without a relay the opt-in is bare `app-server` plus what every
+    // child carries: the CLAUDE.md fallback (docs/85 10.2), the
+    // tool-output limit and install suggestions off (docs/88 C.4).
     let bare = CodexAdapter::new("codex-must-never-spawn");
     bare.set_use_own_mcp(true);
     assert_eq!(
         bare.spawn_args_for("cmd-open"),
-        [provider_codex::claude_md_fallback(), provider_codex::tool_output_limit()].concat(),
+        [provider_codex::claude_md_fallback(), provider_codex::tool_output_limit(), provider_codex::terminal::tool_suggest_off()].concat(),
         "opted in, no relay: bare"
     );
 }
