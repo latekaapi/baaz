@@ -127,7 +127,7 @@ fn parse_iso_utc(text: &str) -> Option<i64> {
     let (date, rest) = text.split_once('T')?;
     let mut ymd = date.split('-').map(|part| part.parse::<i64>().ok());
     let (year, month, day) = (ymd.next()??, ymd.next()??, ymd.next()??);
-    let split = rest.find(|c| c == 'Z' || c == '+' || c == '-')?;
+    let split = rest.find(['Z', '+', '-'])?;
     let (clock, offset) = rest.split_at(split);
     let mut hms = clock.split(':');
     let hour: i64 = hms.next()?.parse().ok()?;
@@ -209,7 +209,7 @@ impl AccountSnapshot {
     /// flag, so it always wins; the polled reply fills the meter before
     /// the first turn (docs/85 16.1).
     pub fn observe_polled(&mut self, info: RateLimitInfo) {
-        if self.latest.as_ref().map_or(true, |latest| latest.rate_limit_type.is_empty()) {
+        if self.latest.as_ref().is_none_or(|latest| latest.rate_limit_type.is_empty()) {
             self.observe(info);
         }
     }

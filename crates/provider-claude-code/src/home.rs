@@ -464,7 +464,7 @@ mod tests {
             std::fs::write(dir.join(name).join("SKILL.md"), "---\nname: x\n---\n").unwrap();
         }
         let before: Vec<_> = walk(&repo);
-        let folder = repo_skills_dir(&state, &repo.join("src/deep"), &[personal.clone()]).unwrap().expect("a folder");
+        let folder = repo_skills_dir(&state, &repo.join("src/deep"), std::slice::from_ref(&personal)).unwrap().expect("a folder");
         assert!(folder.starts_with(state.join("claude-repo-skills")));
         let links = folder.join(".claude/skills");
         let names = |dir: &Path| { let mut n: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect(); n.sort(); n };
@@ -475,7 +475,7 @@ mod tests {
         std::fs::create_dir_all(repo.join(".agents/skills/ship")).unwrap();
         std::fs::write(repo.join(".agents/skills/ship/SKILL.md"), "x").unwrap();
         std::fs::remove_dir_all(repo.join(".agents/skills/deploy")).unwrap();
-        repo_skills_dir(&state, &repo, &[personal.clone()]).unwrap().expect("a folder");
+        repo_skills_dir(&state, &repo, std::slice::from_ref(&personal)).unwrap().expect("a folder");
         assert_eq!(names(&links), vec!["ship"], "a gone skill loses its link, a new one gains one");
 
         let bare = root.join("bare");
