@@ -100,27 +100,20 @@ impl PickerDelegate for FolderDelegate {
     }
 }
 
-/// What a model-picker pick asks for.
-#[derive(Clone, Debug)]
-pub(crate) enum ModelPick {
-    /// A model row (or the "Models unavailable" reason row).
-    Model(SharedString),
-    /// A model and one of its effort levels, from the nested submenu.
-    Nested(SharedString, SharedString),
-}
-
-/// The model picker's rows and state, pushed by the session each frame.
+/// The model picker's rows, pushed by the session each frame. A pick is the
+/// row's id: a model, or the "Models unavailable" reason row. Effort is
+/// the composer's own chip, never a submenu here (owner 2026-11-27: the
+/// nested submenu flickered as the pointer crossed rows, and said what the
+/// effort chip already says).
 #[derive(Default)]
 pub(crate) struct ModelDelegate {
-    /// The catalog's rows, each with its effort submenu.
+    /// The catalog's rows.
     pub(crate) rows: Vec<PickerRow>,
-    /// The selected row's effort submenu stands open (→ opens it, ← shuts).
-    pub(crate) sub_open: bool,
 }
 
 impl PickerDelegate for ModelDelegate {
     type Row = PickerRow;
-    type Pick = ModelPick;
+    type Pick = SharedString;
 
     fn match_count(&self) -> usize {
         self.rows.len()
@@ -130,27 +123,19 @@ impl PickerDelegate for ModelDelegate {
         self.rows.get(ix).map(|row| row.id.clone())
     }
 
-    fn confirm(&self, ix: usize) -> Option<ModelPick> {
-        self.match_id(ix).map(ModelPick::Model)
+    fn confirm(&self, ix: usize) -> Option<SharedString> {
+        self.match_id(ix)
     }
 
     fn render_match(&self, ix: usize, _selected: bool) -> PickerRow {
         self.rows[ix].clone()
     }
 
-    fn render_picker(&self, rows: Vec<PickerRow>, frame: PickerFrame, window: &mut Window, cx: &mut Context<ModelPicker>) -> AnyElement {
-        let _ = window;
+    fn render_picker(&self, rows: Vec<PickerRow>, frame: PickerFrame, _window: &mut Window, _cx: &mut Context<ModelPicker>) -> AnyElement {
         let (select, dismiss) = (frame.select.clone(), frame.dismiss.clone());
-        let me = cx.entity().downgrade();
-        let nested = move |model: &SharedString, level: &SharedString, window: &mut Window, cx: &mut gpui::App| {
-            let pick = ModelPick::Nested(model.clone(), level.clone());
-            let _ = me.update(cx, |picker, cx| picker.pick(pick, window, cx));
-        };
         let menu = model_menu("model-menu", rows, frame.selected, true)
             .align_end(true)
-            .open_submenu(self.sub_open.then_some(frame.selected))
             .on_pick(move |id, window, cx| select(id, window, cx))
-            .on_pick_nested(nested)
             .on_close(move |window, cx| dismiss(window, cx));
         let menu = if crate::runtime::captures() { menu.at_rest() } else { menu };
         menu.into_any_element()
@@ -244,8 +229,8 @@ impl SessionView {
     /// Open the model picker with the selection on `selected` (one past
     /// the last row is "no row": the chip names a model the catalog lacks).
     pub(super) fn open_model_picker(&mut self, selected: usize, cx: &mut Context<Self>) {
-        let pick = cx.listener(|this: &mut Self, pick: &ModelPick, _, cx| this.on_model_pick(pick, cx));
-        let delegate = ModelDelegate { rows: self.model_menu_rows(cx), sub_open: false };
+        let pick = cx.listener(|this: &mut Self, pick: &SharedString, _, cx| this.on_model_pick(pick, cx));
+        let delegate = ModelDelegate { rows: self.model_menu_rows(cx) };
         let picker = cx.new(|cx| {
             let mut picker = Picker::new(delegate, cx).on_pick(pick);
             picker.select(selected, cx);
@@ -314,29 +299,15 @@ impl SessionView {
 
     /// A model-picker pick: the model (the reason row restates why there is
     /// no catalog, then closes), or a model and its level in one press.
-    fn on_model_pick(&mut self, pick: &ModelPick, cx: &mut Context<Self>) {
-        match pick {
-            ModelPick::Model(id) if id.as_ref() == MODEL_UNAVAILABLE_ROW => {
-                if let Some(reason) = self.runtime.read(cx).models_error.clone() {
-                    self.toast("Models unavailable", reason, cx);
-                }
-                self.close_menu(cx);
+    fn on_model_pick(&mut self, id: &SharedString, cx: &mut Context<Self>) {
+        if id.as_ref() == MODEL_UNAVAILABLE_ROW {
+            if let Some(reason) = self.runtime.read(cx).models_error.clone() {
+                self.toast("Models unavailable", reason, cx);
             }
-            ModelPick::Model(id) => {
-                let id = id.to_string();
-                self.pick_model(&id, cx);
-            }
-            ModelPick::Nested(model, level) => {
-                let effort = self
-                    .rt(cx).effort_options_for(Some(model.as_ref()))
-                    .options()
-                    .and_then(|options| options.iter().find(|o| crate::overlays::effort_row_id(o.effort) == level.as_ref()).map(|o| o.effort));
-                let model = model.to_string();
-                self.pick_model(&model, cx);
-                if let Some(effort) = effort {
-                    self.pick_effort(effort, cx);
-                }
-            }
+            self.close_menu(cx);
+            return;
         }
+        let id = id.to_string();
+        self.pick_model(&id, cx);
     }
 }

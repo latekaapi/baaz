@@ -2701,10 +2701,10 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
     /// selection two owners — and the check, which marks the session's actual
     /// value, would wander with the mouse. The keyboard owns `selected`; the
     /// pointer owns its own highlight and reports only a click.
-    /// The model picker's rows: the catalog, each model with its effort
-    /// submenu where the provider lists levels (D4), its context limit and
-    /// its `default` / `active` badges; with no catalog and a reason, the
-    /// one reason row (never an empty menu).
+    /// The model picker's rows: the catalog, each model with its context
+    /// limit and its `default` / `active` badges; with no catalog and a
+    /// reason, the one reason row (never an empty menu). Effort is the
+    /// composer's own chip: a row opens no submenu (owner 2026-11-27).
     pub(crate) fn model_menu_rows(&self, cx: &gpui::App) -> Vec<PickerRow> {
         let mut rows: Vec<PickerRow> = self
             .rt(cx).models
@@ -2725,21 +2725,6 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 }
                 if m.is_active {
                     row = row.badge("active");
-                }
-                // D4: a model whose levels the provider lists opens
-                // them as a nested submenu (Default first).
-                if let Some(options) = self.runtime.read(cx).effort_options_for(Some(&m.model_id)).options() {
-                    if options.len() > 1 {
-                        let current = if m.is_active { options.iter().position(|o| o.effort == self.runtime.read(cx).effort) } else { None };
-                        row = row.submenu(PickerSubmenu {
-                            title: format!("Reasoning effort · {}", m.display_label).into(),
-                            rows: options
-                                .iter()
-                                .map(|o| PickerRow::new(crate::overlays::effort_row_id(o.effort), crate::overlays::effort_label(o.effort), o.detail.clone()))
-                                .collect(),
-                            selected: current,
-                        });
-                    }
                 }
                 row
             })
@@ -2784,14 +2769,8 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 // The model picker is its own view (plan 4.6): the rows are
                 // pushed in (it draws right after, in this same frame).
                 let Some(picker) = self.model_picker(cx) else { return Vec::new() };
-                let sub_open = self.overlays.read(cx).menu().is_some_and(|m| m.sub_open);
                 let rows = self.model_menu_rows(cx);
-                picker.update(cx, |picker, cx| {
-                    picker.push_facts(cx, |delegate| {
-                        delegate.rows = rows;
-                        delegate.sub_open = sub_open;
-                    })
-                });
+                picker.update(cx, |picker, cx| picker.push_facts(cx, |delegate| delegate.rows = rows));
                 vec![(ComposerChipAnchor::Model, picker.into_any_element())]
             }
             // The folder picker is its own view too; its rows were pushed

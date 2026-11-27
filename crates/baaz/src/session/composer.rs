@@ -340,21 +340,15 @@ impl SessionRuntime {
     /// providers: changing the model re-derives the list, so the chooser
     /// follows the selection.
     pub(super) fn effort_options(&self) -> EffortOptions {
-        self.effort_options_for(None)
-    }
-
-    /// [`Self::effort_options`] for `model` instead of the session's own —
-    /// a model row's nested submenu in the model picker (D4).
-    pub(super) fn effort_options_for(&self, model: Option<&str>) -> EffortOptions {
         // A catalog that carries its own tiers is read off the row; the
         // others from their CLI's own effort source (5.5 moves these into
         // the adapters' declarations).
         if self.provider_kind().has(provider::ProviderTrait::CatalogEfforts) {
-            return self.muse_effort_options(model);
+            return self.muse_effort_options();
         }
         match self.provider_kind() {
-            ProviderId::ClaudeCode => self.claude_code_efforts(model),
-            _ => self.codex_effort_options(model),
+            ProviderId::ClaudeCode => self.claude_code_efforts(),
+            _ => self.codex_effort_options(),
         }
     }
 
@@ -364,8 +358,8 @@ impl SessionRuntime {
     /// older host, `"unknown"`, or no row at all) offers the whole closed
     /// enum as before — MSP validates the tier. A tier the closed enum
     /// cannot spell is skipped, never fabricated.
-    fn muse_effort_options(&self, model: Option<&str>) -> EffortOptions {
-        let current = model.map(str::to_owned).unwrap_or_else(|| self.model_id());
+    fn muse_effort_options(&self) -> EffortOptions {
+        let current = self.model_id();
         let Some(row) = self.models.iter().find(|row| row.model_id == current) else {
             return EffortOptions::Available(muse_efforts());
         };
@@ -392,10 +386,10 @@ impl SessionRuntime {
         EffortOptions::Available(options)
     }
 
-    /// The model the effort options read: `model` when given, else the
-    /// session's active (or pending) one.
-    fn effort_model<'a>(&'a self, model: Option<&'a str>) -> Option<&'a str> {
-        model.or_else(|| self.models.iter().find(|m| m.is_active).map(|m| m.model_id.as_str())).or(self.pending_model.as_deref())
+    /// The model the effort options read: the session's active (or
+    /// pending) one.
+    fn effort_model(&self) -> Option<&str> {
+        self.models.iter().find(|m| m.is_active).map(|m| m.model_id.as_str()).or(self.pending_model.as_deref())
     }
 
     /// The muted note the effort menu shows when the session's model names
@@ -436,8 +430,8 @@ impl SessionRuntime {
     /// (the level rides `turn/start` and the server validates it — a
     /// rejection banners, never silences); a model whose row names no
     /// levels explains itself instead of opening an empty menu.
-    fn codex_effort_options(&self, model: Option<&str>) -> EffortOptions {
-        let current = self.effort_model(model);
+    fn codex_effort_options(&self) -> EffortOptions {
+        let current = self.effort_model();
         let Some(model) = current else {
             return EffortOptions::Unavailable(
                 "No model is selected, so there is no catalog row to read reasoning levels from."
@@ -530,31 +524,23 @@ impl SessionRuntime {
 }
 
 impl SessionView {
-    /// ← / → in the open menu (D4).
+    /// ← / → in the open menu (D4): the effort slider steps a level.
     pub fn menu_sideways(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let kind = self.overlays.read(cx).menu().map(|m| m.kind);
-        match kind {
-            Some(MenuKind::Effort) => {
-                let levels = self.runtime.read(cx).effort_levels();
-                if levels.is_empty() {
-                    return;
-                }
-                let at = self.runtime.read(cx).effort.and_then(|e| levels.iter().position(|l| *l == e));
-                let next = match (at, delta.signum()) {
-                    (None, 1) => Some(0),
-                    (None, _) => None,
-                    (Some(i), d) => Some((i as isize + d).clamp(0, levels.len() as isize - 1) as usize),
-                };
-                if let Some(next) = next {
-                    self.runtime.update(cx, |rt, cx| rt.set_effort(Some(levels[next]), cx));
-                }
-            }
-            Some(MenuKind::Model) => {
-                self.overlays.update(cx, |overlays, cx| {
-                    overlays.edit_menu(None, |menu| std::mem::replace(&mut menu.sub_open, delta > 0) != (delta > 0), cx);
-                });
-            }
-            _ => {}
+        if self.overlays.read(cx).menu().map(|m| m.kind) != Some(MenuKind::Effort) {
+            return;
+        }
+        let levels = self.runtime.read(cx).effort_levels();
+        if levels.is_empty() {
+            return;
+        }
+        let at = self.runtime.read(cx).effort.and_then(|e| levels.iter().position(|l| *l == e));
+        let next = match (at, delta.signum()) {
+            (None, 1) => Some(0),
+            (None, _) => None,
+            (Some(i), d) => Some((i as isize + d).clamp(0, levels.len() as isize - 1) as usize),
+        };
+        if let Some(next) = next {
+            self.runtime.update(cx, |rt, cx| rt.set_effort(Some(levels[next]), cx));
         }
     }
 }
@@ -570,7 +556,7 @@ impl SessionRuntime {
     /// catalog folded yet the menu offers only `Default` with the note
     /// saying the levels load when the session starts. A level the closed
     /// enum cannot spell is skipped, never fabricated.
-    fn claude_code_efforts(&self, model: Option<&str>) -> EffortOptions {
+    fn claude_code_efforts(&self) -> EffortOptions {
         if self.claude_efforts.is_empty() {
             return EffortOptions::AvailableWithNote {
                 options: vec![EffortOption {
@@ -580,7 +566,7 @@ impl SessionRuntime {
                 note: Self::CLAUDE_PRE_CATALOG_NOTE.to_owned(),
             };
         }
-        let current = self.effort_model(model);
+        let current = self.effort_model();
         if let Some(levels) = current.and_then(|model| self.claude_efforts.get(model)) {
             return Self::claude_row_options(current.unwrap_or("this model"), levels);
         }

@@ -142,7 +142,8 @@ pub enum MenuKind {
     /// Archive. The session id lives on [`Menu::session`]; the screen draws
     /// and drives it.
     SessionRow,
-    /// The right pane's view menu, under the tab row's `＋` (docs/83 §6):
+    /// The right pane's view menu, under the title bar's (or Browse's tab
+    /// row's) `＋` (docs/83 §6):
     /// Changes, Files, Page, Terminal, Tasks, and (in Sessions) the views that
     /// can stack below (docs/82 8.1), the ones showing checked.
     RightViews,
@@ -170,9 +171,7 @@ pub struct Menu {
     /// group row, so the menu anchors under the crumb instead of the
     /// sidebar's content edge.
     pub project_header: bool,
-    /// The menu's submenu is open: the model picker's effort submenu on
-    /// the selected row (→ opens it, ← closes it; D4), the project menu's
-    /// Colour submenu.
+    /// The menu's submenu is open: the project menu's Colour submenu.
     pub sub_open: bool,
     /// For [`MenuKind::SessionRow`]: whose row menu it is. Meaningless for
     /// every other kind.

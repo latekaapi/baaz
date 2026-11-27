@@ -614,17 +614,17 @@ ENTRIES = {
                                       "--steps", "new;model"]},
     "composer-effort":      {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "new;effort"]},
-    # The model menu opened upward from the bottom composer with a row's
-    # reasoning-effort submenu open (owner 2026-10-30: the submenu ran past
-    # the window's bottom edge). `fixture-models` fills a fixed Muse-shaped
-    # catalog offline, `submenu` opens the highlighted row's levels as →
-    # does. Its own state dir, so no other entry's provider pick leaks in.
+    # The model menu opened upward from the bottom composer over a catalog
+    # whose every row lists reasoning levels: no row opens a submenu or
+    # wears a chevron (owner 2026-11-27: effort is the composer's own chip;
+    # the nested submenu flickered as the pointer crossed rows).
+    # `fixture-models` fills a fixed Muse-shaped catalog offline. Its own
+    # state dir, so no other entry's provider pick leaks in.
     # `setprovider:muse` first: since 5.8 a new session starts on the first
-    # connected provider, and the Muse-shaped catalog's submenu does not draw
-    # on a Claude Code composer (Gate 5 found the submenu silently absent).
-    "composer-model-submenu": {"shot": ["--no-connect", "--login", "signed-in",
-                                        "--steps", "new;setprovider:muse;wait:300;fixture-models;model;submenu"],
-                               "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-submenu-state-")}},
+    # connected provider.
+    "composer-model-catalog": {"shot": ["--no-connect", "--login", "signed-in",
+                                        "--steps", "new;setprovider:muse;wait:300;fixture-models;model"],
+                               "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-model-catalog-state-")}},
     # One composer per non-muse lane, reached by the scripted provider
     # pick. `setprovider:` is a setter through the picker's own path —
     # not a toggle — so both runs land on the lane's composer and

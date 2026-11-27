@@ -1659,7 +1659,7 @@ pub(crate) fn changes_screen(
             .child(list)
             .into_any_element()
     };
-    // The sticky row: an open file whose row scrolled under the tab row
+    // The sticky row: an open file whose row scrolled under the title bar
     // while its diff still shows sticks at the top (docs/43 §2.6).
     let sticky = (!clean)
         .then(|| {

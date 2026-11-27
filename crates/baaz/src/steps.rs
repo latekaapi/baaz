@@ -55,8 +55,7 @@
 //! | `setmodel:<id>` | `session/setModel`, without waiting for the catalog |
 //! | `handoff:<provider>` | "Continue in X" as a verb (`muse`, `claude-code`, `codex`), headless: no confirm dialog — the command line already asked. Needs turns, refuses on a pending question or approval, and never fires for the session's own provider; an unknown id fails, free |
 //! | `setprovider:<id>` | the provider menu's row as a verb (`muse`, `claude-code`, `codex`): a fresh session swaps lanes, a session with turns starts a new session on the pick instead and the step fails saying so; an unknown id fails, free |
-//! | `fixture-models` | fill the model menu with a fixed three-row Muse-shaped catalog whose rows open effort submenus (no catalog request), free |
-//! | `submenu` | open the open model menu's highlighted row's submenu (as →); fails when the model menu is closed, free |
+//! | `fixture-models` | fill the model menu with a fixed three-row Muse-shaped catalog, each row listing reasoning levels (no catalog request), free |
 //! | `seteffort:<level>` | the effort menu's row as a verb (`default` clears); an unknown spelling fails, free |
 //! | `compact` | `session/compact` |
 //! | `digest-now` | this session went idle: the application writes its digest when one is due (docs/85 12.4) |
@@ -192,6 +191,7 @@
 //! | `page-eval:<js>` | run `js` in the Browse centre page (no `;` — it separates steps), e.g. `window.scrollTo(0,900)`; free |
 //! | `site-info` | open the site-information panel (the address row's shield) for the centre page; no page fails the step |
 //! | `pointer:<x>,<y>` | dispatch one mouse move to that window point: the pointer resting on a row, so a following `sidebar-scroll-sweep:` shows hover under a scroll |
+//! | `click-at:<x>,<y>` | a real click at that window point: a move, the press, and the release 120 ms later, through the window's own event path (hover, press and selection paint as they do under a hand) — for filming what a click draws, free |
 //! | `transcript-scroll-sweep:<dy,finger_ticks,tail_ticks>` | the transcript's twin of `sidebar-scroll-sweep:`, pushing the active session's own wheel accumulator |
 //! | `overflow` | open the header's ⋯: the session's one menu plus the rows only the open session has (docs/82 8.9); fails with no session open (the header then shows no ⋯) |
 //! | `view-menu` | open the Sessions caption's view menu |
@@ -595,6 +595,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "wheel", run: |this, rest, window, cx| this.step_wheel(rest, window, cx) },
     WindowVerb { verb: "sidebar-wheel", run: |this, rest, window, cx| this.step_sidebar_wheel(rest, window, cx) },
     WindowVerb { verb: "pointer", run: |this, rest, window, cx| this.step_pointer(rest, window, cx) },
+    WindowVerb { verb: "click-at", run: |this, rest, window, cx| this.step_click_at(rest, window, cx) },
     WindowVerb { verb: "page-eval", run: |this, rest, _, cx| {
         let state = this.browse_centre_state(cx).ok_or("no page is open")?;
         state.update(cx, |state, _| state.eval_with_result(u64::MAX, rest));
@@ -1175,7 +1176,6 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "model", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Model, cx); Ok(()) } },
     SessionVerb { verb: "effort", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Effort, cx); Ok(()) } },
     SessionVerb { verb: "fixture-models", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_fixture_models(cx)) },
-    SessionVerb { verb: "submenu", run: |v, _, _, cx| v.step_submenu(cx) },
     SessionVerb { verb: "provider", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Provider, cx); Ok(()) } },
     SessionVerb { verb: "mode", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Mode, cx); Ok(()) } },
     // The new-session row's folder picker (docs/82 6.6), opened as its

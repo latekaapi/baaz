@@ -305,8 +305,9 @@ impl SessionView {
 
 impl SessionRuntime {
     /// `fixture-models`: a fixed three-row catalog shaped like Muse's own
-    /// (owner screenshot 2026-10-30), each row listing reasoning levels so
-    /// it opens a submenu — offline, no catalog request, nothing persisted.
+    /// (owner screenshot 2026-10-30), each row listing reasoning levels (the
+    /// effort chip walks them) — offline, no catalog request, nothing
+    /// persisted.
     pub(crate) fn step_fixture_models(&mut self, cx: &mut Context<Self>) -> StepResult {
         let levels: Vec<String> = ["minimal", "low", "medium", "high", "xhigh"].map(str::to_owned).to_vec();
         let row = |id: &str, label: &str, default: bool, active: bool| ModelCatalogEntry {
@@ -334,23 +335,6 @@ impl SessionRuntime {
 }
 
 impl SessionView {
-    /// `submenu`: open the model menu's highlighted row's submenu, as the
-    /// → key does. Fails when the model menu is not open, or when the
-    /// highlighted row lists no reasoning levels (it has no submenu to
-    /// open).
-    pub(crate) fn step_submenu(&mut self, cx: &mut Context<Self>) -> StepResult {
-        let Some(selected) = self.model_picker(cx).map(|picker| picker.read(cx).selected()) else {
-            return Err("the model menu is not open".into());
-        };
-        if self.runtime.read(cx).models.get(selected).is_none_or(|row| row.efforts.is_empty()) {
-            return Err("the highlighted model row has no submenu".into());
-        }
-        self.overlays.update(cx, |overlays, cx| {
-            overlays.edit_menu(None, |menu| !std::mem::replace(&mut menu.sub_open, true), cx);
-        });
-        Ok(())
-    }
-
     /// `meter`: pin the context meter's breakdown open.
     pub(crate) fn step_meter(&mut self, cx: &mut Context<Self>) -> StepResult {
         // An entry on the overlay stack, drawn by this view's composer.

@@ -7,8 +7,9 @@
 //! hash, the file watch and its task), the open/close snap, the strip's
 //! motion flag, the Files keyboard focus, the drafted PR body waiting for a
 //! window, and the Files context menu. It renders itself (`impl Render`):
-//! `Harness::render` composes the view and seats the pane's tab row
-//! ([`Region::actions`]) in the shell's header, and no longer builds either.
+//! `Harness::render` composes the view and, in Browse, seats the pane's tab
+//! row ([`Region::actions`]) in the shell's header (Sessions has none: each
+//! screen's row is the pane's title bar), and no longer builds either.
 //!
 //! What only the root knows reaches the pane as [`RightFacts`]: the project
 //! the pane reads for, the active session (its view, for "This session" and
@@ -151,7 +152,7 @@ pub(crate) enum RightPaneEvent {
     PullRequestRead { root: PathBuf, branch: String, pr: Option<crate::git_ops::PullRequest> },
     /// The merged card's Archive this session: the open session.
     ArchiveSession,
-    /// The tab row's ＋: the views menu.
+    /// The `＋` (the title bar's, or Browse's tab row's): the views menu.
     OpenViewsMenu,
     /// A Tasks row: show the terminal on the tab its command runs in.
     OpenTerminalTab(String),
@@ -195,8 +196,9 @@ pub(crate) fn lower_drag_share(start: f32, grab: f32, at: f32, height: f32) -> f
     crate::layout::clamp_split(start + (at - grab) / height)
 }
 
-/// The right pane: Changes · Files · Page · Terminal · Tasks on one strip
-/// under its tab row, and the lower pane under it when one stands open.
+/// The right pane: Changes · Files · Page · Terminal · Tasks on one strip,
+/// each screen's own row its title bar, and the lower pane under it when one
+/// stands open.
 pub(crate) struct RightPane {
     /// The last git/diff/filesystem reads, with the roots and instants they
     /// were read for. [`right::render`] draws from this and never touches a
@@ -212,9 +214,6 @@ pub(crate) struct RightPane {
     /// through the shell's `resizing` bypass ([`Self::take_snap`]). User
     /// toggles disarm it, so they keep animating.
     pub(crate) snap: bool,
-    /// D6: the strip is between screens this frame (the Page screen's native
-    /// view hides behind its still picture while it moves).
-    pub(crate) strip_moving: bool,
     /// D6: the Files screen's keyboard focus (↑ ↓ ← → ⏎, ⌘F, /, Esc): the
     /// pane's focus handle.
     pub(crate) focus: FocusHandle,
@@ -280,7 +279,6 @@ impl RightPane {
             resize: RightResizeDrag::restored(width),
             refresh: Refresh::default(),
             snap: false,
-            strip_moving: false,
             focus: cx.focus_handle(),
             pending_pr_body: None,
             overlays,
@@ -623,29 +621,25 @@ impl Region for RightPane {
     }
 
     /// The pane's tab row (docs/83 §6), for the shell to seat in the right
-    /// column's 44 px header in both modes: Changes · Files · Page ·
-    /// Terminal, Tasks while it shows or the session has tasks, the open file's tab while
-    /// Files previews one (strip mode only), `＋`, maximise and ✕.
+    /// column's 44 px header — in Browse only: Changes · Files · Terminal,
+    /// Tasks while it shows or the session has tasks, `＋`, maximise and ✕.
+    /// Sessions has none (owner 2026-11-27): the centre header's toggles
+    /// pick the screen, and each screen's own row is the pane's title bar,
+    /// ending in `＋`, maximise and ✕ ([`Self::pane_controls`]).
     fn actions(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if layout::Layout::get(cx).mode != layout::Mode::Browse {
+            return None;
+        }
         let kind = layout::right_kind(layout::Layout::get(cx));
-        let strip_mode = layout::Layout::get(cx).mode != layout::Mode::Browse && !self.facts.pending_neutral;
-        let open_file = if strip_mode {
-            self.facts.project.as_ref().and_then(|(root, _)| {
-                self.cache.preview_for(root).map(|preview| (root.clone(), SharedString::from(preview.name)))
-            })
-        } else {
-            None
-        };
         let tasks = self.tasks_tab_shown(kind, cx);
-        Some(self.render_tabs(kind, open_file, tasks, cx))
+        Some(self.render_tabs(kind, tasks, cx))
     }
 
-    /// The pane draws over its Page while the strip slides (the page shows
-    /// as its still picture) and while the Page screen shows Baaz's own
+    /// The pane draws over its Page while the Page screen shows Baaz's own
     /// state there: no page yet, couldn't load, crashed, a pushed view, a
     /// pin's note.
     fn covers_page(&self, cx: &App) -> bool {
-        self.strip_moving || self.facts.page.as_ref().is_some_and(|page| self.page_covered(page.read(cx)))
+        self.facts.page.as_ref().is_some_and(|page| self.page_covered(page.read(cx)))
     }
 }
 
@@ -682,9 +676,11 @@ impl Render for RightPane {
         let right_open = layout::Layout::get(cx).right_open && !self.facts.settings_open;
         let browse_mode = layout::Layout::get(cx).mode == layout::Mode::Browse;
         // Q4c: the neutral body — an empty pane that keeps its width, so the
-        // centre never resizes mid-switch.
+        // centre never resizes mid-switch; in Sessions an empty title bar
+        // keeps the header line across the column (it has no tab row).
         if self.facts.pending_neutral {
-            return gpui_kit::base::v_flex().size_full().into_any_element();
+            let bar = (!browse_mode).then(|| aui::workbench::pane_subheader(cx));
+            return gpui_kit::base::v_flex().size_full().children(bar).into_any_element();
         }
         let project = self.facts.project.clone();
         let width = self.resize.width;
@@ -696,11 +692,10 @@ impl Render for RightPane {
         });
         // D6 (docs/43 §2.3): in Sessions the pane is a window onto one of
         // five screens on a strip — Changes · Files · Page · Terminal · Tasks
-        // (docs/82 8.1) — under the
-        // pane's tab row (docs/83 §6), each with its own sub-header if any;
-        // a tab or toggle slides the strip (240 ms ease-out), a two-finger
-        // sideways swipe moves one screen. Browse keeps its pane's body as it
-        // was (out of D6's scope): one body under the same tab row.
+        // (docs/82 8.1) — each with its own row as the pane's title bar (no
+        // tab row, owner 2026-11-27); a toggle or a Shift + two-finger
+        // sideways swipe changes the screen at once. Browse keeps its pane's
+        // body as it was (out of D6's scope): one body under its tab row.
         if browse_mode {
             // B2a-H2b: in Browse the pane never drives a native page — one
             // tab, one page. The Page kind falls back to Changes; the header
@@ -739,8 +734,11 @@ impl Render for RightPane {
             return self.worker_screen(worker, title, window, cx);
         }
         let index = right::screen_index(kind);
-        let pos = aui::workbench::strip_position("right-strip", index, window, cx);
-        self.strip_moving = aui::workbench::strip_moving(pos, index);
+        // The screen changes at once (owner 2026-11-27): the 240 ms slide
+        // carried the outgoing screen across the pane and showed the Page as
+        // a blank still picture on the way — it read as a flicker on every
+        // toggle. The strip stays the one layout; it just never moves.
+        let pos = index as f32;
         let visible = aui::workbench::strip_visible(pos, RightKind::ALL.len());
         // docs/82 8.1: the lower pane's kind, drawn under the strip and
         // never on it — a slide passing its slot shows the ground there, so
@@ -762,7 +760,10 @@ impl Render for RightPane {
                 continue;
             }
             let page = if screen_kind == RightKind::Browser { page.clone() } else { None };
-            screens.push(Some(self.screen(screen_kind, page.as_ref(), right_open, page_menu, base_menu, window, cx)));
+            // The shown screen's row is the pane's title bar, ending in the
+            // pane's own controls (owner 2026-11-27).
+            let controls = (screen_kind == kind).then(|| self.pane_controls(cx));
+            screens.push(Some(self.screen(screen_kind, page.as_ref(), right_open, page_menu, base_menu, controls, window, cx)));
         }
         let swipe = cx.weak_entity();
         let strip = aui::workbench::pane_strip("right-strip", pos, px(width), screens)
@@ -772,7 +773,7 @@ impl Render for RightPane {
             .into_any_element();
         match lower {
             Some(lower) => {
-                let below = self.screen(lower, None, right_open, page_menu, base_menu, window, cx);
+                let below = self.screen(lower, None, right_open, page_menu, base_menu, None, window, cx);
                 self.stacked(strip, lower, below, cx)
             }
             None => strip,
@@ -783,6 +784,8 @@ impl Render for RightPane {
 impl RightPane {
     /// One screen of the pane, on the strip or in the lower pane: the
     /// shared builder ([`right::render_screen`]) with this frame's facts.
+    /// `controls`, the pane's own ([`Self::pane_controls`]), end the shown
+    /// screen's row; the lower pane's screen takes none.
     #[allow(clippy::too_many_arguments)]
     fn screen(
         &mut self,
@@ -791,6 +794,7 @@ impl RightPane {
         right_open: bool,
         page_menu: bool,
         base_menu: bool,
+        controls: Option<AnyElement>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -808,6 +812,7 @@ impl RightPane {
             &self.focus,
             page_menu,
             base_menu,
+            controls,
             cx,
         )
     }
@@ -815,7 +820,7 @@ impl RightPane {
     /// The strip over the lower pane (docs/82 8.1, docs/83 §6): the top
     /// pane takes its share of the height ([`layout::Layout::split`]), a 1
     /// px `line-region` divides them with a grab strip over it, and the
-    /// lower pane carries a 36 px sub-header naming its view with a ✕.
+    /// lower pane carries a 44 px row naming its view with a ✕.
     fn stacked(&mut self, strip: AnyElement, kind: RightKind, below: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         let p = cx.aui().colors;
         let share = layout::Layout::get(cx).split();
@@ -1049,7 +1054,8 @@ impl Harness {
 
 impl RightPane {
     /// docs/85 14.9: a worker beside its lead — a header (its title, its
-    /// provider and mode, Open in centre, ✕) over the worker's own view and
+    /// provider and mode, Open in centre, ✕; the pane's title bar) over the
+    /// worker's own view and
     /// composer band, so a message to it steers where its provider steers
     /// and queues where not, exactly as in the centre.
     fn worker_screen(&mut self, worker: Entity<SessionView>, title: String, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1077,15 +1083,11 @@ impl RightPane {
             // Back to the strip on the kind it shows (select_right leaves
             // the worker).
             .on_click(cx.listener(|_, _, _, cx| cx.emit(RightPaneEvent::Select(crate::layout::right_kind(crate::layout::Layout::get(cx))))));
-        let header = gpui_kit::base::h_flex()
-            .w_full()
-            .h(px(scale::H_MD))
-            .flex_none()
+        // The pane's title bar in Sessions (owner 2026-11-27): the column
+        // header's 44 px on its line, as every screen's row is.
+        let header = aui::workbench::pane_subheader(cx)
             .px(px(scale::SP_3))
             .gap(px(scale::SP_2))
-            .items_center()
-            .border_b_1()
-            .border_color(p.line)
             .child(gpui::div().flex_1().min_w(px(0.0)).truncate().text_role(TextRole::Body).text_color(p.ink).child(title))
             .child(gpui::div().flex_none().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(format!("{provider} · {mode_word}")))
             .child(centre)

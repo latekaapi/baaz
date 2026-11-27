@@ -286,17 +286,6 @@ impl Harness {
         Ok(())
     }
 
-    /// `sidebar-wheel:<dy>[,n]`: the sidebar-scroll instrument. Dispatch
-    /// n synthetic wheel events (default 1) at a sidebar
-    /// point — x = 100 sits in the sessions list at the default width, y =
-    /// 40 % of the window height — synchronously, so one step lands between
-    /// two frames: the burst shape a trackpad really delivers, which
-    /// `--steps wheel:` (window centre, transcript) can never hit. Logs the
-    /// sidebar offset before/after plus the pane and root renders drained
-    /// since the last call — pair with `wait:<ms>` and a trailing
-    /// `sidebar-wheel:0,0` to read a burst's renders after its frames paint
-    /// (renders land on frames, not inside the dispatch). Free: no turn, no
-    /// wire.
     /// `pointer:<x>,<y>`: dispatch one mouse move to window point (x, y) —
     /// the pointer resting on a row, for captures of hover under a scroll
     /// (`sidebar-scroll-sweep:`). An unparseable point fails the step.
@@ -314,6 +303,44 @@ impl Harness {
         Ok(())
     }
 
+    /// `click-at:<x>,<y>`: a real click at window point (x, y) — a mouse
+    /// move, the press, and the release 120 ms later, dispatched through the
+    /// window as the platform's events are, so hover, press and selection
+    /// paint as under a hand (owner 2026-11-27: the sidebar's click flicker
+    /// was found by filming these). An unparseable point fails the step.
+    /// Free: no turn, no wire.
+    pub(crate) fn step_click_at(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
+        let (x, y) = rest
+            .split_once(',')
+            .and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?)))
+            .ok_or_else(|| format!("`{rest}` is not a window point x,y"))?;
+        let position = point(px(x), px(y));
+        window.defer(cx, move |window, cx| {
+            window.dispatch_event(PlatformInput::MouseMove(gpui::MouseMoveEvent { position, ..Default::default() }), cx);
+            window.dispatch_event(PlatformInput::MouseDown(gpui::MouseDownEvent { position, button: gpui::MouseButton::Left, click_count: 1, ..Default::default() }), cx);
+        });
+        let handle = window.window_handle();
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(120)).await;
+            let _ = handle.update(cx, |_, window, cx| {
+                window.dispatch_event(PlatformInput::MouseUp(gpui::MouseUpEvent { position, button: gpui::MouseButton::Left, click_count: 1, ..Default::default() }), cx);
+            });
+        })
+        .detach();
+        Ok(())
+    }
+
+    /// `sidebar-wheel:<dy>[,n]`: the sidebar-scroll instrument. Dispatch
+    /// n synthetic wheel events (default 1) at a sidebar
+    /// point — x = 100 sits in the sessions list at the default width, y =
+    /// 40 % of the window height — synchronously, so one step lands between
+    /// two frames: the burst shape a trackpad really delivers, which
+    /// `--steps wheel:` (window centre, transcript) can never hit. Logs the
+    /// sidebar offset before/after plus the pane and root renders drained
+    /// since the last call — pair with `wait:<ms>` and a trailing
+    /// `sidebar-wheel:0,0` to read a burst's renders after its frames paint
+    /// (renders land on frames, not inside the dispatch). Free: no turn, no
+    /// wire.
     pub(crate) fn step_sidebar_wheel(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         let (dy_text, n_text) = rest.split_once(',').unwrap_or((rest, "1"));
         let dy: f32 = dy_text.trim().parse().map_err(|_| format!("`{dy_text}` is not a wheel delta"))?;
