@@ -1,8 +1,8 @@
 //! The service's answers to the four session and memory tools (docs/85
 //! 12.3): `session_search`, `session_read`, `memory_save`, `memory_edit`.
 //!
-//! Each runs on a worker thread (search.db, baaz.db and the transcript
-//! store are never read on the UI thread) and answers its reply channel
+//! Each runs on a worker thread (baaz.db and the transcript store, which
+//! holds the search tables, are never read on the UI thread) and answers its reply channel
 //! itself. The calling session is the bridge's, never the agent's word
 //! (rule 20): its id and project root come from the service's registry.
 
@@ -109,9 +109,9 @@ fn read(params: &Value, current: &str) -> Result<Value, String> {
         return Err("that is a side session; it has nothing to read".into());
     }
     let state = crate::store::support_dir();
-    // A session Baaz never opened is read from the provider's own file
-    // (docs/87 18.7), text only.
-    let file = baaz_core::provider_search::stored_file(&facts.provider, &session);
+    // A session Baaz never opened (or one the provider has moved past) is
+    // read from the provider's own file (docs/87 18.7), text only.
+    let file = baaz_core::transcripts::stored_file(&facts.provider, &session);
     let turns = baaz_core::transcripts::with_store(&state, |conn| baaz_core::transcripts::read_or_fold(conn, &facts.provider, &session, file.as_deref()))
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?

@@ -45,7 +45,7 @@ impl Harness {
         self.refresh_search(cx);
     }
 
-    /// Re-query `search.db` off the UI thread, latest keystroke wins.
+    /// Re-query the search tables off the UI thread, latest keystroke wins.
     ///
     /// A no-op unless the search palette is open: typing anywhere else must
     /// not touch the disk. When the Sessions view menu narrowed search to the
@@ -106,7 +106,7 @@ impl Harness {
     /// project terms the palette shows, every member's transcript text as
     /// the matchable body. Pure over the harness state so tests can pin
     /// the rows without a window; [`Self::rebuild_search_index`] writes
-    /// them to `search.db` (`docs/22-handoff.md` §8.4).
+    /// them to the store's search tables (`docs/22-handoff.md` §8.4).
     #[cfg(feature = "probe")]
     #[cfg(test)]
     pub(crate) fn search_session_rows(&self, cx: &gpui::App) -> Vec<crate::search::SessionRow> {
@@ -114,7 +114,7 @@ impl Harness {
     }
 
     /// [`Self::search_session_rows`] with what [`crate::search::sync_sessions`]
-    /// needs beside each row: the index ids whose transcript text is the
+    /// needs beside each row: the sessions whose stored words are the
     /// body (fetched only when the row is written), and a fingerprint of
     /// everything that decides what is written — the row's own words and
     /// each body source's `updated_at_us`. No body text is read or cloned
@@ -402,7 +402,7 @@ impl Harness {
         SEARCH_SCOPED_REBUILDS.get()
     }
 
-    /// Rebuild the session half of `search.db` off the UI thread.
+    /// Rebuild the session half of the search tables off the UI thread.
     ///
     /// Runs at boot and after each index refresh; the files half is never
     /// touched here, so recorded files survive a rebuild. When the rebuild
@@ -439,7 +439,9 @@ impl Harness {
                 .map(|(row, body_ids, fingerprint)| crate::search::SyncRow { row, body_ids, fingerprint: *fingerprint })
                 .collect();
             let _ = crate::search::with_writer(|connection| {
-                crate::search::upsert_sessions(connection, &synced, &|ids| search_bodies(&index_path, &provider_of, ids))
+                crate::search::upsert_sessions(connection, &synced, &|connection, ids| {
+                    crate::transcripts::search_words(connection, &index_path, &provider_of, &crate::transcripts::Homes::for_app(), ids)
+                })
             });
         };
         self.wire_call(cx, work, |this: &mut Self, (), cx| {
@@ -471,7 +473,9 @@ impl Harness {
                 })
                 .collect();
             let Ok(stats) = crate::search::with_writer(|connection| {
-                crate::search::sync_sessions(connection, &synced, &|ids| search_bodies(&index_path, &provider_of, ids))
+                crate::search::sync_sessions(connection, &synced, &|connection, ids| {
+                    crate::transcripts::search_words(connection, &index_path, &provider_of, &crate::transcripts::Homes::for_app(), ids)
+                })
             }) else {
                 return;
             };
@@ -544,25 +548,4 @@ impl Harness {
         }
         rows
     }
-}
-
-/// The transcript words for `ids`, whichever provider holds each: Muse's
-/// from its index's `search_text`, Claude Code's and Codex's from their
-/// stored transcripts (`provider_of`, from [`Harness::search_body_owners`]).
-/// Blocking; the search sync calls it off the UI thread, for changed rows
-/// only.
-pub(crate) fn search_bodies(
-    index_path: &std::path::Path,
-    provider_of: &std::collections::HashMap<String, String>,
-    ids: &[String],
-) -> std::collections::HashMap<String, String> {
-    let (lanes, muse): (Vec<&String>, Vec<&String>) = ids.iter().partition(|id| provider_of.contains_key(*id));
-    let muse: Vec<String> = muse.into_iter().cloned().collect();
-    let mut bodies = crate::index::read_bodies(index_path, &muse);
-    let sources: Vec<crate::provider_search::BodySource> = lanes
-        .into_iter()
-        .map(|id| crate::provider_search::BodySource { session_id: id.clone(), provider: provider_of[id].clone() })
-        .collect();
-    bodies.extend(crate::provider_search::read_bodies(&sources));
-    bodies
 }

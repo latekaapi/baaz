@@ -1420,8 +1420,8 @@ fn p3_search_finds_every_providers_sessions_by_their_words(cx: &mut gpui::TestAp
                     .iter()
                     .map(|(row, body_ids, fingerprint)| crate::search::SyncRow { row, body_ids, fingerprint: *fingerprint })
                     .collect();
-                crate::search::sync_sessions(connection, &synced, &|ids| {
-                    crate::app::find::search_bodies(&index_path, &owners, ids)
+                crate::search::sync_sessions(connection, &synced, &|connection, ids| {
+                    crate::transcripts::search_words(connection, &index_path, &owners, &crate::transcripts::Homes::for_app(), ids)
                 })
                 .expect("sync")
             };

@@ -137,9 +137,6 @@ impl ProviderFactory for CodexFactory {
         crate::rollout::stored_rollouts(home)
     }
 
-    fn stored_transcript(&self, raw: &str) -> String {
-        crate::rollout::search_text(raw)
-    }
 }
 
 fn not_installed() -> ProviderError {

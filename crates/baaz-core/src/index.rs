@@ -352,14 +352,15 @@ pub fn save_cache(path: &std::path::Path, index: &HashMap<String, IndexEntry>) -
     serde_json::to_vec(index).ok().is_some_and(|bytes| crate::store::write_atomic(path, &bytes).is_ok())
 }
 
-/// Muse's `search_text` for `ids`, keyed by session id; ids with no row (or
-/// no text) are absent.
+/// Muse's `search_text` for `ids` with the `updated_at_us` it belongs to,
+/// keyed by session id; ids with no row (or no text) are absent.
 ///
 /// Blocking, so call it off the UI thread. This is the only read of the
-/// transcript text, and the search sync asks only for sessions whose
+/// transcript text: the search sync copies it into Baaz's store
+/// ([`crate::transcripts::fill`], docs/87 18.8) for the sessions whose
 /// fingerprint changed — after boot that is the session a turn just
 /// finished in, not all of them. Every failure mode is an empty map.
-pub fn read_bodies(path: &std::path::Path, ids: &[String]) -> HashMap<String, String> {
+pub fn read_bodies(path: &std::path::Path, ids: &[String]) -> HashMap<String, (String, Option<i64>)> {
     let mut out = HashMap::new();
     if ids.is_empty() {
         return out;
@@ -374,15 +375,15 @@ pub fn read_bodies(path: &std::path::Path, ids: &[String]) -> HashMap<String, St
     // SQLite's default bound on host parameters is 32 766; stay well under.
     for chunk in ids.chunks(500) {
         let marks = vec!["?"; chunk.len()].join(",");
-        let sql = format!("SELECT session_id, search_text FROM sessions WHERE session_id IN ({marks})");
+        let sql = format!("SELECT session_id, search_text, updated_at_us FROM sessions WHERE session_id IN ({marks})");
         let Ok(mut statement) = connection.prepare(&sql) else { return out };
         let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<i64>>(2).ok().flatten()))
         });
         if let Ok(rows) = rows {
-            for (id, text) in rows.filter_map(Result::ok) {
+            for (id, text, stamp) in rows.filter_map(Result::ok) {
                 if let Some(text) = text.filter(|t| !t.is_empty()) {
-                    out.insert(id, text);
+                    out.insert(id, (text, stamp));
                 }
             }
         }
@@ -515,8 +516,8 @@ mod tests {
         assert!(index.values().all(|entry| entry.search_text.is_empty()), "no body rides the sidebar read");
         let bodies = read_bodies(&path, &["s1".to_owned(), "s3".to_owned(), "missing".to_owned()]);
         assert_eq!(bodies.len(), 2, "only the asked-for rows that exist");
-        assert_eq!(bodies["s1"], "body one");
-        assert_eq!(bodies["s3"], "body three");
+        assert_eq!(bodies["s1"].0, "body one");
+        assert_eq!(bodies["s3"].0, "body three");
         assert!(read_bodies(&path, &[]).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }

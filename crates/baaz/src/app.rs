@@ -736,7 +736,7 @@ pub struct Harness {
     /// these tabs. Dropped (and its socket removed) on quit.
     pub(crate) terminal_service: TerminalService,
     /// The search palette's query field. The card's own query row shows the
-    /// result count; typing here re-queries `search.db` off the UI thread.
+    /// result count; typing here re-queries the search tables off the UI thread.
     /// There is no sidebar quick-filter: ⌘⇧F and the sidebar search icon open
     /// only this palette, so the two can never be open together.
     pub(crate) search_query: Entity<TextareaState>,

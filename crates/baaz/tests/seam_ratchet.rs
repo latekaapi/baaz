@@ -474,7 +474,7 @@ const WIRE_EXCEPTIONS: [(&str, &str); 18] = [
     ("settings_providers.rs", "Codex's device-code sign-in drives its child from the app"),
     ("app/sessions/provider_open.rs", "the transcript Trash reads each CLI home"),
     ("baaz-core/import.rs", "the import scan reads each CLI's stored transcripts"),
-    ("baaz-core/provider_search.rs", "search reads each CLI's stored transcripts"),
+    ("baaz-core/transcripts/files.rs", "the store finds each CLI's stored transcripts"),
     ("baaz-core/provider_status.rs", "the install and sign-in probes (not yet a factory method)"),
     ("baaz-core/session_migration.rs", "the legacy-home migration moves each CLI's files"),
     ("baaz-core/sessions.rs", "forget finds each CLI's transcript files"),

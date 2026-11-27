@@ -103,9 +103,6 @@ impl ProviderFactory for ClaudeCodeFactory {
         crate::history::stored_transcripts(home)
     }
 
-    fn stored_transcript(&self, raw: &str) -> String {
-        crate::history::search_text(raw)
-    }
 }
 
 fn not_installed() -> ProviderError {
