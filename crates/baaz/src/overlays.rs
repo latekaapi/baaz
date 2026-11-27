@@ -142,7 +142,8 @@ pub enum MenuKind {
     /// Archive. The session id lives on [`Menu::session`]; the screen draws
     /// and drives it.
     SessionRow,
-    /// The right pane's view menu, under the tab row's `＋` (docs/83 §6):
+    /// The right pane's view menu, under the title bar's (or Browse's tab
+    /// row's) `＋` (docs/83 §6):
     /// Changes, Files, Page, Terminal, Tasks, and (in Sessions) the views that
     /// can stack below (docs/82 8.1), the ones showing checked.
     RightViews,

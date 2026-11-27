@@ -532,12 +532,14 @@ impl TerminalDock {
     }
 
     /// The right pane's Terminal view (docs/82 8.1, docs/83 §6): the
-    /// terminal's header as the screen's 36 px sub-header over the grid,
-    /// filling the screen — the screen's size is the terminal's, so no
-    /// spring, height or maximise. With no tab the pane's empty state
-    /// offers a new one. The pane's screen wrapper names the landmark
-    /// ("Right pane: Terminal"), as it does every screen's.
-    pub(crate) fn pane_screen(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// terminal's header as the screen's 44 px row over the grid, filling
+    /// the screen — the screen's size is the terminal's, so no spring,
+    /// height or maximise. `controls`, the pane's own, end that row (the
+    /// pane's title bar, owner 2026-11-27); with no project they stay for
+    /// the caller. With no tab the pane's empty state offers a new one. The
+    /// pane's screen wrapper names the landmark ("Right pane: Terminal"), as
+    /// it does every screen's.
+    pub(crate) fn pane_screen(&mut self, id: &'static str, controls: &mut Option<AnyElement>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(TerminalBody { header, grid }) = self.body(window, cx) else {
             return state_block("right-terminal-noproject", IconName::Terminal, "No project")
                 .line("Open or add a project to use its terminal.")
@@ -556,7 +558,7 @@ impl TerminalDock {
         };
         let frame = v_flex()
             .size_full()
-            .child(pane_subheader(cx).pr(px(scale::SP_2)).child(header))
+            .child(pane_subheader(cx).pr(px(scale::SP_2)).child(header).children(controls.take()))
             .child(div().flex_1().min_h(px(0.0)).w_full().relative().overflow_hidden().bg(p.term_bg).child(body));
         self.keyed(frame, cx).id(id).into_any_element()
     }

@@ -31,8 +31,9 @@ impl RightPane {
         };
     }
 
-    /// Whether the tab row carries Tasks: while it shows, or while the open
-    /// session has any task listed (docs/83 §6: each open view is a tab).
+    /// Whether Browse's tab row carries Tasks: while it shows, or while the
+    /// open session has any task listed (docs/83 §6: each open view is a
+    /// tab). Sessions reaches Tasks through the title bar's `＋`.
     pub(crate) fn tasks_tab_shown(&self, shown: crate::layout::RightKind, cx: &gpui::App) -> bool {
         if shown == crate::layout::RightKind::Tasks {
             return true;

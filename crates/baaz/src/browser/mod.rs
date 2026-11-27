@@ -154,10 +154,12 @@ fn window_content_bounds(window: &Window) -> Bounds<Pixels> {
 /// The browser pane's page in window coordinates, derived from the window's
 /// content box: the right column hangs off the content's right edge,
 /// `right_width` wide, its first pixel the divider; the page sits under the
-/// pane's tab row (the column's 44 px header) and the Page's 36 px nav row
-/// ([`aui::workbench::PAGE_NAV_H`]). Pure so tests can drive it.
+/// Page's nav row ([`aui::workbench::PAGE_NAV_H`]), which is the pane's
+/// title bar at the column's top — Sessions has no tab row over it (owner
+/// 2026-11-27), and Browse's pane never shows a page. Pure so tests can
+/// drive it.
 pub(crate) fn browser_page_bounds(content: Bounds<Pixels>, right_width: Pixels) -> Bounds<Pixels> {
-    let bar = gpui::px(aui_tokens::scale::BAR_DEFAULT + aui::workbench::PAGE_NAV_H);
+    let bar = gpui::px(aui::workbench::PAGE_NAV_H);
     Bounds {
         origin: Point {
             x: content.origin.x + content.size.width - right_width + gpui::px(DIVIDER_PX),
@@ -753,9 +755,9 @@ mod tests {
         };
         let pane = browser_page_bounds(content, gpui::px(400.0));
         assert_eq!(f32::from(pane.origin.x), 1041.0, "past the column's 1 px divider");
-        assert_eq!(f32::from(pane.origin.y), 80.0, "under the pane's 44 px tab row and the 36 px nav row");
+        assert_eq!(f32::from(pane.origin.y), 44.0, "under the 44 px nav row, the pane's title bar (no tab row over it)");
         assert_eq!(f32::from(pane.size.width), 399.0);
-        assert_eq!(f32::from(pane.size.height), 900.0 - 80.0);
+        assert_eq!(f32::from(pane.size.height), 900.0 - 44.0);
     }
 
     #[test]

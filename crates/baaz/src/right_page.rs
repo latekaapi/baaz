@@ -1,5 +1,5 @@
 //! D6's Page screen in Baaz (docs/43 §2.7): the session's one page under its
-//! 36 px nav row (the screen's sub-header under the pane's tab row); "No page yet" with an address field before the agent (or
+//! 44 px nav row (the pane's title bar, ending in the pane's controls); "No page yet" with an address field before the agent (or
 //! the person) opens one; Baaz's own "This page couldn’t load" over a failed
 //! or crashed page. The pill and the notes panel float over the native page
 //! in their own window (`overlay.rs`, `OverlayKind::PageFloat`).
@@ -124,7 +124,7 @@ pub(crate) fn recent_rows(state: &WebviewState) -> Vec<RecentRow> {
 }
 
 /// Whether the Page screen shows a page (not the "No page yet" state): then
-/// its nav row is the screen's sub-header under the tab row.
+/// its nav row is the screen's row, the pane's title bar.
 pub(crate) fn shows_page(state: Option<&Entity<WebviewState>>, cx: &gpui::App) -> bool {
     state.is_some_and(|s| !is_blank(&s.read(cx).url()))
 }
@@ -176,7 +176,17 @@ pub(crate) fn recent_menu(rows: &[RecentRow], width: f32, pane: gpui::WeakEntity
 }
 
 /// The Page screen's body.
-pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, address: Option<Entity<InputState>>, menu_open: bool, cx: &mut Context<RightPane>) -> AnyElement {
+/// `controls`, the pane's own, end the nav row while a page shows (the row
+/// is then the pane's title bar); otherwise they stay for the caller.
+pub(crate) fn page_body(
+    browser: BrowserPane<'_>,
+    pane_open: bool,
+    agent: &str,
+    address: Option<Entity<InputState>>,
+    menu_open: bool,
+    controls: &mut Option<AnyElement>,
+    cx: &mut Context<RightPane>,
+) -> AnyElement {
     let Some(state) = browser.state else {
         return if pane_open {
             state_block("right-browser-loading", IconName::Globe, "Opening the page").into_any_element()
@@ -213,6 +223,9 @@ pub(crate) fn page_body(browser: BrowserPane<'_>, pane_open: bool, agent: &str, 
                 this.set_page_menu(open, cx);
             });
         });
+    }
+    if let Some(controls) = controls.take() {
+        pane = pane.trailing(controls);
     }
     let pane = pane.into_any_element();
     // Couldn't load / crashed: Baaz's own page over the page area, under the

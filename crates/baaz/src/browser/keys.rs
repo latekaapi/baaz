@@ -54,8 +54,8 @@ impl Harness {
             return;
         };
         let content = window_content_bounds(window);
-        // The live page sits under the pane's tab row and nav row: a press
-        // on either is outside the page and takes the keyboard back too.
+        // The live page sits under the pane's nav row (its title bar): a
+        // press on it is outside the page and takes the keyboard back too.
         let page = browser_page_bounds(content, gpui::px(self.right_width(cx)));
         if should_release_keyboard_on_mouse_down(
             state.read(cx).holds_keyboard(),

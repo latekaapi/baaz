@@ -680,7 +680,7 @@ pub struct Harness {
     pub(crate) overlays: Entity<Overlays>,
     /// The right pane (task 4.3): its cache, refresh, watch, divider,
     /// focus, menus and drafts live on the entity; the root composes its
-    /// view, seats its tab row, and maps its events
+    /// view, seats its tab row in Browse, and maps its events
     /// ([`crate::right_pane::RightPaneEvent`]).
     pub(crate) right_pane: Entity<crate::right_pane::RightPane>,
     /// Whether the window's traffic lights are hidden now (closed sidebar,
@@ -2330,8 +2330,9 @@ impl Harness {
     /// The transcript row's pane toggles (D6, docs/43 §2.2): Changes ·
     /// Files · Page, 28 px ghost buttons; the one the pane shows is lit and
     /// announces itself pressed; none is lit while the pane is closed. A
-    /// click opens the pane on that screen (sliding the strip when it was
-    /// open on another), and the lit toggle closes it.
+    /// click opens the pane on that screen (at once, when it was open on
+    /// another), and the lit toggle closes it. With no tab row in Sessions
+    /// (owner 2026-11-27) these are how a screen is picked.
     fn pane_toggles(&self, cx: &mut Context<Self>) -> AnyElement {
         let open = crate::layout::Layout::get(cx).right_open && !self.settings_open(cx);
         let shown = layout::right_kind(crate::layout::Layout::get(cx));
@@ -2357,7 +2358,7 @@ impl Harness {
     }
 
     /// A pane toggle's click: the lit one closes the pane; any other opens
-    /// the pane on its screen (the strip slides there when it was open).
+    /// the pane on its screen.
     pub(crate) fn pane_toggle_click(&mut self, kind: layout::RightKind, cx: &mut Context<Self>) {
         let lit = crate::layout::Layout::get(cx).right_open && layout::right_kind(crate::layout::Layout::get(cx)) == kind;
         if lit {
@@ -4656,8 +4657,9 @@ impl Render for Harness {
             // from its own read cache — no subprocess or filesystem I/O of its
             // own — and is deliberately not `.cached(...)` like the sidebar
             // and transcript columns: the facts arrive during this render, so
-            // a retained subtree would draw last frame's. Its tab row goes in
-            // the column's 44 px header (docs/83 §6).
+            // a retained subtree would draw last frame's. In Browse its tab
+            // row goes in the column's 44 px header (docs/83 §6); in Sessions
+            // there is none and the shown screen's row is the title bar.
             let right = self.compose_right_pane(window, cx);
             let header_right_el = self.right_pane.update(cx, |pane, cx| pane.actions(window, cx));
             // One shell for every page (docs/83 §3, flat): the sidebar column
@@ -7738,14 +7740,14 @@ mod tests {
     /// (docs/82 8.1), each id
     /// parsing back to its kind and sitting at its strip index, the active
     /// one lit; Tasks joins them while it shows or the session has tasks
-    /// (docs/82 6.5); a previewed file adds one closable tab that is lit in
-    /// Files' place.
+    /// (docs/82 6.5). Browse only: Sessions has no tab row (owner
+    /// 2026-11-27).
     #[test]
-    fn the_tab_row_maps_to_the_kinds_and_the_open_file() {
+    fn the_tab_row_maps_to_the_kinds() {
         use crate::layout::RightKind;
-        let tabs = crate::right::pane_tab_list(RightKind::Files, None, false);
+        let tabs = crate::right::pane_tab_list(RightKind::Files, false);
         assert_eq!(tabs.len(), 4, "Changes, Files, Page, Terminal — no more without an open file or tasks");
-        let with_tasks = crate::right::pane_tab_list(RightKind::Tasks, None, true);
+        let with_tasks = crate::right::pane_tab_list(RightKind::Tasks, true);
         for (index, tab) in with_tasks.iter().enumerate() {
             let kind = RightKind::parse(&tab.id).unwrap_or_else(|| panic!("tab {:?} parses back to no kind", tab.id));
             assert_eq!(crate::right::screen_index(kind), index, "tab {:?} sits at its own index", tab.id);
@@ -7755,13 +7757,6 @@ mod tests {
         assert_eq!(with_tasks.iter().map(|t| t.label.as_ref()).collect::<Vec<_>>(), ["Changes", "Files", "Page", "Terminal", "Tasks"]);
         assert_eq!(tabs.iter().map(|t| t.label.as_ref()).collect::<Vec<_>>(), ["Changes", "Files", "Page", "Terminal"]);
         assert!(!with_tasks.iter().any(|tab| tab.closable), "the views' tabs are fixed");
-
-        let tabs = crate::right::pane_tab_list(RightKind::Files, Some("right.rs".into()), false);
-        assert_eq!(tabs.len(), 5);
-        assert_eq!((tabs[4].id.as_ref(), tabs[4].label.as_ref(), tabs[4].active, tabs[4].closable), (crate::right::FILE_TAB, "right.rs", true, true));
-        assert!(!tabs[1].active, "Files is not lit while its file shows");
-        let tabs = crate::right::pane_tab_list(RightKind::Changes, Some("right.rs".into()), false);
-        assert!(tabs[0].active && !tabs[4].active, "on Changes the file's tab waits unlit");
     }
 
     /// Maximise flips between the widest pane and the default width.

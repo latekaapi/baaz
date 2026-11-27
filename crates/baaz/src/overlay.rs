@@ -723,8 +723,8 @@ impl Harness {
     /// What the Page screen floats over its native page (docs/43 §2.7),
     /// and where, in screen space: the notes panel 8 in from the page's
     /// foot while annotating, else the agent pill 16 above it while the
-    /// agent acts. `None` when the pane is not on a native page, the strip
-    /// is moving, or nothing floats.
+    /// agent acts. `None` when the pane is not on a native page or nothing
+    /// floats.
     fn wanted_page_float(&self, window: &Window, cx: &App) -> Option<(Bounds<Pixels>, u64)> {
         if self.settings_open(cx) {
             return None;
@@ -733,7 +733,7 @@ impl Harness {
             return self.wanted_agent_line(self.browser.read(cx).centre_page_rect?, window, cx);
         }
         let pane = self.right_pane.read(cx);
-        if !crate::layout::Layout::get(cx).right_open || pane.strip_moving {
+        if !crate::layout::Layout::get(cx).right_open {
             return None;
         }
         if crate::layout::right_kind(crate::layout::Layout::get(cx)) != crate::layout::RightKind::Browser || pane.cache.pushed.contains_key(&2) {

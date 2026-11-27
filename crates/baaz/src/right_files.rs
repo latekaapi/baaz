@@ -357,10 +357,10 @@ pub(crate) fn files_screen(
     (Some(row), body)
 }
 
-/// The preview: a view pushed on Files (docs/43 §2.5) under its own tab
-/// (docs/83 §6). Its sub-header is the file's path (`t-caption`,
-/// `fg-muted`) and its actions; the way back to the tree is the Files tab
-/// (or the file tab's ✕, or Esc).
+/// The preview: a view pushed on Files (docs/43 §2.5). Its row is ← (back
+/// to the tree), the file's path (`t-caption`, `fg-muted`) and its actions
+/// (owner 2026-11-27: the way back sits in the title bar beside the file's
+/// name, not in a tab); Esc goes back too.
 fn preview_screen(
     cache: &RightCache,
     root: &Path,
@@ -374,7 +374,13 @@ fn preview_screen(
     let abs = root.join(&preview.path);
     let open_abs = abs.clone();
     let gone = matches!(&preview.content, PreviewContent::Card { meta } if meta.contains("gone"));
-    let mut row = pushed_row("right-file-row", preview.path.clone());
+    let back_root = root.to_path_buf();
+    let mut row = pushed_row("right-file-row", preview.path.clone()).back_label("Back to files").on_back(cx.listener(move |this: &mut RightPane, _, window, cx| {
+        this.close_file_preview_for(&back_root, cx);
+        // The tree takes the keyboard back, so ↑ ↓ go on from the row that
+        // was open (live 2026-10-19).
+        window.focus(&this.focus.clone(), cx);
+    }));
     if !gone {
         // docs/82 7.5: the one open button follows Settings › General ›
         // "Open files in" ("Open in Zed"), at the first held line (7.1), else
