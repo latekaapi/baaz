@@ -131,10 +131,11 @@ pub(crate) fn shows_page(state: Option<&Entity<WebviewState>>, cx: &gpui::App) -
 
 /// Where the Recent pages menu hangs, inside the screen: under the nav row
 /// from the address field's left edge while a page shows, else at the
-/// screen's top-left corner.
+/// screen's top-left corner. The nav row ends in the pane's controls (its
+/// title bar), so it narrows by their width, as the row itself does.
 pub(crate) fn recent_menu_seat(merged: bool, width: f32) -> (f32, f32) {
     if merged {
-        (aui::workbench::page_address_left(width), aui::workbench::RECENT_MENU_TOP)
+        (aui::workbench::page_address_left(width - aui::workbench::PANE_CONTROLS_W), aui::workbench::RECENT_MENU_TOP)
     } else {
         (6.0, 2.0)
     }
