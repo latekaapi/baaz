@@ -106,7 +106,6 @@ mod pane_tools;
 use baaz_core::plan;
 mod project_menu;
 use baaz_core::projects;
-use baaz_core::provider_search;
 mod provider_model;
 use baaz_core::provider_sessions;
 use baaz_core::provider_status;

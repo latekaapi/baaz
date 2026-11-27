@@ -41,11 +41,11 @@ pub fn support_dir() -> PathBuf {
     crate::runtime::state_dir().path
 }
 
-/// How much the Baaz folder holds on disk, and of it the search index
-/// (docs/85 10.7, Settings › Data). Measured off the caller's thread at most
-/// once a minute; `None` until the first measure lands, and always in a
-/// capture (a capture's folder is throwaway and its size would change every
-/// shot).
+/// How much the Baaz folder holds on disk, and of it the transcript store
+/// with its search tables (docs/85 10.7, docs/87 18.8; Settings › Data).
+/// Measured off the caller's thread at most once a minute; `None` until the
+/// first measure lands, and always in a capture (a capture's folder is
+/// throwaway and its size would change every shot).
 pub fn storage_size_cached() -> Option<StorageSize> {
     static CACHE: std::sync::Mutex<(Option<StorageSize>, Option<std::time::Instant>)> = std::sync::Mutex::new((None, None));
     if crate::runtime::captures() {
@@ -57,7 +57,7 @@ pub fn storage_size_cached() -> Option<StorageSize> {
         cache.1 = Some(std::time::Instant::now());
         let dir = support_dir();
         std::thread::spawn(move || {
-            let measured = StorageSize { total: folder_bytes(&dir), search: crate::search::index_bytes(&dir) };
+            let measured = StorageSize { total: folder_bytes(&dir), search: crate::transcripts::store_bytes(&dir) };
             CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).0 = Some(measured);
         });
     }
@@ -69,7 +69,7 @@ pub fn storage_size_cached() -> Option<StorageSize> {
 pub struct StorageSize {
     /// Everything under the Baaz folder.
     pub total: u64,
-    /// `search.db` with its WAL.
+    /// `transcript.db` (session words and the search tables) with its WAL.
     pub search: u64,
 }
 

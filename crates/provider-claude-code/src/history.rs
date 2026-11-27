@@ -128,75 +128,6 @@ pub fn stored_session_ids(dir: &Path) -> Vec<String> {
     ids.into_iter().map(|(_, id)| id).collect()
 }
 
-/// Bytes of transcript text [`search_text`] keeps: the words a person
-/// searches for are in the prompts and answers, and a session that ran for
-/// days must not put megabytes into the search index.
-pub const SEARCH_TEXT_LIMIT: usize = 256 * 1024;
-
-/// The searchable words of one stored transcript (`<session-id>.jsonl`):
-/// every user prompt and every assistant text block, in order, one per line.
-///
-/// Tool calls, tool results, thinking, attachments and Claude Code's own
-/// bookkeeping lines (`ai-title`, `last-prompt`, `queue-operation`, …) are
-/// left out, as are `isMeta` lines and user text that is a tag block
-/// (`<command-name>`, `<local-command-stdout>`, `<system-reminder>`): what a
-/// person remembers is what they asked and what they were told. A line that
-/// does not parse is skipped, never fatal. Cut at [`SEARCH_TEXT_LIMIT`].
-pub fn search_text(transcript: &str) -> String {
-    let mut out = String::new();
-    for line in transcript.lines() {
-        if out.len() >= SEARCH_TEXT_LIMIT {
-            break;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        let kind = value.get("type").and_then(|v| v.as_str());
-        if !matches!(kind, Some("user" | "assistant")) {
-            continue;
-        }
-        if value.get("isMeta").and_then(|v| v.as_bool()) == Some(true) {
-            continue;
-        }
-        let Some(content) = value.get("message").and_then(|m| m.get("content")) else { continue };
-        let mut push = |text: &str| {
-            let text = text.trim();
-            if text.is_empty() || (kind == Some("user") && text.starts_with('<')) {
-                return;
-            }
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(text);
-        };
-        match content {
-            serde_json::Value::String(text) => push(text),
-            serde_json::Value::Array(blocks) => {
-                for block in blocks {
-                    if block.get("type").and_then(|v| v.as_str()) == Some("text") {
-                        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                            push(text);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    cut_at_char_boundary(&mut out, SEARCH_TEXT_LIMIT);
-    out
-}
-
-/// Truncate `text` to at most `limit` bytes on a char boundary.
-fn cut_at_char_boundary(text: &mut String, limit: usize) {
-    if text.len() <= limit {
-        return;
-    }
-    let mut at = limit;
-    while !text.is_char_boundary(at) {
-        at -= 1;
-    }
-    text.truncate(at);
-}
-
 /// The uuid `--resume-session-at` cuts at for "Branch from here" through
 /// the assistant turn `turn_id` (docs/85 16.3, probed live 26 Nov 2026,
 /// claude 2.1.276): the turn starts at the first `assistant` row whose
@@ -418,32 +349,6 @@ pub(crate) mod tests {
         );
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::remove_dir_all(&config);
-    }
-
-    #[test]
-    fn search_text_keeps_prompts_and_answers_only() {
-        let transcript = [
-            r#"{"type":"user","message":{"role":"user","content":"why does the parser panic"}}"#,
-            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"meta caveat"}}"#,
-            r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>"}}"#,
-            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"secret plan"},{"type":"text","text":"Because the lexer returns None."}]}}"#,
-            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"path":"x"}}]}}"#,
-            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"file body"}]}}"#,
-            r#"{"type":"ai-title","title":"Parser panic"}"#,
-            "not json",
-            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"thanks, fix it"}]}}"#,
-        ]
-        .join("\n");
-        assert_eq!(search_text(&transcript), "why does the parser panic\nBecause the lexer returns None.\nthanks, fix it");
-    }
-
-    #[test]
-    fn search_text_is_capped_on_a_char_boundary() {
-        let long = "é".repeat(SEARCH_TEXT_LIMIT);
-        let line = serde_json::json!({"type":"user","message":{"content": long}}).to_string();
-        let text = search_text(&line);
-        assert!(text.len() <= SEARCH_TEXT_LIMIT);
-        assert!(text.chars().all(|c| c == 'é'));
     }
 
     #[test]

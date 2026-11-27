@@ -432,12 +432,6 @@ pub trait ProviderFactory: Send + Sync {
         StoredSessions::new()
     }
 
-    /// One stored transcript's searchable words: the person's and the
-    /// agent's messages, capped.
-    fn stored_transcript(&self, _raw: &str) -> String {
-        String::new()
-    }
-
     /// The child its sessions share, when they share one
     /// ([`ProviderTrait::SharedChild`]).
     fn shared_child(&self) -> Option<&dyn SharedChild> {

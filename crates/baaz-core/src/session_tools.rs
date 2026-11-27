@@ -2,7 +2,8 @@
 //! past work.
 //!
 //! **Search.** The agent passes 3–5 phrasings of what it is looking for;
-//! each runs against `search.db` (stemmed words and name parts, 11.3) and
+//! each runs against the store's search tables (stemmed words and name
+//! parts, 11.3; every session's words since docs/87 18.8) and
 //! the lists merge by reciprocal rank, so a session several phrasings find
 //! rises. Each result names its title, date, provider, project, digest and
 //! the snippet around the match. The search defaults to the current

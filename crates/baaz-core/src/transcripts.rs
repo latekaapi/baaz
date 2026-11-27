@@ -30,6 +30,9 @@ use std::sync::Mutex;
 
 use rusqlite::{params, Connection, OptionalExtension as _};
 
+pub mod files;
+pub use files::{stored_file, stored_files_in, Homes};
+
 /// The store's format: bump it when a stored turn's shape changes.
 pub const FORMAT: u32 = 1;
 
@@ -73,6 +76,11 @@ pub fn open_at(path: &Path) -> rusqlite::Result<Connection> {
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('format', ?1)", params![FORMAT.to_string()])?;
     }
     Ok(conn)
+}
+
+/// `transcript.db` and its WAL under `state`, in bytes (Settings › Data).
+pub fn store_bytes(state: &Path) -> u64 {
+    ["transcript.db", "transcript.db-wal"].iter().map(|name| std::fs::metadata(state.join(name)).map(|m| m.len()).unwrap_or(0)).sum()
 }
 
 /// The kept connection to this run's store, opened on first use (and again
@@ -217,31 +225,163 @@ pub fn kept_if_fresh(state: &Path, provider: &str, session_id: &str, muse_stamp:
 /// opened. Never equal to [`source_now`], so a reopen never serves it.
 pub const LITE: &str = "lite:";
 
-/// `session_read`'s turns (docs/87 18.7): the store's, when Baaz keeps the
-/// session; else a text-only fold of the provider's own file (`file`: its
-/// jsonl or rollout), kept under a [`LITE`] fingerprint and refolded when
-/// the file has changed since. `None` when neither has turns (Muse keeps no
-/// file Baaz can read). Blocking.
-pub fn read_or_fold(conn: &mut Connection, provider: &str, session_id: &str, file: Option<&Path>) -> rusqlite::Result<Option<Vec<aui_protocol::Turn>>> {
+/// Where one session's words come from when the store fills it
+/// ([`fill`]): Claude Code's and Codex's own file, or Muse's index text
+/// (Muse keeps no file Baaz can fold; its index carries the words) with the
+/// index stamp they belong to.
+pub enum Words<'a> {
+    /// The jsonl or rollout ([`files::stored_file`]); `None` when it is gone.
+    File(Option<&'a Path>),
+    /// Muse's index `search_text` and its `updated_at_us`.
+    Muse { text: &'a str, stamp: Option<i64> },
+}
+
+/// Make sure the store holds `(provider, session_id)`'s words (docs/87 18.7,
+/// 18.8): a real transcript as fresh as its source stands; anything else
+/// (no row, a lite copy of an older file, a real row the provider has moved
+/// past) is replaced by a text-only copy under a [`LITE`] fingerprint, which
+/// a reopen never serves and which never heads a real transcript. With
+/// nothing to copy from (the file is gone, no Muse text), what is kept
+/// stays. Blocking.
+pub fn fill(conn: &mut Connection, provider: &str, session_id: &str, words: Words<'_>) -> rusqlite::Result<()> {
     let row = stored(conn, provider, session_id)?;
-    if row.as_ref().is_some_and(|row| !row.source.starts_with(LITE)) {
-        return read(conn, provider, session_id);
+    let (fresh, lite) = match &words {
+        Words::File(Some(file)) => {
+            let fresh = file_fingerprint(file);
+            if fresh.is_empty() {
+                return Ok(());
+            }
+            let lite = format!("{LITE}{fresh}");
+            (fresh, lite)
+        }
+        Words::File(None) => return Ok(()),
+        Words::Muse { text, stamp } => {
+            if text.trim().is_empty() {
+                return Ok(());
+            }
+            let fresh = source_now("muse", session_id, *stamp);
+            let lite = format!("{LITE}{fresh}");
+            (fresh, lite)
+        }
+    };
+    if row.as_ref().is_some_and(|row| (row.source == fresh && row.turns > 0) || row.source == lite) {
+        return Ok(());
     }
-    let Some(file) = file else { return Ok(None) };
-    let lite = format!("{LITE}{}", file_fingerprint(file));
-    if lite == LITE {
-        return Ok(None);
-    }
-    if row.is_some_and(|row| row.source == lite) {
-        return read(conn, provider, session_id);
-    }
-    let Ok(text) = std::fs::read_to_string(file) else { return Ok(None) };
-    let turns = lite_turns(provider, &text);
+    let turns = match words {
+        Words::File(Some(file)) => match std::fs::read_to_string(file) {
+            Ok(text) => lite_turns(provider, &text),
+            Err(_) => return Ok(()),
+        },
+        Words::File(None) => return Ok(()),
+        Words::Muse { text, .. } => vec![aui_protocol::Turn::Assistant {
+            id: "lite-0".into(),
+            blocks: vec![aui_protocol::Block::text(text.trim())],
+            meta: Default::default(),
+            timestamp: None,
+        }],
+    };
     if turns.is_empty() {
-        return Ok(None);
+        return Ok(());
     }
-    write_from(conn, provider, session_id, &lite, &turns, 0)?;
-    Ok(Some(turns))
+    write_from(conn, provider, session_id, &lite, &turns, 0)
+}
+
+/// `session_read`'s turns (docs/87 18.7): the store's, after [`fill`] has
+/// brought a session Baaz never opened (or one the provider has moved past)
+/// in from its own file (`file`: its jsonl or rollout). `None` when the
+/// store holds nothing for it. Blocking.
+pub fn read_or_fold(conn: &mut Connection, provider: &str, session_id: &str, file: Option<&Path>) -> rusqlite::Result<Option<Vec<aui_protocol::Turn>>> {
+    if provider != "muse" {
+        fill(conn, provider, session_id, Words::File(file))?;
+    }
+    read(conn, provider, session_id)
+}
+
+/// How much of one session's words search keeps (as the providers' own
+/// search text was capped before 18.8).
+pub const WORDS_LIMIT: usize = 256 * 1024;
+
+/// The searchable words of the session the store holds (docs/87 18.8): each
+/// ask and each reply's text, one per line, capped at [`WORDS_LIMIT`] on a
+/// character boundary. Tool cards, thinking and notices are not words.
+/// `None` when the store holds nothing for it.
+pub fn words(conn: &Connection, provider: &str, session_id: &str) -> rusqlite::Result<Option<String>> {
+    use aui_protocol::{Block, Turn};
+    let Some(turns) = read(conn, provider, session_id)? else { return Ok(None) };
+    let mut out = String::new();
+    let mut push = |text: &str| {
+        let text = text.trim();
+        if text.is_empty() || out.len() >= WORDS_LIMIT {
+            return;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(text);
+    };
+    for turn in &turns {
+        match turn {
+            Turn::User { text, .. } => push(text),
+            Turn::Assistant { blocks, .. } => {
+                for block in blocks {
+                    if let Block::Text { text, .. } = block {
+                        push(text);
+                    }
+                }
+            }
+        }
+    }
+    if out.len() > WORDS_LIMIT {
+        let mut at = WORDS_LIMIT;
+        while !out.is_char_boundary(at) {
+            at -= 1;
+        }
+        out.truncate(at);
+    }
+    Ok(Some(out))
+}
+
+/// The search sync's bodies (docs/87 18.8): the words for `ids`, whichever
+/// provider holds each, read from the store after [`fill`]ing it — Muse's
+/// from its index's `search_text` at `index_path` (copied in), Claude
+/// Code's and Codex's from their own files under `homes` (folded to text).
+/// A session the store already keeps as fresh as its source is not read
+/// again. `provider_of` names the Claude Code and Codex sessions (the app's
+/// `search_body_owners`); every other id is Muse's. Ids with no words are
+/// absent. Blocking: the sync calls it off the UI thread, on its own
+/// connection, for changed rows only.
+pub fn search_words(
+    conn: &mut Connection,
+    index_path: &Path,
+    provider_of: &std::collections::HashMap<String, String>,
+    homes: &Homes,
+    ids: &[String],
+) -> std::collections::HashMap<String, String> {
+    let muse: Vec<String> = ids.iter().filter(|id| !provider_of.contains_key(*id)).cloned().collect();
+    for (id, (text, stamp)) in crate::index::read_bodies(index_path, &muse) {
+        if let Err(error) = fill(conn, "muse", &id, Words::Muse { text: &text, stamp }) {
+            crate::baaz_log!("search: muse {id} not kept ({error})");
+        }
+    }
+    for provider in ["claude-code", "codex"] {
+        let wanted: Vec<&str> =
+            ids.iter().filter(|id| provider_of.get(*id).is_some_and(|p| p == provider)).map(String::as_str).collect();
+        if wanted.is_empty() {
+            continue;
+        }
+        let found = stored_files_in(provider, &wanted, homes);
+        for id in wanted {
+            if let Err(error) = fill(conn, provider, id, Words::File(found.get(id).map(PathBuf::as_path))) {
+                crate::baaz_log!("search: {provider} {id} not kept ({error})");
+            }
+        }
+    }
+    ids.iter()
+        .filter_map(|id| {
+            let provider = provider_of.get(id).map_or("muse", String::as_str);
+            words(conn, provider, id).ok().flatten().filter(|text| !text.is_empty()).map(|text| (id.clone(), text))
+        })
+        .collect()
 }
 
 /// A provider file folded to text-only turns: each real prompt a user turn,
@@ -249,7 +389,9 @@ pub fn read_or_fold(conn: &mut Connection, provider: &str, session_id: &str, fil
 /// thinking and injected context are left out). Claude Code's jsonl: a
 /// prompt is [`crate::import::claude_prompt`], a reply an `assistant` line's
 /// `text` blocks (sidechains skipped). Codex's rollout: a prompt is
-/// [`crate::import::codex_prompt`], a reply an assistant `response_item`'s
+/// [`crate::import::codex_prompt`] — or, in a rollout that has no
+/// `user_message` events (an older Codex), a user `response_item`'s text
+/// that is not injected context — a reply an assistant `response_item`'s
 /// `output_text`. Anything else folds to nothing.
 pub fn lite_turns(provider: &str, text: &str) -> Vec<aui_protocol::Turn> {
     use aui_protocol::{Block, Turn};
@@ -267,16 +409,18 @@ pub fn lite_turns(provider: &str, text: &str) -> Vec<aui_protocol::Turn> {
             }
         }
     };
+    let codex_events = provider == "codex" && text.contains("\"user_message\"");
     for line in text.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         let prompt = match provider {
-            "claude-code" => crate::import::claude_prompt(&value),
-            "codex" => crate::import::codex_prompt(&value),
+            "claude-code" => crate::import::claude_prompt(&value).map(str::to_owned),
+            "codex" if codex_events => crate::import::codex_prompt(&value).map(str::to_owned),
+            "codex" => codex_item_prompt(&value),
             _ => return Vec::new(),
         };
         if let Some(prompt) = prompt {
             let id = format!("lite-{}", turns.len());
-            turns.push(Turn::User { id, text: prompt.to_owned(), attachments: Vec::new(), mentions: Vec::new(), timestamp: None });
+            turns.push(Turn::User { id, text: prompt, attachments: Vec::new(), mentions: Vec::new(), timestamp: None });
             continue;
         }
         let replies: Vec<&str> = match provider {
@@ -320,6 +464,26 @@ pub fn lite_turns(provider: &str, text: &str) -> Vec<aui_protocol::Turn> {
     turns
 }
 
+/// A user `response_item`'s typed text in a rollout with no `user_message`
+/// events: its text blocks, less the context blocks Codex injects (they
+/// open with `<`), one per line. `None` when nothing is left.
+fn codex_item_prompt(value: &serde_json::Value) -> Option<String> {
+    if value.get("type").and_then(|v| v.as_str()) != Some("response_item")
+        || value.pointer("/payload/type").and_then(|v| v.as_str()) != Some("message")
+        || value.pointer("/payload/role").and_then(|v| v.as_str()) != Some("user")
+    {
+        return None;
+    }
+    let typed: Vec<&str> = value
+        .pointer("/payload/content")?
+        .as_array()?
+        .iter()
+        .filter_map(|block| block.get("text").and_then(|v| v.as_str()).map(str::trim))
+        .filter(|text| !text.is_empty() && !text.starts_with('<'))
+        .collect();
+    (!typed.is_empty()).then(|| typed.join("\n"))
+}
+
 /// How long an archived session keeps its stored turns (docs/85 11.4).
 pub const KEEP_ARCHIVED_DAYS: i64 = 183;
 
@@ -360,7 +524,7 @@ pub fn forget(conn: &Connection, provider: &str, session_id: &str) -> rusqlite::
 pub fn source_now(provider: &str, session_id: &str, muse_stamp: Option<i64>) -> String {
     match provider {
         "muse" => muse_stamp.map(|stamp| format!("muse:{stamp}")).unwrap_or_default(),
-        _ => crate::provider_search::stored_file(provider, session_id).map(|path| file_fingerprint(&path)).unwrap_or_default(),
+        _ => files::stored_file(provider, session_id).map(|path| file_fingerprint(&path)).unwrap_or_default(),
     }
 }
 
@@ -486,17 +650,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A session Baaz keeps for real is read from the store, never refolded;
-    /// a lite copy never becomes the head of a real transcript; no file and
-    /// no row is no turns.
+    /// A session Baaz keeps for real and as fresh as its file is read from
+    /// the store, never refolded; one the file has moved past is refolded
+    /// (docs/87 18.8: a session continued in the terminal is found by its
+    /// new words); a lite copy never becomes the head of a real transcript;
+    /// no file and no row is no turns.
     #[test]
     fn the_real_store_wins_and_a_lite_copy_never_heads_a_transcript() {
         let dir = temp("lite-real");
         let file = dir.join("rollout.jsonl");
         std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/codex/rollout-stored.ndjson"), &file).expect("fixture");
         let mut conn = open_at(&dir.join("transcript.db")).expect("store");
-        write_from(&mut conn, "codex", "kept", "real-source", &[turn(0), turn(1)], 0).expect("write");
+        write_from(&mut conn, "codex", "kept", &file_fingerprint(&file), &[turn(0), turn(1)], 0).expect("write");
         assert_eq!(read_or_fold(&mut conn, "codex", "kept", Some(&file)).expect("read"), Some(vec![turn(0), turn(1)]));
+        write_from(&mut conn, "codex", "stale", "an-older-file", &[turn(0), turn(1)], 0).expect("write");
+        let refolded = read_or_fold(&mut conn, "codex", "stale", Some(&file)).expect("read").expect("turns");
+        assert!(texts(&refolded)[1].contains("All tests pass: 2/2."), "the file's newer words: {:?}", texts(&refolded));
+        assert!(stored(&conn, "codex", "stale").expect("row").expect("kept").source.starts_with(LITE));
+        // The file gone: what is kept stays.
+        assert_eq!(read_or_fold(&mut conn, "codex", "stale", None).expect("read"), Some(refolded));
         assert_eq!(read_or_fold(&mut conn, "codex", "none", None).expect("read"), None);
         assert_eq!(read_or_fold(&mut conn, "muse", "m", Some(&file)).expect("read"), None, "no lite fold for Muse");
         drop(conn);
@@ -506,6 +678,90 @@ mod tests {
         assert_eq!(lite.map(|turns| turns.len()), Some(2), "a two-turn lite copy");
         record_settled(&dir, "codex", "lite", None, 2, &[turn(2)]);
         assert_eq!(with_store(&dir, |conn| stored(conn, "codex", "lite")).expect("store").expect("row"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Muse index with `rows` of `(id, search_text, updated_at_us)`.
+    fn muse_index(path: &Path, rows: &[(&str, &str, i64)]) {
+        let _ = std::fs::remove_file(path);
+        let conn = Connection::open(path).expect("index");
+        conn.execute_batch("CREATE TABLE sessions(session_id TEXT, session_name TEXT, title TEXT, first_user_prompt TEXT, search_text TEXT, updated_at_us INTEGER, workspace_root TEXT)")
+            .expect("schema");
+        for (id, text, stamp) in rows {
+            conn.execute("INSERT INTO sessions(session_id, search_text, updated_at_us) VALUES (?1, ?2, ?3)", params![id, text, stamp]).expect("row");
+        }
+    }
+
+    /// docs/87 18.8: search's words come from the store, filled first for
+    /// every provider — Muse's index text copied in (a session Baaz never
+    /// opened is found), Claude Code's and Codex's own files folded to text
+    /// (prompts and replies, never tool output) — and a Muse session that
+    /// moved on in the CLI is found by its new words.
+    #[test]
+    fn search_words_fill_the_store_for_every_provider() {
+        let dir = temp("search-words");
+        let (homes, sources) = files::write_synthetic(&dir, 4);
+        let index = dir.join("session-index.db");
+        muse_index(&index, &[("m1", "muse words about the kestrel", 10), ("m-empty", "", 10)]);
+        let mut conn = open_at(&dir.join("transcript.db")).expect("store");
+        let provider_of: std::collections::HashMap<String, String> = sources.iter().map(|(p, id)| (id.clone(), p.clone())).collect();
+        let mut ids: Vec<String> = sources.iter().map(|(_, id)| id.clone()).collect();
+        ids.extend(["m1".to_owned(), "m-empty".to_owned(), "gone".to_owned()]);
+        let words = search_words(&mut conn, &index, &provider_of, &homes, &ids);
+        assert_eq!(words.len(), 5, "four provider files and one Muse text: {:?}", words.keys().collect::<Vec<_>>());
+        let claude = &words[&sources[0].1];
+        assert!(claude.contains("claude prompt 0 turn 3 about the sidebar") && claude.contains("answer 3 for session 0"), "{claude}");
+        assert!(!claude.contains("xxxx"), "tool results are not words");
+        let codex = &words[&sources[1].1];
+        assert!(codex.contains("codex prompt 1 turn 0 about the router") && codex.contains("codex answer 39 for session 1"));
+        assert!(!codex.contains("yyyy"), "tool output is not words");
+        assert_eq!(words["m1"], "muse words about the kestrel");
+        for (provider, id) in [("muse", "m1"), (sources[0].0.as_str(), sources[0].1.as_str())] {
+            assert!(stored(&conn, provider, id).expect("row").expect("kept in the store").source.starts_with(LITE));
+        }
+        // The session went on in the Muse CLI: a new stamp, new words.
+        muse_index(&index, &[("m1", "muse words about the kestrel and the heron", 11)]);
+        let again = search_words(&mut conn, &index, &provider_of, &homes, &["m1".to_owned()]);
+        assert!(again["m1"].ends_with("the heron"), "{again:?}");
+        // A Muse session Baaz keeps for real at that stamp is read from its turns.
+        write_from(&mut conn, "muse", "m1", &source_now("muse", "m1", Some(11)), &[turn(0), turn(1)], 0).expect("write");
+        assert_eq!(search_words(&mut conn, &index, &provider_of, &homes, &["m1".to_owned()])["m1"], "ask 0\nanswer 1");
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The owner's tree is read only for ids Baaz's own homes lack, and
+    /// Baaz's own copy wins (moved from provider_search, docs/50 P3).
+    #[test]
+    fn a_later_home_is_read_only_for_ids_the_first_lacks() {
+        let first = temp("homes-first");
+        let second = temp("homes-second");
+        let (mut homes, sources) = files::write_synthetic(&first, 2);
+        let (owner, owner_sources) = files::write_synthetic(&second, 2);
+        assert_eq!(sources, owner_sources, "the same ids live in both trees");
+        let claude_id = sources[0].1.as_str();
+        let owner_copy = owner.claude[0].join("projects").join("-work-project").join(format!("{claude_id}.jsonl"));
+        homes.claude.extend(owner.claude.clone());
+        let found = stored_files_in("claude-code", &[claude_id], &homes);
+        assert!(found[claude_id].starts_with(&first), "Baaz's own copy wins");
+        std::fs::remove_dir_all(first.join("claude-home")).expect("drop own tree");
+        let found = stored_files_in("claude-code", &[claude_id, "nope"], &homes);
+        assert_eq!(found.get(claude_id), Some(&owner_copy), "an id only the owner's tree holds is found there");
+        assert!(!found.contains_key("nope"));
+        assert!(stored_files_in("muse", &["m1"], &homes).is_empty(), "Muse keeps no file");
+        let _ = std::fs::remove_dir_all(&first);
+        let _ = std::fs::remove_dir_all(&second);
+    }
+
+    #[test]
+    fn words_are_capped_on_a_char_boundary() {
+        let dir = temp("words-cap");
+        let mut conn = open_at(&dir.join("transcript.db")).expect("store");
+        let long = "é".repeat(WORDS_LIMIT);
+        let user = Turn::User { id: "u".into(), text: long, attachments: Vec::new(), mentions: Vec::new(), timestamp: None };
+        write_from(&mut conn, "codex", "long", "1:1", &[user], 0).expect("write");
+        let text = words(&conn, "codex", "long").expect("read").expect("kept");
+        assert!(text.len() <= WORDS_LIMIT && text.chars().all(|c| c == 'é'));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

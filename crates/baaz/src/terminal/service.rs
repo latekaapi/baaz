@@ -788,7 +788,7 @@ impl TerminalService {
             return;
         }
         // docs/85 12.3: past sessions and memory notes, answered on a worker
-        // thread (search.db, baaz.db and the store stay off this one).
+        // thread (baaz.db and the transcript store stay off this one).
         if super::memory_tools::MEMORY_TOOL_NAMES.contains(&job.tool.as_str()) {
             let Job { id, tool, params, reply, .. } = job;
             std::thread::spawn(move || match super::memory_tools::handle(&tool, &params, &root.to_string_lossy(), &session) {

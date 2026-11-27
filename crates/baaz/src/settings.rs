@@ -2185,7 +2185,7 @@ impl SettingsPage {
         // itself, so there is nothing to press.
         let place_text = match self.facts.storage {
             Some(size) => format!(
-                "{} · uses {}, of which the search index {}",
+                "{} · uses {}, of which session text and search {}",
                 data_folder_label(),
                 baaz_core::store::human_bytes(size.total),
                 baaz_core::store::human_bytes(size.search)
@@ -2269,7 +2269,7 @@ impl SettingsPage {
         settings_sections_stack()
             .child(section("Where it lives").rows(where_rows).note(
                 "baaz.db holds sessions, prompt history and usage; layout.json your settings; projects.json your projects; \
-                 Browser/browser.db the browser's history, bookmarks and site settings; search.db the search index. \
+                 Browser/browser.db the browser's history, bookmarks and site settings; transcript.db each session's text and the search index. \
                  Providers keep their transcripts in their own folders.",
             ))
             .child(self.settings_group("Export", vec![export], cx))

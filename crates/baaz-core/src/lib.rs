@@ -57,7 +57,6 @@ pub mod memory_lint;
 pub mod pane_tools;
 pub mod plan;
 pub mod projects;
-pub mod provider_search;
 pub mod provider_sessions;
 pub mod provider_status;
 pub mod providers;

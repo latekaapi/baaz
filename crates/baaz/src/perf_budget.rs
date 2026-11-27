@@ -2,8 +2,9 @@
 //! store the size of the owner's (docs/51 step M).
 //!
 //! A finished turn costs Baaz an index refresh (Muse's `session-index.db`
-//! re-read by stamp) and a search sync (`search.db` brought up to date for
-//! the rows whose fingerprint moved). Both were measured at 34 s and 5.4 s
+//! re-read by stamp) and a search sync (the store's search tables brought up
+//! to date for the rows whose fingerprint moved, their words copied into
+//! the store first). Both were measured at 34 s and 5.4 s
 //! before P0 and at milliseconds after it; this mode re-times them on every
 //! gate run so a regression fails `scripts/perf-budgets.py` instead of
 //! reaching the owner as a hot fan.
@@ -131,8 +132,12 @@ fn sync(
         .iter()
         .map(|(row, body_ids, fingerprint)| SyncRow { row, body_ids, fingerprint: *fingerprint })
         .collect();
-    crate::search::sync_sessions(connection, &synced, &|ids| crate::index::read_bodies(index_path, ids))
-        .unwrap_or_default()
+    let none = HashMap::new();
+    let homes = crate::transcripts::Homes::default();
+    crate::search::sync_sessions(connection, &synced, &|connection, ids| {
+        crate::transcripts::search_words(connection, index_path, &none, &homes, ids)
+    })
+    .unwrap_or_default()
 }
 
 fn ms(at: Instant) -> f64 {
@@ -144,10 +149,11 @@ fn ms(at: Instant) -> f64 {
 pub fn run(dir: &Path) -> serde_json::Value {
     let _ = std::fs::create_dir_all(dir);
     let index_path = dir.join("session-index.db");
-    let search_path = dir.join("search.db");
-    let _ = std::fs::remove_file(&search_path);
-    let _ = std::fs::remove_file(dir.join("search.db-wal"));
-    let _ = std::fs::remove_file(dir.join("search.db-shm"));
+    // Search lives in the transcript store (docs/87 18.8).
+    let search_path = dir.join("transcript.db");
+    for name in ["transcript.db", "transcript.db-wal", "transcript.db-shm", "search.db", "search.db-wal", "search.db-shm"] {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
     if let Err(error) = write_index(&index_path) {
         eprintln!("perf-store: cannot write the synthetic index: {error}");
         std::process::exit(2);
@@ -233,10 +239,13 @@ pub fn run(dir: &Path) -> serde_json::Value {
     assert!(hits.iter().any(|hit| hit.session_id == session_id(SESSIONS / 2)), "the bumped row is findable");
 
     // Claude Code and Codex transcripts read for search (docs/50 P3): the
-    // body fetch a changed provider row pays.
-    let (homes, providers) = crate::provider_search::write_synthetic(dir, PROVIDER_SESSIONS);
+    // body fetch a changed provider row pays — since docs/87 18.8 a fold
+    // of its file into the store, then its words read back.
+    let (homes, providers) = crate::transcripts::files::write_synthetic(dir, PROVIDER_SESSIONS);
+    let provider_of: HashMap<String, String> = providers.iter().map(|(provider, id)| (id.clone(), provider.clone())).collect();
+    let ids: Vec<String> = providers.iter().map(|(_, id)| id.clone()).collect();
     let at = Instant::now();
-    let bodies = crate::provider_search::read_bodies_in(&providers, &homes);
+    let bodies = crate::transcripts::search_words(&mut connection, &index_path, &provider_of, &homes, &ids);
     put("provider_bodies_ms", ms(at));
     assert_eq!(bodies.len(), PROVIDER_SESSIONS, "every synthetic provider transcript yields text");
 

@@ -13,10 +13,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Bytes of transcript text [`search_text`] keeps, as for Claude Code: the
-/// prompts and answers, never megabytes per session.
-pub const SEARCH_TEXT_LIMIT: usize = 256 * 1024;
-
 /// The thread id a rollout file name carries: everything after the
 /// `rollout-<YYYY-MM-DDTHH-MM-SS>-` prefix, minus `.jsonl`. Codex thread
 /// ids are UUIDs (five dash-separated groups), so the id is the last five
@@ -53,54 +49,6 @@ pub fn stored_rollouts(codex_home: &Path) -> HashMap<String, PathBuf> {
     out
 }
 
-/// The searchable words of one rollout: every user prompt and assistant
-/// message, in order, one per line.
-///
-/// Only `response_item` messages with role `user` or `assistant` count;
-/// `developer` instructions, tool calls, reasoning and event lines are
-/// left out, as is user text that is a context block Codex injects
-/// (`<environment_context>`, `<user_instructions>`, `<recommended_plugins>`).
-/// A line that does not parse is skipped. Cut at [`SEARCH_TEXT_LIMIT`].
-pub fn search_text(rollout: &str) -> String {
-    let mut out = String::new();
-    for line in rollout.lines() {
-        if out.len() >= SEARCH_TEXT_LIMIT {
-            break;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        if value.get("type").and_then(|v| v.as_str()) != Some("response_item") {
-            continue;
-        }
-        let Some(payload) = value.get("payload") else { continue };
-        if payload.get("type").and_then(|v| v.as_str()) != Some("message") {
-            continue;
-        }
-        let role = payload.get("role").and_then(|v| v.as_str());
-        if !matches!(role, Some("user" | "assistant")) {
-            continue;
-        }
-        let Some(blocks) = payload.get("content").and_then(|c| c.as_array()) else { continue };
-        for block in blocks {
-            let Some(text) = block.get("text").and_then(|v| v.as_str()).map(str::trim) else { continue };
-            if text.is_empty() || (role == Some("user") && text.starts_with('<')) {
-                continue;
-            }
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(text);
-        }
-    }
-    if out.len() > SEARCH_TEXT_LIMIT {
-        let mut at = SEARCH_TEXT_LIMIT;
-        while !out.is_char_boundary(at) {
-            at -= 1;
-        }
-        out.truncate(at);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,21 +62,6 @@ mod tests {
         assert_eq!(thread_id_of("rollout-2026-10-17T14-28-09-01a14915-3803-7303-aa91-189ad43310e1.json"), None);
         assert_eq!(thread_id_of("notes.jsonl"), None);
         assert_eq!(thread_id_of("rollout-a-b.jsonl"), None);
-    }
-
-    #[test]
-    fn search_text_keeps_prompts_and_answers_only() {
-        let rollout = [
-            r#"{"type":"session_meta","payload":{"id":"t1","cwd":"/work"}}"#,
-            r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"You are Codex"}]}}"#,
-            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n<cwd>/work</cwd>"},{"type":"input_text","text":"rename the flux capacitor"}]}}"#,
-            r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}"}}"#,
-            r#"{"type":"event_msg","payload":{"type":"agent_message","message":"dup"}}"#,
-            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Renamed it to warp coil."}]}}"#,
-            "{broken",
-        ]
-        .join("\n");
-        assert_eq!(search_text(&rollout), "rename the flux capacitor\nRenamed it to warp coil.");
     }
 
     #[test]
