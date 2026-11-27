@@ -230,6 +230,20 @@ pub fn read() -> Overrides {
     .unwrap_or_default()
 }
 
+/// What a window builds its sidebar from (docs/87 18.8): the facts and the
+/// provider records together, from one read of the `session` table — both
+/// live on its rows, and a boot used to run the same query twice for them.
+/// The records follow [`crate::provider_sessions::read`]'s capture rule.
+/// Blocking: it waits for the writer, behind every write queued before it.
+pub fn read_front() -> (Overrides, crate::provider_sessions::ProviderSessionStore) {
+    take_soon();
+    let (meta, records) = crate::db::read(crate::db::path(), |db| crate::db::sessions::load_front(&db.conn, &mut db.front))
+        .and_then(|loaded| loaded.map_err(|error| crate::baaz_log!("db: sessions do not read ({error})")).ok())
+        .unwrap_or_default();
+    let records = if crate::provider_sessions::readable() { records } else { Default::default() };
+    (meta, records)
+}
+
 /// Write the facts now: [`save`], then wait for it. Blocking (on the writer,
 /// never on SQLite here): the quit flush and tests.
 pub fn write(overrides: &Overrides) {

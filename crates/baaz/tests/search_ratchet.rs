@@ -1,4 +1,5 @@
-//! docs/85 10.8: a palette keystroke never opens search.db. The palette's
+//! docs/85 10.8: a palette keystroke never opens the search tables' file
+//! (`transcript.db` since docs/87 18.8). The palette's
 //! query (`refresh_search` in `app/find.rs`) reads through the kept
 //! connection (`search::with_reader`); no search path in the app opens the
 //! file itself.
@@ -15,6 +16,6 @@ fn the_palette_path_opens_no_connection() {
     }
     for file in ["app/find.rs", "session/events.rs"] {
         let text = std::fs::read_to_string(root.join(file)).expect("reads");
-        assert!(!text.contains("search::open()"), "{file} opens search.db per call");
+        assert!(!text.contains("search::open()"), "{file} opens the search file per call");
     }
 }

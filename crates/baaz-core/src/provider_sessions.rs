@@ -73,7 +73,7 @@ pub type ProviderSessionStore = HashMap<String, ProviderSessionRecord>;
 /// `migrate-sessions`): the records it reads are the fixture its temp state
 /// dir was seeded with, never the owner's.
 pub fn read() -> ProviderSessionStore {
-    if crate::runtime::state_isolated() && std::env::var_os("BAAZ_MIGRATION_FIXTURE").is_none() {
+    if !readable() {
         return ProviderSessionStore::new();
     }
     crate::db::read(crate::db::path(), |db| {
@@ -81,6 +81,11 @@ pub fn read() -> ProviderSessionStore {
     })
     .and_then(|loaded| loaded.map_err(|error| crate::baaz_log!("db: records do not read ({error})")).ok())
     .unwrap_or_default()
+}
+
+/// Whether this run reads the records at all ([`read`]'s capture rule).
+pub fn readable() -> bool {
+    !crate::runtime::state_isolated() || std::env::var_os("BAAZ_MIGRATION_FIXTURE").is_some()
 }
 
 /// Write the records now: [`save`], then wait for it. Blocking (on the
