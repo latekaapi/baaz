@@ -526,24 +526,21 @@ impl SessionRuntime {
 impl SessionView {
     /// ← / → in the open menu (D4): the effort slider steps a level.
     pub fn menu_sideways(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let kind = self.overlays.read(cx).menu().map(|m| m.kind);
-        match kind {
-            Some(MenuKind::Effort) => {
-                let levels = self.runtime.read(cx).effort_levels();
-                if levels.is_empty() {
-                    return;
-                }
-                let at = self.runtime.read(cx).effort.and_then(|e| levels.iter().position(|l| *l == e));
-                let next = match (at, delta.signum()) {
-                    (None, 1) => Some(0),
-                    (None, _) => None,
-                    (Some(i), d) => Some((i as isize + d).clamp(0, levels.len() as isize - 1) as usize),
-                };
-                if let Some(next) = next {
-                    self.runtime.update(cx, |rt, cx| rt.set_effort(Some(levels[next]), cx));
-                }
-            }
-            _ => {}
+        if self.overlays.read(cx).menu().map(|m| m.kind) != Some(MenuKind::Effort) {
+            return;
+        }
+        let levels = self.runtime.read(cx).effort_levels();
+        if levels.is_empty() {
+            return;
+        }
+        let at = self.runtime.read(cx).effort.and_then(|e| levels.iter().position(|l| *l == e));
+        let next = match (at, delta.signum()) {
+            (None, 1) => Some(0),
+            (None, _) => None,
+            (Some(i), d) => Some((i as isize + d).clamp(0, levels.len() as isize - 1) as usize),
+        };
+        if let Some(next) = next {
+            self.runtime.update(cx, |rt, cx| rt.set_effort(Some(levels[next]), cx));
         }
     }
 }
