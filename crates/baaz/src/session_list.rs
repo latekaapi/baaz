@@ -217,8 +217,10 @@ pub(crate) struct SessionList {
 impl EventEmitter<SessionListEvent> for SessionList {}
 
 impl SessionList {
-    /// An empty list over the provider records on disk.
+    /// An empty list over the facts and provider records on disk, read
+    /// together ([`crate::sessions::read_front`]).
     pub(crate) fn new() -> Self {
+        let (overrides, provider_sessions) = crate::sessions::read_front();
         Self {
             sessions: Vec::new(),
             epoch: 0,
@@ -228,8 +230,8 @@ impl SessionList {
             chain_index: RefCell::new(None),
             chain_index_builds: Cell::new(0),
             index: std::sync::Arc::new(HashMap::new()),
-            overrides: crate::sessions::Overrides::new(),
-            provider_sessions: crate::provider_sessions::read(),
+            overrides,
+            provider_sessions,
             projects: Projects::default(),
             branches: HashMap::new(),
             sessions_loaded: false,

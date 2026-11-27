@@ -1126,7 +1126,6 @@ impl Harness {
                 this.submit_api_key(cx);
             }
         }));
-        this.session_list.update(cx, |list, _| list.overrides = crate::sessions::read());
         // A damaged store was set aside while booting, or a background write
         // fails later: one toast each (docs/81 A F8, F9). The wake channel
         // is closed in tests, like the status wake: those call
