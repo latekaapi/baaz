@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 
 use aui::composer::{
     command_menu, composer, composer_state_rows, effort_menu, effort_slider_menu, mention_picker, mode_menu,
-    model_menu, plus_menu, provider_menu, queue_strip, PickerSubmenu, CommandItem, CommandSection, ComposerChip,
+    model_menu, plus_menu, provider_menu, queue_strip, CommandItem, CommandSection, ComposerChip,
     ComposerChipAnchor, ComposerChipKind, ComposerChipState, ComposerIntent, MentionIcon, MentionItem, MentionSection,
     PickerRow, PlusMenuItem, QueueIntent, QueueStripRow,
 };

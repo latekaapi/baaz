@@ -170,9 +170,7 @@ pub struct Menu {
     /// group row, so the menu anchors under the crumb instead of the
     /// sidebar's content edge.
     pub project_header: bool,
-    /// The menu's submenu is open: the model picker's effort submenu on
-    /// the selected row (→ opens it, ← closes it; D4), the project menu's
-    /// Colour submenu.
+    /// The menu's submenu is open: the project menu's Colour submenu.
     pub sub_open: bool,
     /// For [`MenuKind::SessionRow`]: whose row menu it is. Meaningless for
     /// every other kind.

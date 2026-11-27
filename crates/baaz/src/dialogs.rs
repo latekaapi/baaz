@@ -883,15 +883,14 @@ impl Harness {
     }
 
 
-    /// ↑/↓ in an open menu, wrapping over the rows the menu actually has.
     /// ← / → in the open composer menu (D4): the effort slider steps a
-    /// level; on the model picker → opens the selected row's effort submenu
-    /// and ← closes it.
+    /// level.
     pub(crate) fn menu_sideways(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(view) = self.active.clone() else { return };
         view.update(cx, |view, cx| view.menu_sideways(delta, cx));
     }
 
+    /// ↑/↓ in an open menu, wrapping over the rows the menu actually has.
     pub(crate) fn move_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(view) = self.active.clone() else { return };
         // The composer draws its menus: the session view (or the menu's

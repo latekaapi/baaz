@@ -2178,11 +2178,6 @@ mod tests {
                 assert_eq!(options[0].detail, "The model's default: Medium.");
                 assert_eq!(options[1].detail, "Quick answers");
                 assert_eq!(view.rt(cx).effort_levels().len(), 3, "the slider walks the same stops");
-                // Another row's submenu reads that row: an older host's.
-                let EffortOptions::Available(options) = view.rt(cx).effort_options_for(Some("untiered")) else {
-                    panic!("an older host still offers effort");
-                };
-                assert_eq!(options.len(), 9, "the full closed enum plus Default");
             });
         });
     }

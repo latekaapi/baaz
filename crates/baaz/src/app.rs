@@ -132,11 +132,9 @@ actions!(
         MenuUp,
         /// Move the open menu's selection down.
         MenuDown,
-        /// ← in the open menu: the effort slider steps down; a model's
-        /// submenu closes (D4).
+        /// ← in the open menu: the effort slider steps down (D4).
         MenuLeft,
-        /// → in the open menu: the effort slider steps up; a model's
-        /// submenu opens (D4).
+        /// → in the open menu: the effort slider steps up (D4).
         MenuRight,
         /// Activate the open menu's selected row.
         MenuConfirm,
