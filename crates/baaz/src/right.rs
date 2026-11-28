@@ -34,7 +34,7 @@ use gpui_kit::base::{h_flex, v_flex};
 
 use crate::app::Harness;
 use crate::right_pane::RightPane;
-use crate::layout::RightKind;
+use crate::layout::{LayoutGlobal as _, RightKind};
 
 /// How many file-tree rows the Files pane will hold. A directory with 10,000
 /// entries must not be read into the pane; the footer names the cap.
@@ -653,11 +653,6 @@ pub(crate) fn pane_tab_list(kind: RightKind, tasks: bool) -> Vec<aui::workbench:
         .collect()
 }
 
-/// Whether the pane stands at the widest the divider allows (maximised).
-pub(crate) fn right_maximised(width: f32) -> bool {
-    width >= aui::shell::RIGHT_MAX_WIDTH - 0.5
-}
-
 /// The glyph a screen wears in its centre-header toggle (docs/43 §2.2).
 pub(crate) fn screen_glyph(kind: RightKind) -> IconName {
     match kind {
@@ -816,12 +811,13 @@ fn title_bar(row: Option<AnyElement>, controls: Option<AnyElement>, kind: RightK
 
 impl RightPane {
     /// The pane's tab row in Browse (docs/83 §6): the tabs
-    /// ([`pane_tab_list`]), `＋` (the view menu), maximise and ✕. What
+    /// ([`pane_tab_list`]), `＋` (the view menu) and ✕. No maximise: Browse's
+    /// centre is the page, and maximise belongs to Sessions (owner
+    /// 2026-11-28; switching to Browse restores the chat). What
     /// [`Region::actions`](crate::region::Region::actions) hands the shell.
     pub(crate) fn render_tabs(&self, kind: RightKind, tasks: bool, cx: &mut Context<Self>) -> AnyElement {
         let tabs = pane_tab_list(kind, tasks);
         let (select, seat) = (cx.weak_entity(), cx.weak_entity());
-        let maximised = right_maximised(self.resize.width);
         let menu_open = self.overlays.read(cx).is_open(crate::overlays::MenuKind::RightViews);
         aui::workbench::pane_tabs("right-tabs", tabs)
             .on_select(move |id, _, cx| {
@@ -837,17 +833,18 @@ impl RightPane {
             .on_add_bounds(move |bounds, _, cx| {
                 let _ = seat.update(cx, |this, cx| this.note_views_menu_seat(bounds, cx));
             })
-            .on_maximise(maximised, cx.listener(|this: &mut RightPane, _: &gpui::ClickEvent, _, cx| this.toggle_right_maximised(cx)))
             .on_close(cx.listener(|_: &mut RightPane, _: &gpui::ClickEvent, _, cx| cx.emit(crate::right_pane::RightPaneEvent::Toggle)))
             .into_any_element()
     }
 
     /// The pane's own controls at the end of the shown screen's row — its
     /// title bar in Sessions (owner 2026-11-27): `＋` (the view menu, which
-    /// also reaches Tasks and the lower pane), maximise and ✕.
+    /// also reaches Tasks and the lower pane), maximise / restore and ✕.
+    /// Maximised, the pane fills the window right of the sidebar and the
+    /// chat hides ([`crate::app::Harness::toggle_right_maximised`]).
     pub(crate) fn pane_controls(&self, cx: &mut Context<Self>) -> AnyElement {
         let seat = cx.weak_entity();
-        let maximised = right_maximised(self.resize.width);
+        let maximised = crate::layout::Layout::get(cx).right_maximised;
         let menu_open = self.overlays.read(cx).is_open(crate::overlays::MenuKind::RightViews);
         aui::workbench::pane_controls("right-controls")
             .on_add(menu_open, cx.listener(|_: &mut RightPane, _: &gpui::ClickEvent, _, cx| {
@@ -856,7 +853,7 @@ impl RightPane {
             .on_add_bounds(move |bounds, _, cx| {
                 let _ = seat.update(cx, |this, cx| this.note_views_menu_seat(bounds, cx));
             })
-            .on_maximise(maximised, cx.listener(|this: &mut RightPane, _: &gpui::ClickEvent, _, cx| this.toggle_right_maximised(cx)))
+            .on_maximise(maximised, cx.listener(|_: &mut RightPane, _: &gpui::ClickEvent, _, cx| cx.emit(crate::right_pane::RightPaneEvent::ToggleMaximise)))
             .on_close(cx.listener(|_: &mut RightPane, _: &gpui::ClickEvent, _, cx| cx.emit(crate::right_pane::RightPaneEvent::Toggle)))
             .into_any_element()
     }
@@ -870,15 +867,6 @@ impl RightPane {
         if !had {
             cx.notify();
         }
-    }
-
-    /// Maximise (docs/83 §6): the pane to the widest the divider allows, or
-    /// back to the default width when it is there already. Persists like a
-    /// drag does.
-    pub(crate) fn toggle_right_maximised(&mut self, cx: &mut Context<Self>) {
-        self.resize.width = if right_maximised(self.resize.width) { aui::shell::RIGHT_WIDTH } else { aui::shell::RIGHT_MAX_WIDTH };
-        self.resize.persist(cx);
-        cx.notify();
     }
 
     /// Flip the directory `id` open or closed for `root` and re-read, so
@@ -2349,7 +2337,6 @@ fn browser_pane(
 #[cfg(feature = "probe")]
 #[cfg(test)]
 mod tests {
-    use crate::layout::LayoutGlobal as _;
 
     #[test]
     fn only_the_foreground_agent_flips_the_visible_pane() {

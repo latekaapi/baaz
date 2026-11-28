@@ -121,6 +121,9 @@ pub(crate) enum RightPaneEvent {
     Select(RightKind),
     /// The ✕: toggle the pane (`Harness::toggle_right`).
     Toggle,
+    /// Maximise / Restore in the title bar
+    /// (`Harness::toggle_right_maximised`).
+    ToggleMaximise,
     /// Open `url` as the session's page (HTML, SVG and PDF rows; the
     /// no-page address field).
     OpenUrl(String),
@@ -964,6 +967,50 @@ impl Harness {
         self.right_pane.read(cx).width()
     }
 
+    /// Whether the pane fills the window right of the sidebar this frame
+    /// (maximised, open, in Sessions, with no Settings page over it).
+    pub(crate) fn right_fills(&self, cx: &App) -> bool {
+        layout::Layout::get(cx).right_fills() && !self.settings_open(cx)
+    }
+
+    /// The pane's width on screen in a `window_w` window: the divider's,
+    /// or — maximised — everything right of the sidebar.
+    pub(crate) fn shown_right_width(&self, window_w: f32, cx: &App) -> f32 {
+        let sidebar = if layout::Layout::get(cx).sidebar_open { self.sidebar_width(cx) } else { 0.0 };
+        layout::shown_right_width(window_w, sidebar, self.right_width(cx), self.right_fills(cx))
+    }
+
+    /// Maximise / Restore (the pane's title bar, owner 2026-11-28):
+    /// maximised, the pane fills everything right of the sidebar — the
+    /// whole window when the sidebar is closed — and the chat column,
+    /// header and all, is hidden; restored, the chat comes back with the
+    /// pane at its own divider width (maximise never touches that width).
+    /// The sidebar keeps its state either way. Only while the pane stands
+    /// open in Sessions with no Settings page over it; anything that
+    /// closes the pane, switches to Browse or activates a session ends it
+    /// (`Layout::settle_right_maximised`, [`Self::restore_right_for_session`]).
+    /// Never stored. Maximising takes the keyboard to the pane, off the
+    /// hidden composer; restoring hands it back to the composer.
+    pub(crate) fn toggle_right_maximised(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open(cx) || !layout::Layout::get(cx).right_open || layout::Layout::get(cx).mode != layout::Mode::Sessions {
+            return;
+        }
+        // Menus belong to the layout they opened in.
+        self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
+        let fills = layout::Layout::stage(cx, |layout| {
+            layout.right_maximised = !layout.right_maximised;
+            layout.right_maximised
+        });
+        crate::baaz_log!("right pane maximised: {fills}");
+        if fills {
+            let focus = self.right_pane.read(cx).focus.clone();
+            window.focus(&focus, cx);
+        } else {
+            self.arm_composer_focus(cx);
+        }
+        cx.notify();
+    }
+
     /// The pane for this frame (strip mode builds the session's page here,
     /// where the window is at hand): push the facts, then compose the view.
     /// Z7a2: the Page draws the active session's live webview, created
@@ -1011,6 +1058,7 @@ impl Harness {
             RightPaneEvent::Persist => self.save_right_for_active(cx),
             RightPaneEvent::Select(kind) => self.select_right(*kind, cx),
             RightPaneEvent::Toggle => self.toggle_right(cx),
+            RightPaneEvent::ToggleMaximise => self.toggle_right_maximised(window, cx),
             RightPaneEvent::OpenUrl(url) => self.open_url_in_browser(url.clone(), cx),
             RightPaneEvent::Reveal { root, abs } => self.reveal_link_path(root, abs, Some(false), None, cx),
             RightPaneEvent::RevertFile { root, path, turn } => {

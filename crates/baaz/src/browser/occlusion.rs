@@ -458,9 +458,12 @@ impl BrowserView {
 
     /// Cut the shell's chrome over the centre (the sidebar peek) through
     /// the Browse page as holes, so it shows over the native page and takes
-    /// the clicks there; none outside Browse. The Peek's and the Split's ×
-    /// and the loading line ride with them.
-    pub(crate) fn cut_holes(&mut self, rects: Vec<(Bounds<Pixels>, Pixels)>, cx: &mut gpui::App) {
+    /// the clicks there. Outside Browse the only page under the peek is the
+    /// pane's while it fills the window (maximised, sidebar closed):
+    /// `pane_page`, which the caller passes only then; otherwise no page
+    /// gets any. The Peek's and the Split's × and the loading line ride
+    /// with the Browse page's.
+    pub(crate) fn cut_holes(&mut self, rects: Vec<(Bounds<Pixels>, Pixels)>, pane_page: Option<Entity<WebviewState>>, cx: &mut gpui::App) {
         // R4: the Split's × on the shown half rides with the centre's holes.
         let in_browse = crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
         let mut rects = rects;
@@ -469,18 +472,18 @@ impl BrowserView {
                 rects.push(hole);
             }
         }
+        let hole = |(b, r): &(Bounds<Pixels>, Pixels)| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height), f32::from(*r)];
         let holes: Vec<[f32; 5]> = if in_browse {
-            rects
-                .iter()
-                .chain(self.occlusion.progress_hole.get().map(|b| (b, Pixels::ZERO)).iter())
-                .map(|(b, r)| [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height), f32::from(*r)])
-                .collect()
+            rects.iter().chain(self.occlusion.progress_hole.get().map(|b| (b, Pixels::ZERO)).iter()).map(hole).collect()
+        } else if pane_page.is_some() {
+            rects.iter().map(hole).collect()
         } else {
             Vec::new()
         };
         // Holes belong to the page shown now: a page that stopped being the
-        // centre (another tab, Sessions, Settings) gets its own back whole.
-        let current = self.browse_centre_shown(cx).and_then(|id| self.states.get(&id).cloned());
+        // centre (another tab, Sessions, Settings) or the filling pane's
+        // gets its own back whole.
+        let current = if in_browse { self.browse_centre_shown(cx).and_then(|id| self.states.get(&id).cloned()) } else { pane_page };
         self.occlusion.hand_holes(holes, current, cx);
     }
 

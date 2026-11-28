@@ -143,6 +143,7 @@
 //! | `fixture-session:<name>` | capture aid: park a local session row plus one session tab carrying `https://example.com`, and carry it into Browse (the offline `browse-from-session` shot), free |
 //! | `page-menu` | open the Page row's Recent pages menu (`page-menu:off` closes it), free |
 //! | `right-width:<px>` | settle the right-pane divider at a width, clamped into the library range so captures never depend on `layout.json`, free |
+//! | `right-maximise:<on\|off>` | the pane's Maximise / Restore through its button's own path, as a setter (asking for the state it is in changes nothing); a pane that is not open in Sessions, Settings over it, or another payload fails the step, free |
 //! | `mode:<sessions\|browse>` | set the window's mode idempotently (`browse` shows the person's tabs, `sessions` the sessions; never toggles); unknown fails the step, free |
 //! | `files-select:<path>` | preview the project-relative file in the Files pane through the click's own path (a directory toggles instead); empty or project-less fails, free |
 //! | `changes-open:<path>` | open that changed file's diff in the Changes pane (idempotent; the path is project-relative, as git reports it); unknown fails the step, free |
@@ -428,6 +429,7 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "sidebar-width", run: |this, rest, _, cx| this.step_sidebar_width(rest, cx) },
     WindowVerb { verb: "right", run: |this, rest, _, cx| this.step_right(rest, cx) },
     WindowVerb { verb: "right-width", run: |this, rest, _, cx| this.step_right_width(rest, cx) },
+    WindowVerb { verb: "right-maximise", run: |this, rest, window, cx| this.step_right_maximise(rest, window, cx) },
     WindowVerb { verb: "right-lower", run: |this, rest, window, cx| this.step_right_lower(rest, window, cx) },
     WindowVerb { verb: "right-split", run: |this, rest, _, cx| this.step_right_split(rest, cx) },
     WindowVerb { verb: "terminal-place", run: |this, rest, window, cx| this.step_terminal_place(rest, window, cx) },
@@ -905,6 +907,26 @@ impl Harness {
             // the baselines were pinned to user state without anyone noticing.
             crate::layout::Layout::stage(cx, |layout| layout.right_width = Some(width));
             self.right_pane.update(cx, |pane, _| pane.resize.width = width);
+        }
+        Ok(())
+    }
+
+    /// `right-maximise:<on|off>`: Maximise or Restore the pane through the
+    /// title bar button's own path ([`Harness::toggle_right_maximised`]),
+    /// as a setter — a second run lands where the first did. Fails when it
+    /// cannot land there: no open pane in Sessions, Settings over it, or a
+    /// payload other than `on` / `off`. Free: no turn, no wire.
+    pub(crate) fn step_right_maximise(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> StepResult {
+        let want = match rest.trim() {
+            "on" => true,
+            "off" => false,
+            other => return Err(format!("`{other}` is not on or off")),
+        };
+        if crate::layout::Layout::get(cx).right_maximised != want {
+            self.toggle_right_maximised(window, cx);
+        }
+        if crate::layout::Layout::get(cx).right_maximised != want {
+            return Err("no open pane in Sessions to maximise".into());
         }
         Ok(())
     }
@@ -1697,6 +1719,7 @@ mod tests {
         assert!(super::is_known_step("right:git"));
         assert!(super::is_known_step("right:files"));
         assert!(super::is_known_step("right-width:400"));
+        assert!(super::is_known_step("right-maximise:on"));
         assert!(super::is_known_step("right:"));
     }
 
@@ -1951,6 +1974,35 @@ mod tests {
             assert!(layout(vc).dock_open() && !layout(vc).terminal_in_pane());
         }
         assert!(vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_terminal_place("ceiling", window, cx))).is_err());
+        restore_state(state);
+    }
+
+    /// `right-maximise` is a setter that fails wherever it cannot land.
+    #[gpui::test]
+    fn step_right_maximise_sets_and_refuses(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("maximise-step");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(step_test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
+        });
+        let step = |vc: &mut gpui::VisualTestContext, rest: &str| vc.update(|window, cx| baaz.update(cx, |h, cx| h.step_right_maximise(rest, window, cx)));
+        // Side-by-side tests swap `BAAZ_STATE_DIR`: start from a known layout.
+        vc.update(|_, cx| crate::layout::Layout::stage(cx, |l| {
+            l.mode = crate::layout::Mode::Sessions;
+            l.right_open = false;
+        }));
+        assert!(step(vc, "on").is_err(), "a closed pane fails the step");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(crate::layout::RightKind::Files, cx)));
+        for _ in 0..2 {
+            step(vc, "on").expect("maximised");
+            assert!(vc.update(|_, cx| crate::layout::Layout::get(cx).right_maximised), "a second `on` stays on");
+        }
+        for _ in 0..2 {
+            step(vc, "off").expect("restored");
+            assert!(!vc.update(|_, cx| crate::layout::Layout::get(cx).right_maximised), "a second `off` stays off");
+        }
+        assert!(step(vc, "wide").is_err(), "another payload fails the step");
         restore_state(state);
     }
 

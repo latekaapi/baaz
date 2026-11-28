@@ -130,14 +130,18 @@ impl LayoutGlobal for Layout {
     /// Change the preferences without writing yet: the next
     /// [`Layout::update`] (or the quit's [`Layout::save`]) carries it. For a
     /// session switch restoring that session's pane, which must not pay for
-    /// a file write, and for scripted steps and tests.
+    /// a file write, and for scripted steps and tests. Every edit ends
+    /// with [`Layout::settle_right_maximised`]: whatever closed the pane or
+    /// left Sessions also ended its maximise, with no call site to forget.
     fn stage<R>(cx: &mut gpui::App, edit: impl FnOnce(&mut Layout) -> R) -> R {
         Self::init(cx);
         // `global_mut` queues the observers' notification; unlike
         // `update_global` it leases nothing, so an observer that reads the
         // global (or updates it again) never finds it missing.
         let store = cx.global_mut::<LayoutStore>();
-        edit(&mut store.0)
+        let result = edit(&mut store.0);
+        store.0.settle_right_maximised();
+        result
     }
 
     /// Write the live preferences, and put the Agents block in force for the
@@ -171,6 +175,18 @@ pub fn right_width(layout: &Layout) -> f32 {
     match layout.right_width {
         Some(width) => aui::shell::clamp_right_width(width),
         None => aui::shell::RIGHT_WIDTH,
+    }
+}
+
+/// The right pane's width on screen in a `window_w` window: its divider's
+/// `divider_w`, or — maximised ([`Layout::right_fills`]) — every pixel
+/// right of a `sidebar_w` sidebar (0 when the sidebar is closed), what the
+/// shell lays the column out at ([`aui::shell::right_fill_width`]).
+pub fn shown_right_width(window_w: f32, sidebar_w: f32, divider_w: f32, fills: bool) -> f32 {
+    if fills {
+        aui::shell::right_fill_width(window_w, sidebar_w)
+    } else {
+        divider_w
     }
 }
 
@@ -259,6 +275,7 @@ mod tests {
             right_lower: Some(RightKind::Terminal),
             right_split: Some(0.4),
             right_previous: Some(RightKind::Files),
+            right_maximised: true,
             use_own_mcp: UseOwnMcp { codex: true, claude_code: false },
             mode: Mode::Browse,
             sidebar_open: false,
@@ -302,6 +319,7 @@ mod tests {
         assert!(text.contains("\"archiveOnMerge\":true"));
         assert!(text.contains("\"onboarding\":{\"regions\":\"done\",\"defaultBrowser\":\"due\"}"));
         assert!(text.contains("\"openIn\":\"zed\""));
+        assert!(!text.to_lowercase().contains("maxim"), "the maximised pane is never stored");
         let back: Layout = serde_json::from_str(&text).unwrap();
         assert!(back.archive_on_merge);
         assert_eq!(back.open_in.as_deref(), Some("zed"));
@@ -475,6 +493,20 @@ mod tests {
         // of the sidebar's divider.
         assert_eq!(right_drag_width(400.0, 100.0, 120.0), 380.0);
         assert_eq!(right_drag_width(400.0, 100.0, 80.0), 420.0);
+    }
+
+    /// Maximised, the pane is every pixel right of the sidebar — the whole
+    /// window when it is closed, past the divider's cap; otherwise it is
+    /// the divider's width whatever the window.
+    #[test]
+    fn the_shown_pane_width_is_the_divider_or_everything_right_of_the_sidebar() {
+        assert_eq!(shown_right_width(1600.0, 256.0, 400.0, false), 400.0);
+        assert_eq!(shown_right_width(1600.0, 256.0, 400.0, true), 1344.0);
+        assert_eq!(shown_right_width(1600.0, 0.0, 400.0, true), 1600.0);
+        assert!(shown_right_width(1600.0, 256.0, 400.0, true) > aui::shell::RIGHT_MAX_WIDTH);
+        // Restoring hands back the divider's own width: maximise never wrote it.
+        assert_eq!(shown_right_width(1600.0, 256.0, 515.0, false), 515.0);
+        assert_eq!(shown_right_width(100.0, 256.0, 400.0, true), 0.0);
     }
 
     #[test]

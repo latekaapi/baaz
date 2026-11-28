@@ -56,7 +56,9 @@ impl Harness {
         let content = window_content_bounds(window);
         // The live page sits under the pane's nav row (its title bar): a
         // press on it is outside the page and takes the keyboard back too.
-        let page = browser_page_bounds(content, gpui::px(self.right_width(cx)));
+        // Maximised, the pane is everything right of the sidebar.
+        let shown = self.shown_right_width(f32::from(content.size.width), cx);
+        let page = browser_page_bounds(content, gpui::px(shown));
         if should_release_keyboard_on_mouse_down(
             state.read(cx).holds_keyboard(),
             event.position,
