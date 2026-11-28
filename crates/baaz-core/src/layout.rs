@@ -595,6 +595,15 @@ pub struct Layout {
     /// stored.
     #[serde(skip)]
     pub right_previous: Option<RightKind>,
+    /// The pane maximised (owner 2026-11-28): it fills everything right of
+    /// the sidebar and the chat column is hidden. Read it through
+    /// [`Self::right_fills`]. Never stored: every launch activates a
+    /// session, and picking a session restores the chat, so a stored value
+    /// could only ever be thrown away — or, if something skipped that,
+    /// open the window with no chat in it. It never outlives the open pane
+    /// in Sessions ([`Self::settle_right_maximised`]).
+    #[serde(skip)]
+    pub right_maximised: bool,
     /// The two inherit-owner-servers opt-ins, owned by the Settings ›
     /// MCP page (see [`UseOwnMcp`]).
     #[serde(rename = "useOwnMcp", default)]
@@ -817,6 +826,24 @@ impl Layout {
 
     // ── the right pane's workspace (docs/82 8.1) ───────────────────────
 
+    /// Whether the pane fills the window right of the sidebar (maximised):
+    /// asked for, standing open, in Sessions. Settings hides the pane
+    /// without closing it, so the caller also asks that it is not open.
+    pub fn right_fills(&self) -> bool {
+        self.right_maximised && self.right_open && self.mode == Mode::Sessions
+    }
+
+    /// The maximised pane never outlives the pane, or Sessions: a pane that
+    /// closed (✕, ⌘⌥B, the terminal leaving it, a session whose pane stood
+    /// closed) or a switch to Browse (whose pane stands closed, and whose
+    /// centre is the page) ends it, so the next open is the pane at its own
+    /// width beside the chat. The live store calls this after every edit.
+    pub fn settle_right_maximised(&mut self) {
+        if !self.right_open || self.mode != Mode::Sessions {
+            self.right_maximised = false;
+        }
+    }
+
     /// The top pane's share of the pane's height: the stored one, held to
     /// its range, or [`SPLIT_DEFAULT`].
     pub fn split(&self) -> f32 {
@@ -1003,6 +1030,7 @@ impl Default for Layout {
             right_lower: None,
             right_split: None,
             right_previous: None,
+            right_maximised: false,
             use_own_mcp: UseOwnMcp::default(),
             mode: Mode::Sessions,
             sidebar_open: true,
@@ -1070,6 +1098,61 @@ pub fn right_kind(layout: &Layout) -> RightKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The maximised pane (owner 2026-11-28): it fills only while asked
+    /// for, open, in Sessions, and every way out of those ends it.
+    #[test]
+    fn the_maximised_pane_fills_only_open_in_sessions_and_never_outlives_them() {
+        let open = || Layout { right_open: true, right_maximised: true, ..Layout::default() };
+        assert!(open().right_fills());
+        assert!(!Layout { right_maximised: false, ..open() }.right_fills(), "not asked for");
+        assert!(!Layout { right_open: false, ..open() }.right_fills(), "a closed pane fills nothing");
+        assert!(!Layout { mode: Mode::Browse, ..open() }.right_fills(), "Browse's centre is the page");
+
+        // A close ends it: reopening is the pane at its own width.
+        let mut closed = open();
+        closed.right_open = false;
+        closed.settle_right_maximised();
+        assert!(!closed.right_maximised);
+        closed.right_open = true;
+        assert!(!closed.right_fills(), "the next open is not maximised");
+
+        // ⌃` taking a top Terminal out of the pane closes it.
+        let mut terminal = Layout { terminal_place: TerminalPlace::Pane, right_kind: Some(RightKind::Terminal), ..open() };
+        assert!(!terminal.toggle_terminal());
+        terminal.settle_right_maximised();
+        assert!(!terminal.right_maximised);
+
+        // Browse sets the pane aside closed; coming back is not maximised.
+        let mut browse = open();
+        browse.mode = Mode::Browse;
+        browse.enter_browse();
+        browse.settle_right_maximised();
+        assert!(!browse.right_maximised);
+        browse.mode = Mode::Sessions;
+        browse.leave_browse();
+        browse.settle_right_maximised();
+        assert!(browse.right_open, "Sessions gets its open pane back");
+        assert!(!browse.right_fills(), "beside the chat, not maximised");
+
+        // Anything that keeps the pane open in Sessions keeps it: picking
+        // another screen, a lower pane.
+        let mut kept = open();
+        kept.open_top(RightKind::Changes);
+        kept.set_lower(Some(RightKind::Terminal)).unwrap();
+        kept.settle_right_maximised();
+        assert!(kept.right_fills());
+    }
+
+    /// Never stored: a relaunch opens with the chat in view.
+    #[test]
+    fn the_maximised_pane_is_never_written() {
+        let layout = Layout { right_open: true, right_maximised: true, ..Layout::default() };
+        let json = serde_json::to_string(&layout).unwrap();
+        assert!(!json.to_lowercase().contains("maxim"), "{json}");
+        let back: Layout = serde_json::from_str(&json).unwrap();
+        assert!(back.right_open && !back.right_maximised);
+    }
 
     /// The retired Feedback Mode switch (removed in plan 4.11b): a stored
     /// `feedbackMode` key — or either older spelling — reads as nothing,

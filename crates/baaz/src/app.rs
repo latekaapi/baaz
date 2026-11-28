@@ -2133,12 +2133,19 @@ impl Harness {
     /// root (the tree listing/diff/git caches stay per root), and the pane's
     /// data refreshes. Flipping open/closed arms the pane's snap
     /// ([`crate::right_pane::RightPane::snap`]) so the next frame lands with
-    /// no animation; user toggles never arm it.
+    /// no animation; user toggles never arm it. A maximised pane is
+    /// restored: picking a session (or any activation) shows its chat.
     pub(crate) fn restore_right_for_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
         // B7fix: the outgoing session's debounced pane state lands on disk
         // before the incoming session's loads — a switch is the durability
         // point the toggle gesture itself must not pay for.
         self.flush_stores();
+        // Owner 2026-11-28: the session someone picks is shown with its
+        // chat, never behind a maximised pane. The fill comes and goes in
+        // one frame, so this needs no snap.
+        if crate::layout::Layout::get(cx).right_maximised {
+            crate::layout::Layout::stage(cx, |layout| layout.right_maximised = false);
+        }
         let stored = self.session_list.read(cx).overrides.get(session_id).and_then(|meta| meta.right.clone());
         let open = stored.as_ref().is_some_and(|state| state.open);
         if crate::layout::Layout::get(cx).right_open != open {
@@ -4673,13 +4680,16 @@ impl Render for Harness {
             // for the peek so it shows over the page.
             let browse = crate::layout::Layout::get(cx).mode == layout::Mode::Browse && !settings_open;
             let chrome = if let Some(chrome) = settings_chrome {
-                self.browser.update(cx, |browser, cx| browser.cut_holes(Vec::new(), cx));
+                self.browser.update(cx, |browser, cx| browser.cut_holes(Vec::new(), None, cx));
                 chrome
             } else {
                 self.render_bar_chrome(window, cx)
             };
             let holes = cx.entity().downgrade();
             let (right_width, right_resizing) = (self.right_width(cx), self.right_pane.read(cx).resize.active);
+            // Maximised (owner 2026-11-28): the pane fills the window right
+            // of the sidebar and the centre, header and all, hides.
+            let right_fills = self.right_fills(cx);
             let (sidebar_width, sidebar_resizing) = (self.sidebar_width(cx), self.sidebar_resizing(cx));
             let right_snap = self.right_pane.update(cx, |pane, _| pane.take_snap());
             // Painted lights off: the window owns real, glossy ones, and
@@ -4693,6 +4703,7 @@ impl Render for Harness {
                 .resizing(sidebar_resizing || right_resizing || right_snap)
                 .sidebar_open(crate::layout::Layout::get(cx).sidebar_open)
                 .right_open(right_open)
+                .right_fill(right_fills)
                 .sidebar(sidebar)
                 .chrome_lead(chrome.lead)
                 .peek_open(self.capture.peek_pinned())
@@ -4711,7 +4722,12 @@ impl Render for Harness {
                             this.lights_hidden = hidden;
                             crate::native_lights::set_traffic_lights_hidden(window, hidden, cx);
                         }
-                        this.browser.update(cx, |browser, cx| browser.cut_holes(rects, cx));
+                        // A pane filling the window has its page under the
+                        // peek (sidebar closed): the peek cuts through it.
+                        let pane_page = (this.right_fills(cx) && crate::layout::right_kind(crate::layout::Layout::get(cx)) == layout::RightKind::Browser)
+                            .then(|| this.existing_browser(cx))
+                            .flatten();
+                        this.browser.update(cx, |browser, cx| browser.cut_holes(rects, pane_page, cx));
                     });
                 })
                 .right(right)
@@ -4764,8 +4780,9 @@ impl Render for Harness {
             // settled edge from the RIGHT: the pane fills the window's right
             // edge, so the divider stands `width` left of it. Hidden with
             // the pane: there is no divider to grab while it stands closed
-            // (or while Settings hides the pane without closing it).
-            if right_open {
+            // (or while Settings hides the pane without closing it), nor
+            // while it is maximised (its left edge is the sidebar's).
+            if right_open && !right_fills {
                 let press = cx.entity().downgrade();
                 let travel = cx.entity().downgrade();
                 let release = cx.entity().downgrade();
@@ -7759,12 +7776,110 @@ mod tests {
         assert!(!with_tasks.iter().any(|tab| tab.closable), "the views' tabs are fixed");
     }
 
-    /// Maximise flips between the widest pane and the default width.
-    #[test]
-    fn maximise_toggles_between_the_widest_and_the_default_width() {
-        assert!(crate::right::right_maximised(aui::shell::RIGHT_MAX_WIDTH));
-        assert!(!crate::right::right_maximised(aui::shell::RIGHT_WIDTH));
-        assert!(!crate::right::right_maximised(aui::shell::RIGHT_MAX_WIDTH - 1.0));
+    /// A true maximise (owner 2026-11-28): Maximise fills the window right
+    /// of the sidebar without touching the divider's width, Restore gives
+    /// the chat back, and every way out leaves it — ✕ / ⌘⌥B, ⌃` taking the
+    /// pane's terminal away, Browse, picking a session — so no state hides
+    /// the chat with no way back. Settings hides it and hands it back.
+    #[gpui::test]
+    fn maximise_fills_restores_and_every_exit_leaves_it(cx: &mut gpui::TestAppContext) {
+        let state = hermetic_state("maximise");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
+        });
+        use crate::layout::{Layout, RightKind};
+        let maximised = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| Layout::get(cx).right_maximised);
+        let fills = |vc: &mut gpui::VisualTestContext| vc.update(|_, cx| baaz.read(cx).right_fills(cx));
+        let toggle = |vc: &mut gpui::VisualTestContext| vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_right_maximised(window, cx)));
+        // Tests run side by side and swap `BAAZ_STATE_DIR`, so the layout
+        // read at boot may be another test's: start from a known one.
+        vc.update(|_, cx| Layout::stage(cx, |l| {
+            l.mode = crate::layout::Mode::Sessions;
+            l.right_open = false;
+            l.sidebar_open = true;
+        }));
+
+        // With the pane closed there is nothing to maximise.
+        toggle(vc);
+        assert!(!maximised(vc), "a closed pane is never maximised");
+
+        // Open, maximise, restore: the divider keeps its own width.
+        vc.update(|_, cx| baaz.update(cx, |h, cx| {
+            h.right_pane.update(cx, |pane, _| pane.resize.width = 515.0);
+            h.select_right(RightKind::Changes, cx);
+        }));
+        toggle(vc);
+        assert!(maximised(vc) && fills(vc), "Maximise fills");
+        let shown = vc.update(|_, cx| baaz.read(cx).shown_right_width(1600.0, cx));
+        let sidebar = vc.update(|_, cx| baaz.read(cx).sidebar_width(cx));
+        assert_eq!(shown, 1600.0 - sidebar, "everything right of the open sidebar");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
+        assert!(fills(vc), "the sidebar keeps its own state; the pane still fills");
+        assert_eq!(vc.update(|_, cx| baaz.read(cx).shown_right_width(1600.0, cx)), 1600.0, "the whole window, sidebar closed");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_sidebar(cx)));
+        // Picking another screen keeps it.
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.select_right(RightKind::Files, cx)));
+        assert!(fills(vc), "another screen stays maximised");
+        toggle(vc);
+        assert!(!maximised(vc), "Restore");
+        assert_eq!(vc.update(|_, cx| baaz.read(cx).right_width(cx)), 515.0, "the pane's own width back");
+        assert_eq!(vc.update(|_, cx| baaz.read(cx).shown_right_width(1600.0, cx)), 515.0);
+
+        // ✕ (and ⌘⌥B, the same toggle) leaves it; the next open is beside the chat.
+        toggle(vc);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
+        assert!(!maximised(vc), "✕ leaves it");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_right(cx)));
+        assert!(vc.update(|_, cx| Layout::get(cx).right_open) && !fills(vc), "reopened beside the chat");
+
+        // Settings hides the pane without closing it: maximise waits under
+        // the page and comes back on exit. No toggle while the page is up.
+        toggle(vc);
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.open_settings(0, cx)));
+        assert!(!fills(vc), "Settings shows its page, not the pane");
+        toggle(vc);
+        assert!(maximised(vc), "no maximise toggle under Settings");
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.close_settings(cx)));
+        assert!(fills(vc), "back to the maximised pane");
+
+        // Browse leaves it, and Sessions gets its pane back beside the chat.
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Browse, window, cx)));
+        assert!(!maximised(vc), "Browse leaves it");
+        toggle(vc);
+        assert!(!maximised(vc), "no maximise in Browse");
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.set_mode(crate::layout::Mode::Sessions, window, cx)));
+        assert!(vc.update(|_, cx| Layout::get(cx).right_open) && !fills(vc), "Sessions' pane back, beside the chat");
+
+        // ⌃` taking a top Terminal out of the pane closes it, and leaves it.
+        vc.update(|window, cx| baaz.update(cx, |h, cx| {
+            Layout::stage(cx, |l| l.seat_terminal_in_pane());
+            h.toggle_right_maximised(window, cx);
+        }));
+        assert!(fills(vc));
+        vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_terminal(window, cx)));
+        assert!(!vc.update(|_, cx| Layout::get(cx).right_open), "the terminal took the pane with it");
+        assert!(!maximised(vc), "a pane that closed is not maximised");
+
+        // Picking a session (any activation restores its pane) leaves it,
+        // even when that session's pane stands open too.
+        vc.update(|_, cx| baaz.update(cx, |h, cx| {
+            h.select_right(RightKind::Changes, cx);
+            h.set_override("s-1", |meta| meta.right = Some(crate::sessions::RightState { open: true, kind: RightKind::Changes, ..Default::default() }), cx);
+        }));
+        toggle(vc);
+        assert!(fills(vc));
+        vc.update(|_, cx| baaz.update(cx, |h, cx| h.restore_right_for_session("s-1", cx)));
+        assert!(vc.update(|_, cx| Layout::get(cx).right_open), "that session's pane stands open");
+        assert!(!maximised(vc), "picking a session shows its chat");
+
+        // Never written to layout.json (baaz-core's and `layout`'s round
+        // trips pin the file itself; the live value serialises without it).
+        toggle(vc);
+        let text = vc.update(|_, cx| serde_json::to_string(Layout::get(cx)).unwrap());
+        assert!(!text.to_lowercase().contains("maxim"), "a relaunch opens with the chat in view: {text}");
+        restore_state(state);
     }
 
     /// Z2: the right pane belongs to each session and a switch restores it

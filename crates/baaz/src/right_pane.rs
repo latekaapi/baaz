@@ -102,6 +102,10 @@ pub(crate) struct RightFacts {
     /// frame (the root's frame never did), so no read and no file watch
     /// starts behind it.
     pub live: bool,
+    /// Maximised (owner 2026-11-28): the sidebar's width on screen (0 when
+    /// it is closed) while the pane fills the window right of it; `None`
+    /// beside the chat. See [`RightPane::shown_width`].
+    pub fill_after: Option<f32>,
 }
 
 impl RightFacts {
@@ -121,6 +125,9 @@ pub(crate) enum RightPaneEvent {
     Select(RightKind),
     /// The ✕: toggle the pane (`Harness::toggle_right`).
     Toggle,
+    /// Maximise / Restore in the title bar
+    /// (`Harness::toggle_right_maximised`).
+    ToggleMaximise,
     /// Open `url` as the session's page (HTML, SVG and PDF rows; the
     /// no-page address field).
     OpenUrl(String),
@@ -296,6 +303,16 @@ impl RightPane {
     /// The divider's width now, in window pixels.
     pub(crate) fn width(&self) -> f32 {
         self.resize.width
+    }
+
+    /// The width the pane draws at this frame: the divider's, or —
+    /// maximised — every pixel of the window right of the sidebar, the
+    /// width the shell gives the column ([`aui::shell::right_fill_width`]).
+    pub(crate) fn shown_width(&self, window: &Window) -> f32 {
+        match self.facts.fill_after {
+            Some(sidebar) => aui::shell::right_fill_width(f32::from(window.viewport_size().width), sidebar),
+            None => self.resize.width,
+        }
     }
 
     /// Consume the restore's snap (one frame lands without animating).
@@ -683,7 +700,7 @@ impl Render for RightPane {
             return gpui_kit::base::v_flex().size_full().children(bar).into_any_element();
         }
         let project = self.facts.project.clone();
-        let width = self.resize.width;
+        let width = self.shown_width(window);
         #[cfg(feature = "probe")]
         #[cfg(test)]
         DRAWN_CHANGES.with(|drawn| {
@@ -799,6 +816,7 @@ impl RightPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let edits = if kind == RightKind::Changes { self.session_edits(cx) } else { Vec::new() };
+        let width = self.shown_width(window);
         right::render_screen(
             kind,
             &self.cache,
@@ -807,7 +825,7 @@ impl RightPane {
             right::BrowserPane { state: page, window, offers: self.facts.page_offers },
             &self.terminal,
             right_open,
-            self.resize.width,
+            width,
             self.facts.agent(),
             &self.focus,
             page_menu,
@@ -936,6 +954,7 @@ impl Harness {
                 aui::workbench::PageNavExtras { send_page: offers.send_page, keep_tab: offers.keep }
             }),
             live: matches!(self.auth, crate::login::Auth::SignedIn(_)) || !(self.args.offline || self.args.replay.is_some()),
+            fill_after: self.right_fills(cx).then(|| if layout::Layout::get(cx).sidebar_open { self.sidebar_width(cx) } else { 0.0 }),
         }
     }
 
@@ -962,6 +981,50 @@ impl Harness {
     /// The divider's width now.
     pub(crate) fn right_width(&self, cx: &App) -> f32 {
         self.right_pane.read(cx).width()
+    }
+
+    /// Whether the pane fills the window right of the sidebar this frame
+    /// (maximised, open, in Sessions, with no Settings page over it).
+    pub(crate) fn right_fills(&self, cx: &App) -> bool {
+        layout::Layout::get(cx).right_fills() && !self.settings_open(cx)
+    }
+
+    /// The pane's width on screen in a `window_w` window: the divider's,
+    /// or — maximised — everything right of the sidebar.
+    pub(crate) fn shown_right_width(&self, window_w: f32, cx: &App) -> f32 {
+        let sidebar = if layout::Layout::get(cx).sidebar_open { self.sidebar_width(cx) } else { 0.0 };
+        layout::shown_right_width(window_w, sidebar, self.right_width(cx), self.right_fills(cx))
+    }
+
+    /// Maximise / Restore (the pane's title bar, owner 2026-11-28):
+    /// maximised, the pane fills everything right of the sidebar — the
+    /// whole window when the sidebar is closed — and the chat column,
+    /// header and all, is hidden; restored, the chat comes back with the
+    /// pane at its own divider width (maximise never touches that width).
+    /// The sidebar keeps its state either way. Only while the pane stands
+    /// open in Sessions with no Settings page over it; anything that
+    /// closes the pane, switches to Browse or activates a session ends it
+    /// (`Layout::settle_right_maximised`, [`Self::restore_right_for_session`]).
+    /// Never stored. Maximising takes the keyboard to the pane, off the
+    /// hidden composer; restoring hands it back to the composer.
+    pub(crate) fn toggle_right_maximised(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open(cx) || !layout::Layout::get(cx).right_open || layout::Layout::get(cx).mode != layout::Mode::Sessions {
+            return;
+        }
+        // Menus belong to the layout they opened in.
+        self.overlays.update(cx, |overlays, cx| overlays.close_menu(cx));
+        let fills = layout::Layout::stage(cx, |layout| {
+            layout.right_maximised = !layout.right_maximised;
+            layout.right_maximised
+        });
+        crate::baaz_log!("right pane maximised: {fills}");
+        if fills {
+            let focus = self.right_pane.read(cx).focus.clone();
+            window.focus(&focus, cx);
+        } else {
+            self.arm_composer_focus(cx);
+        }
+        cx.notify();
     }
 
     /// The pane for this frame (strip mode builds the session's page here,
@@ -1011,6 +1074,7 @@ impl Harness {
             RightPaneEvent::Persist => self.save_right_for_active(cx),
             RightPaneEvent::Select(kind) => self.select_right(*kind, cx),
             RightPaneEvent::Toggle => self.toggle_right(cx),
+            RightPaneEvent::ToggleMaximise => self.toggle_right_maximised(window, cx),
             RightPaneEvent::OpenUrl(url) => self.open_url_in_browser(url.clone(), cx),
             RightPaneEvent::Reveal { root, abs } => self.reveal_link_path(root, abs, Some(false), None, cx),
             RightPaneEvent::RevertFile { root, path, turn } => {
@@ -1076,6 +1140,15 @@ impl RightPane {
             .ghost()
             .accessibility_label(format!("Open {title} in the centre"))
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(RightPaneEvent::WorkerInCentre(centre_id.clone()))));
+        // Maximise / Restore, as on every screen's title bar: a maximised
+        // pane showing a worker keeps its way back to the chat.
+        let maximised = layout::Layout::get(cx).right_maximised;
+        let (glyph, label) = if maximised { (aui_icons::IconName::Minimize, "Restore the pane") } else { (aui_icons::IconName::Maximize, "Maximise the pane") };
+        let maximise = aui::data::icon_button("worker-maximise", glyph)
+            .ghost()
+            .muted()
+            .accessibility_label(label)
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(RightPaneEvent::ToggleMaximise)));
         let close = aui::data::icon_button("worker-close", aui_icons::IconName::X)
             .ghost()
             .muted()
@@ -1091,6 +1164,7 @@ impl RightPane {
             .child(gpui::div().flex_1().min_w(px(0.0)).truncate().text_role(TextRole::Body).text_color(p.ink).child(title))
             .child(gpui::div().flex_none().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(format!("{provider} · {mode_word}")))
             .child(centre)
+            .child(maximise)
             .child(close);
         let band = worker.update(cx, |view, cx| view.render_composer_band(window, cx));
         gpui_kit::base::v_flex()

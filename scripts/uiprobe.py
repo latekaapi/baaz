@@ -1403,6 +1403,20 @@ ENTRIES.update({
     "right-page-terminal":       _populated("right-width:440;right:browser;browse:https://example.com;"
                                             "terminal-dock:zsh;terminal-place:pane", replay=True),
     "right-changes-lower-files": _populated("right-width:440;right:changes;right-lower:files", replay=True),
+    # Owner 2026-11-28, a true maximise: the pane fills everything right of
+    # the sidebar (the whole window with it closed) and the chat, header
+    # and all, hides. `right-maximise:on` is the title bar button's path.
+    # Changes beside an open sidebar and with it closed; Files' preview;
+    # the Page alone with the sidebar closed, and with the edge peek held
+    # over it; the Page over the terminal (the lower pane); a worker.
+    "right-maximised":           _populated("right-width:440;right:changes;changes-open:crates/baaz/src/right.rs;right-maximise:on", replay=True),
+    "right-maximised-collapsed": _populated("right-width:440;right:changes;changes-open:crates/baaz/src/right.rs;sidebar;right-maximise:on", replay=True),
+    "right-maximised-files":     _populated("right-width:440;right:files;files-select:src/lib.rs;right-maximise:on", workspace=_REPO_ACME),
+    "right-maximised-page":      _populated("right-width:440;right:browser;browse:https://example.com;sidebar;right-maximise:on", replay=True),
+    "right-maximised-peek":      _populated("right-width:440;right:browser;browse:https://example.com;sidebar;right-maximise:on;sidebar-peek", replay=True),
+    "right-maximised-split":     _populated("right-width:440;right:browser;browse:https://example.com;"
+                                            "terminal-dock:zsh;terminal-place:pane;right-maximise:on", replay=True),
+    "right-maximised-worker":    _populated("right-width:440;workers-fixture:running;workers-pane;right-maximise:on", replay=True),
     "settings-sidebar":        _populated("settings:sidebar"),
     "palette-populated":       _populated("palette"),
     # Task 2.4's peek, held open with the sidebar closed: `sidebar` closes
