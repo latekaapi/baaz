@@ -119,7 +119,7 @@ pub(crate) const KEYMAP: &[KeymapEntry] = &[
     KeymapEntry { action: "ShowRightChanges", keystroke: "cmd-shift-d", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Changes in the right pane" },
     KeymapEntry { action: "ShowRightFiles", keystroke: "cmd-alt-e", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show Files in the right pane" },
     KeymapEntry { action: "ShowRightBrowser", keystroke: "cmd-shift-b", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Show the Page in the right pane" },
-    KeymapEntry { action: "ToggleAgentLine", keystroke: "cmd-j", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Ask about this page (the agent line)" },
+    KeymapEntry { action: "ToggleAgentLine", keystroke: "cmd-j", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Ask about this page (the agent card)" },
     KeymapEntry { action: "ToggleAgentCard", keystroke: "cmd-e", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Open the agent card" },
     KeymapEntry { action: "ToggleAgentColumn", keystroke: "cmd-shift-e", context: Some(crate::app::BROWSE_CONTEXT), category: "pane", label: "Dock the agent card as a column" },
     KeymapEntry { action: "ToggleBrowseMode", keystroke: "cmd-alt-b", context: Some(aui::keys::ROOT_CONTEXT), category: "pane", label: "Switch between Sessions and Browse" },

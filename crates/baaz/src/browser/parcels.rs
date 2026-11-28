@@ -111,6 +111,12 @@ impl BrowserView {
     }
 
     /// Take the parcels keyed to `session`, oldest first.
+    /// Hold `parcel` for `session`, whose view is not on screen: it lands
+    /// in that session's composer, unsent, when the person opens it.
+    pub(crate) fn hold_parcel_for(&mut self, session: &str, parcel: Parcel) {
+        self.parcels.push(PendingParcel { target: Some(session.to_owned()), parcel, announce: None });
+    }
+
     fn take_parcels_for(&mut self, session: &str) -> Vec<PendingParcel> {
         let (mine, rest) = std::mem::take(&mut self.parcels).into_iter().partition(|pending| pending.target.as_deref() == Some(session));
         self.parcels = rest;
@@ -164,7 +170,7 @@ impl Harness {
                 let title = self.parcel_session_title(&id, cx);
                 match self.find_view(&id, cx) {
                     Some(view) => self.apply_parcel(&view, parcel, window, cx),
-                    None => self.browser.update(cx, |browser, _| browser.parcels.push(PendingParcel { target: Some(id.clone()), parcel, announce: None })),
+                    None => self.browser.update(cx, |browser, _| browser.hold_parcel_for(&id, parcel)),
                 }
                 let headline = if noun == "Draft" { format!("Continued in {title}") } else { format!("{noun} added to {title}") };
                 self.overlays.update(cx, |o, cx| o.toast_open(headline, "Waiting in its composer, unsent.", &id, cx));

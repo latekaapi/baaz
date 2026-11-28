@@ -120,7 +120,9 @@ actions!(
         OpenModelMenu,
         /// Open the reasoning-effort picker (⌃⌘E; ⌘⇧E docks the agent column).
         OpenEffortMenu,
-        /// Browse: open or close the ⌘J agent line (docs/27 §4.5).
+        /// Browse: ⌘J, ask about the page — open or close the agent card,
+        /// as ⌘E does (docs/27 §4.5; the card is the one chat since owner
+        /// 2026-11-28).
         ToggleAgentLine,
         /// Browse: open or close the ⌘E agent card.
         ToggleAgentCard,
@@ -934,6 +936,14 @@ impl Harness {
         cx.observe_window_appearance(window, |this, window, cx| {
             if crate::layout::Layout::get(cx).theme == layout::ThemePref::System {
                 this.apply_theme_pref(Some(window), cx);
+            }
+        })
+        .detach();
+        // A float waits while Baaz is in the background (sync_overlay): the
+        // window coming back to the front brings it up to date.
+        cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.sync_floats(window, cx);
             }
         })
         .detach();
@@ -4927,8 +4937,8 @@ impl Render for Harness {
                 ))
                 .on_action(cx.listener(|this, _: &OpenModelMenu, _, cx| this.open_picker(MenuKind::Model, cx)))
                 .on_action(cx.listener(|this, _: &OpenEffortMenu, _, cx| this.open_picker(MenuKind::Effort, cx)))
-                .on_action(cx.listener(|this, _: &ToggleAgentLine, window, cx| this.toggle_agent_line(window, cx)))
-                .on_action(cx.listener(|this, _: &ToggleAgentCard, _, cx| this.toggle_agent_card(cx)))
+                .on_action(cx.listener(|this, _: &ToggleAgentLine, window, cx| this.toggle_agent_card(window, cx)))
+                .on_action(cx.listener(|this, _: &ToggleAgentCard, window, cx| this.toggle_agent_card(window, cx)))
                 .on_action(cx.listener(|this, _: &ToggleAgentColumn, _, cx| this.toggle_agent_column(cx)))
                 .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
                 .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
@@ -5516,6 +5526,41 @@ mod tests {
             assert_eq!(hint(h, None), "The agent can type here");
             assert_eq!(hint(h, Some("no-such-tab")), "The agent can type here");
         });
+        restore_state(state);
+    }
+
+    /// Owner 2026-11-28: a Muse session's terminal tab, opened earlier by a
+    /// Codex session, said "Codex can type here". Tabs belong to the
+    /// project: the hint names the session on screen's agent, and the tab's
+    /// opener only when no session is open.
+    #[gpui::test]
+    fn dock_hint_names_the_session_on_screen_over_the_tab_opener(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let state = hermetic_state("dock-hint-active");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
+        });
+        let root = state.2.clone();
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.register_terminal_session("codex-opener", root.clone(), "codex", cx);
+                h.register_terminal_session("muse-here", root, "muse", cx);
+            })
+        });
+        let name = |vc: &mut gpui::VisualTestContext, active: Option<&str>| {
+            vc.update(|_, cx| {
+                baaz.update(cx, |h, cx| {
+                    h.terminal_dock.update(cx, |dock, _| {
+                        dock.facts.origin = active.map(str::to_owned);
+                        crate::terminal::TerminalDock::hint_name(dock.hint_provider(Some("codex-opener")))
+                    })
+                })
+            })
+        };
+        assert_eq!(name(vc, Some("muse-here")), "Muse can type here", "the session on screen's agent");
+        assert_eq!(name(vc, None), "Codex can type here", "no session open: the tab's opener");
         restore_state(state);
     }
 

@@ -432,3 +432,78 @@ fn three_sessions_then_land_and_push(cx: &mut gpui::TestAppContext) {
     let _ = std::fs::remove_dir_all(&bare);
     cleanup(&root, state);
 }
+
+/// Owner 2026-11-28: `session_new` opens an ordinary session the person
+/// drives — its own row, no task, no lead — in the background, with the
+/// agent's prompt waiting unsent; the person stays put, and the prompt is
+/// in the composer when they open it. Nothing is sent to any provider.
+#[gpui::test]
+fn session_new_opens_a_session_with_the_prompt_unsent_and_leaves_the_person_put(cx: &mut gpui::TestAppContext) {
+    let state = lane_state("session-new");
+    let root = folder(&state.2, true);
+    let (factory, sent) = recording_factory_numbered(true);
+    let (baaz, vc, lead) = session_with(cx, &root, factory);
+
+    let code = |out: serde_json::Value| error_text(&out);
+    assert!(code(reply(&pane_call(&baaz, vc, &lead, &root, "session_new", serde_json::json!({"prompt": "  "})))).starts_with("[bad_argument]"));
+    assert!(code(reply(&pane_call(&baaz, vc, &lead, &root, "session_new", serde_json::json!({"prompt": "x", "provider": "bogus"})))).starts_with("[bad_argument]"));
+
+    let prompt = "Open google.com in the browser and tell me the page title.";
+    let out = reply(&pane_call(&baaz, vc, &lead, &root, "session_new", serde_json::json!({"prompt": prompt, "title": "Open Google"})));
+    assert_eq!(out["ok"], true, "{out}");
+    let new = out["result"]["session"].as_str().unwrap().to_owned();
+    assert_ne!(new, lead, "a session of its own");
+    vc.run_until_parked();
+    let (active, is_worker, name) = vc.update(|_, cx| {
+        let h = baaz.read(cx);
+        (
+            h.active.clone().unwrap().read(cx).rt(cx).session_id.clone(),
+            h.registry.orchestra.workers.contains_key(&new),
+            h.session_list.read(cx).overrides.get(&new).and_then(|m| m.name.clone()),
+        )
+    });
+    assert_eq!(active, lead, "the person stays where they are");
+    assert!(!is_worker, "no task and no lead: an ordinary session");
+    assert_eq!(name.as_deref(), Some("Open Google"), "the title names its row");
+    assert!(!sent.lock().unwrap().iter().any(|s| s.0.contains("google.com")), "nothing is sent: {:?}", sent.lock().unwrap());
+
+    // Opening it lands the prompt in its composer, still unsent.
+    vc.update(|window, cx| baaz.update(cx, |h, cx| h.resume(new.clone(), window, cx)));
+    vc.run_until_parked();
+    let draft = vc.update(|_, cx| {
+        let h = baaz.read(cx);
+        let view = h.active.clone().unwrap();
+        assert_eq!(view.read(cx).rt(cx).session_id, new);
+        view.read(cx).draft_text(cx)
+    });
+    assert_eq!(draft.trim(), prompt, "the prompt waits in the composer");
+    assert!(!sent.lock().unwrap().iter().any(|s| s.0.contains("google.com")), "still unsent");
+    cleanup(&root, state);
+}
+
+/// Owner 2026-11-28: "open the terminal in the right pane" — the agent's
+/// `pane_show view=terminal` opened the dock under the chat, because it
+/// showed the terminal where it sat. It now seats it in the right pane.
+#[gpui::test]
+fn pane_show_terminal_puts_the_terminal_in_the_right_pane(cx: &mut gpui::TestAppContext) {
+    use crate::layout::{LayoutGlobal as _, TerminalPlace};
+    let state = lane_state("pane-show-terminal");
+    let root = folder(&state.2, true);
+    let (factory, _sent) = recording_factory_numbered(true);
+    let (baaz, vc, lead) = session_with(cx, &root, factory);
+    vc.update(|_, cx| crate::layout::Layout::stage(cx, |l| {
+        l.terminal_place = TerminalPlace::Bottom;
+        l.terminal_open = false;
+        l.right_open = false;
+    }));
+    let out = reply(&pane_call(&baaz, vc, &lead, &root, "pane_show", serde_json::json!({"view": "terminal"})));
+    assert_eq!(out["ok"], true, "{out}");
+    let (place, in_pane, dock) = vc.update(|_, cx| {
+        let l = crate::layout::Layout::get(cx);
+        (l.terminal_place, l.terminal_in_pane(), l.dock_open())
+    });
+    assert_eq!(place, TerminalPlace::Pane, "the terminal moved to the pane");
+    assert!(in_pane, "the right pane shows it");
+    assert!(!dock, "the dock under the chat stays closed");
+    cleanup(&root, state);
+}

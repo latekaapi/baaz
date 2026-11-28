@@ -1,12 +1,13 @@
 //! One Ask, and nothing into a composer no one can see (docs/82 8.2): ✦,
-//! the Field's Ask and ⌘J open the line in place and start no session; a
+//! the Field's Ask and ⌘J open the agent card in place (the one chat, owner
+//! 2026-11-28) and start no session; a
 //! hand-off, a screenshot or notes from Browse go to the session the person
 //! picks — keyed by its id, never `active` — with a toast whose Open takes
 //! them there; a cancelled pick attaches nothing; with the composer on
 //! screen a screenshot attaches there, no picker.
 
 use super::*;
-use crate::app::agent_window::LineUi;
+use crate::app::agent_window::CardUi;
 use crate::app::browser_handoff::HandoffTarget;
 use crate::overlay_stack::LayerKind;
 
@@ -51,12 +52,33 @@ fn browse_over_a_page(vc: &mut gpui::VisualTestContext, dir: &std::path::Path) -
     baaz
 }
 
-fn line(baaz: &Entity<Harness>, vc: &mut gpui::VisualTestContext) -> LineUi {
-    vc.update(|_, cx| baaz.read(cx).browser.read(cx).agent_window.line_ui.clone())
+fn card(baaz: &Entity<Harness>, vc: &mut gpui::VisualTestContext) -> CardUi {
+    vc.update(|_, cx| baaz.read(cx).browser.read(cx).agent_window.card_ui)
 }
 
-fn close_line(baaz: &Entity<Harness>, vc: &mut gpui::VisualTestContext) {
-    vc.update(|_, cx| baaz.update(cx, |h, cx| h.browser.update(cx, |b, cx| b.set_agent_line(LineUi::Closed, None, cx))));
+fn page_chip(baaz: &Entity<Harness>, vc: &mut gpui::VisualTestContext) -> bool {
+    vc.update(|_, cx| baaz.read(cx).browser.read(cx).agent_window.page_chip)
+}
+
+fn close_card(baaz: &Entity<Harness>, vc: &mut gpui::VisualTestContext) {
+    vc.update(|_, cx| baaz.update(cx, |h, cx| h.browser.update(cx, |b, cx| b.set_agent_card(CardUi::Closed, cx))));
+}
+
+/// Whether `ask` went to the browser chat: queued on its start or sent as
+/// its newest user turn — or, with no provider to ask, the card says so.
+fn asked_or_told(baaz: &Entity<Harness>, vc: &mut gpui::VisualTestContext, ask: &str) -> bool {
+    vc.update(|_, cx| {
+        let h = baaz.read(cx);
+        let notice = h.browser.read(cx).agent_window.notice.is_some();
+        let sent = h.registry.browser_chat().is_some_and(|view| {
+            let rt = view.read(cx).rt(cx);
+            rt.queued_start_sends().iter().any(|text| text.ends_with(ask))
+                || rt.transcript_session().is_some_and(|s| {
+                    s.turns.iter().any(|turn| matches!(turn, aui_protocol::Turn::User { text, .. } if text.ends_with(ask)))
+                })
+        });
+        sent || (notice && h.registry.browser_chat().is_none())
+    })
 }
 
 /// What no Ask may change: still Browse, "s-1" still the session, its
@@ -81,38 +103,76 @@ fn newest_toast(baaz: &Entity<Harness>, vc: &mut gpui::VisualTestContext) -> (St
 }
 
 #[gpui::test]
-fn star_the_fields_ask_and_cmd_j_open_the_line_and_start_no_session(cx: &mut gpui::TestAppContext) {
+fn star_the_fields_ask_and_cmd_j_open_the_card_and_start_no_session(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
     let state = lane_state("one-ask");
     let vc = cx.add_empty_window();
     let baaz = browse_over_a_page(vc, &state.2);
-    // ✦: the line, ready to type, "This page" standing.
+    // ✦: the card, ready to type, "This page" standing.
     vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_ask_page(window, cx)));
-    assert_eq!(line(&baaz, vc), LineUi::Ask, "✦ opens the line");
-    assert!(vc.update(|_, cx| baaz.read(cx).browser.read(cx).agent_window.line_page_chip), "on the page shown");
+    assert_eq!(card(&baaz, vc), CardUi::Card, "✦ opens the card");
+    assert!(page_chip(&baaz, vc), "on the page shown");
     assert_nothing_drafted(&baaz, vc, "✦");
-    close_line(&baaz, vc);
-    // ⌘J: the same line.
-    vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_agent_line(window, cx)));
-    assert_eq!(line(&baaz, vc), LineUi::Ask, "⌘J opens the line");
+    // Owner 2026-11-28 ("why are both boxes shown?"): ✦ with the card
+    // already open left the card and put the line's own ask under it. There
+    // is one chat now: ✦ again keeps the one card, and the line has no
+    // ask of its own to show (only the driving bar, with no agent driving).
+    vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_ask_page(window, cx)));
+    assert_eq!(card(&baaz, vc), CardUi::Card, "✦ on the open card keeps the one card");
+    assert!(vc.update(|_, cx| baaz.read(cx).line_view(cx).is_none()), "no second chat box under the card");
+    // ⌘J on the open card closes it.
+    vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_agent_card(window, cx)));
+    assert_eq!(card(&baaz, vc), CardUi::Closed, "⌘J closes the open card");
+    // ⌘J: the same card, the chip standing again after a ×.
+    vc.update(|_, cx| baaz.update(cx, |h, cx| h.browser.update(cx, |b, cx| b.set_page_chip(false, cx))));
+    vc.update(|window, cx| baaz.update(cx, |h, cx| h.toggle_agent_card(window, cx)));
+    assert_eq!(card(&baaz, vc), CardUi::Card, "⌘J opens the card");
+    assert!(page_chip(&baaz, vc), "each open puts \u{201C}This page\u{201D} back");
     assert_nothing_drafted(&baaz, vc, "⌘J");
-    close_line(&baaz, vc);
-    // The Field's Ask: the line, with the question asked there in place
-    // (or, with no provider to ask, the line saying so) — never a session.
+    // A docked column stays docked when asked again.
+    vc.update(|_, cx| baaz.update(cx, |h, cx| h.toggle_agent_column(cx)));
+    vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_ask_page(window, cx)));
+    assert_eq!(card(&baaz, vc), CardUi::Column, "an open column stays where it is");
+    close_card(&baaz, vc);
+    // The Field's Ask: the card, with the question asked there (or, with
+    // no provider to ask, the card saying so) — never a session.
     vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_ask("what is the refund window?", window, cx)));
     vc.run_until_parked();
-    let asked = line(&baaz, vc);
-    let notice = vc.update(|_, cx| baaz.read(cx).browser.read(cx).agent_window.line_notice.clone());
-    assert!(
-        matches!(&asked, LineUi::Answer { question, .. } if question == "what is the refund window?") || (asked == LineUi::Ask && notice.is_some()),
-        "the Field's Ask asks on the line, got {asked:?} / {notice:?}"
-    );
+    assert_eq!(card(&baaz, vc), CardUi::Card, "the Field's Ask opens the card");
+    assert!(asked_or_told(&baaz, vc, "what is the refund window?"), "the Field's Ask asks in the card");
     vc.update(|_, cx| {
         let h = baaz.read(cx);
         assert_eq!(crate::layout::Layout::get(cx).mode, crate::layout::Mode::Browse, "the Field's Ask stays in Browse");
         assert_eq!(h.active_id(cx).as_deref(), Some("s-1"), "the Field's Ask opens no session");
         assert_eq!(h.active.as_ref().expect("open").read(cx).draft_text(cx), "", "the Field's Ask drafts nothing");
         assert!(h.browser.read(cx).parcels.is_empty(), "nothing waits for a session");
+    });
+    lane_restore(state);
+}
+
+/// The card's `+` (shown while no chip stands) puts "This page" back; its
+/// quick action "Sum it up" asks the chat with the action's own ask.
+#[gpui::test]
+fn the_cards_plus_restores_the_page_and_sum_it_up_asks(cx: &mut gpui::TestAppContext) {
+    use aui::browse::agent_window::CardIntent;
+    cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+    let state = lane_state("one-ask-card");
+    let vc = cx.add_empty_window();
+    let baaz = browse_over_a_page(vc, &state.2);
+    vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_ask_page(window, cx)));
+    vc.update(|window, cx| baaz.update(cx, |h, cx| h.card_intent(CardIntent::ChipRemove("this-page".into()), window, cx)));
+    assert!(!page_chip(&baaz, vc), "× removes the chip");
+    vc.update(|window, cx| baaz.update(cx, |h, cx| h.card_intent(CardIntent::Plus, window, cx)));
+    assert!(page_chip(&baaz, vc), "+ puts \u{201C}This page\u{201D} back");
+    let sum = crate::app::agent_window::site_action_ask("sum").expect("the Sum it up ask");
+    vc.update(|window, cx| baaz.update(cx, |h, cx| h.card_intent(CardIntent::Quick("sum".into()), window, cx)));
+    vc.run_until_parked();
+    assert!(asked_or_told(&baaz, vc, sum), "Sum it up asks the chat");
+    vc.update(|_, cx| {
+        let h = baaz.read(cx);
+        assert!(h.registry.browser_chat().is_some(), "the scripted lane started the browser chat");
+        assert_eq!(h.active_id(cx).as_deref(), Some("s-1"), "Sum it up opens no session");
+        assert_eq!(crate::layout::Layout::get(cx).mode, crate::layout::Mode::Browse, "Sum it up stays in Browse");
     });
     lane_restore(state);
 }
@@ -132,13 +192,16 @@ fn the_fields_ask_on_a_new_tab_asks_with_no_page(cx: &mut gpui::TestAppContext) 
         })
     });
     vc.update(|window, cx| baaz.update(cx, |h, cx| h.browse_ask("hello", window, cx)));
-    assert_ne!(line(&baaz, vc), LineUi::Closed, "the line opens on a new tab too");
+    assert_eq!(card(&baaz, vc), CardUi::Card, "the card opens on a new tab too");
     vc.update(|_, cx| {
         let h = baaz.read(cx);
-        assert!(!h.browser.read(cx).agent_window.line_page_chip, "a new tab is no page to ask about");
+        assert!(!h.browser.read(cx).agent_window.page_chip, "a new tab is no page to ask about");
         assert_eq!(h.active_id(cx).as_deref(), Some("s-1"), "no session");
         assert_eq!(crate::layout::Layout::get(cx).mode, crate::layout::Mode::Browse);
     });
+    // `+` on a new tab: still no page to add.
+    vc.update(|window, cx| baaz.update(cx, |h, cx| h.card_intent(aui::browse::agent_window::CardIntent::Plus, window, cx)));
+    assert!(!page_chip(&baaz, vc), "+ adds no page where none is shown");
     lane_restore(state);
 }
 

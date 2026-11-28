@@ -32,7 +32,7 @@ impl Harness {
     /// drawn at once (the card shows it opening), the provider's child
     /// answers in the background, and the queued send goes out when it
     /// lands. Returns the provisional id, or `None` when no provider can
-    /// start (the caller says so on the line).
+    /// start (the caller says so in the card).
     pub(crate) fn start_browser_chat(&mut self, ask: String, window: &mut Window, cx: &mut Context<Self>) -> Option<String> {
         let choice = self.assistant_choice(cx)?;
         let workspace = assistant::browser_workspace_dir().to_string_lossy().into_owned();
@@ -74,7 +74,7 @@ impl Harness {
         Some(request_id)
     }
 
-    /// Point the line and the card at an existing browser chat, `session`
+    /// Point the card at an existing browser chat, `session`
     /// (its task folder's Open chat): the view must still be live.
     pub(crate) fn show_browser_chat(&mut self, session: &str, cx: &mut Context<Self>) -> bool {
         match self.find_view(session, cx) {
@@ -102,7 +102,7 @@ impl Harness {
             }
         }
         self.resubscribe_live_views(cx);
-        // Its turn and its asks move the agent line over the page.
+        // Its turn and its asks move the agent card over the page.
         self.watch_browser_chat(cx);
     }
 

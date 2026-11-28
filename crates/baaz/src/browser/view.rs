@@ -52,7 +52,7 @@ pub(crate) enum BrowserEvent {
     /// root makes it the shown tab.
     SplitFocus(TabId),
     /// The centre page's rect, or the pane's shown page's, moved: the
-    /// windows floating over the page (the corner, the agent line, the
+    /// windows floating over the page (the corner, the driving bar, the
     /// notes panel) follow it.
     PageRectMoved,
 }
@@ -300,8 +300,8 @@ pub(crate) struct BrowserView {
     /// a new session and a project or space change. Part of the sidebar key
     /// (and read by the centre every frame).
     pub(crate) browse_session_tab: Option<crate::browser::TabId>,
-    /// The agent window over the page (task 4.5): the ⌘J line, the ⌘E card,
-    /// its float and handoff picker, and the browser chats' pages and
+    /// The agent window over the page (task 4.5): the ⌘J/⌘E card and ⌘⇧E
+    /// column, its float and handoff picker, and the browser chats' pages and
     /// handoffs ([`crate::app::agent_window::AgentWindowState`]).
     pub(crate) agent_window: crate::app::agent_window::AgentWindowState,
     /// The one owner of what covers the native pages, which shows, and the

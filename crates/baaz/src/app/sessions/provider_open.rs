@@ -968,7 +968,7 @@ impl Harness {
     /// view's slot, the drafts and unsent names, the selection and reveal,
     /// the parcels waiting on it, a per-session override (the pane state a
     /// toggle wrote meanwhile), any session browser tabs, and a browser
-    /// chat's line state, used pages and reveal (docs/81 A F4). The view
+    /// chat's used pages and reveal (docs/81 A F4). The view
     /// renames itself in `attach_provider`. The draft has no row, no
     /// record and no turn until it lands.
     pub(super) fn rekey_session(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
@@ -987,16 +987,6 @@ impl Harness {
             crate::sessions::write(&self.session_list.read(cx).overrides);
             self.invalidate_list(cx);
         }
-        self.browser.update(cx, |browser, _| match &mut browser.agent_window.line_ui {
-            crate::app::agent_window::LineUi::Answer { session, .. }
-            | crate::app::agent_window::LineUi::Drafting { session, .. }
-            | crate::app::agent_window::LineUi::Drafted { session, .. }
-                if session == old =>
-            {
-                *session = new.to_owned();
-            }
-            _ => {}
-        });
         if let Some(pages) = self.browser.update(cx, |browser, _| browser.agent_window.browser_chat_pages.remove(old)) {
             self.browser.update(cx, |browser, _| browser.agent_window.browser_chat_pages.insert(new.to_owned(), pages));
         }

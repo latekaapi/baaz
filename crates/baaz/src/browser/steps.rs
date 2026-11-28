@@ -505,8 +505,8 @@ impl Harness {
             return Err("no page is open in Browse".into());
         }
         self.browse_ask(text, window, cx);
-        if self.browser.read(cx).agent_window.line_ui == crate::app::agent_window::LineUi::Closed {
-            return Err("the line did not open".into());
+        if self.browser.read(cx).agent_window.card_ui == crate::app::agent_window::CardUi::Closed {
+            return Err("the card did not open".into());
         }
         Ok(())
     }

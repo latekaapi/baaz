@@ -259,8 +259,8 @@ fn suggestions_pickup_and_row_presses() {
     assert!(leave.contains("focus_root"), "leaving falls back to the root, never a dead handle");
 }
 
-/// One Ask (docs/82 8.2): the Field's Ask opens the ⌘J line and asks
-/// there in place — never a session, never a draft, never `active`, never a
+/// One Ask (docs/82 8.2): the Field's Ask opens the agent card (the one
+/// chat, owner 2026-11-28) and asks there — never a session, never a draft, never `active`, never a
 /// navigation. ⌘↵ rides the input's own binding, so the commit never also
 /// fires. What a page sends a session it is not showing (a parcel) is keyed
 /// by that session's id: `new_session_in` drops an untargeted one on every
@@ -270,13 +270,13 @@ fn suggestions_pickup_and_row_presses() {
 fn one_ask_asks_in_place_and_parcels_land_on_arrival() {
     let browser = browser_source();
     let ask = fn_body(&browser, "browse_ask");
-    assert!(ask.contains("self.open_agent_line(window, cx)"), "the Field's Ask opens the line");
+    assert!(ask.contains("self.open_agent_card(window, cx)"), "the Field's Ask opens the card");
     assert!(ask.contains("self.ask_browser_chat("), "and asks there");
     for banned in ["new_session", "parcels", "self.active", "set_draft", "navigate"] {
         assert!(!ask.contains(banned), "the Field's Ask starts no session and drafts nothing ({banned})");
     }
     let star = fn_body(&browser, "browse_ask_page");
-    assert!(star.contains("self.open_agent_line(window, cx)"), "✦ opens the same line");
+    assert!(star.contains("self.open_agent_card(window, cx)"), "✦ opens the same card");
     assert!(!star.contains("browse_ask("), "✦ asks nothing by itself");
     let focus = fn_body(&browser, "focus_browse_address_with");
     assert!(

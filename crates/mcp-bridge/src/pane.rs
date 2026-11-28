@@ -13,7 +13,9 @@ use crate::ToolRegistry;
 
 /// Steering for the model.
 pub const INSTRUCTIONS: &str = "To show the person something — a file at a line, a diff, what changed, the terminal, \
-    the pull request — use pane_show: it opens in the pane beside the chat. changes_read tells what changed (all \
+    the pull request — use pane_show: it opens in Baaz's right pane beside the chat (\"open the terminal in the right \
+    pane\" is pane_show view=terminal). Call Baaz's tools by the names you were given, and say a tool worked only after \
+    it returned without an error. changes_read tells what changed (all \
     changes, this session, the last turn, a turn); changes_revert, changes_comment and changes_commit act through the \
     pane so the person sees it; pr_status reads the pull request's state, checks and review comments.";
 

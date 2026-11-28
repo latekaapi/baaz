@@ -13,10 +13,11 @@ pub const INSTRUCTIONS: &str = "To split work across agents — \"write with Son
     another agent do X\", \"run these in parallel\" — use delegate (agents_available says who can take a task); \
     give each task 2-5 acceptance criteria drawn from the person's words and show them in your message. You are \
     woken when your tasks settle; task_status shows them meanwhile. If you were given a task, finish by \
-    calling report, or escalate when blocked.";
+    calling report, or escalate when blocked. To start a session the person will drive themselves (\"open a new \
+    session that…\"), use session_new: it waits for them, unsent.";
 
 /// The tools, in contract order.
-pub const ORCHESTRA_TOOL_NAMES: [&str; 11] = [
+pub const ORCHESTRA_TOOL_NAMES: [&str; 12] = [
     "agents_available",
     "delegate",
     "task_status",
@@ -26,6 +27,7 @@ pub const ORCHESTRA_TOOL_NAMES: [&str; 11] = [
     "task_land",
     "session_send",
     "session_watch",
+    "session_new",
     "report",
     "escalate",
 ];
@@ -87,6 +89,16 @@ pub fn tool_defs() -> Vec<(String, String, Value)> {
             "session_watch",
             "Treat existing sessions as your tasks (\"these three sessions, then land and push\"): Baaz checks and lands them like delegated work.",
             json!({"type": "object", "required": ["sessions"], "properties": {"sessions": {"type": "array", "items": {"type": "string"}}, "check": {"type": "string"}}}),
+        ),
+        def(
+            "session_new",
+            "Open a new session for the person with your prompt waiting in its composer, unsent: \"start a new session that…\", \"open a session to do X\", \"make a new session asking the agent to…\". It gets its own row in the sidebar, in this project; the person stays where they are, opens it, reviews the prompt and sends it. Not for work you need back (that is delegate). Answers the new session's id.",
+            json!({"type": "object", "required": ["prompt"], "properties": {
+                "prompt": {"type": "string", "description": "The prompt, complete enough for the new session to act on alone."},
+                "title": {"type": "string", "description": "A few words for the sidebar."},
+                "provider": {"type": "string", "description": "claude-code, codex, muse, … (agents_available); omit for your own."},
+                "model": {"type": "string", "description": "A model the provider knows; omit for its default."},
+            }}),
         ),
         def(
             "report",

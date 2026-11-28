@@ -241,10 +241,10 @@ impl Harness {
         }
     }
 
-    /// The ✦ Ask button: the one Ask (docs/82 8.2) — the ⌘J line opens on
-    /// the page shown, ready to type. Never a session, never a draft.
+    /// The ✦ Ask button: the one Ask (docs/82 8.2) — the agent card opens
+    /// on the page shown, ready to type. Never a session, never a draft.
     pub(crate) fn browse_ask_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_agent_line(window, cx);
+        self.open_agent_card(window, cx);
     }
 
     /// A tab menu row.

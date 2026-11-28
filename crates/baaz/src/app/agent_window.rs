@@ -1,18 +1,17 @@
-//! The agent window over a Browse page (docs/27 §4.5, R3): the ⌘J line, the
-//! ⌘E card and the ⌘⇧E column, wired to a browser chat
-//! ([`super::browser_chat`]). The library draws every state (agentic-ui
-//! `browse/line-*`, `browse/agent-card`, `browse/agent-column`,
-//! `browse/handoff`); this module decides which one shows and turns their
-//! intents into Baaz actions.
+//! The agent window over a Browse page (docs/27 §4.5, R3): the ⌘E card and
+//! the ⌘⇧E column, wired to a browser chat ([`super::browser_chat`]). The
+//! library draws every state (agentic-ui `browse/agent-card`,
+//! `browse/agent-column`, `browse/handoff`, and the driving line); this
+//! module decides which one shows and turns their intents into Baaz actions.
 //!
-//! - **The line** asks about the page on screen. A small ask answers inline
-//!   (the line grows into an answer, R3 board 1a/1b); an ask that takes more
-//!   than a few steps grows into the card. "Draft a reply" writes into the
-//!   page's own box and never sends (board 2a/2b).
-//! - **The card** is the chat itself, bottom-right over the page; **the
-//!   column** is the same card docked beside the page.
-//! - While the chat (or any session) acts on the tab on screen, the line is
-//!   the driving bar (R2), whatever this module's own state.
+//! - **The card** is the one chat (owner 2026-11-28): every way to ask —
+//!   ⌘J, the ✦ button, the Field's Ask — opens it on the page on screen.
+//!   While its body is empty it offers the quick actions ("Sum it up",
+//!   "Draft a reply"); "Draft a reply" writes into the page's own box and
+//!   never sends. **The column** is the same card docked beside the page.
+//! - While the chat (or any session) acts on the tab on screen, the line
+//!   over the page's foot is the driving bar (R2): Take over, the page's
+//!   approvals. The line has no chat of its own.
 
 #[cfg(feature = "probe")]
 use gpui::AppContext as _;
@@ -20,22 +19,6 @@ use gpui::{Context, Window};
 
 use super::Harness;
 use crate::layout::LayoutGlobal as _;
-
-/// What the line shows when no agent is driving the tab on screen.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) enum LineUi {
-    /// Closed (the page alone).
-    #[default]
-    Closed,
-    /// The ask row with its chips and the site's actions.
-    Ask,
-    /// A small ask answering on the line: `question` as sent to `session`.
-    Answer { question: String, session: String },
-    /// A draft written into the page's box by `session`, on `tab`.
-    Drafting { session: String, tab: u64 },
-    /// The draft landed; nothing was sent.
-    Drafted { session: String, tab: u64 },
-}
 
 /// Where the card stands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -49,21 +32,19 @@ pub(crate) enum CardUi {
     Column,
 }
 
-/// The agent window's own state (task 4.5): what the line and the card show,
-/// the card's float window and handoff picker, and what each browser chat
-/// used and was handed off to. One field of the Browse view it floats over
-/// ([`crate::browser::BrowserView::agent_window`], task 4.5b).
+/// The agent window's own state (task 4.5): where the card stands, its
+/// "This page" chip and float window, the driving bar's input, and what
+/// each browser chat used and was handed off to. One field of the Browse
+/// view it floats over ([`crate::browser::BrowserView::agent_window`],
+/// task 4.5b).
 pub(crate) struct AgentWindowState {
-    /// The ⌘J line's own state (R3), when no agent drives the tab on screen.
-    pub(crate) line_ui: LineUi,
     /// Where the agent card stands: closed, floating, or docked.
     pub(crate) card_ui: CardUi,
-    /// The line's float wants the keyboard (its ask row is open).
-    pub(crate) line_wants_keys: bool,
-    /// The line's "This page" chip stands (× removes it until reopened).
-    pub(crate) line_page_chip: bool,
-    /// One quiet sentence the line shows instead of asking (no provider).
-    pub(crate) line_notice: Option<String>,
+    /// The card's "This page" chip stands (× removes it, `+` or the next
+    /// open puts it back).
+    pub(crate) page_chip: bool,
+    /// One quiet sentence the card shows instead of an answer (no provider).
+    pub(crate) notice: Option<String>,
     /// The card's steering input.
     pub(crate) agent_card_input: Option<gpui::Entity<gpui_kit::base::input::TextareaState>>,
     /// The card's float window, while it is open or opening.
@@ -77,18 +58,17 @@ pub(crate) struct AgentWindowState {
     /// Provider prompts a browser chat already accepted for its own
     /// browser tools (each once).
     pub(crate) auto_accepted: std::collections::HashSet<String>,
-    /// The agent line's input: it needs one even while it only reports.
+    /// The driving bar's input: the library's line takes one even though
+    /// the bar only reports.
     pub(crate) agent_line_input: Option<gpui::Entity<gpui_kit::base::input::TextareaState>>,
 }
 
 impl Default for AgentWindowState {
     fn default() -> Self {
         Self {
-            line_ui: LineUi::Closed,
             card_ui: CardUi::Closed,
-            line_wants_keys: false,
-            line_page_chip: true,
-            line_notice: None,
+            page_chip: true,
+            notice: None,
             agent_card_input: None,
             card_float: None,
             browser_handoffs: std::collections::HashMap::new(),
@@ -101,12 +81,15 @@ impl Default for AgentWindowState {
 
 /// The column's width, beside the page.
 pub(crate) const COLUMN_W: f32 = 400.0;
-/// An ask on the line whose turn takes more steps than this grows into the
-/// card (docs/27 §4.5: "any multi-step ask").
-pub(crate) const INLINE_MAX_STEPS: usize = 3;
 
-/// The site actions under the ask row (docs/27 §4.5).
-pub(crate) const SITE_ACTIONS: [(&str, &str); 2] = [("sum", "Sum it up"), ("draft", "Draft a reply")];
+/// The card's quick actions, offered while its body is empty (docs/27
+/// §4.5; the line's site actions until owner 2026-11-28).
+pub(crate) const QUICK_ACTIONS: [(&str, &str); 2] = [("sum", "Sum it up"), ("draft", "Draft a reply")];
+
+/// [`QUICK_ACTIONS`] as the library's card takes them.
+pub(crate) fn quick_actions() -> Vec<(gpui::SharedString, gpui::SharedString)> {
+    QUICK_ACTIONS.iter().map(|(id, label)| ((*id).into(), (*label).into())).collect()
+}
 
 /// The prompt that tells a browser chat which page the person means, ahead
 /// of their words. The tab is theirs: the grant lets the chat use it.
@@ -123,7 +106,7 @@ pub(crate) fn page_prompt(ask: &str, page: Option<(u64, &str, &str)>) -> String 
     }
 }
 
-/// The site action's ask, in the person's words.
+/// A quick action's ask, in the person's words.
 pub(crate) fn site_action_ask(id: &str) -> Option<&'static str> {
     match id {
         "sum" => Some("Sum up this page in a few short lines."),
@@ -134,13 +117,8 @@ pub(crate) fn site_action_ask(id: &str) -> Option<&'static str> {
     }
 }
 
-/// The JavaScript Undo runs on the drafted tab: empties the box the draft
-/// went into (the focused field or editable), firing `input` so the page's
-/// own state follows.
-pub(crate) const UNDO_DRAFT_JS: &str = "(()=>{const e=document.activeElement;if(e&&'value' in e){e.value='';e.dispatchEvent(new Event('input',{bubbles:true}));return 'cleared'}if(e&&e.isContentEditable){e.textContent='';e.dispatchEvent(new Event('input',{bubbles:true}));return 'cleared'}return 'none'})()";
-
-/// The answer an inline ask shows: the last assistant turn's text, once the
-/// turn has settled. `None` while it runs.
+/// A browser chat's answer: the last assistant turn's text after its last
+/// tool call, once the turn has settled. `None` while it runs.
 pub(crate) fn settled_answer(session: &aui_protocol::Session, busy: bool) -> Option<String> {
     if busy {
         return None;
@@ -164,23 +142,6 @@ pub(crate) fn settled_answer(session: &aui_protocol::Session, busy: bool) -> Opt
         .collect();
     let text = text.join("\n\n").trim().to_owned();
     (!text.is_empty()).then_some(text)
-}
-
-/// How many tool steps the last assistant turn took: past
-/// [`INLINE_MAX_STEPS`] an inline ask grows into the card.
-pub(crate) fn last_turn_steps(session: &aui_protocol::Session) -> usize {
-    let Some(turn) = session.turns.iter().rev().find(|turn| matches!(turn, aui_protocol::Turn::Assistant { .. })) else {
-        return 0;
-    };
-    turn.blocks()
-        .iter()
-        .map(|block| match block {
-            aui_protocol::Block::ToolCall { .. } => 1,
-            aui_protocol::Block::ToolGroup { calls, .. } => calls.len(),
-            aui_protocol::Block::Activity { steps, .. } => steps.len(),
-            _ => 0,
-        })
-        .sum()
 }
 
 /// The card's transcript for a browser chat's session: the person's asks
@@ -256,18 +217,18 @@ pub(crate) fn agent_transcript(
             }
         }
     }
-    AgentTranscript { title: title.to_owned().into(), model: model.to_owned().into(), chips: Vec::new(), items }
+    AgentTranscript { title: title.to_owned().into(), model: model.to_owned().into(), chips: Vec::new(), items, actions: quick_actions(), page_on_screen: false }
 }
 
 /// A user turn without the page preamble [`page_prompt`] put in front; a
-/// site action's ask reads as the action's own name.
+/// quick action's ask reads as the action's own name.
 pub(crate) fn strip_page_prompt(text: &str) -> &str {
     let preamble = text.starts_with("I'm looking at tab ") || text.starts_with("Browse with the Baaz browser tools");
     let rest = match preamble.then(|| text.split_once("\n\n")).flatten() {
         Some((_, rest)) => rest,
         None => text,
     };
-    SITE_ACTIONS
+    QUICK_ACTIONS
         .iter()
         .find(|(id, _)| site_action_ask(id) == Some(rest))
         .map(|(_, label)| *label)
@@ -308,109 +269,90 @@ fn agent_step_state(status: &aui_protocol::ToolStatus) -> aui::browse::agent_win
 }
 
 impl crate::browser::BrowserView {
-    /// The agent line's own state (and, when `keys` says, whether it takes
-    /// the keyboard): the line float redraws from this view's notify.
-    pub(crate) fn set_agent_line(&mut self, line: LineUi, keys: Option<bool>, cx: &mut Context<Self>) {
-        self.agent_window.line_ui = line;
-        if let Some(keys) = keys {
-            self.agent_window.line_wants_keys = keys;
-        }
-        cx.notify();
-    }
-
-    /// The agent card's state. Opening it (`take_answer`) carries the
-    /// line's inline answer on, so the line closes it: it never shows twice.
-    /// Docking and undocking move the card without touching the line.
-    pub(crate) fn set_agent_card(&mut self, card: CardUi, take_answer: bool, cx: &mut Context<Self>) {
+    /// Where the agent card stands; the float follows from this view's
+    /// notify.
+    pub(crate) fn set_agent_card(&mut self, card: CardUi, cx: &mut Context<Self>) {
         self.agent_window.card_ui = card;
-        if take_answer && card != CardUi::Closed && matches!(self.agent_window.line_ui, LineUi::Answer { .. }) {
-            self.agent_window.line_ui = LineUi::Closed;
-        }
         cx.notify();
     }
 
-    /// Drop the "This page" chip from the next ask.
-    pub(crate) fn remove_page_chip(&mut self, cx: &mut Context<Self>) {
-        if std::mem::replace(&mut self.agent_window.line_page_chip, false) {
+    /// Stand the "This page" chip for the next ask, or drop it.
+    pub(crate) fn set_page_chip(&mut self, on: bool, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.agent_window.page_chip, on) != on {
             cx.notify();
         }
     }
 
-    /// The line's notice under its field (a missing provider), or none.
+    /// The card's notice in its body (a missing provider), or none.
     pub(crate) fn set_agent_notice(&mut self, notice: Option<String>, cx: &mut Context<Self>) {
-        if self.agent_window.line_notice != notice {
-            self.agent_window.line_notice = notice;
+        if self.agent_window.notice != notice {
+            self.agent_window.notice = notice;
             cx.notify();
         }
     }
 }
 
 impl Harness {
-    /// ⌘J: open the line on the page on screen ([`Self::open_agent_line`]),
-    /// or close it.
-    pub(crate) fn toggle_agent_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.browser.read(cx).browse_centre_shown(cx).is_none() {
+    /// ⌘J and ⌘E: open the card on the page on screen
+    /// ([`Self::open_agent_card`]), or close it (floating or docked).
+    pub(crate) fn toggle_agent_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return;
         }
-        if self.browser.read(cx).agent_window.line_ui == LineUi::Closed {
-            self.open_agent_line(window, cx);
+        if self.browser.read(cx).agent_window.card_ui == CardUi::Closed {
+            self.open_agent_card(window, cx);
         } else {
-            self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Closed, None, cx));
+            self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Closed, cx));
         }
     }
 
-    /// The one Ask (docs/82 8.2): ⌘J, the ✦ button and the Field's Ask all
-    /// open the line here, on the page shown, ready to type. "This page"
-    /// stands again each time — unless no page is shown (a new tab), where
-    /// the line asks with no page. A line already open stays as it is.
+    /// The one Ask (docs/82 8.2, owner 2026-11-28): ⌘J, ⌘E, the ✦ button
+    /// and the Field's Ask all open the card here, on the page shown, ready
+    /// to type. "This page" stands again each time — unless no page is
+    /// shown (a new tab), where the card asks with no page. A card already
+    /// open (floating or docked) stays where it is and takes the keyboard.
     /// Browse only; with no tab at all, Browse's own blank tab opens first.
-    pub(crate) fn open_agent_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_agent_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
             return;
         }
         if self.browser.read(cx).browse_centre_shown(cx).is_none() {
             self.ensure_browse_tab(window, cx);
         }
-        if self.browser.read(cx).agent_window.line_ui != LineUi::Closed {
-            return;
-        }
-        let page = self.page_on_screen(cx).is_some_and(|(_, _, url)| !url.is_empty() && url != crate::browser::tabs::BLANK) && !self.browse_centre_tab_blank(cx);
+        let page = self.real_page_shown(cx);
+        let open = self.browser.read(cx).agent_window.card_ui != CardUi::Closed;
         self.browser.update(cx, |browser, cx| {
-            browser.agent_window.line_page_chip = page;
-            browser.set_agent_line(LineUi::Ask, Some(true), cx);
+            browser.set_page_chip(page, cx);
+            if !open {
+                browser.set_agent_card(CardUi::Card, cx);
+            }
         });
+        // A card opening takes the keyboard as its window opens
+        // (`sync_card_float`); one already open takes it here.
+        if open {
+            self.focus_agent_card(cx);
+        }
     }
 
-    /// Escape in the agent window: the handoff picker first, then the card,
-    /// then the line's own state (never the driving bar's: Take over and
-    /// the approval answer with their own buttons).
+    /// Whether the tab on screen shows a real page to ask about (not a new
+    /// tab): the "This page" chip's rule.
+    pub(crate) fn real_page_shown(&self, cx: &gpui::App) -> bool {
+        self.page_on_screen(cx).is_some_and(|(_, _, url)| !url.is_empty() && url != crate::browser::tabs::BLANK) && !self.browse_centre_tab_blank(cx)
+    }
+
+    /// Escape in the card's window: the handoff picker first, then the
+    /// floating card (a docked column stays). The driving bar never closes
+    /// on Escape: Take over and the approval answer with their own buttons.
     pub(crate) fn escape_agent_window(&mut self, kind: crate::overlay::OverlayKind, cx: &mut Context<Self>) {
-        if kind == crate::overlay::OverlayKind::AgentCard {
-            if let Some(picker) = self.handoff_picker_view(cx) {
-                // The picker's own dismissal, through the overlay stack.
-                picker.update(cx, |picker, cx| picker.dismiss(cx));
-            } else if self.browser.read(cx).agent_window.card_ui == CardUi::Card {
-                self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Closed, true, cx));
-            }
-        } else {
-            match self.browser.read(cx).agent_window.line_ui {
-                LineUi::Answer { .. } => self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Ask, Some(true), cx)),
-                LineUi::Ask | LineUi::Drafted { .. } => self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Closed, None, cx)),
-                _ => {}
-            }
-        }
-    }
-
-    /// ⌘E: open the card on the current chat, or close it.
-    pub(crate) fn toggle_agent_card(&mut self, cx: &mut Context<Self>) {
-        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
+        if kind != crate::overlay::OverlayKind::AgentCard {
             return;
         }
-        // The card carries the answer on: the line does not show it twice.
-        self.browser.update(cx, |browser, cx| {
-            let card = if browser.agent_window.card_ui == CardUi::Closed { CardUi::Card } else { CardUi::Closed };
-            browser.set_agent_card(card, true, cx);
-        });
+        if let Some(picker) = self.handoff_picker_view(cx) {
+            // The picker's own dismissal, through the overlay stack.
+            picker.update(cx, |picker, cx| picker.dismiss(cx));
+        } else if self.browser.read(cx).agent_window.card_ui == CardUi::Card {
+            self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Closed, cx));
+        }
     }
 
     /// ⌘⇧E: dock the card as a column, or undock it.
@@ -420,7 +362,7 @@ impl Harness {
         }
         self.browser.update(cx, |browser, cx| {
             let card = if browser.agent_window.card_ui == CardUi::Column { CardUi::Card } else { CardUi::Column };
-            browser.set_agent_card(card, true, cx);
+            browser.set_agent_card(card, cx);
         });
     }
 
@@ -432,16 +374,15 @@ impl Harness {
         Some((id.0, page.title().to_string(), page.url().to_string()))
     }
 
-    /// Send `ask` from the line (or the card's footer when `inline` is
-    /// false): to the open chat when it is idle, else to a new one. The
-    /// person's tab on screen is granted to the chat while the "This page"
-    /// chip stands.
-    pub(crate) fn ask_browser_chat(&mut self, ask: &str, inline: bool, draft: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Send `ask` as a new ask in the browser chat: to the open chat when
+    /// it is idle, else to a new one. The person's tab on screen is granted
+    /// to the chat while the "This page" chip stands.
+    pub(crate) fn ask_browser_chat(&mut self, ask: &str, window: &mut Window, cx: &mut Context<Self>) {
         let ask = ask.trim();
         if ask.is_empty() {
             return;
         }
-        let page = if self.browser.read(cx).agent_window.line_page_chip { self.page_on_screen(cx) } else { None };
+        let page = if self.browser.read(cx).agent_window.page_chip { self.page_on_screen(cx) } else { None };
         let prompt = page_prompt(ask, page.as_ref().map(|(tab, title, url)| (*tab, title.as_str(), url.as_str())));
         // The open chat continues while it is idle and still on the
         // Assistant's provider; after a change in Settings the next ask
@@ -477,16 +418,7 @@ impl Harness {
             let read_only = crate::layout::Layout::get(cx).agents.your_tabs == crate::browser::agents::YourTabs::ReadOnly;
             self.terminal_service.grant_tab(&session, *tab, state, read_only);
         }
-        if let Some(input) = self.browser.read(cx).agent_window.agent_line_input.clone() {
-            input.update(cx, |input, cx| input.set_value("", window, cx));
-        }
         self.browser.update(cx, |browser, cx| browser.set_agent_notice(None, cx));
-        let line_ui = match (draft, page) {
-            (true, Some((tab, _, _))) => LineUi::Drafting { session, tab },
-            _ if inline => LineUi::Answer { question: ask.to_owned(), session },
-            _ => self.browser.read(cx).agent_window.line_ui.clone(),
-        };
-        self.browser.update(cx, |browser, cx| browser.set_agent_line(line_ui, Some(false), cx));
     }
 
     /// A browser chat's own browser tools need no second ask from its
@@ -494,7 +426,8 @@ impl Harness {
     /// Agents) already stops Send, Pay, Delete, Upload and sign-in, and any
     /// action under Ask. So the provider's prompt for `mcp__baaz__browser_*`
     /// is accepted here, once per prompt; every other tool (files, shell)
-    /// still asks in the card.
+    /// still asks in the card. Runs on the browser chat's own changes and
+    /// every settle, before the floats follow (`Harness::watch_browser_chat`).
     pub(crate) fn auto_accept_browser_tools(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self.registry.browser_chat().cloned() else { return };
         let due: Vec<String> = view
@@ -509,115 +442,6 @@ impl Harness {
             view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.answer_external(&id, true, cx)));
         }
     }
-
-    /// On the browser chat's own changes and every settle, before the floats
-    /// follow (`Harness::watch_browser_chat`): an inline ask whose turn grew past
-    /// [`INLINE_MAX_STEPS`] moves to the card; a draft whose turn settled
-    /// lands as Drafted.
-    pub(crate) fn settle_agent_line(&mut self, cx: &mut Context<Self>) {
-        self.auto_accept_browser_tools(cx);
-        let Some(view) = self.registry.browser_chat().cloned() else { return };
-        let (busy, id, steps, asks) = {
-            let view = view.read(cx);
-            (
-                view.rt(cx).busy() || view.rt(cx).is_starting(),
-                view.rt(cx).session_id.clone(),
-                view.rt(cx).transcript_session().map(last_turn_steps).unwrap_or(0),
-                view.rt(cx).pending_external_approvals().iter().any(|(_, h)| !h.contains("mcp__baaz__browser_")) || (view.rt(cx).pending_external_approvals().is_empty() && view.rt(cx).pending_approval_line().is_some()),
-            )
-        };
-        match self.browser.read(cx).agent_window.line_ui.clone() {
-            // Past a few steps, or waiting on the person's OK, the ask moves
-            // to the card, where the steps and the question show.
-            LineUi::Answer { session, .. } if session == id && (steps > INLINE_MAX_STEPS || asks) => {
-                // An open card closes the line's answer itself.
-                self.browser.update(cx, |browser, cx| {
-                    if browser.agent_window.card_ui == CardUi::Closed {
-                        browser.set_agent_card(CardUi::Card, true, cx);
-                    } else {
-                        browser.set_agent_line(LineUi::Closed, None, cx);
-                    }
-                });
-            }
-            LineUi::Drafting { session, tab } if session == id && !busy => {
-                self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Drafted { session, tab }, None, cx));
-            }
-            _ => {}
-        }
-    }
-
-    /// The line's own state (not the driving bar), for the float to draw.
-    pub(crate) fn own_line_state(&self, cx: &gpui::App) -> Option<aui::browse::agent_window::LineState> {
-        use aui::browse::agent_window::LineState;
-        let chips = if self.browser.read(cx).agent_window.line_page_chip { vec![page_chip()] } else { Vec::new() };
-        match &self.browser.read(cx).agent_window.line_ui {
-            LineUi::Closed => None,
-            LineUi::Ask => Some(LineState::Ask {
-                text: "Ask about this page".into(),
-                chips,
-                site_actions: SITE_ACTIONS.iter().map(|(id, label)| ((*id).into(), (*label).into())).collect(),
-            }),
-            LineUi::Answer { question, session } => {
-                let view = self.find_view(session, cx)?;
-                let view = view.read(cx);
-                let busy = view.rt(cx).busy() || view.rt(cx).is_starting();
-                let answer = view.rt(cx).transcript_session().and_then(|s| settled_answer(s, busy));
-                let title = self.page_on_screen(cx).map(|(_, title, _)| title);
-                Some(LineState::Answer {
-                    question: question.clone().into(),
-                    answer: answer.map(Into::into),
-                    source: title.filter(|t| !t.is_empty()).map(Into::into),
-                    text: "Ask about this page".into(),
-                    chips,
-                })
-            }
-            // While the draft is typed the driving bar shows (the chat acts
-            // on the tab); between its steps the line reads as working.
-            LineUi::Drafting { .. } => Some(LineState::from_task(aui::browse::TaskFace::Typing, "Writing a draft in the page")),
-            LineUi::Drafted { .. } => Some(LineState::Drafted { label: "Draft ready".into() }),
-        }
-    }
-
-    /// One line intent that is not the driving bar's.
-    pub(crate) fn own_line_intent(&mut self, intent: aui::browse::agent_window::LineIntent, window: &mut Window, cx: &mut Context<Self>) {
-        use aui::browse::agent_window::LineIntent;
-        match intent {
-            LineIntent::Send(text) => self.ask_browser_chat(&text, true, false, window, cx),
-            LineIntent::SiteAction(id) => {
-                if let Some(ask) = site_action_ask(&id) {
-                    self.ask_browser_chat(ask, true, id.as_ref() == "draft", window, cx);
-                }
-            }
-            LineIntent::ChipRemove(_) => self.browser.update(cx, |browser, cx| browser.remove_page_chip(cx)),
-            LineIntent::Copy => {
-                if let Some(text) = self.own_line_state(cx).and_then(|state| match state {
-                    aui::browse::agent_window::LineState::Answer { answer, .. } => answer,
-                    _ => None,
-                }) {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
-                }
-            }
-            LineIntent::Dismiss => self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Ask, Some(true), cx)),
-            LineIntent::Expand => self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Card, true, cx)),
-            LineIntent::Undo => {
-                if let LineUi::Drafted { tab, .. } = self.browser.read(cx).agent_window.line_ui.clone() {
-                    if let Some(state) = self.browser.read(cx).states.get(&crate::browser::tabs::TabId(tab)).cloned() {
-                        state.update(cx, |state, _| state.eval_with_result(u64::MAX - tab, UNDO_DRAFT_JS));
-                    }
-                }
-                self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Closed, None, cx));
-            }
-            LineIntent::Done => self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Closed, None, cx)),
-            LineIntent::Stop => {
-                if let Some(view) = self.registry.browser_chat().cloned() {
-                    view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.interrupt(cx)));
-                }
-                self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Ask, None, cx));
-            }
-            LineIntent::Plus => {}
-            _ => {}
-        }
-    }
 }
 
 impl Harness {
@@ -628,7 +452,7 @@ impl Harness {
         match intent {
             // The card talks to its own chat: ↩ steers the running turn (or
             // sends the next), ⌘↩ queues behind it. Only with no chat yet does
-            // it start one (seen live: a steer through the line's reuse rule
+            // it start one (seen live: a steer through the ask's reuse rule
             // started a second chat).
             CardIntent::Send(text) | CardIntent::Queue(text) => {
                 match self.registry.browser_chat().cloned() {
@@ -639,19 +463,34 @@ impl Harness {
                             view.runtime().clone().update(cx, |rt, cx| rt.steer_or_send(text, cx));
                         }
                     }),
-                    None => self.ask_browser_chat(&text, false, false, window, cx),
+                    None => self.ask_browser_chat(&text, window, cx),
                 }
                 if let Some(input) = self.browser.read(cx).agent_window.agent_card_input.clone() {
                     input.update(cx, |input, cx| input.set_value("", window, cx));
                 }
             }
-            CardIntent::Dock => self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Column, false, cx)),
-            CardIntent::Undock => self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Card, false, cx)),
+            // A quick action of the empty card: its ask, as the person's
+            // own. "Draft a reply" writes into the page's box and never
+            // sends — its prompt says so.
+            CardIntent::Quick(id) => {
+                if let Some(ask) = site_action_ask(&id) {
+                    self.ask_browser_chat(ask, window, cx);
+                }
+            }
+            CardIntent::Dock => self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Column, cx)),
+            CardIntent::Undock => self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Card, cx)),
             CardIntent::Close => {
-                self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Closed, true, cx));
+                self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Closed, cx));
                 self.overlays.update(cx, |o, cx| { o.close(crate::overlay_stack::LayerKind::HandoffPicker, cx); });
             }
-            CardIntent::ChipRemove(_) => self.browser.update(cx, |browser, cx| browser.remove_page_chip(cx)),
+            CardIntent::ChipRemove(_) => self.browser.update(cx, |browser, cx| browser.set_page_chip(false, cx)),
+            // `+` (shown only while no chip stands): "This page" back, when
+            // there is a page to ask about.
+            CardIntent::Plus => {
+                if self.real_page_shown(cx) {
+                    self.browser.update(cx, |browser, cx| browser.set_page_chip(true, cx));
+                }
+            }
             CardIntent::Model => self.open_settings_page("browser", cx),
             CardIntent::Handoff => self.toggle_handoff_picker(cx),
             CardIntent::OpenHandoff => self.open_handoff_target(window, cx),
@@ -674,7 +513,6 @@ impl Harness {
                     });
                 }
             }
-            CardIntent::Plus => {}
         }
     }
 }
@@ -682,9 +520,9 @@ impl Harness {
 impl Harness {
     #[cfg(feature = "probe")]
     /// `browser-chat-fixture:<answer|steps|draft>` (free: no turn, no wire):
-    /// a read-only browser chat whose transcript is canned, made the line's
-    /// chat. `answer` lands the line in its inline answer, `steps` opens the
-    /// card on a multi-step chat, `draft` lands the draft state; empty is
+    /// a read-only browser chat whose transcript is canned, made the card's
+    /// chat, and the card opened on it: `answer` a one-step answer, `steps`
+    /// a multi-step chat, `draft` a "Draft a reply" that landed; empty is
     /// `answer`. Any other payload fails the step.
     pub(crate) fn step_browser_chat_fixture(&mut self, rest: &str, window: &mut Window, cx: &mut Context<Self>) -> crate::steps::StepResult {
         use aui_protocol::{Block, Session, ToolBody, ToolKind, ToolStatus, Turn, TurnMeta};
@@ -757,15 +595,11 @@ impl Harness {
             self.browser.update(cx, |browser, _| browser.agent_window.browser_chat_pages.insert(id.clone(), vec![(title.clone(), url.clone())]));
         }
         self.set_browser_chat(view, cx);
-        match kind {
-            "steps" => self.browser.update(cx, |browser, cx| browser.set_agent_card(CardUi::Card, false, cx)),
-            "draft" => {
-                if let Some((tab, _, _)) = page {
-                    self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Drafted { session: id, tab }, None, cx));
-                }
+        self.browser.update(cx, |browser, cx| {
+            if browser.agent_window.card_ui == CardUi::Closed {
+                browser.set_agent_card(CardUi::Card, cx);
             }
-            _ => self.browser.update(cx, |browser, cx| browser.set_agent_line(LineUi::Answer { question: ask.to_owned(), session: id }, None, cx)),
-        }
+        });
         Ok(())
     }
 }
@@ -885,7 +719,7 @@ impl Harness {
 }
 
 /// The "This page" chip.
-fn page_chip() -> aui::composer::ComposerChip {
+pub(crate) fn page_chip() -> aui::composer::ComposerChip {
     aui::composer::ComposerChip {
         id: "this-page".into(),
         kind: aui::composer::ComposerChipKind::File,

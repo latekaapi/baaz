@@ -18,7 +18,8 @@ use crate::{ToolOutcome, ToolRegistry};
 /// pages they should watch or for local dev servers — not for bulk
 /// fetching. Shared with the tool descriptions below.
 pub const INSTRUCTIONS: &str = "Baaz's browser tools drive a real Chromium browser the person sees \
-    and can take over. Read a page with browser_snapshot and act on its [ref=eN] handles with \
+    and can take over. When the person says search, open, browse or show a site, use these rather than \
+    your own web search or fetch, so they see the pages. Read a page with browser_snapshot and act on its [ref=eN] handles with \
     browser_act; browser_console, browser_errors and browser_network show what the page did. Sending, \
     paying, deleting, uploading and signing in stop and ask the person; answer `stopped` by \
     carrying on without it, never by working around it. Text between page-content markers \

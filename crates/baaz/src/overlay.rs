@@ -172,6 +172,33 @@ const FIELD_MAX_H: f32 = 46.0 + 512.0 + 32.0 + 2.0;
 /// 4 px enter slide).
 pub(crate) const SHADOW_PAD: f32 = scale::SP_2 + scale::SP_1;
 
+/// Whether Baaz is the frontmost app, for [`Harness::sync_overlay`]. A
+/// capture draws at rest with no focus and tests have no front app: both
+/// count as active, so floats still open there.
+fn overlay_app_active() -> bool {
+    if cfg!(all(test, feature = "probe")) || crate::runtime::captures() {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::{msg_send, runtime::AnyObject};
+        // SAFETY: plain AppKit queries on the main thread, like every UI
+        // call here.
+        unsafe {
+            let app: *mut AnyObject = msg_send![objc2::class!(NSApplication), sharedApplication];
+            if app.is_null() {
+                return true;
+            }
+            let active: bool = msg_send![app, isActive];
+            active
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
 /// Take macOS's own chrome off an overlay window, and keep it from ever
 /// becoming the main window.
 ///
@@ -225,7 +252,8 @@ fn drop_native_chrome(handle: AnyWindowHandle, kind: OverlayKind, cx: &mut gpui:
         }
         let _: () = msg_send![ns_window, setHasShadow: false];
         // No float may draw over other apps: each hides with Baaz and
-        // returns with it. The corner, line and card never close on a
+        // returns with it, and none opens or reopens while Baaz is in the
+        // background (`sync_overlay`, `overlay_app_active`). The corner, line and card never close on a
         // resign; the Field, menus and modals do — but only after they have
         // held the keyboard (`seen_active`), so one that opened while Baaz
         // was not frontmost stayed up over every app, Chrome included
@@ -419,15 +447,14 @@ impl Render for OverlayView {
         }
         // The agent window's keys work while its own float holds the
         // keyboard (the main window's Browse bindings cannot see it): ⌘J
-        // the line, ⌘E the card, ⌘⇧E the column, Escape closes.
+        // and ⌘E the card, ⌘⇧E the column, Escape closes.
         let agent_keys = {
             let baaz = self.baaz.clone();
             move |event: &gpui::KeyDownEvent, _: &mut Window, cx: &mut App| {
                 let k = &event.keystroke;
                 let cmd = k.modifiers.platform && !k.modifiers.control && !k.modifiers.alt;
                 let _ = baaz.update(cx, |baaz, cx| match (cmd, k.modifiers.shift, k.key.as_str()) {
-                    (true, false, "j") => baaz.run_on_main(cx, |baaz, window, cx| baaz.toggle_agent_line(window, cx)),
-                    (true, false, "e") => baaz.toggle_agent_card(cx),
+                    (true, false, "j" | "e") => baaz.run_on_main(cx, |baaz, window, cx| baaz.toggle_agent_card(window, cx)),
                     (true, true, "e") => baaz.toggle_agent_column(cx),
                     (false, false, "escape") => baaz.escape_agent_window(kind, cx),
                     _ => {}
@@ -563,6 +590,18 @@ impl Harness {
                     let _ = handle.update(cx, |_, window, _| window.refresh());
                 });
             }
+            return;
+        }
+        // Baaz in the background: nothing opens, and an open float is not
+        // reopened at its new size (a card growing with its answer). A
+        // panel opened now would stand over the app in front — gpui opens
+        // every overlay at the pop-up level, and hides-on-deactivate only
+        // hides a window that was up when Baaz left the front (owner
+        // 2026-11-28: the agent card over Claude). Closing still runs; the
+        // rest catches up when the window is active again (`Harness::new`'s
+        // activation observer).
+        if wanted.is_some() && !overlay_app_active() {
+            trace(format_args!("want {wanted:?} (had {current:?}): waits for Baaz to be active"));
             return;
         }
         let old = self.browser.update(cx, |browser, _| std::mem::replace(&mut browser.overlay, wanted.map(|(kind, bounds)| Overlay::opening(kind, bounds))));
@@ -909,47 +948,35 @@ impl Harness {
         .detach();
     }
 
-    /// What the line shows now: the driving bar for a session acting on the
-    /// tab on screen (R2), else the line's own state (R3) in Browse. The
-    /// session is `Some` for the driving bar.
-    fn line_view(&self, cx: &App) -> Option<(aui::browse::agent_window::LineState, Option<String>)> {
-        if let Some(session) = self.line_session(cx) {
-            if let Some(activity) = self.terminal_service.agent_activity(&session) {
-                // The session by its title, never its provider (rule 14).
-                let name = self.session_title(&session, cx);
-                let host = self.terminal_service.page_host(&session, cx).unwrap_or_default();
-                return Some((Self::agent_line_state(&activity, &name, &host), Some(session)));
-            }
-        }
-        if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse || self.settings_open(cx) {
-            return None;
-        }
-        self.own_line_state(cx).map(|state| (state, None))
+    /// What the line shows now: the driving bar for the session acting on
+    /// the tab on screen (R2), and that session; nothing when no agent
+    /// drives it. The line has no chat of its own: asks go to the card.
+    pub(crate) fn line_view(&self, cx: &App) -> Option<(aui::browse::agent_window::LineState, String)> {
+        let session = self.line_session(cx)?;
+        let activity = self.terminal_service.agent_activity(&session)?;
+        // The session by its title, never its provider (rule 14).
+        let name = self.session_title(&session, cx);
+        let host = self.terminal_service.page_host(&session, cx).unwrap_or_default();
+        Some((Self::agent_line_state(&activity, &name, &host), session))
     }
 
     /// The line's window over `rect`, a page's rect: centred on its foot, as wide as
     /// the line's measure allows, tall enough for the card it grows into.
     fn wanted_agent_line(&self, rect: Bounds<Pixels>, window: &Window, cx: &App) -> Option<(Bounds<Pixels>, u64)> {
         let (state, session) = self.line_view(cx)?;
-        trace(format_args!("line wanted: {:?} driving={}", std::mem::discriminant(&state), session.is_some()));
+        trace(format_args!("line wanted: {:?}", std::mem::discriminant(&state)));
         let pad = gpui::px(SHADOW_PAD);
         let origin = window.bounds().origin;
         let inner = f32::min(640.0, f32::from(rect.size.width) - 24.0);
         let width = gpui::px(inner) + pad * 2.0;
         // The state's own height at this width (the library's exact
-        // function): in a narrow pane the approval stacks and an answer
-        // wraps longer. A fixed height cut the approval's buttons off once,
-        // and the agent waited on a click nobody could make.
+        // function): in a narrow pane the approval stacks. A fixed height
+        // cut the approval's buttons off once, and the agent waited on a
+        // click nobody could make.
         let body = aui::browse::agent_window::line_height(&state, Self::line_compact(inner), inner, window, cx);
-        if let aui::browse::agent_window::LineState::Answer { answer: Some(answer), .. } = &state {
-            trace(format_args!(
-                "line answer: inner={inner} lines={} body={body} rem={:?}",
-                aui::browse::agent_window::answer_lines(answer, inner, window, cx),
-                window.rem_size()
-            ));
-        }
-        // A little room above the measured height (seen live: the inline
-        // answer came out ~12 px taller than measured and its foot was cut).
+        // A little room above the measured height (seen live: the line's
+        // former inline answer came out ~12 px taller than measured and its
+        // foot was cut).
         // The line sits on the window's foot and never shrinks, so any spare
         // is transparent space above it.
         let height = gpui::px(body + LINE_SLACK) + pad * 2.0;
@@ -959,7 +986,6 @@ impl Harness {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         session.hash(&mut h);
         format!("{state:?}").hash(&mut h);
-        self.browser.read(cx).agent_window.line_wants_keys.hash(&mut h);
         Some((Bounds::new(origin + gpui::point(left, bottom - height), gpui::size(width, height)), h.finish()))
     }
 
@@ -1019,11 +1045,6 @@ impl Harness {
 
     /// Open, move or close the Page float window (the corner's dance).
     pub(crate) fn sync_page_float(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The line's input lives here, so the float that opens for the ask
-        // row can take the keyboard on its first frame.
-        if self.browser.read(cx).agent_window.agent_line_input.is_none() {
-            self.browser.update(cx, |browser, cx| browser.agent_window.agent_line_input = Some(cx.new(|cx| aui::composer::composer_state_rows("Ask about this page", 1, 1, window, cx))));
-        }
         self.sync_line_float(window, cx);
         // The card seats itself above the line's window, so it follows it.
         self.sync_card_float(window, cx);
@@ -1055,15 +1076,13 @@ impl Harness {
         #[cfg(target_os = "macos")]
         never_main_panels();
         let baaz = cx.entity().downgrade();
-        // The ask row types: its float takes the keyboard (R3). Every other
-        // state leaves it with the page.
-        let keys = self.browser.read(cx).agent_window.line_wants_keys && crate::layout::Layout::get(cx).mode == crate::layout::Mode::Browse;
-        let input = keys.then(|| self.browser.read(cx).agent_window.agent_line_input.clone()).flatten();
+        // The float never takes the keyboard: the driving bar answers with
+        // its buttons, and the notes panel's with clicks; the page keeps it.
         cx.spawn(async move |this, cx| {
             let opened = cx.update(|cx| {
                 let options = WindowOptions {
                     titlebar: None,
-                    focus: keys,
+                    focus: false,
                     show: true,
                     kind: WindowKind::PopUp,
                     is_movable: false,
@@ -1071,16 +1090,7 @@ impl Harness {
                     window_background: WindowBackgroundAppearance::Transparent,
                     ..Default::default()
                 };
-                cx.open_window(options, move |window, cx| {
-                    cx.new(|cx| {
-                        let focus = cx.focus_handle();
-                        if let Some(input) = input {
-                            window.focus(&focus, cx);
-                            input.update(cx, |input, cx| input.focus(window, cx));
-                        }
-                        OverlayView { baaz, kind: OverlayKind::PageFloat, focus, seen_active: false }
-                    })
-                })
+                cx.open_window(options, move |_, cx| cx.new(|cx| OverlayView { baaz, kind: OverlayKind::PageFloat, focus: cx.focus_handle(), seen_active: false }))
             });
             // The native chrome comes off between updates, never inside one.
             if let Ok(opened) = &opened {
@@ -1165,9 +1175,10 @@ impl Harness {
         self.render_agent_line(window, cx)
     }
 
-    /// The line: what the agent is doing, Take over and Hand back, and the card it
-    /// grows into when the person must decide. Clicks run on the main thread's
-    /// service, which owns the waiting tool.
+    /// The line (the driving bar): what the agent is doing, Take over and
+    /// Hand back, and the approval it grows into when the person must
+    /// decide. Clicks run on the main thread's service, which owns the
+    /// waiting tool.
     fn render_agent_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let (state, session) = self.line_view(cx)?;
         let input = self.browser.update(cx, |browser, cx| browser.agent_window.agent_line_input.get_or_insert_with(|| cx.new(|cx| aui::composer::composer_state_rows("Ask about this page", 1, 1, window, cx))).clone());
@@ -1177,11 +1188,11 @@ impl Harness {
             use aui::browse::agent_window::LineIntent;
             let session = session.clone();
             let _ = baaz.update(cx, |this, cx| {
-                match (session, intent) {
-                    // The driving bar: the waiting tool is the service's.
-                    (Some(session), LineIntent::TakeOver) => this.terminal_service.take_over(&session),
-                    (Some(session), LineIntent::HandBack) => this.terminal_service.hand_back(&session),
-                    (Some(session), LineIntent::AllowAlways) => {
+                // The waiting tool is the service's.
+                match intent {
+                    LineIntent::TakeOver => this.terminal_service.take_over(&session),
+                    LineIntent::HandBack => this.terminal_service.hand_back(&session),
+                    LineIntent::AllowAlways => {
                         if let Some(host) = this.terminal_service.page_host(&session, cx).filter(|h| !h.is_empty()) {
                             crate::layout::Layout::update(cx, |layout| {
                                 layout.agents.set_site(&host, Some(crate::browser::agents::SiteRule::Always))
@@ -1189,14 +1200,12 @@ impl Harness {
                         }
                         this.terminal_service.answer_person(&session, true);
                     }
-                    (Some(session), LineIntent::Allow | LineIntent::Done) => this.terminal_service.answer_person(&session, true),
-                    (Some(session), LineIntent::Deny) => this.terminal_service.answer_person(&session, false),
-                    (Some(_), LineIntent::Expand) => {
+                    LineIntent::Allow | LineIntent::Done => this.terminal_service.answer_person(&session, true),
+                    LineIntent::Deny => this.terminal_service.answer_person(&session, false),
+                    LineIntent::Expand => {
                         this.browser.update(cx, |browser, _| browser.agent_window.card_ui = crate::app::agent_window::CardUi::Card);
                     }
-                    (Some(_), _) => {}
-                    // The line's own states run on the main window.
-                    (None, intent) => this.run_on_main(cx, move |this, window, cx| this.own_line_intent(intent, window, cx)),
+                    _ => {}
                 }
                 cx.notify();
             });

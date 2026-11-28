@@ -12,13 +12,17 @@
 //! are all baked in.
 //!
 //! The source, in order:
-//! 1. the current aerial's still (`com.apple.wallpaper/aerials/thumbnails/
-//!    <assetID>.png`) — an aerial wallpaper is a video, and
-//!    `desktopImageURLForScreen:` then answers the stock `DefaultDesktop.heic`
-//!    instead of what is on screen (seen 2026-10-11);
-//! 2. `NSWorkspace.desktopImageURLForScreen:` for the main screen (HEIC and
-//!    other formats go through `/usr/bin/sips` first);
-//! 3. none readable: option B's mesh (indigo, teal, plum), generated.
+//! 1. `NSWorkspace.desktopImageURLForScreen:` for the main screen (HEIC and
+//!    other formats go through `/usr/bin/sips` first) — only when the
+//!    picture lives outside `~/Library` (the system's pictures, the person's
+//!    own files): under `~/Library` it is another app's data, and reading it
+//!    raised macOS's "Baaz would like to access data from other apps" on a
+//!    blank tab the person never asked about (owner 2026-11-28). The aerial
+//!    still that used to come first (`com.apple.wallpaper/aerials/…`, read
+//!    from Apple's wallpaper store) is gone for the same reason; an aerial
+//!    wallpaper is a video, and `desktopImageURLForScreen:` then answers the
+//!    stock picture, so an aerial now shows the stock one;
+//! 2. none readable: option B's mesh (indigo, teal, plum), generated.
 
 use std::path::{Path, PathBuf};
 
@@ -77,55 +81,21 @@ pub(crate) fn bake(source: Option<PathBuf>) -> Option<PathBuf> {
     Some(out)
 }
 
-/// What the desktop shows now, as a readable still: the aerial's still
-/// when an aerial is set, else the desktop picture.
+/// What the desktop shows now, as a readable still: the desktop picture,
+/// when it is one Baaz may read without asking (see the module doc).
 pub(crate) fn current_source() -> Option<PathBuf> {
-    aerial_still().or_else(desktop_picture).filter(|path| path.exists())
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    desktop_picture().filter(|path| readable_without_asking(path, home.as_deref())).filter(|path| path.exists())
 }
 
-/// The current aerial's thumbnail. The wallpaper store's `Index.plist` is a
-/// binary plist whose aerial choices nest their configuration as raw binary
-/// plist bytes, so the asset id appears in the file as plain ASCII: the
-/// first UUID-shaped run that names an existing thumbnail is the one set.
-fn aerial_still() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let root = Path::new(&home).join("Library/Application Support/com.apple.wallpaper");
-    let index = std::fs::read(root.join("Store/Index.plist")).ok()?;
-    let thumbs = root.join("aerials/thumbnails");
-    uuids(&index).into_iter().map(|id| thumbs.join(format!("{id}.png"))).find(|path| path.exists())
-}
-
-/// Every 8-4-4-4-12 hex run in `bytes`, in order.
-fn uuids(bytes: &[u8]) -> Vec<String> {
-    const SHAPE: [usize; 5] = [8, 4, 4, 4, 12];
-    let mut found = Vec::new();
-    let mut i = 0;
-    while i + 36 <= bytes.len() {
-        let candidate = &bytes[i..i + 36];
-        let mut at = 0;
-        let mut ok = true;
-        for (n, len) in SHAPE.iter().enumerate() {
-            if !candidate[at..at + len].iter().all(u8::is_ascii_hexdigit) {
-                ok = false;
-                break;
-            }
-            at += len;
-            if n < 4 {
-                if candidate[at] != b'-' {
-                    ok = false;
-                    break;
-                }
-                at += 1;
-            }
-        }
-        if ok {
-            found.push(String::from_utf8_lossy(candidate).into_owned());
-            i += 36;
-        } else {
-            i += 1;
-        }
+/// Whether reading `path` stays off other apps' data: nothing under the
+/// person's `~/Library` (containers, group containers, Application Support
+/// — where macOS asks before one app reads another's files).
+fn readable_without_asking(path: &Path, home: Option<&Path>) -> bool {
+    match home {
+        Some(home) => !path.starts_with(home.join("Library")),
+        None => true,
     }
-    found
 }
 
 /// `NSWorkspace.desktopImageURLForScreen:` for the main screen.
@@ -257,13 +227,24 @@ fn mesh() -> RgbImage {
 mod tests {
     use super::*;
 
+    /// Owner 2026-11-28: a blank tab raised macOS's "access data from
+    /// other apps". The ground reads no picture under ~/Library; the
+    /// system's pictures and the person's own files stay readable.
     #[test]
-    fn uuids_are_found_inside_binary_noise() {
-        let mut bytes = vec![0u8, 0x5f, 0x10, 0x24];
-        bytes.extend_from_slice(b"52ACB9B8-75FC-4516-BC60-4550CFF3B661");
-        bytes.extend_from_slice(&[8, 11, 0x13, b'z']);
-        bytes.extend_from_slice(b"not-a-uuid-1234");
-        assert_eq!(uuids(&bytes), vec!["52ACB9B8-75FC-4516-BC60-4550CFF3B661".to_owned()]);
+    fn the_ground_never_reads_another_apps_data() {
+        let home = Path::new("/Users/ada");
+        for other in [
+            "/Users/ada/Library/Application Support/com.apple.wallpaper/aerials/thumbnails/x.png",
+            "/Users/ada/Library/Containers/com.apple.wallpaper.agent/Data/x.heic",
+            "/Users/ada/Library/Group Containers/group.com.apple.photos/x.jpg",
+        ] {
+            assert!(!readable_without_asking(Path::new(other), Some(home)), "{other}");
+        }
+        for fine in ["/System/Library/Desktop Pictures/Sequoia.heic", "/Users/ada/Pictures/beach.jpg", "/Library/Desktop Pictures/x.jpg"] {
+            assert!(readable_without_asking(Path::new(fine), Some(home)), "{fine}");
+        }
+        let source = include_str!("newtab_ground.rs");
+        assert!(!source.contains(&["com.apple.", "wallpaper/Store"].concat()), "the wallpaper store is never read");
     }
 
     #[test]

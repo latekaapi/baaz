@@ -127,6 +127,23 @@ impl Harness {
         .detach();
     }
 
+    /// Give the open card's input the keyboard. A capture takes no focus.
+    pub(crate) fn focus_agent_card(&mut self, cx: &mut Context<Self>) {
+        if crate::runtime::captures() {
+            return;
+        }
+        let float = self.browser.read(cx).agent_window.card_float.as_ref().and_then(|float| float.handle);
+        let input = self.browser.read(cx).agent_window.agent_card_input.clone();
+        if let (Some(handle), Some(input)) = (float, input) {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    window.activate_window();
+                    input.update(cx, |input, cx| input.focus(window, cx));
+                });
+            });
+        }
+    }
+
     /// The chat's title for the card: its name or generated title, else its
     /// first ask, short.
     fn browser_chat_title(&self, cx: &App) -> String {
@@ -203,17 +220,15 @@ impl Harness {
         if let Some((_, label, detail)) = self.browser_chat_id(cx).and_then(|id| self.browser.read(cx).agent_window.browser_handoffs.get(&id).cloned()) {
             transcript.items.push(aui::browse::agent_window::AgentItem::HandedOff { title: label.into(), detail: detail.into() });
         }
-        if self.browser.read(cx).agent_window.line_page_chip {
-            transcript.chips = vec![aui::composer::ComposerChip {
-                id: "this-page".into(),
-                kind: aui::composer::ComposerChipKind::File,
-                label: "This page".into(),
-                removable: true,
-                thumbnail: None,
-                detail: None,
-                state: Default::default(),
-            }];
+        // No provider to ask: the card says so where the answer would be.
+        if let (None, Some(notice)) = (self.registry.browser_chat(), self.browser.read(cx).agent_window.notice.clone()) {
+            transcript.items.push(aui::browse::agent_window::AgentItem::Answer(notice.into()));
         }
+        if self.browser.read(cx).agent_window.page_chip {
+            transcript.chips = vec![crate::app::agent_window::page_chip()];
+        }
+        // `+` puts the page back only where there is one (not a new tab).
+        transcript.page_on_screen = self.real_page_shown(cx);
         let baaz = cx.weak_entity();
         let on_intent = move |intent: aui::browse::agent_window::CardIntent, _: &mut Window, cx: &mut App| {
             let _ = baaz.update(cx, |this, cx| this.run_on_main(cx, move |this, window, cx| this.card_intent(intent, window, cx)));
@@ -232,12 +247,12 @@ impl Harness {
     }
 }
 
-/// The card before any turn: the title and model, nothing in the body (or
-/// one working step while the chat opens).
+/// The card before any turn: the title and model, the quick actions in the
+/// body (or one working step while the chat opens).
 fn empty_transcript(title: &str, model: &str, busy: bool) -> aui::browse::agent_window::AgentTranscript {
     use aui::browse::agent_window::{AgentItem, AgentTranscript, Step, StepState};
     let items = if busy { vec![AgentItem::Steps(vec![Step::new("Starting", StepState::Running)])] } else { Vec::new() };
-    AgentTranscript { title: title.to_owned().into(), model: model.to_owned().into(), chips: Vec::new(), items }
+    AgentTranscript { title: title.to_owned().into(), model: model.to_owned().into(), chips: Vec::new(), items, actions: crate::app::agent_window::quick_actions(), page_on_screen: false }
 }
 
 /// A model id as the card names it: the assistant's label when it is one
