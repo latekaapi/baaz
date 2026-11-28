@@ -109,6 +109,9 @@ impl PickerDelegate for FolderDelegate {
 pub(crate) struct ModelDelegate {
     /// The catalog's rows.
     pub(crate) rows: Vec<PickerRow>,
+    /// The line under the rows when the session's model is not among them
+    /// ([`SessionRuntime::unlisted_model_note`]).
+    pub(crate) note: Option<SharedString>,
 }
 
 impl PickerDelegate for ModelDelegate {
@@ -133,8 +136,11 @@ impl PickerDelegate for ModelDelegate {
 
     fn render_picker(&self, rows: Vec<PickerRow>, frame: PickerFrame, _window: &mut Window, _cx: &mut Context<ModelPicker>) -> AnyElement {
         let (select, dismiss) = (frame.select.clone(), frame.dismiss.clone());
-        let menu = model_menu("model-menu", rows, frame.selected, true)
-            .align_end(true)
+        let mut menu = model_menu("model-menu", rows, frame.selected, true).align_end(true);
+        if let Some(note) = self.note.clone() {
+            menu = menu.note(note);
+        }
+        let menu = menu
             .on_pick(move |id, window, cx| select(id, window, cx))
             .on_close(move |window, cx| dismiss(window, cx));
         let menu = if crate::runtime::captures() { menu.at_rest() } else { menu };
@@ -230,7 +236,8 @@ impl SessionView {
     /// the last row is "no row": the chip names a model the catalog lacks).
     pub(super) fn open_model_picker(&mut self, selected: usize, cx: &mut Context<Self>) {
         let pick = cx.listener(|this: &mut Self, pick: &SharedString, _, cx| this.on_model_pick(pick, cx));
-        let delegate = ModelDelegate { rows: self.model_menu_rows(cx) };
+        let note = self.runtime.read(cx).unlisted_model_note().map(SharedString::from);
+        let delegate = ModelDelegate { rows: self.model_menu_rows(cx), note };
         let picker = cx.new(|cx| {
             let mut picker = Picker::new(delegate, cx).on_pick(pick);
             picker.select(selected, cx);

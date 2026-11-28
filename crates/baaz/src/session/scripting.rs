@@ -332,6 +332,37 @@ impl SessionRuntime {
         cx.emit(RuntimeEvent::MenusStale);
         Ok(())
     }
+
+    /// `fixture-models-unlisted`: a Codex catalog that does not list the
+    /// model the session runs — an older CLI under a config naming a newer
+    /// model (owner round B3) — folded through the real catalog path, so
+    /// the model picker lists that model as its own checked row with the
+    /// note under the rows. Fails on a session that is not Codex's, where
+    /// no note is drawn.
+    pub(crate) fn step_fixture_models_unlisted(&mut self, cx: &mut Context<Self>) -> StepResult {
+        if self.provider_kind() != crate::providers::ProviderId::Codex {
+            return Err(format!("the session is not a {} session", crate::providers::ProviderId::Codex.label()));
+        }
+        let row = |id: &str, label: &str, default: bool| provider::ModelSummary {
+            id: id.to_owned(),
+            label: label.to_owned(),
+            active: false,
+            efforts: ["low", "medium", "high", "xhigh"].map(str::to_owned).to_vec(),
+            hidden: false,
+            is_default: default,
+            description: Some("A sample catalog row for captures.".to_owned()),
+            default_effort: Some("medium".to_owned()),
+            effort_notes: Vec::new(),
+            unavailable_modes: Vec::new(),
+        };
+        self.history_model = Some("gpt-6.2-sol".to_owned());
+        self.models_fixture = true;
+        self.apply_model_catalog(vec![row("gpt-6.1-sol", "GPT-6.1-Sol", true), row("gpt-6.1-astra", "GPT-6.1-Astra", false)], "openai", cx);
+        if self.unlisted_model_note().is_none() {
+            return Err("the fixture catalog folded without a note".into());
+        }
+        Ok(())
+    }
 }
 
 impl SessionView {

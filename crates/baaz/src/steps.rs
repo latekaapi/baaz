@@ -56,6 +56,7 @@
 //! | `handoff:<provider>` | "Continue in X" as a verb (`muse`, `claude-code`, `codex`), headless: no confirm dialog — the command line already asked. Needs turns, refuses on a pending question or approval, and never fires for the session's own provider; an unknown id fails, free |
 //! | `setprovider:<id>` | the provider menu's row as a verb (`muse`, `claude-code`, `codex`): a fresh session swaps lanes, a session with turns starts a new session on the pick instead and the step fails saying so; an unknown id fails, free |
 //! | `fixture-models` | fill the model menu with a fixed three-row Muse-shaped catalog, each row listing reasoning levels (no catalog request), free |
+//! | `fixture-models-unlisted` | on a Codex session: fold a two-row catalog that omits the session's model (`gpt-6.2-sol`) through the real catalog path, so the model menu shows its note; fails off Codex, free |
 //! | `seteffort:<level>` | the effort menu's row as a verb (`default` clears); an unknown spelling fails, free |
 //! | `compact` | `session/compact` |
 //! | `digest-now` | this session went idle: the application writes its digest when one is due (docs/85 12.4) |
@@ -1214,6 +1215,7 @@ pub(crate) const SESSION_VERBS: &[SessionVerb] = &[
     SessionVerb { verb: "model", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Model, cx); Ok(()) } },
     SessionVerb { verb: "effort", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Effort, cx); Ok(()) } },
     SessionVerb { verb: "fixture-models", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_fixture_models(cx)) },
+    SessionVerb { verb: "fixture-models-unlisted", run: |v, _, _, cx| v.runtime().clone().update(cx, |rt, cx| rt.step_fixture_models_unlisted(cx)) },
     SessionVerb { verb: "provider", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Provider, cx); Ok(()) } },
     SessionVerb { verb: "mode", run: |v, _, _, cx| { v.toggle_picker(MenuKind::Mode, cx); Ok(()) } },
     // The new-session row's folder picker (docs/82 6.6), opened as its

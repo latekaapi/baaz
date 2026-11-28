@@ -626,6 +626,13 @@ ENTRIES = {
     "composer-model-catalog": {"shot": ["--no-connect", "--login", "signed-in",
                                         "--steps", "new;setprovider:muse;wait:300;fixture-models;model"],
                                "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-model-catalog-state-")}},
+    # The model picker on a Codex session whose model the catalog does not
+    # list (an older CLI under a config naming a newer model, owner round
+    # B3): no row checked, the note under the rows. Offline; the catalog
+    # is a fixture.
+    "composer-menu-model-unlisted": {"shot": ["--no-connect", "--login", "signed-in",
+                                              "--steps", "new;setprovider:codex;wait:300;fixture-models-unlisted;model"],
+                                     "env": {"BAAZ_STATE_DIR": tempfile.mkdtemp(prefix="uiprobe-model-unlisted-state-")}},
     # One composer per non-muse lane, reached by the scripted provider
     # pick. `setprovider:` is a setter through the picker's own path —
     # not a toggle — so both runs land on the lane's composer and
