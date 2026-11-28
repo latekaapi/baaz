@@ -1818,6 +1818,47 @@ mod tests {
         });
     }
 
+    /// Owner round B3: a Codex session runs a model its `model/list` omits
+    /// (an older CLI under a config naming a newer model). The model menu
+    /// opens with the note under the rows saying why and what fixes it; a
+    /// listed model, and a Claude Code session, get none.
+    #[gpui::test]
+    fn codex_unlisted_model_gets_the_menu_note(cx: &mut gpui::TestAppContext) {
+        use crate::session::pickers::ModelPicker;
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let view = lane_view(vc, "codex", "s-unlisted");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.apply_model_catalog(codex_fixture_catalog(), "openai", cx)));
+            // A listed model: no note.
+            view.update(cx, |view, cx| {
+                assert_eq!(view.rt(cx).model_id(), "gpt-5.6-sol");
+                assert_eq!(view.rt(cx).unlisted_model_note(), None, "a listed model gets no note");
+            });
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("gpt-6.2-sol", cx)));
+            view.update(cx, |view, cx| {
+                let note = view.rt(cx).unlisted_model_note().expect("an unlisted model gets the note");
+                assert!(note.starts_with("gpt-6.2-sol isn't in this Codex's model list"), "{note}");
+                assert!(note.contains("Update Codex"), "it says what fixes it: {note}");
+            });
+            // The open menu carries it under the rows.
+            view.update(cx, |view, cx| view.toggle_picker(MenuKind::Model, cx));
+            view.update(cx, |view, cx| {
+                let picker: gpui::Entity<ModelPicker> = view.model_picker(cx).expect("the model picker is open");
+                let note = picker.read(cx).delegate.note.clone();
+                assert!(note.is_some_and(|n| n.starts_with("gpt-6.2-sol")), "the menu draws the note");
+            });
+        });
+        // Claude Code: a resolved full id beside the catalog's aliases is
+        // not "unlisted".
+        let view = lane_view(vc, "claude-code", "s-unlisted-claude");
+        vc.update(|_, cx| {
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.apply_model_catalog(claude_fixture_catalog(), "anthropic", cx)));
+            view.update(cx, |view, cx| view.runtime().clone().update(cx, |rt, cx| rt.set_model("claude-opus-5-5", cx)));
+            view.update(cx, |view, cx| assert_eq!(view.rt(cx).unlisted_model_note(), None));
+        });
+    }
+
     /// Auto on a Claude Code model without it: the mode picker's Auto row
     /// says "Not available for Haiku" while the chip's model is Haiku —
     /// alias or the resolved full id the stream reports — and nothing on

@@ -1677,6 +1677,31 @@ impl SessionRuntime {
         String::new()
     }
 
+    /// The model picker's note when this session runs a model its catalog
+    /// does not list, or `None`. Codex only: its `model/list` names just
+    /// the models the installed CLI knows, while its config may name a
+    /// newer one the CLI still runs (owner round B3: GPT-6.2 was missing
+    /// from the menu until Codex was updated). The menu then lists that
+    /// model as a checked row of Baaz's own (`apply_model_catalog`), and
+    /// the note says why it stands apart and what fixes it. The catalog's
+    /// own ids are [`Self::codex_efforts`]'s keys. Claude Code's catalog
+    /// lists aliases a resolved full id never equals, and muse's flags the
+    /// session's own row, so neither gets a note.
+    pub(crate) fn unlisted_model_note(&self) -> Option<String> {
+        if self.provider_kind() != crate::providers::ProviderId::Codex || self.codex_efforts.is_empty() {
+            return None;
+        }
+        let id = self.model_id();
+        if id.is_empty() || self.codex_efforts.contains_key(&id) {
+            return None;
+        }
+        let provider = self.provider_kind().label();
+        Some(format!(
+            "{id} isn't in this {provider}'s model list, which names only the models it knows: \
+             {provider} may be older than the model. Update {provider} to list it with the others."
+        ))
+    }
+
     /// What the composer model chip reads. The muse lane shows the
     /// session model's display label from the `model/list` catalog when a
     /// row names it, else the model id humanised — never the bare provider

@@ -2770,7 +2770,13 @@ fn tool_word(kind: &aui_protocol::ToolKind) -> &str {
                 // pushed in (it draws right after, in this same frame).
                 let Some(picker) = self.model_picker(cx) else { return Vec::new() };
                 let rows = self.model_menu_rows(cx);
-                picker.update(cx, |picker, cx| picker.push_facts(cx, |delegate| delegate.rows = rows));
+                let note = self.runtime.read(cx).unlisted_model_note().map(SharedString::from);
+                picker.update(cx, |picker, cx| {
+                    picker.push_facts(cx, |delegate| {
+                        delegate.rows = rows;
+                        delegate.note = note;
+                    })
+                });
                 vec![(ComposerChipAnchor::Model, picker.into_any_element())]
             }
             // The folder picker is its own view too; its rows were pushed
