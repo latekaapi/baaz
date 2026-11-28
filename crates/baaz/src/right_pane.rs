@@ -102,6 +102,10 @@ pub(crate) struct RightFacts {
     /// frame (the root's frame never did), so no read and no file watch
     /// starts behind it.
     pub live: bool,
+    /// Maximised (owner 2026-11-28): the sidebar's width on screen (0 when
+    /// it is closed) while the pane fills the window right of it; `None`
+    /// beside the chat. See [`RightPane::shown_width`].
+    pub fill_after: Option<f32>,
 }
 
 impl RightFacts {
@@ -299,6 +303,16 @@ impl RightPane {
     /// The divider's width now, in window pixels.
     pub(crate) fn width(&self) -> f32 {
         self.resize.width
+    }
+
+    /// The width the pane draws at this frame: the divider's, or —
+    /// maximised — every pixel of the window right of the sidebar, the
+    /// width the shell gives the column ([`aui::shell::right_fill_width`]).
+    pub(crate) fn shown_width(&self, window: &Window) -> f32 {
+        match self.facts.fill_after {
+            Some(sidebar) => aui::shell::right_fill_width(f32::from(window.viewport_size().width), sidebar),
+            None => self.resize.width,
+        }
     }
 
     /// Consume the restore's snap (one frame lands without animating).
@@ -686,7 +700,7 @@ impl Render for RightPane {
             return gpui_kit::base::v_flex().size_full().children(bar).into_any_element();
         }
         let project = self.facts.project.clone();
-        let width = self.resize.width;
+        let width = self.shown_width(window);
         #[cfg(feature = "probe")]
         #[cfg(test)]
         DRAWN_CHANGES.with(|drawn| {
@@ -802,6 +816,7 @@ impl RightPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let edits = if kind == RightKind::Changes { self.session_edits(cx) } else { Vec::new() };
+        let width = self.shown_width(window);
         right::render_screen(
             kind,
             &self.cache,
@@ -810,7 +825,7 @@ impl RightPane {
             right::BrowserPane { state: page, window, offers: self.facts.page_offers },
             &self.terminal,
             right_open,
-            self.resize.width,
+            width,
             self.facts.agent(),
             &self.focus,
             page_menu,
@@ -939,6 +954,7 @@ impl Harness {
                 aui::workbench::PageNavExtras { send_page: offers.send_page, keep_tab: offers.keep }
             }),
             live: matches!(self.auth, crate::login::Auth::SignedIn(_)) || !(self.args.offline || self.args.replay.is_some()),
+            fill_after: self.right_fills(cx).then(|| if layout::Layout::get(cx).sidebar_open { self.sidebar_width(cx) } else { 0.0 }),
         }
     }
 
@@ -1124,6 +1140,15 @@ impl RightPane {
             .ghost()
             .accessibility_label(format!("Open {title} in the centre"))
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(RightPaneEvent::WorkerInCentre(centre_id.clone()))));
+        // Maximise / Restore, as on every screen's title bar: a maximised
+        // pane showing a worker keeps its way back to the chat.
+        let maximised = layout::Layout::get(cx).right_maximised;
+        let (glyph, label) = if maximised { (aui_icons::IconName::Minimize, "Restore the pane") } else { (aui_icons::IconName::Maximize, "Maximise the pane") };
+        let maximise = aui::data::icon_button("worker-maximise", glyph)
+            .ghost()
+            .muted()
+            .accessibility_label(label)
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(RightPaneEvent::ToggleMaximise)));
         let close = aui::data::icon_button("worker-close", aui_icons::IconName::X)
             .ghost()
             .muted()
@@ -1139,6 +1164,7 @@ impl RightPane {
             .child(gpui::div().flex_1().min_w(px(0.0)).truncate().text_role(TextRole::Body).text_color(p.ink).child(title))
             .child(gpui::div().flex_none().role_in(TextRole::Caption, cx).text_color(p.fg_muted).child(format!("{provider} · {mode_word}")))
             .child(centre)
+            .child(maximise)
             .child(close);
         let band = worker.update(cx, |view, cx| view.render_composer_band(window, cx));
         gpui_kit::base::v_flex()
