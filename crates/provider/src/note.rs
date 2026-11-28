@@ -40,12 +40,15 @@ pub const MAX_CHARS: usize = 500;
 /// no model names.
 pub fn compose(tools: NoteTools) -> String {
     let mut lines = vec![
-        "You are running inside Baaz, the person's desktop app. Give file paths absolute, with :line when it matters (/abs/file.rs:42).",
+        "You are running inside Baaz, the person's desktop app. Give file paths absolute, with :line when it matters.",
     ];
     if tools.bridge {
-        lines.push("terminal_* runs commands in a terminal the person watches: use it when they say terminal, or for long or interactive commands.");
-        lines.push("browser_* drives their browser pane; pane_show shows them a file, diff, terminal or PR.");
-        lines.push("Check session_search before redoing work; save what later sessions need with memory_save.");
+        lines.push("terminal_* runs commands in a terminal the person watches: for when they say terminal, or long or interactive runs.");
+        // Owner 2026-11-28: a "google search" ran on the agent's own web
+        // tools and the Page stayed empty; asked to look at a site, the
+        // agent uses the pane so the person sees it.
+        lines.push("browser_* drives their browser pane: when they say search, open, browse or show a site, use it, not web tools. pane_show shows a file, diff, terminal or PR.");
+        lines.push("Check session_search before redoing work; memory_save what later sessions need.");
     }
     lines.push("Ask choices with your question tool.");
     lines.join("\n")
@@ -113,6 +116,9 @@ mod tests {
         let note = compose(NoteTools { bridge: true });
         assert!(note.len() <= MAX_CHARS, "{} chars", note.len());
         assert!(compose(NoteTools { bridge: false }).len() < note.len());
+        // Owner 2026-11-28: asked to search or open a site, the agent
+        // uses the browser pane the person sees, not its own web tools.
+        assert!(note.contains("when they say search, open, browse or show a site, use it, not web tools"), "{note}");
         for word in ["2026", "claude-", "gpt-", "haiku", "sonnet", "opus"] {
             assert!(!note.to_lowercase().contains(word), "{word} in the note");
         }

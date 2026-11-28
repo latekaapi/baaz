@@ -5519,6 +5519,41 @@ mod tests {
         restore_state(state);
     }
 
+    /// Owner 2026-11-28: a Muse session's terminal tab, opened earlier by a
+    /// Codex session, said "Codex can type here". Tabs belong to the
+    /// project: the hint names the session on screen's agent, and the tab's
+    /// opener only when no session is open.
+    #[gpui::test]
+    fn dock_hint_names_the_session_on_screen_over_the_tab_opener(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let state = hermetic_state("dock-hint-active");
+        cx.update(|cx| aui::init(aui_tokens::ThemeKind::Dark, cx));
+        let vc = cx.add_empty_window();
+        let baaz = vc.update(|window, cx| {
+            cx.new(|cx| Harness::new(test_args(&state.2), crate::runtime::CaptureToken::default(), window, cx))
+        });
+        let root = state.2.clone();
+        vc.update(|_, cx| {
+            baaz.update(cx, |h, cx| {
+                h.register_terminal_session("codex-opener", root.clone(), "codex", cx);
+                h.register_terminal_session("muse-here", root, "muse", cx);
+            })
+        });
+        let name = |vc: &mut gpui::VisualTestContext, active: Option<&str>| {
+            vc.update(|_, cx| {
+                baaz.update(cx, |h, cx| {
+                    h.terminal_dock.update(cx, |dock, _| {
+                        dock.facts.origin = active.map(str::to_owned);
+                        crate::terminal::TerminalDock::hint_name(dock.hint_provider(Some("codex-opener")))
+                    })
+                })
+            })
+        };
+        assert_eq!(name(vc, Some("muse-here")), "Muse can type here", "the session on screen's agent");
+        assert_eq!(name(vc, None), "Codex can type here", "no session open: the tab's opener");
+        restore_state(state);
+    }
+
     /// Z7a2: open a local session view the way the scripted chrome does —
     /// what the browser tests activate without a provider child.
     fn open_test_session(

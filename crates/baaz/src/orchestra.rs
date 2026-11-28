@@ -24,7 +24,7 @@ use crate::layout::LayoutGlobal as _;
 use crate::terminal::service::PaneCall;
 
 /// The orchestration tools the harness answers (lead, then worker).
-pub const ORCHESTRA_TOOL_NAMES: [&str; 11] = [
+pub const ORCHESTRA_TOOL_NAMES: [&str; 12] = [
     "agents_available",
     "delegate",
     "task_status",
@@ -34,6 +34,7 @@ pub const ORCHESTRA_TOOL_NAMES: [&str; 11] = [
     "task_land",
     "session_send",
     "session_watch",
+    "session_new",
     "report",
     "escalate",
 ];
@@ -124,12 +125,60 @@ impl Harness {
                 call.answer(outcome);
             }
             "session_watch" => self.session_watch_call(call, cx),
+            "session_new" => self.session_new_call(call, cx),
             "task_wait" => self.task_wait_call(call, cx),
             "task_land" => self.task_land_call(call, cx),
             "report" => self.report_call(call, cx),
             "escalate" => self.escalate_call(call, cx),
             other => call.answer(Err(refuse(Refusal::new(Code::NotFound, format!("{other} is not built yet"))))),
         }
+    }
+
+    /// `session_new` (owner 2026-11-28): a new top-level session the person
+    /// drives, with the agent's prompt waiting in its composer, unsent. It
+    /// opens in the background like a worker ([`Self::open_worker`]) — its
+    /// own sidebar row, the person stays where they are — but carries no
+    /// task and no lead: nothing checks it or wakes the caller. It opens in
+    /// the caller's folder, on the caller's provider unless another is
+    /// named, in the caller's permission mode. The prompt lands when the
+    /// person opens it (a parcel keyed to its id), and a toast offers Open.
+    fn session_new_call(&mut self, call: PaneCall, cx: &mut Context<Self>) {
+        let Some(prompt) = text(&call.params, "prompt").filter(|p| !p.trim().is_empty()) else {
+            return call.answer(Err(refuse(Refusal::new(Code::BadArgument, "give the prompt the new session should start from"))));
+        };
+        let Some(caller) = self.registry.find_runtime(self.active.as_ref(), &call.session, cx) else {
+            return call.answer(Err(refuse(Refusal::new(Code::NotFound, "your session is not open in Baaz"))));
+        };
+        let (caller_provider, mode) = {
+            let rt = caller.read(cx);
+            (rt.provider_kind(), rt.mode())
+        };
+        let provider_id = match text(&call.params, "provider") {
+            Some(named) => match crate::providers::ProviderId::parse_known(&named) {
+                Some(id) => id,
+                None => return call.answer(Err(refuse(Refusal::new(Code::BadArgument, format!("unknown provider `{named}` (agents_available lists them)"))))),
+            },
+            None => caller_provider,
+        };
+        let root = call.root.to_string_lossy().into_owned();
+        let project = self.session_list.read(cx).projects.resolve(Some(&root), None).map(|p| p.id.clone());
+        let title = text(&call.params, "title").filter(|t| !t.trim().is_empty());
+        let model = text(&call.params, "model");
+        self.run_on_main(cx, move |this, window, cx| {
+            this.open_worker(provider_id, model, mode, project, root, move |this, opened, cx| match opened {
+                Ok(id) => {
+                    if let Some(title) = title.clone() {
+                        this.set_override(&id, |meta| meta.name = Some(title), cx);
+                    }
+                    this.browser.update(cx, |browser, _| browser.hold_parcel_for(&id, crate::browser::Parcel::Text(prompt.clone())));
+                    let headline = format!("New session: {}", title.clone().unwrap_or_else(|| prompt.chars().take(48).collect()));
+                    this.overlays.update(cx, |o, cx| o.toast_open(headline, "Your prompt waits in its composer, unsent.", &id, cx));
+                    crate::baaz_log!("orchestra: session_new {id} for {}", call.session);
+                    call.answer(Ok(json!({"session": id, "state": "opened; the prompt waits in its composer, unsent, for the person to review and send"})));
+                }
+                Err(why) => call.answer(Err(refuse(Refusal::new(Code::ProviderUnavailable, format!("the new session did not open: {why}"))))),
+            }, window, cx);
+        });
     }
 
     /// `agents_available`: per provider, whether it can take a task now.

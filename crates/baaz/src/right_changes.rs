@@ -1499,12 +1499,12 @@ pub(crate) fn changes_screen(
                 }
                 row
             };
-            // docs/82 6.4: "Revert" beside the row (the pane's quiet text
-            // action), shown while it is hovered (its box always laid out, so the counts never move
-            // under the pointer).
+            // docs/82 6.4: "Revert" (the pane's quiet text action) first in
+            // the row's hover tray, over the row's end while it is hovered
+            // (owner 2026-11-28: a box kept for it at rest read as an empty
+            // strip).
             let with_revert = |row: aui::workbench::ChangeRow, slot: &str, cx: &mut Context<RightPane>| -> AnyElement {
                 let Some(turn) = revert.clone() else { return row.into_any_element() };
-                use aui::interact::PaintHover as _;
                 let (root, path) = (root_buf.clone(), change.path.clone());
                 let button = text_action(SharedString::from(format!("right-changes-revert-{slot}:{}", change.path)), "Revert", None, scale::H_SM, cx)
                     .aria_label(format!("Revert {}", change.path))
@@ -1512,13 +1512,7 @@ pub(crate) fn changes_screen(
                         cx.stop_propagation();
                         cx.emit(RightPaneEvent::RevertFile { root: root.clone(), path: path.clone(), turn: turn.clone() });
                     }));
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .hover_group()
-                    .child(div().flex_1().min_w(px(0.0)).child(row))
-                    .child(div().flex_none().reveal_on_hover(false).child(button))
-                    .into_any_element()
+                row.action(button).into_any_element()
             };
             // docs/82 7.2: the row's tick for the commit, before it.
             let with_tick = |row: AnyElement, slot: &str, cx: &mut Context<RightPane>| -> AnyElement {

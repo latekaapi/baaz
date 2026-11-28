@@ -173,8 +173,18 @@ impl TerminalDock {
             .or_else(|| origin.and_then(|session| self.providers.get(session)).and_then(|provider| crate::sidebar::provider_mark(provider)))
     }
 
-    /// The dock header's hint for the active tab's agent: whose session the
-    /// person shares the terminal with (D43). Each lane names its own agent
+    /// Whose agent the hint names for a tab `opener` opened. Tabs belong to
+    /// the project, so any session's agent can type in one: the session on
+    /// screen's agent (owner 2026-11-28: a Muse session's terminal said
+    /// "Codex can type here", the agent that happened to open the tab), and
+    /// the opener's only when no session is open.
+    pub(crate) fn hint_provider(&self, opener: Option<&str>) -> Option<Provider> {
+        self.facts.origin.as_deref().and_then(|active| self.mark_for(Some(active))).or_else(|| self.mark_for(opener))
+    }
+
+    /// The dock header's hint: the agent the person shares the terminal with
+    /// — the session on screen's, else the active tab's opener (D43). Each
+    /// lane names its own agent
     /// by the label of the provider wearing that mark, read from the
     /// registry (rule 14); a tab no session owns names none, rather than
     /// wearing Muse's name.
@@ -468,7 +478,7 @@ impl TerminalDock {
         let (active_tab, hint_provider) = {
             let host = self.host.read(cx);
             match host.active_for(&root) {
-                Some(tab) => (Some((tab.id.clone(), tab.session.clone())), self.mark_for(tab.origin_session.as_deref())),
+                Some(tab) => (Some((tab.id.clone(), tab.session.clone())), self.hint_provider(tab.origin_session.as_deref())),
                 None => (None, None),
             }
         };

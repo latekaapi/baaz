@@ -274,15 +274,30 @@ impl ToolRegistry {
     }
 }
 
+/// A tool name as an agent may spell it, back to the bare name the bridge
+/// registers: agents carry their own host's prefix over (Claude's
+/// `mcp__baaz__pane_show`; Muse once called `mcp__baaz.terminal_open`, owner
+/// 2026-11-28), and a call by the prefixed name must still reach the tool.
+pub fn bare_tool_name(name: &str) -> &str {
+    for prefix in ["mcp__baaz__", "mcp__baaz.", "baaz__", "baaz."] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            return rest;
+        }
+    }
+    name
+}
+
 /// `tool_search`'s own advertisement.
 fn tool_search_def() -> Value {
     json!({
         "name": TOOL_SEARCH,
-        "description": "Find and run Baaz's other tools: the right pane (show a file at a line, a diff, what changed, \
-            revert, comment, commit, the pull request's checks), the terminal (read the screen, send keys, list or close \
-            tabs), the browser (read, click, type, screenshot), past sessions (read one), memory notes (edit), and code \
-            search (where something is defined or used). Pass query to list matching tools with their arguments; \
-            pass call (a tool's name) and arguments to run it.",
+        "description": "Find and run Baaz's other tools. Showing things in the right pane (the terminal, a file at a \
+            line, a diff, what changed, the browser, the pull request) is pane_show, listed on its own: call it directly. \
+            This finds the rest: reading or acting on changes (what changed, revert, comment, commit, the pull request's \
+            checks), the terminal (open a tab, read the screen, send keys, list or close tabs), the browser (read, click, \
+            type, screenshot), past sessions (read one), memory notes (edit), code search (where something is defined or \
+            used), and other agents (delegate a task, open a new session with a prompt). Pass query to list matching tools \
+            with their arguments; pass call (a tool's name) and arguments to run it.",
         "inputSchema": {"type": "object", "properties": {
             "query": {"type": "string", "description": "What you want to do, in a few words."},
             "call": {"type": "string", "description": "A tool's name to run."},
@@ -469,12 +484,12 @@ fn call_tool(id: &Value, params: &Value, registry: &ToolRegistry) -> String {
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let mut name = name.to_owned();
+    let mut name = bare_tool_name(name).to_owned();
     if registry.always_on.is_some() && name == TOOL_SEARCH {
         match arguments.get("call").and_then(Value::as_str).map(str::to_owned) {
             Some(target) => {
                 arguments = arguments.get("arguments").cloned().unwrap_or_else(|| json!({}));
-                name = target;
+                name = bare_tool_name(&target).to_owned();
             }
             None => {
                 let query = arguments.get("query").and_then(Value::as_str).unwrap_or("");
@@ -672,5 +687,38 @@ mod tool_search_tests {
         assert_eq!(direct["result"]["content"][0]["text"], "changes_read", "a name the agent already knows still runs");
         let none = call(&registry, json!({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "tool_search", "arguments": {"query": "zzz qqq"}}}));
         assert!(none["result"]["content"][0]["text"].as_str().unwrap().contains("No tool matches"));
+    }
+
+    /// Owner 2026-11-28: a Muse session called `mcp__baaz.terminal_open`
+    /// and was refused. A tool reached by its host-prefixed name runs, by
+    /// name or through tool_search; an unknown bare name is still refused.
+    #[test]
+    fn a_prefixed_tool_name_reaches_the_tool() {
+        for name in ["mcp__baaz__pane_show", "mcp__baaz.pane_show", "baaz.pane_show", "baaz__pane_show", "pane_show"] {
+            assert_eq!(bare_tool_name(name), "pane_show", "{name}");
+        }
+        let mut registry = full();
+        registry.set_tool_search(&ALWAYS_ON_TOOL_NAMES);
+        let direct = call(&registry, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "mcp__baaz.terminal_read", "arguments": {}}}));
+        assert_eq!(direct["result"]["content"][0]["text"], "terminal_read", "{direct}");
+        let searched = call(&registry, json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "tool_search", "arguments": {"call": "mcp__baaz__pr_status", "arguments": {}}}}));
+        assert_eq!(searched["result"]["content"][0]["text"], "pr_status", "{searched}");
+        let unknown = call(&registry, json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "mcp__baaz.terminal_teleport", "arguments": {}}}));
+        assert!(unknown["error"]["message"].as_str().unwrap().contains("unknown tool: terminal_teleport"), "{unknown}");
+    }
+
+    /// Owner 2026-11-28: Muse answered "I have no pane control" while
+    /// pane_show was in its list. tool_search's description sends the
+    /// right pane to pane_show by name, and pane_show says it is the right
+    /// pane; the bridge's instructions tie "open the terminal in the right
+    /// pane" to it.
+    #[test]
+    fn the_right_pane_is_named_on_pane_show_not_hidden_behind_search() {
+        let search = tool_search_def()["description"].as_str().unwrap().to_owned();
+        assert!(search.contains("pane_show, listed on its own: call it directly"), "{search}");
+        let pane = crate::pane::tool_defs().into_iter().find(|(name, _, _)| name == "pane_show").unwrap().1;
+        assert!(pane.contains("Baaz's right pane"), "{pane}");
+        assert!(crate::pane::INSTRUCTIONS.contains("pane_show view=terminal"));
+        assert!(ALWAYS_ON_TOOL_NAMES.contains(&"pane_show"));
     }
 }
