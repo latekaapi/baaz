@@ -222,18 +222,18 @@ impl Harness {
     }
 
     /// The Field's Ask (its Ask row, ⌘↵): the one Ask (docs/82 8.2) —
-    /// the ⌘J line opens on the page shown and asks `query` there in
-    /// place, as the line's own submit would. Never a session, never a
-    /// draft; "Continue in a session…" is the card's second step. With no
-    /// page shown (a new tab) it still asks on the line, with no page.
+    /// the agent card opens on the page shown and asks `query` there, as
+    /// the card's own send would. Never a session, never a draft;
+    /// "Continue in a session…" is the card's second step. With no page
+    /// shown (a new tab) it still asks in the card, with no page.
     pub(crate) fn browse_ask(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         let query = query.trim().to_owned();
         if query.is_empty() {
             return;
         }
         self.leave_browse_address(window, cx);
-        self.open_agent_line(window, cx);
-        self.ask_browser_chat(&query, true, false, window, cx);
+        self.open_agent_card(window, cx);
+        self.ask_browser_chat(&query, window, cx);
         cx.notify();
     }
 
@@ -394,8 +394,7 @@ impl Harness {
                     Some(FieldAction::ClearHistory) => self.ask_clear_history(cx),
                     Some(FieldAction::Bookmark) => self.bookmark_shown_page(window, cx),
                     Some(FieldAction::AdsHere) => self.toggle_ads_here(window, cx),
-                    Some(FieldAction::AgentLine) => self.toggle_agent_line(window, cx),
-                    Some(FieldAction::AgentCard) => self.toggle_agent_card(cx),
+                    Some(FieldAction::AgentCard) => self.toggle_agent_card(window, cx),
                     Some(FieldAction::AgentColumn) => self.toggle_agent_column(cx),
                     None => {}
                 }
@@ -676,8 +675,8 @@ mod gesture_tests {
     }
 
     #[test]
-    fn the_agent_windows_three_sizes_are_findable_by_name() {
-        for (id, action) in [("agent-line", FieldAction::AgentLine), ("agent-card", FieldAction::AgentCard), ("agent-column", FieldAction::AgentColumn)] {
+    fn the_agent_windows_two_sizes_are_findable_by_name() {
+        for (id, action) in [("agent-card", FieldAction::AgentCard), ("agent-column", FieldAction::AgentColumn)] {
             let found = FIELD_COMMANDS.iter().find(|(command, _, _)| *command == id).expect("a Field command");
             assert_eq!(found.2, action);
         }

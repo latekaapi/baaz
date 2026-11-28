@@ -816,7 +816,7 @@ fn open_shell_window(args: &Args, cx: &mut App) -> (WindowHandle<Root>, crate::r
         Some(_) => Bounds::new(gpui::point(px(0.0), px(0.0)), size(px(WINDOW_W), px(WINDOW_H))),
         None => {
             // `BAAZ_WINDOW_SIZE=<w>x<h>`: a check run at another size (the
-            // agent line in a narrow window, R3). Unset: the usual window.
+            // driving bar in a narrow window, R3). Unset: the usual window.
             let (w, h) = std::env::var("BAAZ_WINDOW_SIZE")
                 .ok()
                 .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))))

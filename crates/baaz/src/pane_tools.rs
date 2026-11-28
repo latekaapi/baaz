@@ -131,7 +131,7 @@ impl Harness {
                 self.with_right_pane(cx, |pane, cx| pane.show_scope(root, scope, files, cx))?;
             }
             Show::Browser => self.show_browser_for_agent(session, cx),
-            Show::Terminal => self.show_terminal(cx),
+            Show::Terminal => self.show_terminal_in_pane(cx),
             Show::Tasks => self.open_right_on(RightKind::Tasks, cx),
             Show::Pr => {
                 self.open_right_on(RightKind::Changes, cx);

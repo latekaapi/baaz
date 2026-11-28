@@ -50,7 +50,7 @@ pub(crate) struct WindowSync {
     /// A floats sync is queued for the frame after the next layout.
     floats_queued: bool,
     /// The browser chat's runtime, watched while it is the browser chat:
-    /// its turn and its asks move the agent line.
+    /// its turn and its asks move the agent card.
     browser_chat_watch: Option<(gpui::EntityId, [Subscription; 2])>,
     /// The observations behind the settle, the floats and the title. Made
     /// once when the root is built, never cleared.
@@ -128,8 +128,8 @@ impl Harness {
     /// * the overlay stack's keyboard: the palette takes it the moment it
     ///   opens (its query field where it has one), and an entry that closed
     ///   gives it back where it was ([`Self::restore_overlay_focus`]);
-    /// * the agent line follows the browser chat, and the floats follow it
-    ///   all on the next frame.
+    /// * the browser chat's own browser tools are accepted for it, and the
+    ///   floats follow it all on the next frame.
     ///
     /// Nothing here notifies the root: a settle that changed nothing ends
     /// here (one that moved the statuses notifies through the model).
@@ -155,7 +155,7 @@ impl Harness {
             }
         }
         self.restore_overlay_focus(window, cx);
-        self.settle_agent_line(cx);
+        self.auto_accept_browser_tools(cx);
         self.queue_floats(cx);
     }
 
@@ -322,8 +322,8 @@ impl Harness {
     }
 
     /// The browser chat changed (one set, or none): watch its runtime, whose
-    /// turn and asks move the agent line (and whose browser tools the line
-    /// accepts, [`Self::auto_accept_browser_tools`]).
+    /// turn and asks move the agent card (and whose browser tools are
+    /// accepted for it, [`Self::auto_accept_browser_tools`]).
     pub(crate) fn watch_browser_chat(&mut self, cx: &mut Context<Self>) {
         let runtime = self.registry.browser_chat().map(|view| view.read(cx).runtime().clone());
         let watched = self.window_sync.browser_chat_watch.as_ref().map(|(id, _)| *id);
@@ -334,11 +334,11 @@ impl Harness {
             // The runtime names its own changes as events; a write made
             // through `as_mut` (the view's) notifies it instead.
             let events = cx.subscribe(&runtime, |this, _, _: &crate::session::RuntimeEvent, cx| {
-                this.settle_agent_line(cx);
+                this.auto_accept_browser_tools(cx);
                 this.queue_floats(cx);
             });
             let writes = cx.observe(&runtime, |this, _, cx| {
-                this.settle_agent_line(cx);
+                this.auto_accept_browser_tools(cx);
                 this.queue_floats(cx);
             });
             (runtime.entity_id(), [events, writes])

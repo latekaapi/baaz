@@ -480,3 +480,30 @@ fn session_new_opens_a_session_with_the_prompt_unsent_and_leaves_the_person_put(
     assert!(!sent.lock().unwrap().iter().any(|s| s.0.contains("google.com")), "still unsent");
     cleanup(&root, state);
 }
+
+/// Owner 2026-11-28: "open the terminal in the right pane" — the agent's
+/// `pane_show view=terminal` opened the dock under the chat, because it
+/// showed the terminal where it sat. It now seats it in the right pane.
+#[gpui::test]
+fn pane_show_terminal_puts_the_terminal_in_the_right_pane(cx: &mut gpui::TestAppContext) {
+    use crate::layout::{LayoutGlobal as _, TerminalPlace};
+    let state = lane_state("pane-show-terminal");
+    let root = folder(&state.2, true);
+    let (factory, _sent) = recording_factory_numbered(true);
+    let (baaz, vc, lead) = session_with(cx, &root, factory);
+    vc.update(|_, cx| crate::layout::Layout::stage(cx, |l| {
+        l.terminal_place = TerminalPlace::Bottom;
+        l.terminal_open = false;
+        l.right_open = false;
+    }));
+    let out = reply(&pane_call(&baaz, vc, &lead, &root, "pane_show", serde_json::json!({"view": "terminal"})));
+    assert_eq!(out["ok"], true, "{out}");
+    let (place, in_pane, dock) = vc.update(|_, cx| {
+        let l = crate::layout::Layout::get(cx);
+        (l.terminal_place, l.terminal_in_pane(), l.dock_open())
+    });
+    assert_eq!(place, TerminalPlace::Pane, "the terminal moved to the pane");
+    assert!(in_pane, "the right pane shows it");
+    assert!(!dock, "the dock under the chat stays closed");
+    cleanup(&root, state);
+}

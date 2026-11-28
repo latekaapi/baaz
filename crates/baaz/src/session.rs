@@ -1975,7 +1975,7 @@ impl SessionRuntime {
 
     #[cfg(feature = "probe")]
     /// Load a canned transcript into a read-only view (the
-    /// `browser-chat-fixture` step: the agent card and line with no turn).
+    /// `browser-chat-fixture` step: the agent card with no turn).
     pub(crate) fn load_fixture(&mut self, session: aui_protocol::Session, cx: &mut Context<Self>) {
         self.store.load(session);
         cx.emit(RuntimeEvent::EntriesAppended);
@@ -2742,6 +2742,16 @@ impl SessionRuntime {
     #[cfg(test)]
     pub(crate) fn banner_text(&self) -> Option<&str> {
         self.banner.as_deref()
+    }
+
+    /// The sends waiting on the start, in order (tests read what an ask
+    /// queued before its provider answered).
+    #[cfg(all(test, feature = "probe"))]
+    pub(crate) fn queued_start_sends(&self) -> &[String] {
+        match &self.start {
+            StartState::Starting(queue) => &queue.sends,
+            _ => &[],
+        }
     }
 
     /// The start's queue, while it is on the wire.

@@ -455,15 +455,14 @@ pub(crate) enum FieldAction {
     Bookmark,
     /// Allow (or block again) ads on the shown page's site.
     AdsHere,
-    /// The agent window as its one line (⌘J), a card (⌘E) or a docked
-    /// column (⇧⌘E): one window in three sizes, each findable by name.
-    AgentLine,
+    /// The agent window as a card (⌘J, ⌘E) or a docked column (⇧⌘E): one
+    /// window in two sizes, each findable by name.
     AgentCard,
     AgentColumn,
 }
 
 /// What the Field finds by name (docs/27 §4.4): the page's own commands.
-const FIELD_COMMANDS: [(&str, &str, FieldAction); 22] = [
+const FIELD_COMMANDS: [(&str, &str, FieldAction); 21] = [
     ("new-tab", "New tab", FieldAction::Page(aui::screens::sidebar::PageAction::NewTab)),
     ("find", "Find in page", FieldAction::Page(aui::screens::sidebar::PageAction::Find)),
     ("copy-link", "Copy link", FieldAction::Page(aui::screens::sidebar::PageAction::CopyLink)),
@@ -481,9 +480,8 @@ const FIELD_COMMANDS: [(&str, &str, FieldAction); 22] = [
     ("history", "History", FieldAction::Page(aui::screens::sidebar::PageAction::History)),
     ("site-settings", "Site settings…", FieldAction::Page(aui::screens::sidebar::PageAction::SiteSettings)),
     ("ads-here", "Allow ads on this site", FieldAction::AdsHere),
-    // The agent window's three sizes (docs/27): ⌘J, ⌘E, ⇧⌘E.
-    ("agent-line", "Ask about this page", FieldAction::AgentLine),
-    ("agent-card", "Open the agent as a card", FieldAction::AgentCard),
+    // The agent window's two sizes (docs/27): ⌘J or ⌘E, ⇧⌘E.
+    ("agent-card", "Ask about this page", FieldAction::AgentCard),
     ("agent-column", "Dock the agent as a column", FieldAction::AgentColumn),
     // docs/82 8.3: listed only where they work (`field_command_offered`).
     ("send-page", "Send page to session…", FieldAction::Page(aui::screens::sidebar::PageAction::SendPage)),

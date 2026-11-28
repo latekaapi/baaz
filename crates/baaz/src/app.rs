@@ -120,7 +120,9 @@ actions!(
         OpenModelMenu,
         /// Open the reasoning-effort picker (⌃⌘E; ⌘⇧E docks the agent column).
         OpenEffortMenu,
-        /// Browse: open or close the ⌘J agent line (docs/27 §4.5).
+        /// Browse: ⌘J, ask about the page — open or close the agent card,
+        /// as ⌘E does (docs/27 §4.5; the card is the one chat since owner
+        /// 2026-11-28).
         ToggleAgentLine,
         /// Browse: open or close the ⌘E agent card.
         ToggleAgentCard,
@@ -934,6 +936,14 @@ impl Harness {
         cx.observe_window_appearance(window, |this, window, cx| {
             if crate::layout::Layout::get(cx).theme == layout::ThemePref::System {
                 this.apply_theme_pref(Some(window), cx);
+            }
+        })
+        .detach();
+        // A float waits while Baaz is in the background (sync_overlay): the
+        // window coming back to the front brings it up to date.
+        cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.sync_floats(window, cx);
             }
         })
         .detach();
@@ -4927,8 +4937,8 @@ impl Render for Harness {
                 ))
                 .on_action(cx.listener(|this, _: &OpenModelMenu, _, cx| this.open_picker(MenuKind::Model, cx)))
                 .on_action(cx.listener(|this, _: &OpenEffortMenu, _, cx| this.open_picker(MenuKind::Effort, cx)))
-                .on_action(cx.listener(|this, _: &ToggleAgentLine, window, cx| this.toggle_agent_line(window, cx)))
-                .on_action(cx.listener(|this, _: &ToggleAgentCard, _, cx| this.toggle_agent_card(cx)))
+                .on_action(cx.listener(|this, _: &ToggleAgentLine, window, cx| this.toggle_agent_card(window, cx)))
+                .on_action(cx.listener(|this, _: &ToggleAgentCard, window, cx| this.toggle_agent_card(window, cx)))
                 .on_action(cx.listener(|this, _: &ToggleAgentColumn, _, cx| this.toggle_agent_column(cx)))
                 .on_action(cx.listener(|this, _: &OpenModeMenu, _, cx| this.open_picker(MenuKind::Mode, cx)))
                 .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))

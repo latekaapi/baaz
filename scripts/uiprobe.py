@@ -425,13 +425,14 @@ ENTRIES = {
     "right-page-expand":    {"shot": ["--no-connect", "--login", "signed-in",
                                       "--steps", "new;right-width:400;right:browser;browse:https://example.com;page-expand;page-collapse"]},
     # docs/82 8.2, one Ask: the Field's Ask (`browse-ask:`, the ✦ path
-    # too) opens the ⌘J line on the shown page with the question asked
-    # there in place — no session, no draft. Scripted lanes: the browser
+    # too) opens the agent card on the shown page with the question asked
+    # there (the card is the one chat since owner 2026-11-28; the entry
+    # keeps its name and baseline) — no session, no draft. Scripted lanes: the browser
     # chat's lane sends nothing anywhere. `browse-shot-picker`: a Browse
     # screenshot with no composer on screen opens "Add to which session?"
     # over the page (`shot-pick` lands a fixture picture: the scripted page
     # takes none); the P6 sidebar fixture gives it session rows to list.
-    # CAUTION: in Browse the line and the picker draw in overlay windows
+    # CAUTION: in Browse the card and the picker draw in overlay windows
     # (over the native page), and a shot renders the main window only, so
     # these two show the page without them — like `browse-omnibox`'s Field.
     # They pin that the script runs (a failed step exits 1), not the look.

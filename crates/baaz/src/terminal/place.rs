@@ -69,6 +69,20 @@ impl Harness {
         }
     }
 
+    /// An agent's `pane_show view=terminal`: the terminal in the right pane,
+    /// wherever it sat — the dock's own "Move terminal to the right pane"
+    /// (owner 2026-11-28: asked to "open the terminal in the right pane",
+    /// the tool opened the dock under the chat, since it showed the terminal
+    /// where it sat). Below an open Page, else the pane's top view; the dock
+    /// closes ([`crate::layout::Layout::seat_terminal_in_pane`]).
+    pub(crate) fn show_terminal_in_pane(&mut self, cx: &mut Context<Self>) {
+        if crate::layout::Layout::get(cx).terminal_in_pane() {
+            return;
+        }
+        crate::layout::Layout::stage(cx, |layout| layout.seat_terminal_in_pane());
+        self.pane_moved(cx);
+    }
+
     /// The agent ran something in the terminal: show it, never focused, so
     /// the person's keyboard stays where it was while they watch. At the
     /// bottom the dock opens; in the pane it opens below what the person is

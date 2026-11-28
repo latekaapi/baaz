@@ -134,7 +134,7 @@
 //! | `zoom:<in\|out\|reset>` | step the shown Browse page's zoom, kept for its site, as ⌘= ⌘- ⌘0 do; no page, an engine that cannot zoom, or a level that did not move fails the step, free |
 //! | `agent-drive:<x>,<y>\|<label>` | the session whose tab Browse shows runs a page tool on it that never ends, having last acted at `x`,`y` (the page's CSS pixels) as `label` (`clicking “Next”`): the agent cursor and the driving bar on the real activity path (docs/82 8.6); it sends nothing anywhere. No shown page, a tab that is no session's, or a bad point fails the step, free |
 //! | `library:<bookmarks\|history>` | open the Bookmarks or History page over the Browse centre (docs/82 8.6), idempotently; unknown fails the step, free |
-//! | `browse-ask:<text>` | Browse: the Field's Ask with `text` — the ⌘J line opens on the shown page and asks there (docs/82 8.2); scripted lanes only (the browser chat's lane sends nothing anywhere), so it reaches no model; empty text, no page, live lanes or no line fail the step |
+//! | `browse-ask:<text>` | Browse: the Field's Ask with `text` — the agent card opens on the shown page and asks there (docs/82 8.2); scripted lanes only (the browser chat's lane sends nothing anywhere), so it reaches no model; empty text, no page, live lanes or no card fail the step |
 //! | `keep-tab:<id\|shown>` | Keep this tab on tab `id` or the one shown (Browse's, else the Page's): the session's tab becomes the person's, same page (docs/82 8.3); a tab that is no session's fails the step, free |
 //! | `page-expand` | the Page's "Open in Browse": the session's tab full width in Browse, the same page; no session tab on the Page fails the step, free |
 //! | `page-collapse` | "Back to the session's Page" from Browse showing a session's tab: Sessions, that session, its Page on the tab; no session tab shown fails the step, free |
@@ -242,11 +242,10 @@
 //! | `centre` | log `baaz: centre hero=<hero> loading=<loading>`: hero vs loading-row paints since the last call (the open-flicker instrument) |
 //! | `key:<keystroke>` | post a real keypress for that `gpui::Keystroke::parse` keystroke through CoreGraphics into Baaz's own pid, exactly like a person's keypress — modifiers plus letters, digits, punctuation, enter, escape, tab, arrows and f1–f12; unknown names fail the step, free |
 //! | `page-focus` | give the active browser page the keyboard, free |
-//! | `agent-line` | Browse: open or close the ⌘J agent line on the page on screen (R3), free |
 //! | `page-theme-changed` | Browse: send Chromium's theme-changed notification to every page window (as a macOS appearance or display change does), free |
-//! | `agent-card` | Browse: open or close the ⌘E agent card (R3), free |
-//! | `agent-column` | Browse: dock the card as a column, or undock it (⌘⇧E, R3), free |
-//! | `browser-chat-fixture:<answer\|steps\|draft>` | Browse: a read-only browser chat with a canned transcript made the line's chat — `answer` lands the inline answer, `steps` opens the card, `draft` the landed draft (R3), free: no turn |
+//! | `agent-card` | Browse: open or close the agent card as ⌘J and ⌘E do (R3); outside Browse fails the step, free |
+//! | `agent-column` | Browse: dock the card as a column, or undock it (⌘⇧E, R3); outside Browse fails the step, free |
+//! | `browser-chat-fixture:<answer\|steps\|draft>` | Browse: a read-only browser chat with a canned transcript made the card's chat, and the card opened on it — `answer` a one-step answer, `steps` a multi-step chat, `draft` a landed "Draft a reply" (R3), free: no turn |
 //! | `handoff-picker` | open the agent card's handoff picker (R3 board 3a), free |
 //! | `setup:<provider>:<install\|signin\|update>` | open the D5 setup sheet as its button would (`claude-code`, `codex`); deterministic runs show a scripted terminal with the typed command, never a shell; a kind the provider has no command for fails the step, free |
 //! | `connect-menu` | open the "New sessions start in" menu: the connect screen's footer, else Settings › Providers' (fails when neither is up), free |
@@ -617,13 +616,30 @@ pub(crate) const WINDOW_VERBS: &[WindowVerb] = &[
     WindowVerb { verb: "key", run: |this, rest, _, _| this.step_key(rest) },
     WindowVerb { verb: "page-focus", run: |this, _, window, cx| this.step_page_focus(window, cx) },
     // R3, free (no turn, no wire): the agent window over a Browse page.
-    // `agent-line` / `agent-card` / `agent-column` toggle as ⌘J / ⌘E / ⌘⇧E
-    // do; `browser-chat-fixture:<answer|steps|draft>` makes a read-only
-    // browser chat with a canned transcript and points the line at it;
+    // `agent-card` / `agent-column` toggle as ⌘J or ⌘E / ⌘⇧E do;
+    // `browser-chat-fixture:<answer|steps|draft>` makes a read-only browser
+    // chat with a canned transcript and opens the card on it;
     // `handoff-picker` opens the card's picker.
-    WindowVerb { verb: "agent-line", run: |this, _, window, cx| { this.toggle_agent_line(window, cx); Ok(()) } },
-    WindowVerb { verb: "agent-card", run: |this, _, _, cx| { this.toggle_agent_card(cx); Ok(()) } },
-    WindowVerb { verb: "agent-column", run: |this, _, _, cx| { this.toggle_agent_column(cx); Ok(()) } },
+    WindowVerb {
+        verb: "agent-card",
+        run: |this, _, window, cx| {
+            if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
+                return Err("agent-card works in Browse only".into());
+            }
+            this.toggle_agent_card(window, cx);
+            Ok(())
+        },
+    },
+    WindowVerb {
+        verb: "agent-column",
+        run: |this, _, _, cx| {
+            if crate::layout::Layout::get(cx).mode != crate::layout::Mode::Browse {
+                return Err("agent-column works in Browse only".into());
+            }
+            this.toggle_agent_column(cx);
+            Ok(())
+        },
+    },
     WindowVerb { verb: "browser-chat-fixture", run: |this, rest, window, cx| this.step_browser_chat_fixture(rest, window, cx) },
     WindowVerb { verb: "handoff-picker", run: |this, _, _, cx| { this.overlays.update(cx, |o, cx| o.push(crate::overlay_stack::Entry::new(crate::overlay_stack::Layer::HandoffPicker), cx)); Ok(()) } },
     // Chromium's theme-change notification on every page window, as macOS

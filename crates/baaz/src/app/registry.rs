@@ -6,7 +6,7 @@
 //! [`SessionView`] over it. A session lives in one of three places: the
 //! centre ([`Harness::active`](super::Harness), a view, which stays a field
 //! because almost every handler reads it), the parked MRU behind it, or the
-//! browser chat on the agent line. Before this module each place was a
+//! browser chat in the Browse agent card. Before this module each place was a
 //! separate field and every question about "all of them" — find a session
 //! by id, is any turn running, shut every lane down, subscribe to every
 //! session — was answered by a hand-written loop that had to remember all
@@ -50,7 +50,7 @@ struct Parked {
 pub(crate) struct SessionRegistry {
     /// Parked sessions, most recently used first, keyed by session id.
     parked: Vec<Parked>,
-    /// The chat on the Browse agent line, when there is one.
+    /// The chat in the Browse agent card, when there is one.
     browser_chat: Option<Entity<SessionView>>,
     /// One subscription per live runtime and one per live view; rebuilt by
     /// [`Self::resubscribe`].
@@ -165,12 +165,12 @@ impl SessionRegistry {
 
     // ------------------------------------------------------ browser chat
 
-    /// The chat on the agent line.
+    /// The chat in the agent card.
     pub(crate) fn browser_chat(&self) -> Option<&Entity<SessionView>> {
         self.browser_chat.as_ref()
     }
 
-    /// Put `view` on the agent line; returns the chat it replaced.
+    /// Put `view` in the agent card; returns the chat it replaced.
     pub(crate) fn replace_browser_chat(&mut self, view: Entity<SessionView>) -> Option<Entity<SessionView>> {
         self.browser_chat.replace(view)
     }
